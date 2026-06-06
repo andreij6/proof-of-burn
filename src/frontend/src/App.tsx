@@ -960,8 +960,8 @@ export default function App() {
             <Reveal delay={50} motion={motion}>
               <div className="col" style={{ gap: 10 }}>
                 <p style={{ fontSize: 22, lineHeight: 1.25, fontFamily: 'var(--font-display)', fontWeight: 600, color: 'var(--fg)', margin: 0, textWrap: 'balance' }}>
-                  Put skin in the game.<br />
-                  <span style={{ color: 'var(--burn)' }}>Steer governance.</span>
+                  Democratizing<br />
+                  <span style={{ color: 'var(--burn)' }}>Voting Power</span>
                 </p>
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, maxWidth: 480 }}>
                   Burn ICP to signal conviction on proposals you care about — your committed weight determines which way the neuron votes. Every ICP burned is gone forever, tightening the supply for every holder.
