@@ -1470,6 +1470,24 @@ fn list_vote_history() -> Vec<VoteRecord> {
     })
 }
 
+/// Returns a page of audit log entries. offset + limit are capped at 10,000
+/// to prevent a single query from exhausting cycle budgets.
+#[ic_cdk::query]
+fn get_audit_log(offset: u64, limit: u64) -> Vec<AuditLogEntry> {
+    let limit = limit.min(1000) as usize;
+    AUDIT_LOG.with(|log| {
+        let borrowed = log.borrow();
+        let len = borrowed.len();
+        if offset >= len || limit == 0 {
+            return vec![];
+        }
+        let end = (offset as usize + limit).min(len as usize);
+        (offset as usize..end)
+            .filter_map(|i| borrowed.get(i as u64))
+            .collect()
+    })
+}
+
 ic_cdk::export_candid!();
 
 #[cfg(test)]
