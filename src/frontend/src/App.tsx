@@ -360,6 +360,7 @@ export default function App() {
   const [gating, setGating] = useState<string>('blur');
   const [aiMode, setAiMode] = useState<string>('hidden');
   const [motion, setMotion] = useState<string>('expressive');
+  const [isDetailsOpen, setIsDetailsOpen] = useState<boolean>(false);
 
   // Input states for each proposal
   const [aiOpenMap, setAiOpenMap] = useState<Record<string, boolean>>({});
@@ -966,6 +967,20 @@ export default function App() {
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, maxWidth: 480 }}>
                   Signal conviction on key NNS proposals. Your burned ICP directly steers governance decisions while permanently shrinking the circulating supply to benefit every holder.
                 </p>
+                <button
+                  onClick={() => setIsDetailsOpen(true)}
+                  style={{
+                    background: 'transparent', border: 'none', color: 'var(--burn)',
+                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                    padding: 0, fontSize: 13.5, fontWeight: 500, width: 'fit-content',
+                    marginTop: 4, transition: 'opacity 0.2s',
+                  }}
+                  onMouseEnter={(e) => e.currentTarget.style.opacity = '0.8'}
+                  onMouseLeave={(e) => e.currentTarget.style.opacity = '1'}
+                >
+                  <Icon name="info" size={13} stroke="var(--burn)" />
+                  More details
+                </button>
               </div>
             </Reveal>
 
@@ -1719,6 +1734,86 @@ export default function App() {
                 )}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── More Details Dialog ── */}
+      {isDetailsOpen && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }}>
+          <div className="card col" style={{
+            maxWidth: 500, width: '100%', gap: 20, background: 'var(--surface)',
+            border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)',
+            maxHeight: '90vh', overflowY: 'auto'
+          }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="info" size={18} stroke="var(--burn)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>DAO Mechanics & Benefits</h4>
+              </span>
+              <button onClick={() => setIsDetailsOpen(false)} style={{
+                background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
+                padding: 4, display: 'grid', placeItems: 'center'
+              }}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+
+            <div className="col" style={{ gap: 16, fontSize: 13.5, lineHeight: 1.5, color: 'var(--fg-2)' }}>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>How it Works</Eyebrow>
+                <ol style={{ margin: 0, paddingLeft: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <li>
+                    <b>Delegate Power:</b> Register your neuron to follow the DAO's primary voting neuron (ID <code>4821667</code>).
+                  </li>
+                  <li>
+                    <b>Deposit to Escrow:</b> Fund a deterministic proposal subaccount with the ICP you want to burn to show conviction.
+                  </li>
+                  <li>
+                    <b>Threshold Check & Vote:</b> One hour before the NNS voting deadline, if the threshold is met, the DAO neuron automatically casts the vote matching the majority.
+                  </li>
+                  <li>
+                    <b>Conviction Settlement:</b>
+                    <ul style={{ margin: '4px 0 0 0', paddingLeft: 16, listStyleType: 'disc' }}>
+                      <li>If the proposal is successfully voted, your escrowed ICP is <b>permanently burned</b> (converted to cycles to fuel the DAO).</li>
+                      <li>If threshold fails, your ICP is automatically returned to your wallet (minus 0.0001 ICP transaction fee).</li>
+                    </ul>
+                  </li>
+                </ol>
+              </div>
+
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>How it Benefits You</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <li>
+                    <b>Amplified Influence:</b> Combine your conviction weight with the primary neuron to force direction on high-priority governance proposals.
+                  </li>
+                  <li>
+                    <b>Zero-Risk If Abstained:</b> Your capital is only burned when collective conviction is high enough to trigger the vote. Otherwise, it is returned.
+                  </li>
+                </ul>
+              </div>
+
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>How it Benefits the ICP Community</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <li>
+                    <b>Supply Deflation:</b> Every burned token is removed from the active circulating supply forever, increasing scarcity for all holders.
+                  </li>
+                  <li>
+                    <b>Skin in the Game:</b> Aligns voting weight directly with long-term ecosystem conviction, preventing low-effort spam votes.
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <Btn variant="primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setIsDetailsOpen(false)}>
+              Got it
+            </Btn>
           </div>
         </div>
       )}
