@@ -246,13 +246,6 @@ function fmtVP(vp: bigint): string {
   return whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
-function fmtYears(seconds: bigint): string {
-  const years = Number(seconds) / (365 * 24 * 60 * 60);
-  if (years >= 1) return `${years.toFixed(years < 10 ? 1 : 0)}y dissolve`;
-  const days = Math.round(Number(seconds) / (24 * 60 * 60));
-  return `${days}d dissolve`;
-}
-
 function formatPrincipal(p: Principal | null): string {
   if (!p) return "anon";
   const s = p.toString();
@@ -1011,11 +1004,8 @@ export default function App() {
                     </span>
                     <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)', whiteSpace: 'nowrap', flexShrink: 0 }}>
                       {leaderInfo && leaderInfo.voting_power > 0n
-                        ? `${fmtVP(leaderInfo.voting_power)} VP`
-                        : "… VP"}
-                      {leaderInfo && leaderInfo.dissolve_delay_seconds > 0n
-                        ? ` · ${fmtYears(leaderInfo.dissolve_delay_seconds)}`
-                        : ""}
+                        ? `${fmtVP(leaderInfo.voting_power)} Voting Power`
+                        : "… Voting Power"}
                     </span>
                   </div>
                 </div>
