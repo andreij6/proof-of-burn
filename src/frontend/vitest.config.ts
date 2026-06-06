@@ -1,8 +1,8 @@
-import { defineConfig } from 'vite'
+/// <reference types="vitest" />
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { icpBindgen } from '@icp-sdk/bindgen/plugins/vite'
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [
     react(),
@@ -10,9 +10,10 @@ export default defineConfig({
       didFile: '../backend/backend.did',
       outDir: './src/bindings',
     }),
-    icpBindgen({
-      didFile: '../backend/ledger.did',
-      outDir: './src/bindings',
-    }),
   ],
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+  },
 })
