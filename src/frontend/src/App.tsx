@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { AuthClient } from "@icp-sdk/auth/client";
 import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
 import { Principal } from "@icp-sdk/core/principal";
-import { createActor as createBackendActor } from "./bindings/backend";
+import { createActor as createBackendActor, Vote } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import type { Proposal } from "./bindings/backend";
+import type { Proposal, EligibilityInfo, VoteRecord } from "./bindings/backend";
 
 // ==========================================
 // 1. Icon Component (Clean, inline SVG paths)
@@ -292,6 +292,8 @@ export default function App() {
 
   // Derived / Application state
   const [isFollowing, setIsFollowing] = useState(false);
+  const [eligibility, setEligibility] = useState<EligibilityInfo | null>(null);
+  const [voteHistory, setVoteHistory] = useState<VoteRecord[]>([]);
   const [holdings, setHoldings] = useState<bigint>(0n);
   const [commitments, setCommitments] = useState<Record<string, bigint>>({});
   const [proposals, setProposals] = useState<Proposal[]>([]);
@@ -310,12 +312,61 @@ export default function App() {
   // Neuron copy status
   const [copied, setCopied] = useState(false);
 
+  // Eligibility & Vote History Helpers
+  const refreshEligibility = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      const info = await currentActor.get_eligibility();
+      setEligibility(info);
+      setIsFollowing(info.following);
+    } catch (err) {
+      console.error("Failed to fetch eligibility:", err);
+    }
+  };
+
+  const fetchVoteHistory = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      const list = await currentActor.list_vote_history();
+      setVoteHistory(list);
+    } catch (err) {
+      console.error("Failed to fetch vote history:", err);
+    }
+  };
+
+  const getProposalTitle = (proposalId: bigint) => {
+    const p = proposals.find(x => x.id === proposalId);
+    if (p) return p.title;
+    const historical: Record<string, string> = {
+      "138300": "Increase replica memory ceiling to 8 GiB",
+      "138250": "Deprecate legacy ledger archive canister",
+      "138200": "Fund developer-grant round 7 (40k ICP)"
+    };
+    return historical[proposalId.toString()] || `Proposal #${proposalId}`;
+  };
+
+  const handleFollowNeuron = async () => {
+    if (!actor) return;
+    try {
+      const res = await actor.register_neuron(4821667n);
+      if (res.__kind__ === "Ok") {
+        setIsFollowing(true);
+        await refreshEligibility();
+      } else {
+        alert(`Verification failed: ${res.Err}`);
+      }
+    } catch (err: any) {
+      console.error("Failed to verify follow:", err);
+      alert(`Error verifying follow: ${err.message || err}`);
+    }
+  };
+
   // Deriving the tier dynamically
   const tier = !principal || principal.isAnonymous()
     ? 0
     : !isFollowing
     ? 1
-    : Object.keys(commitments).length > 0
+    : (Object.keys(commitments).length > 0 || (eligibility?.has_committed ?? false))
     ? 3
     : 2;
 
@@ -356,6 +407,13 @@ export default function App() {
       .finally(() => {
         setIsLoading(false);
       });
+  }, [actor]);
+
+  // Fetch Eligibility and Vote History when Actor changes
+  useEffect(() => {
+    if (!actor) return;
+    refreshEligibility(actor);
+    fetchVoteHistory(actor);
   }, [actor]);
 
   // Fetch Ledger Balance
@@ -407,6 +465,8 @@ export default function App() {
       agentOptions: { host, rootKey: env?.IC_ROOT_KEY }
     }));
     setIsFollowing(false);
+    setEligibility(null);
+    setVoteHistory([]);
     setHoldings(0n);
     setCommitments({});
   };
@@ -642,7 +702,7 @@ export default function App() {
                         <Icon name="arrowUp" size={13} stroke="var(--burn)" /> Sign in to follow
                       </span>
                     ) : (
-                      <Btn variant="primary" sm onClick={() => setIsFollowing(true)}>
+                      <Btn variant="primary" sm onClick={handleFollowNeuron}>
                         <Icon name="check" size={13} stroke="var(--char-950)" /> Follow neuron
                       </Btn>
                     )
@@ -829,31 +889,38 @@ export default function App() {
                 </div>
 
                 {tier >= 1 ? (
-                  <div className="col" style={{ gap: 0 }}>
-                    {[
-                      ['Increase replica memory ceiling to 8 GiB', 'yes', '12.4'],
-                      ['Deprecate legacy ledger archive canister', 'against', '6.0'],
-                      ['Fund developer-grant round 7 (40k ICP)', 'yes', '20.1'],
-                    ].map(([t, v, burned], i) => (
-                      <div key={i} className="row" style={{
-                        justifyContent: 'space-between', gap: 12, padding: '10px 0',
-                        borderBottom: i < 2 ? '1px solid var(--border)' : 'none'
-                      }}>
-                        <span style={{
-                          fontSize: 12.5, color: 'var(--fg-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap'
-                        }}>
-                          {t}
-                        </span>
-                        <div className="row" style={{ gap: 9, flexShrink: 0 }}>
-                          <Chip tone={v === 'against' ? 'muted' : 'ok'} style={{ height: 20, fontSize: 11 }}>{v}</Chip>
-                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)', width: 78, textAlign: 'right' }}>
-                            {burned} burned
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  voteHistory.length === 0 ? (
+                    <div style={{ padding: '16px 0', color: 'var(--fg-3)', textAlign: 'center', fontSize: 13 }}>
+                      No historical votes found on-chain.
+                    </div>
+                  ) : (
+                    <div className="col" style={{ gap: 0 }}>
+                      {voteHistory.map((record, i) => {
+                        const title = getProposalTitle(record.proposal_id);
+                        const voteStr = record.vote === Vote.Yes ? "yes" : record.vote === Vote.No ? "against" : "abstain";
+                        const burnedStr = fmtICP(record.icp_burned_e8s);
+                        return (
+                          <div key={record.proposal_id.toString()} className="row" style={{
+                            justifyContent: 'space-between', gap: 12, padding: '10px 0',
+                            borderBottom: i < voteHistory.length - 1 ? '1px solid var(--border)' : 'none'
+                          }}>
+                            <span style={{
+                              fontSize: 12.5, color: 'var(--fg-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap'
+                            }} title={title}>
+                              {title}
+                            </span>
+                            <div className="row" style={{ gap: 9, flexShrink: 0 }}>
+                              <Chip tone={voteStr === 'against' ? 'muted' : 'ok'} style={{ height: 20, fontSize: 11 }}>{voteStr}</Chip>
+                              <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)', width: 78, textAlign: 'right' }}>
+                                {burnedStr} burned
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )
                 ) : (
                   <Gate hint="Sign in to unlock" height={120} gating={gating}>
                     <div className="col" style={{ gap: 12 }}>
