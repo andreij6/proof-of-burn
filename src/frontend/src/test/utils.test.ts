@@ -264,3 +264,74 @@ describe('PB-115 global stats: votes_cast count', () => {
     expect(countVotes([])).toBe(0n);
   });
 });
+
+// ── PB-116: neuron id formatting (must stay BigInt-safe) ─────────────────────
+
+function formatNeuronId(id: bigint | null | undefined): string {
+  if (id === null || id === undefined) return '…';
+  return id.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+describe('PB-116 formatNeuronId', () => {
+  it('groups thousands', () => {
+    expect(formatNeuronId(4821667n)).toBe('4,821,667');
+  });
+
+  it('handles the production neuron id beyond Number.MAX_SAFE_INTEGER', () => {
+    // 17802688826615984104 > 2^53 — must not lose precision
+    expect(formatNeuronId(17802688826615984104n)).toBe('17,802,688,826,615,984,104');
+  });
+
+  it('renders a placeholder when config not yet loaded', () => {
+    expect(formatNeuronId(null)).toBe('…');
+    expect(formatNeuronId(undefined)).toBe('…');
+  });
+
+  it('production neuron exceeds JS safe integer (guards against Number coercion)', () => {
+    expect(17802688826615984104n > BigInt(Number.MAX_SAFE_INTEGER)).toBe(true);
+  });
+});
+
+// ── PB-114: three-section proposal partitioning ──────────────────────────────
+
+type TestStatus = 'Pending' | 'Burned' | 'Returned' | 'FailedBurn';
+interface TestProp { id: bigint; status: string }
+interface TestCommit { proposal_id: bigint; status: TestStatus }
+
+const ACTIVE = new Set<TestStatus>(['Pending', 'FailedBurn']);
+const SETTLED = new Set<TestStatus>(['Burned', 'Returned']);
+
+function bucketOf(p: TestProp, commits: TestCommit[]): 'open' | 'committed' | 'history' | 'none' {
+  const c = commits.find(m => m.proposal_id === p.id);
+  if (!c && (p.status === 'open' || p.status === 'met')) return 'open';
+  if (c && ACTIVE.has(c.status)) return 'committed';
+  if ((c && SETTLED.has(c.status)) ||
+      (!c && (p.status === 'voted' || p.status === 'settled' || p.status === 'abstained'))) return 'history';
+  return 'none';
+}
+
+describe('PB-114 proposal partitioning', () => {
+  it('uncommitted open proposal → Open', () => {
+    expect(bucketOf({ id: 1n, status: 'open' }, [])).toBe('open');
+  });
+
+  it('uncommitted met proposal is still votable → Open', () => {
+    expect(bucketOf({ id: 1n, status: 'met' }, [])).toBe('open');
+  });
+
+  it('proposal with a pending commitment → Committed', () => {
+    expect(bucketOf({ id: 1n, status: 'met' }, [{ proposal_id: 1n, status: 'Pending' }])).toBe('committed');
+  });
+
+  it('proposal with a burned commitment → History', () => {
+    expect(bucketOf({ id: 1n, status: 'settled' }, [{ proposal_id: 1n, status: 'Burned' }])).toBe('history');
+  });
+
+  it('returned commitment → History', () => {
+    expect(bucketOf({ id: 1n, status: 'abstained' }, [{ proposal_id: 1n, status: 'Returned' }])).toBe('history');
+  });
+
+  it('settled proposal with no personal commitment → History', () => {
+    expect(bucketOf({ id: 9n, status: 'voted' }, [])).toBe('history');
+  });
+});

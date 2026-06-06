@@ -4,7 +4,7 @@ import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
 import { Principal } from "@icp-sdk/core/principal";
 import { createActor as createBackendActor, Vote, Stance, CommitmentStatus } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import type { Proposal, EligibilityInfo, VoteRecord, Commitment, GlobalStats } from "./bindings/backend";
+import type { Proposal, EligibilityInfo, VoteRecord, Commitment, GlobalStats, Config } from "./bindings/backend";
 
 // ==========================================
 // 1. Icon Component (Clean, inline SVG paths)
@@ -220,6 +220,12 @@ function fmtICP(n: number | bigint) {
   return (Number(n) / 100_000_000).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
+// Neuron IDs are u64 and exceed Number.MAX_SAFE_INTEGER — keep them BigInt.
+function formatNeuronId(id: bigint | null | undefined): string {
+  if (id === null || id === undefined) return "…";
+  return id.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
 function formatPrincipal(p: Principal | null): string {
   if (!p) return "anon";
   const s = p.toString();
@@ -307,6 +313,7 @@ export default function App() {
   const [myCommitments, setMyCommitments] = useState<Commitment[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
+  const [config, setConfig] = useState<Config | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -405,6 +412,18 @@ export default function App() {
     }
   };
 
+  // PB-116: the leader neuron is whatever the backend is configured with —
+  // never a hard-coded literal. On mainnet this is pinned to the production neuron.
+  const fetchConfig = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      const cfg = await currentActor.get_config();
+      setConfig(cfg);
+    } catch (err) {
+      console.error("Failed to fetch config:", err);
+    }
+  };
+
   const refreshAllData = async () => {
     if (!actor) return;
     setIsLoading(true);
@@ -415,6 +434,7 @@ export default function App() {
         fetchMyCommitments(actor),
         fetchSystemHealth(actor),
         fetchGlobalStats(actor),
+        fetchConfig(actor),
         actor.list_active_proposals().then((list: Proposal[]) => setProposals(list)),
       ]);
       // Also fetch balance
@@ -445,9 +465,10 @@ export default function App() {
 
   const handleFollowNeuron = async () => {
     if (!actor || isVerifying) return;
+    if (!config) { alert("Config not loaded yet — please retry in a moment."); return; }
     setIsVerifying(true);
     try {
-      const res = await actor.register_neuron(4821667n);
+      const res = await actor.register_neuron(config.primary_neuron_id);
       if (res.__kind__ === "Ok") {
         setIsFollowing(true);
         await refreshEligibility();
@@ -518,6 +539,8 @@ export default function App() {
     fetchVoteHistory(actor);
     fetchMyCommitments(actor);
     fetchSystemHealth(actor);
+    fetchGlobalStats(actor);
+    fetchConfig(actor);
   }, [actor]);
 
   // Fetch Ledger Balance
@@ -582,7 +605,8 @@ export default function App() {
 
   // Handle Neuron Copy
   const handleCopy = () => {
-    navigator.clipboard.writeText("4821667");
+    if (!config) return;
+    navigator.clipboard.writeText(config.primary_neuron_id.toString());
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -752,7 +776,7 @@ export default function App() {
             <Icon name="flame" size={17} stroke="var(--burn)" />
           </span>
           <b style={{ fontFamily: 'var(--font-display)', fontSize: 18, letterSpacing: '-0.02em', color: 'var(--fg)' }}>
-            Proof of Burn DAO
+            Proof of Burn - Alpha
           </b>
         </div>
 
@@ -907,7 +931,7 @@ export default function App() {
                     <Eyrow>Follow this neuron</Eyrow>
                     <div className="row" style={{ gap: 8, alignItems: 'center' }}>
                       <span className="mono" style={{ fontSize: 18, color: 'var(--fg)', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
-                        Neuron 4.821.667
+                        Neuron {formatNeuronId(config?.primary_neuron_id)}
                       </span>
                       <button onClick={handleCopy} title="Copy neuron ID" style={{
                         display: 'grid', placeItems: 'center', width: 24, height: 24,
@@ -930,7 +954,7 @@ export default function App() {
                   </div>
                   <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
                     <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>
-                      VP 4,821,667 · 1,204 votes
+                      Primary leader neuron
                     </span>
                     <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)', whiteSpace: 'nowrap', flexShrink: 0 }}>
                       8y dissolve

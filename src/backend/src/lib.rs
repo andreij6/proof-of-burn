@@ -1089,6 +1089,26 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         Some(10_000),
     ).await.map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
 
+    // F-105: compute pot updates with checked arithmetic BEFORE writing any state,
+    // so an (effectively impossible) overflow returns an error without orphaning a
+    // Pending commitment. The fee transfer above is the saga point-of-no-return.
+    if stance == Stance::Adopt {
+        proposal.adopt_pot_e8s = proposal.adopt_pot_e8s
+            .checked_add(target_e8s)
+            .ok_or("POT_OVERFLOW")?;
+    } else {
+        proposal.reject_pot_e8s = proposal.reject_pot_e8s
+            .checked_add(target_e8s)
+            .ok_or("POT_OVERFLOW")?;
+    }
+    proposal.total_committed_e8s = proposal.total_committed_e8s
+        .checked_add(target_e8s)
+        .ok_or("POT_OVERFLOW")?;
+
+    if proposal.total_committed_e8s >= proposal.threshold_e8s {
+        proposal.status = "met".to_string();
+    }
+
     let commitment = Commitment {
         proposal_id,
         principal: caller,
@@ -1104,17 +1124,6 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
     COMMITMENTS.with(|map| {
         map.borrow_mut().insert(key, commitment);
     });
-
-    if stance == Stance::Adopt {
-        proposal.adopt_pot_e8s += target_e8s;
-    } else {
-        proposal.reject_pot_e8s += target_e8s;
-    }
-    proposal.total_committed_e8s += target_e8s;
-
-    if proposal.total_committed_e8s >= proposal.threshold_e8s {
-        proposal.status = "met".to_string();
-    }
 
     PROPOSALS.with(|map| {
         map.borrow_mut().insert(proposal_id, proposal);
@@ -1289,15 +1298,26 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
             2 // No
         };
 
-        let vote_result = cast_nns_vote(config.primary_neuron_id, pid, vote_choice).await;
-        match vote_result {
-            Ok(_) => {
-                proposal.status = "voted".to_string();
-                proposal.vote_executed_at = Some(ic_cdk::api::time());
+        // F-108: vote against the real NNS proposal id, never the internal map key.
+        // If no NNS id is set this is a misconfiguration — do NOT call the NNS
+        // (which could mis-vote); mark failed so commitments are refunded, not burned.
+        match proposal.nns_proposal_id {
+            Some(nns_id) => {
+                let vote_result = cast_nns_vote(config.primary_neuron_id, nns_id, vote_choice).await;
+                match vote_result {
+                    Ok(_) => {
+                        proposal.status = "voted".to_string();
+                        proposal.vote_executed_at = Some(ic_cdk::api::time());
+                    }
+                    Err(e) => {
+                        proposal.status = "failed".to_string();
+                        ic_cdk::api::print(&format!("NNS vote failed for proposal {}: {}", pid, e));
+                    }
+                }
             }
-            Err(e) => {
+            None => {
                 proposal.status = "failed".to_string();
-                ic_cdk::api::print(&format!("NNS vote failed for proposal {}: {}", pid, e));
+                ic_cdk::api::print(&format!("Proposal {} has no nns_proposal_id; skipping vote", pid));
             }
         }
     } else {
