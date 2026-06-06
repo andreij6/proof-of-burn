@@ -70,18 +70,13 @@ After deploy, confirm `get_config` shows `is_local = false`,
 > Tip: keep the local `init_args` in git and swap only `owner` at deploy time, or
 > maintain a `icp.prod.yaml`. Do not commit the dev owner as the production owner.
 
-### B2 — Point the frontend at the real neuron
+### B2 — Frontend neuron wiring (✅ resolved — verify)
 
-The SPA currently **hard-codes neuron `4821667`** in `src/frontend/src/App.tsx`:
-- `register_neuron(4821667n)` (the Follow button registers this neuron)
-- `clipboard.writeText("4821667")` (copy button)
-- display strings `Neuron 4.821.667` / `VP 4,821,667`
-
-If not fixed, users will be told to follow — and the canister will register — the
-**wrong** neuron, while the backend votes with `17802688826615984104`. They must
-match. Preferred fix: read `primary_neuron_id` from `get_config()` and render it
-everywhere instead of the literal. Minimum fix: replace all three literals with
-`17802688826615984104`. (Tracked separately — see "Known gaps" below.)
+The SPA reads the leader neuron from `get_config().primary_neuron_id` (kept as a
+BigInt) for display, copy, and the follow instructions — no hard-coded id
+(PB-116). The follow flow passes the **user's own** neuron id to
+`register_neuron`, not the leader's (see §6.5). Just confirm on the deployed
+frontend that the neuron block shows `17802688826615984104`.
 
 ### B3 — Authorize the canister on the neuron (hotkey)
 
@@ -209,7 +204,7 @@ icp canister call $BACKEND get_global_stats       --query -e production
 
 Frontend (open the printed `frontend` URL):
 - [ ] Page loads, dark theme, tagline renders
-- [ ] Neuron block shows **17802688826615984104** (not 4821667 — see B2)
+- [ ] Neuron block shows **17802688826615984104** (read from `get_config`)
 - [ ] Proposals load
 - [ ] Sign in via Internet Identity (mainnet II `identity.ic0.app`) works
 - [ ] Simulator / dev faucet sidebar is **absent** (hidden off-localhost)
@@ -219,6 +214,34 @@ End-to-end with a small real amount (recommended before announcing):
 - [ ] Follow the neuron, verify, commit ~1 ICP ADOPT on a live proposal
 - [ ] Confirm escrow debit, commitment appears under "Committed"
 - [ ] After the cutoff, confirm vote cast + ICP burned (or refunded if threshold missed)
+
+---
+
+## 6.5 End-user onboarding (Tier 2 verification)
+
+Tier 2 ("Verified follower") is proven **on-chain per user**, not assumed. Each
+user must do all three of the following before `register_neuron` will succeed —
+the app surfaces them in the "Verify your neuron" panel after sign-in:
+
+1. **Follow the leader neuron.** In the NNS dapp, set the user's own neuron to
+   follow neuron **`17802688826615984104`** on the **Governance** topic.
+2. **Add the app canister as a hotkey.** The backend reads the user's neuron via
+   `get_full_neuron`, which only returns full data to the neuron's controller or
+   a **hotkey**. The user must add the backend canister principal
+   (`icp canister id backend -e production`) as a hotkey on their neuron. The UI
+   shows this principal with a copy button.
+3. **Enter their neuron ID and verify.** The app calls
+   `register_neuron(<their neuron id>)`. The backend then asserts on-chain that:
+   - the neuron's **controller == the calling user** (they own it), and
+   - the neuron **follows the leader** on the governance topic.
+
+If any check fails the call returns `Err` and the user stays Tier 1. There is no
+mock/bypass on mainnet (`is_local = false`) — the F-101 fallback that auto-passes
+verification is gated to local dev only.
+
+> Common support issues: user added the hotkey to the *wrong* neuron; user
+> entered the *leader* id instead of their own; user followed on the wrong topic;
+> hotkey not yet propagated (retry after a minute).
 
 ---
 
@@ -245,15 +268,16 @@ register via the boundary-node API. See PB-101.
 
 ## Known gaps to close before/around launch
 
-| Gap | Impact | Tracking |
+| Gap | Status | Tracking |
 |---|---|---|
-| NNS mock fallback bypass | **Critical** — eligibility/vote bypass on mainnet | PB-110 |
-| `burn_to_cycles` not idempotent | **Critical** — can strand committed ICP | PB-111 |
-| No real integration tests | **High** — burn saga unverified | PB-112 |
-| Votes use internal key not `nns_proposal_id` | Mis-vote once live proposals ingested | PB-115 |
-| Frontend hard-codes neuron 4821667 | Users follow wrong neuron | B2 (file a task) |
-| Proposals are seeded mocks, not live NNS | Stale/fake proposals | PB-031 v2 |
-| Neuron rotation needs a code upgrade | Pinned in code (`MAINNET_PRIMARY_NEURON_ID`); changing it = edit + `icp deploy` upgrade (state preserved). An admin `set_primary_neuron` setter would allow rotation without a code change. | optional |
+| NNS mock fallback bypass | ✅ resolved — gated to `is_local` | PB-110 |
+| `burn_to_cycles` not idempotent | ✅ resolved — block index persisted | PB-111 |
+| No real integration tests | ✅ resolved — PocketIC saga + access-control suite | PB-112 |
+| Votes use internal key not `nns_proposal_id` | ✅ resolved | PB-115 |
+| Frontend neuron wiring / follow flow | ✅ resolved — config-driven + user-neuron verify | PB-116, B2 |
+| Proposals are seeded mocks, not live NNS | ✅ resolved — live `list_proposals` feed (mock = local only) | PB-117 |
+| Burn *success* not covered by tests | Low — only CMC-failure/idempotency asserted; needs a stub CMC | PB-112 (future) |
+| Neuron rotation needs a code upgrade | Pinned in code (`MAINNET_PRIMARY_NEURON_ID`); rotate via edit + `icp deploy` upgrade. An admin `set_primary_neuron` setter would avoid a code change. | optional |
 
 ---
 
