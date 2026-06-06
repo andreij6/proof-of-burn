@@ -20,12 +20,34 @@ type Proposal = record {
   category : text;
   total_committed_e8s : nat64;
 };
+type EligibilityInfo = record {
+  tier : nat8;
+  authenticated : bool;
+  following : bool;
+  has_committed : bool;
+  holdings_e8s : nat64;
+};
+type Vote = variant {
+  Yes;
+  No;
+  Abstain;
+};
+type VoteRecord = record {
+  proposal_id : nat64;
+  vote : Vote;
+  icp_burned_e8s : nat64;
+  decided_at : nat64;
+  nns_outcome : opt text;
+};
 type Result = variant { Ok; Err : text };
 service : (InitPayload) -> {
   add_admin : (principal) -> (Result);
   get_caller_principal : () -> (principal) query;
   get_config : () -> (Config) query;
+  get_eligibility : () -> (EligibilityInfo) query;
   get_proposal : (nat64) -> (opt Proposal) query;
   list_active_proposals : () -> (vec Proposal) query;
+  list_vote_history : () -> (vec VoteRecord) query;
+  register_neuron : (nat64) -> (Result);
   remove_admin : (principal) -> (Result);
 }

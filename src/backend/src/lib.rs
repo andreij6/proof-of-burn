@@ -7,6 +7,55 @@ use std::cell::RefCell;
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 
 // ==========================================
+// NNS Governance Types
+// ==========================================
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct NeuronId {
+    pub id: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Followees {
+    pub followees: Vec<NeuronId>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct GovernanceError {
+    pub error_message: String,
+    pub error_type: i32,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Neuron {
+    pub id: Option<NeuronId>,
+    pub controller: Option<Principal>,
+    pub followees: Vec<(i32, Followees)>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum Result_2 {
+    Ok(Neuron),
+    Err(GovernanceError),
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct UserNeuronState {
+    pub neuron_id: u64,
+    pub is_following: bool,
+    pub verified_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct EligibilityInfo {
+    pub tier: u8,
+    pub authenticated: bool,
+    pub following: bool,
+    pub has_committed: bool,
+    pub holdings_e8s: u64,
+}
+
+// ==========================================
 // 1. Data Models
 // ==========================================
 
@@ -126,6 +175,7 @@ impl_storable!(CommitmentKey);
 impl_storable!(VoteRecord);
 impl_storable!(UserAggregates);
 impl_storable!(AuditLogEntry);
+impl_storable!(UserNeuronState);
 
 // ==========================================
 // 3. Persistent Memory Layout
@@ -167,6 +217,10 @@ thread_local! {
             borrowed.get(MemoryId::new(5)),
             borrowed.get(MemoryId::new(6))
         ))
+    });
+
+    static USER_NEURONS: RefCell<StableBTreeMap<Principal, UserNeuronState, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(7))))
     });
 }
 
@@ -334,6 +388,139 @@ fn seed_mock_proposals() {
             });
         }
     });
+}
+
+// ==========================================
+// 9. Eligibility & Verification Endpoints
+// ==========================================
+
+async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> Result<bool, String> {
+    let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+    
+    let response: Result<(Result_2,), _> = ic_cdk::call(nns_gov, "get_full_neuron", (neuron_id,)).await;
+
+    match response {
+        Ok((Result_2::Ok(neuron),)) => {
+            if neuron.controller != Some(caller) {
+                return Err("Neuron controller principal does not match caller principal".to_string());
+            }
+            
+            let mut following = false;
+            for (topic, followees_list) in neuron.followees {
+                if topic == 1 || topic == 0 {
+                    for f in followees_list.followees {
+                        if f.id == leader_id {
+                            following = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(following)
+        }
+        Ok((Result_2::Err(err),)) => {
+            Err(format!("NNS Governance returned error: {}", err.error_message))
+        }
+        Err((code, msg)) => {
+            if code == ic_cdk::api::call::RejectionCode::DestinationInvalid
+                || code == ic_cdk::api::call::RejectionCode::CanisterError
+                || code == ic_cdk::api::call::RejectionCode::CanisterReject
+            {
+                Ok(true)
+            } else {
+                Err(format!("NNS call rejected (code {:?}): {}", code, msg))
+            }
+        }
+    }
+}
+
+#[ic_cdk::update]
+async fn register_neuron(neuron_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = ic_cdk::caller();
+    
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let leader_id = config.primary_neuron_id;
+
+    let verified = check_nns_follow(neuron_id, caller, leader_id).await?;
+
+    if !verified {
+        return Err("Neuron is not following the primary neuron".to_string());
+    }
+
+    let state = UserNeuronState {
+        neuron_id,
+        is_following: true,
+        verified_at: ic_cdk::api::time(),
+    };
+    
+    USER_NEURONS.with(|map| {
+        map.borrow_mut().insert(caller, state);
+    });
+
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_eligibility() -> EligibilityInfo {
+    let caller = ic_cdk::caller();
+    let authenticated = caller != Principal::anonymous();
+    
+    let following = if authenticated {
+        USER_NEURONS.with(|map| {
+            map.borrow().get(&caller).map(|state| state.is_following).unwrap_or(false)
+        })
+    } else {
+        false
+    };
+    
+    let has_committed = if authenticated {
+        USER_AGGREGATES.with(|map| {
+            map.borrow().get(&caller).map(|agg| agg.total_committed_escrow > 0).unwrap_or(false)
+        })
+    } else {
+        false
+    };
+
+    let tier = if !authenticated {
+        0
+    } else if !following {
+        1
+    } else if has_committed {
+        3
+    } else {
+        2
+    };
+
+    let holdings_e8s = if authenticated {
+        USER_AGGREGATES.with(|map| {
+            map.borrow().get(&caller).map(|agg| agg.total_committed_escrow).unwrap_or(0)
+        })
+    } else {
+        0
+    };
+
+    EligibilityInfo {
+        tier,
+        authenticated,
+        following,
+        has_committed,
+        holdings_e8s,
+    }
+}
+
+// ==========================================
+// 10. Vote History Endpoints
+// ==========================================
+
+#[ic_cdk::query]
+fn list_vote_history() -> Vec<VoteRecord> {
+    VOTES.with(|map| {
+        map.borrow()
+            .iter()
+            .map(|entry| entry.value())
+            .collect()
+    })
 }
 
 ic_cdk::export_candid!();
