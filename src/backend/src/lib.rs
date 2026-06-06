@@ -1464,6 +1464,28 @@ fn setup_timers() {
     });
 }
 
+/// Local-dev faucet — sends 100 ICP from the canister's own account to the caller.
+/// Rejected on mainnet (ledger canister ID check). Never callable by anonymous.
+#[ic_cdk::update]
+async fn dev_faucet() -> Result<(), String> {
+    require_authenticated()?;
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+
+    // Block on mainnet: ICP mainnet ledger canister ID
+    if config.ledger_canister_id == Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap() {
+        return Err("dev_faucet is only available on the local network".to_string());
+    }
+
+    let caller = ic_cdk::caller();
+    let dest = LedgerAccount { owner: caller, subaccount: None };
+    let amount: u64 = 10_000_000_000; // 100 ICP
+
+    call_ledger_transfer(config.ledger_canister_id, None, dest, amount, Some(10_000))
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Faucet transfer failed: {}", e))
+}
+
 #[ic_cdk::query]
 fn list_vote_history() -> Vec<VoteRecord> {
     VOTES.with(|map| {

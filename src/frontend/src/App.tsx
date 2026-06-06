@@ -1203,13 +1203,25 @@ export default function App() {
             </div>
           </div>
 
-          {/* Local test accounts helper */}
+          {/* Local dev faucet — hidden on mainnet by the backend */}
           {principal && !principal.isAnonymous() && (
             <div className="simulator-panel col">
-              <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>Local Funding Tool</span>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>Add 500 ICP mock balance to test holding limits.</span>
-              <Btn variant="secondary" sm onClick={() => setHoldings(prev => prev + 500_00000000n)}>
-                <Icon name="zap" size={12} stroke="var(--burn)" /> Add 500 ICP
+              <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>Dev Faucet</span>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>Send 100 real test ICP to your wallet from the canister.</span>
+              <Btn variant="secondary" sm onClick={async () => {
+                if (!actor) return;
+                try {
+                  const res = await actor.dev_faucet();
+                  if (res.__kind__ === "Err") {
+                    alert(`Faucet error: ${res.Err}`);
+                    return;
+                  }
+                  await refreshAllData();
+                } catch (e: any) {
+                  alert(`Faucet failed: ${e.message || e}`);
+                }
+              }}>
+                <Icon name="zap" size={12} stroke="var(--burn)" /> Get 100 ICP
               </Btn>
             </div>
           )}

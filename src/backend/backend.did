@@ -75,6 +75,7 @@ service : (InitPayload) -> {
   admin_set_proposal_deadline : (nat64, nat64) -> (Result);
   admin_trigger_sweep : () -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
+  dev_faucet : () -> (Result);
   get_audit_log : (nat64, nat64) -> (vec AuditLogEntry) query;
   get_caller_principal : () -> (principal) query;
   get_config : () -> (Config) query;
