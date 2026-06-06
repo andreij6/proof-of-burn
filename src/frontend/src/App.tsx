@@ -358,7 +358,7 @@ export default function App() {
   // Tweak / simulator options
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [gating, setGating] = useState<string>('blur');
-  const [aiMode, setAiMode] = useState<string>('collapsed');
+  const [aiMode, setAiMode] = useState<string>('hidden');
   const [motion, setMotion] = useState<string>('expressive');
 
   // Input states for each proposal
