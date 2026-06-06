@@ -1,1 +1,31 @@
-service : { greet : (text) -> (text) query }
+type Config = record {
+  default_threshold : nat64;
+  admins : vec principal;
+  ai_price_e8s : nat64;
+  primary_neuron_id : nat64;
+};
+type InitPayload = record {
+  default_threshold_e8s : nat64;
+  owner : principal;
+  ai_price_e8s : nat64;
+  primary_neuron_id : nat64;
+};
+type Proposal = record {
+  id : nat64;
+  status : text;
+  nns_proposal_id : opt nat64;
+  title : text;
+  deadline : nat64;
+  threshold_e8s : nat64;
+  category : text;
+  total_committed_e8s : nat64;
+};
+type Result = variant { Ok; Err : text };
+service : (InitPayload) -> {
+  add_admin : (principal) -> (Result);
+  get_caller_principal : () -> (principal) query;
+  get_config : () -> (Config) query;
+  get_proposal : (nat64) -> (opt Proposal) query;
+  list_active_proposals : () -> (vec Proposal) query;
+  remove_admin : (principal) -> (Result);
+}
