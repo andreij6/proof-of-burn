@@ -960,8 +960,8 @@ export default function App() {
             <Reveal delay={50} motion={motion}>
               <div className="col" style={{ gap: 10 }}>
                 <p style={{ fontSize: 22, lineHeight: 1.25, fontFamily: 'var(--font-display)', fontWeight: 600, color: 'var(--fg)', margin: 0, textWrap: 'balance' }}>
-                  Deflationary Power,<br />
-                  <span style={{ color: 'var(--burn)' }}>Direct Control</span>
+                  Amplifying Voice,<br />
+                  <span style={{ color: 'var(--burn)' }}>Burning Supply</span>
                 </p>
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, maxWidth: 480 }}>
                   Signal conviction on key NNS proposals. Your burned ICP directly steers governance decisions while permanently shrinking the circulating supply to benefit every holder.
