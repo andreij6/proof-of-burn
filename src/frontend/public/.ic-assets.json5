@@ -1,0 +1,20 @@
+[
+  // Serve .well-known directory including ic-domains and any ACME challenge files.
+  // The asset canister blocks dot-prefixed directories by default; this re-enables them.
+  {
+    "match": ".well-known",
+    "allow_raw_access": true,
+    "headers": {
+      "Access-Control-Allow-Origin": "*"
+    }
+  },
+  // Standard security headers for all other assets
+  {
+    "match": "**/*",
+    "headers": {
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+      "Content-Security-Policy": "default-src 'self' https://identity.ic0.app; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://ic0.app https://*.ic0.app https://icp-api.io"
+    }
+  }
+]
