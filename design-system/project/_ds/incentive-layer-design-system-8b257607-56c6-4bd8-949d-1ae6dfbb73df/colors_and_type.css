@@ -1,0 +1,300 @@
+/* =============================================================
+   Incentive Layer — Design Tokens
+   Source of truth for colors, type, spacing, motion.
+   All components should consume these vars — never hardcode.
+   ============================================================= */
+
+/* Webfonts — Google Fonts stand-ins until real brand fonts arrive.
+   Loaded via CDN in HTML:
+   <link rel="preconnect" href="https://fonts.googleapis.com">
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+*/
+
+:root {
+  /* ---------- Color — Char scale (warm near-black to warm off-white) ---------- */
+  --char-950: #0C0A09;   /* primary dark surface */
+  --char-925: #100E0C;   /* zebra / alt surface */
+  --char-900: #1A1714;   /* cards, raised surfaces */
+  --char-850: #23201C;   /* hover on cards */
+  --char-800: #2E2A25;   /* borders on dark */
+  --char-700: #44403C;   /* muted icons, disabled text on dark */
+  --char-500: #78716C;   /* mid grey, secondary text */
+  --char-300: #A8A29E;   /* tertiary text */
+  --char-200: #D6D3D1;   /* borders on light */
+  --char-100: #E7E5E4;   /* alt surface light */
+  --char-50:  #F5F4F2;   /* primary light surface */
+  --char-0:   #FAF9F7;   /* highest-contrast white (never pure) */
+
+  /* ---------- Color — Burn (primary accent) ---------- */
+  --burn:       #FF6A1F;  /* core accent */
+  --burn-700:   #E04E0A;  /* pressed */
+  --burn-300:   #FFB080;  /* hover glow / secondary */
+  --burn-100:   #FFE4D2;  /* faint wash backgrounds */
+  --burn-950:   #2A1409;  /* deep ember — dark tinted surface */
+
+  /* ---------- Color — Semantic support ---------- */
+  --ember:      #E5484D;  /* error / destructive */
+  --ember-dim:  #3A1617;
+  --sprout:     #4CB580;  /* success / positive burn growth */
+  --sprout-dim: #14321F;
+  --haze:       #D4A84B;  /* warning / pending */
+  --haze-dim:   #332614;
+
+  /* ---------- Surfaces (dark-mode defaults) ---------- */
+  --bg:         var(--char-950);
+  --bg-alt:     var(--char-925);
+  --surface:    var(--char-900);
+  --surface-hi: var(--char-850);
+  --border:     var(--char-800);
+  --border-hi:  var(--char-700);
+
+  /* ---------- Foreground ---------- */
+  --fg:         var(--char-0);      /* headlines, primary text */
+  --fg-1:       var(--char-50);     /* body default */
+  --fg-2:       var(--char-300);    /* secondary */
+  --fg-3:       var(--char-500);    /* tertiary / muted */
+  --fg-dim:     var(--char-700);    /* disabled */
+  --fg-accent:  var(--burn);
+
+  /* ---------- Type ---------- */
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-body:    "Inter Tight",   ui-sans-serif, system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* Scale — 1.125 (major second) on body, custom on display */
+  --size-xs:    11px;  --lh-xs:    16px;
+  --size-sm:    13px;  --lh-sm:    18px;
+  --size-base:  15px;  --lh-base:  22px;
+  --size-md:    17px;  --lh-md:    24px;
+  --size-lg:    20px;  --lh-lg:    28px;
+  --size-xl:    24px;  --lh-xl:    30px;
+  --size-2xl:   32px;  --lh-2xl:   38px;
+  --size-3xl:   44px;  --lh-3xl:   50px;
+  --size-4xl:   60px;  --lh-4xl:   64px;
+  --size-5xl:   84px;  --lh-5xl:   84px;
+
+  --track-display: -0.02em;
+  --track-body:    0em;
+  --track-mono:    -0.01em;
+  --track-caps:    0.08em;
+
+  /* ---------- Spacing (4px grid) ---------- */
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  20px;
+  --sp-6:  24px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+  --sp-14: 56px;
+  --sp-18: 72px;
+  --sp-24: 96px;
+  --sp-32: 128px;
+
+  /* ---------- Radii ---------- */
+  --r-xs:   2px;
+  --r-sm:   4px;   /* inputs, small chips */
+  --r-md:   8px;   /* buttons, cards */
+  --r-lg:   12px;  /* modals */
+  --r-xl:   16px;  /* rare — large hero cards only */
+  --r-full: 999px; /* status dots only */
+
+  /* ---------- Elevation (used sparingly) ---------- */
+  --elev-1: 0 1px 0 0 var(--border);               /* hairline-as-shadow */
+  --elev-2: 0 4px 12px -4px rgba(0, 0, 0, 0.35);   /* menus */
+  --elev-3: 0 12px 32px -8px rgba(0, 0, 0, 0.45);  /* modals */
+
+  /* ---------- Motion ---------- */
+  --ease-out:      cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out:   cubic-bezier(0.4, 0.0, 0.2, 1);
+  --dur-fast:      120ms;
+  --dur-base:      180ms;
+  --dur-slow:      240ms;
+
+  /* ---------- Focus ---------- */
+  --focus-ring:    0 0 0 2px var(--bg), 0 0 0 4px var(--burn);
+
+  /* ---------- Layout ---------- */
+  --content-max:   1200px;
+  --nav-h:         56px;
+  --sidebar-w:     264px;
+}
+
+/* Light-mode override (opt-in via data-theme="light") */
+[data-theme="light"] {
+  --bg:         var(--char-50);
+  --bg-alt:     var(--char-100);
+  --surface:    var(--char-0);
+  --surface-hi: var(--char-100);
+  --border:     var(--char-200);
+  --border-hi:  var(--char-300);
+
+  --fg:         var(--char-950);
+  --fg-1:       var(--char-900);
+  --fg-2:       var(--char-700);
+  --fg-3:       var(--char-500);
+  --fg-dim:     var(--char-300);
+}
+
+/* =============================================================
+   Semantic element styles — consume these, don't redefine.
+   ============================================================= */
+
+html, body {
+  background: var(--bg);
+  color: var(--fg-1);
+  font-family: var(--font-body);
+  font-size: var(--size-base);
+  line-height: var(--lh-base);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, .h1 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--size-5xl);
+  line-height: var(--lh-5xl);
+  letter-spacing: var(--track-display);
+  color: var(--fg);
+  margin: 0;
+  text-wrap: balance;
+}
+h2, .h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--size-4xl);
+  line-height: var(--lh-4xl);
+  letter-spacing: var(--track-display);
+  color: var(--fg);
+  margin: 0;
+  text-wrap: balance;
+}
+h3, .h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--size-3xl);
+  line-height: var(--lh-3xl);
+  letter-spacing: var(--track-display);
+  color: var(--fg);
+  margin: 0;
+}
+h4, .h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--size-2xl);
+  line-height: var(--lh-2xl);
+  letter-spacing: var(--track-display);
+  color: var(--fg);
+  margin: 0;
+}
+h5, .h5 {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--size-xl);
+  line-height: var(--lh-xl);
+  color: var(--fg);
+  margin: 0;
+}
+h6, .h6 {
+  font-family: var(--font-body);
+  font-weight: 600;
+  font-size: var(--size-md);
+  line-height: var(--lh-md);
+  color: var(--fg);
+  margin: 0;
+}
+
+p {
+  font-size: var(--size-base);
+  line-height: var(--lh-base);
+  color: var(--fg-1);
+  margin: 0;
+  text-wrap: pretty;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--size-xs);
+  font-weight: 500;
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--fg-accent);
+}
+
+.kicker {
+  font-family: var(--font-mono);
+  font-size: var(--size-xs);
+  font-weight: 500;
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1, "zero" 1;
+  letter-spacing: var(--track-mono);
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+  font-variant-numeric: tabular-nums;
+}
+
+code, kbd, samp, pre {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+code {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  color: var(--fg);
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0;
+}
+
+a {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: var(--border-hi);
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--dur-base) var(--ease-out);
+}
+a:hover {
+  text-decoration-color: var(--burn);
+}
+
+::selection {
+  background: var(--burn);
+  color: var(--char-950);
+}
+
+/* Utility: pulse reserved for "live" accents only */
+@keyframes il-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+.live-pulse {
+  animation: il-pulse 2s var(--ease-in-out) infinite;
+}
+
+/* Utility: horizontal-rule layers pattern */
+.bg-layers {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0 23px,
+    var(--border) 23px 24px
+  );
+}

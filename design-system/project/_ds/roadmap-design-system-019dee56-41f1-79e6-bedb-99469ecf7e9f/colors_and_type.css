@@ -1,0 +1,242 @@
+/* ============================================================
+   ROADMAP — Design Tokens
+   Dark-first, Linear-inspired, on-chain governance UI.
+   Single source of truth. Import this into any prototype.
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  color-scheme: dark;
+
+  /* ---------- COLOR ---------- */
+
+  /* Surfaces — graphite scale, cool neutral */
+  --canvas:        #08090C;   /* page background */
+  --surface-0:     #0B0D11;   /* base layer */
+  --surface-1:     #14161B;   /* cards, tickets */
+  --surface-2:     #1A1D23;   /* raised, hover */
+  --surface-3:     #22262E;   /* popovers, modals */
+  --surface-4:     #2A2F38;   /* highest — overlays */
+
+  /* Borders + dividers */
+  --border:        #1F2228;   /* primary hairline */
+  --border-strong: #2A2F38;   /* emphasized hairline */
+  --border-subtle: #14161B;   /* near-invisible */
+
+  /* Foreground / text */
+  --fg:            #E6E8EC;   /* primary text */
+  --fg-strong:     #FFFFFF;   /* headings, hover */
+  --fg-muted:      #9AA0AB;   /* secondary text, labels */
+  --fg-subtle:     #61666F;   /* tertiary, placeholder */
+  --fg-disabled:   #3D4148;
+
+  /* Brand accents */
+  --iris:          #7B7FFF;   /* primary action, "on-chain" */
+  --iris-hover:    #9498FF;
+  --iris-press:    #6469EE;
+  --iris-bg:       rgba(123, 127, 255, 0.10);
+  --iris-border:   rgba(123, 127, 255, 0.30);
+
+  --citrine:       #F2C94C;   /* ICP, staking, boost */
+  --citrine-hover: #FFD86B;
+  --citrine-bg:    rgba(242, 201, 76, 0.10);
+  --citrine-border:rgba(242, 201, 76, 0.30);
+
+  --aurora:        #4ADE80;   /* for-vote, success */
+  --aurora-bg:     rgba(74, 222, 128, 0.10);
+  --aurora-border: rgba(74, 222, 128, 0.30);
+
+  --magenta:       #F26D9C;   /* against-vote, archive, destructive */
+  --magenta-bg:    rgba(242, 109, 156, 0.10);
+  --magenta-border:rgba(242, 109, 156, 0.30);
+
+  /* Semantic — Kanban columns */
+  --status-voting:      var(--iris);
+  --status-development: var(--citrine);
+  --status-done:        var(--aurora);
+  --status-archived:    var(--fg-subtle);
+
+  /* ---------- TYPOGRAPHY ---------- */
+
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* Type scale — UI density first */
+  --fs-xs:   11px;   /* micro labels, badges */
+  --fs-sm:   12px;   /* metadata, captions */
+  --fs-base: 13px;   /* body, UI default */
+  --fs-md:   14px;   /* primary body */
+  --fs-lg:   16px;   /* small headings */
+  --fs-xl:   20px;   /* card titles */
+  --fs-2xl:  24px;   /* section heads */
+  --fs-3xl:  32px;   /* page titles */
+  --fs-4xl:  48px;   /* display */
+  --fs-5xl:  64px;   /* hero */
+
+  --lh-tight:  1.15;
+  --lh-snug:   1.35;
+  --lh-normal: 1.5;
+  --lh-loose:  1.7;
+
+  --tracking-tight:  -0.02em;
+  --tracking-snug:   -0.01em;
+  --tracking-normal: 0em;
+  --tracking-wide:   0.04em;
+  --tracking-caps:   0.08em;
+
+  --fw-regular: 400;
+  --fw-medium:  500;
+  --fw-semi:    600;
+  --fw-bold:    700;
+
+  /* ---------- SPACING ---------- */
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+
+  /* ---------- RADII ---------- */
+
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-pill: 999px;
+
+  /* ---------- ELEVATION ---------- */
+
+  --shadow-0: none;
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 32px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-focus: 0 0 0 2px var(--canvas), 0 0 0 4px var(--iris);
+
+  /* ---------- MOTION ---------- */
+
+  --ease-out:  cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:   cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-io:   cubic-bezier(0.65, 0, 0.35, 1);
+
+  --dur-fast:  120ms;
+  --dur-base:  150ms;
+  --dur-slow:  220ms;
+
+  /* ---------- LAYOUT ---------- */
+
+  --sidebar-w:    240px;
+  --header-h:     48px;
+  --col-gap:      16px;
+  --max-content:  1280px;
+}
+
+/* ============================================================
+   BASE — semantic element styles
+   ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--canvas);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: var(--lh-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 0;
+  font-weight: var(--fw-semi);
+  color: var(--fg-strong);
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--lh-tight);
+}
+
+h1 { font-size: var(--fs-3xl); }
+h2 { font-size: var(--fs-2xl); }
+h3 { font-size: var(--fs-xl); }
+h4 { font-size: var(--fs-lg); font-weight: var(--fw-medium); }
+h5 { font-size: var(--fs-md); font-weight: var(--fw-medium); }
+h6 { font-size: var(--fs-sm); font-weight: var(--fw-medium); text-transform: uppercase; letter-spacing: var(--tracking-caps); color: var(--fg-muted); }
+
+p { margin: 0 0 var(--space-3) 0; line-height: var(--lh-normal); }
+
+a {
+  color: var(--iris);
+  text-decoration: none;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+a:hover { color: var(--iris-hover); }
+
+code, pre, .mono, .num {
+  font-family: var(--font-mono);
+  font-feature-settings: 'zero', 'ss01';
+  font-variant-numeric: tabular-nums;
+}
+
+code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+  font-size: 0.92em;
+  color: var(--fg-strong);
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: var(--space-5) 0;
+}
+
+::selection { background: var(--iris-bg); color: var(--fg-strong); }
+
+/* Scrollbars */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-pill); border: 2px solid var(--canvas); }
+*::-webkit-scrollbar-thumb:hover { background: var(--fg-subtle); }
+
+/* ============================================================
+   UTILITY — semantic helpers
+   ============================================================ */
+
+.label {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+  color: var(--fg-muted);
+}
+
+.muted   { color: var(--fg-muted); }
+.subtle  { color: var(--fg-subtle); }
+.strong  { color: var(--fg-strong); }
+
+.principal {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  letter-spacing: 0;
+}
+
+.ticket-id {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--fg-subtle);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+}
