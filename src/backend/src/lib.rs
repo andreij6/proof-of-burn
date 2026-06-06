@@ -358,14 +358,26 @@ fn init(payload: InitPayload) {
         cell.borrow_mut().set(config);
     });
 
-    seed_mock_proposals();
+    // PB-117: mock proposals are local-dev only. On mainnet the proposal list is
+    // populated from live NNS data (kicked off immediately + on the sweep timer).
+    if is_local {
+        seed_mock_proposals();
+    } else {
+        ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
+    }
     setup_timers();
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
-    // Stable data auto-restores; re-seed if empty
-    seed_mock_proposals();
+    // Stable data auto-restores. Local: top up mock seed if empty. Mainnet:
+    // refresh the live proposal feed shortly after upgrade.
+    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+    if is_local {
+        seed_mock_proposals();
+    } else {
+        ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
+    }
     setup_timers();
 }
 
@@ -1205,7 +1217,7 @@ fn wallet_receive() -> Result<(), String> {
 }
 
 // NNS Voting & Automated Sweeps
-#[derive(CandidType, Serialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct NnsProposalId {
     pub id: u64,
 }
@@ -1241,6 +1253,147 @@ pub enum CommandResponse {
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct RegisterVoteResponse {}
+
+// ── NNS list_proposals (PB-117: live proposal feed) ──
+// Only the fields we consume are declared; candid ignores the rest on decode.
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct ListProposalInfo {
+    pub include_reward_status: Vec<i32>,
+    pub omit_large_fields: Option<bool>,
+    pub before_proposal: Option<NnsProposalId>,
+    pub limit: u32,
+    pub exclude_topic: Vec<i32>,
+    pub include_all_manage_neuron_proposals: Option<bool>,
+    pub include_status: Vec<i32>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct NnsProposalData {
+    pub title: Option<String>,
+    pub summary: String,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct NnsProposalInfo {
+    pub id: Option<NnsProposalId>,
+    pub status: i32,
+    pub topic: i32,
+    pub proposal: Option<NnsProposalData>,
+    pub deadline_timestamp_seconds: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ListProposalInfoResponse {
+    pub proposal_info: Vec<NnsProposalInfo>,
+}
+
+/// Maps an NNS topic int to a short human label for the UI.
+fn nns_topic_label(topic: i32) -> String {
+    match topic {
+        1 => "Neuron Management",
+        2 => "Exchange Rate",
+        3 => "Network Economics",
+        4 => "Governance",
+        5 => "Node Admin",
+        6 => "Participant Management",
+        7 => "Subnet Management",
+        8 => "Network Canister Management",
+        9 => "KYC",
+        10 => "Node Provider Rewards",
+        12 => "IC OS Version Deployment",
+        13 => "IC OS Version Election",
+        14 => "SNS & Neurons' Fund",
+        15 => "API Boundary Node Management",
+        _ => "Governance",
+    }
+    .to_string()
+}
+
+/// PB-117: pull currently-open NNS proposals and upsert them as internal
+/// proposals so the app governs real, live proposals (not mock seed data).
+/// Idempotent: existing proposals (keyed by NNS id) are left untouched.
+async fn fetch_live_proposals() {
+    let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+    let arg = ListProposalInfo {
+        include_reward_status: vec![],
+        omit_large_fields: Some(true),
+        before_proposal: None,
+        limit: 50,
+        exclude_topic: vec![],
+        include_all_manage_neuron_proposals: Some(false),
+        include_status: vec![1], // 1 = Open
+    };
+
+    let response: Result<(ListProposalInfoResponse,), _> =
+        ic_cdk::call(nns_gov, "list_proposals", (arg,)).await;
+
+    let infos = match response {
+        Ok((resp,)) => resp.proposal_info,
+        Err((code, msg)) => {
+            ic_cdk::api::print(&format!("list_proposals failed (code {:?}): {}", code, msg));
+            return;
+        }
+    };
+
+    let default_threshold = CONFIG.with(|c| c.borrow().get().default_threshold);
+    let now = ic_cdk::api::time();
+
+    for info in infos {
+        // Only open proposals with a real id and a future voting deadline.
+        let nns_id = match info.id {
+            Some(p) => p.id,
+            None => continue,
+        };
+        if info.status != 1 {
+            continue;
+        }
+        let deadline_ns = match info.deadline_timestamp_seconds {
+            Some(secs) => secs.saturating_mul(1_000_000_000),
+            None => continue,
+        };
+        // Need at least the 1h commit cutoff left to be useful.
+        if deadline_ns <= now.saturating_add(3_600_000_000_000) {
+            continue;
+        }
+
+        // Skip if we already track this proposal (idempotent upsert).
+        let exists = PROPOSALS.with(|map| map.borrow().get(&nns_id).is_some());
+        if exists {
+            continue;
+        }
+        if proposals_at_quota() {
+            break;
+        }
+
+        let title = info
+            .proposal
+            .as_ref()
+            .and_then(|p| p.title.clone())
+            .or_else(|| info.proposal.as_ref().map(|p| {
+                let s = &p.summary;
+                if s.len() > 80 { format!("{}…", &s[..80]) } else { s.clone() }
+            }))
+            .unwrap_or_else(|| format!("NNS Proposal #{}", nns_id));
+
+        let proposal = Proposal {
+            id: nns_id,
+            title,
+            category: nns_topic_label(info.topic),
+            deadline: deadline_ns,
+            nns_proposal_id: Some(nns_id),
+            status: "open".to_string(),
+            threshold_e8s: default_threshold,
+            total_committed_e8s: 0,
+            adopt_pot_e8s: 0,
+            reject_pot_e8s: 0,
+            vote_executed_at: None,
+            total_burned_e8s: None,
+        };
+        PROPOSALS.with(|map| {
+            map.borrow_mut().insert(nns_id, proposal);
+        });
+    }
+}
 
 async fn cast_nns_vote(leader_id: u64, proposal_id: u64, vote_choice: i32) -> Result<(), String> {
     let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
@@ -1633,6 +1786,11 @@ async fn cycle_topup_check() {
 
 fn setup_timers() {
     ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || async {
+        // PB-117: refresh live NNS proposals on mainnet before settling.
+        let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+        if !is_local {
+            fetch_live_proposals().await;
+        }
         proposal_sync_sweep().await;
         retry_failed_settlements().await;
         cycle_topup_check().await;
