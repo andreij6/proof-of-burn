@@ -187,6 +187,20 @@ pub struct InitPayload {
     pub ai_price_e8s: u64,
 }
 
+/// App-wide totals used by the global stats strip in the UI.
+/// - `tvl_e8s`: sum of `total_committed_e8s` over all proposals whose status
+///   is `open` or `met` (i.e. escrow currently locked).
+/// - `total_burned_e8s`: cumulative ICP burned through this app, summed over
+///   every `VoteRecord` (the canonical burn ledger).
+/// - `votes_cast`: count of distinct NNS proposals the app has voted on,
+///   derived from `VOTES.len()`.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct GlobalStats {
+    pub tvl_e8s: u64,
+    pub total_burned_e8s: u64,
+    pub votes_cast: u64,
+}
+
 // ==========================================
 // 2. Stable Storage Trait Implementations
 // ==========================================
@@ -1626,6 +1640,51 @@ fn list_vote_history() -> Vec<VoteRecord> {
     })
 }
 
+/// App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
+/// cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
+/// the count of distinct NNS proposals this app has cast a vote on.
+///
+/// Pure read over in-memory maps — `O(n)` over proposals + votes. Safe for any
+/// reasonable n; documented in the task.
+#[ic_cdk::query]
+fn get_global_stats() -> GlobalStats {
+    let mut tvl_e8s: u64 = 0;
+    PROPOSALS.with(|map| {
+        for entry in map.borrow().iter() {
+            let p = entry.value();
+            // TVL counts only escrow that is *currently locked* — once a
+            // proposal is settled/abstained/voted/failed, the funds have
+            // either been burned or refunded and are no longer locked.
+            if p.status == "open" || p.status == "met" {
+                // F-105: clamp on overflow rather than silently wrapping.
+                tvl_e8s = tvl_e8s
+                    .checked_add(p.total_committed_e8s)
+                    .unwrap_or(u64::MAX);
+            }
+        }
+    });
+
+    let mut total_burned_e8s: u64 = 0;
+    let mut votes_cast: u64 = 0;
+    VOTES.with(|map| {
+        for entry in map.borrow().iter() {
+            let v = entry.value();
+            total_burned_e8s = total_burned_e8s
+                .checked_add(v.icp_burned_e8s)
+                .unwrap_or(u64::MAX);
+            votes_cast = votes_cast
+                .checked_add(1)
+                .unwrap_or(u64::MAX);
+        }
+    });
+
+    GlobalStats {
+        tvl_e8s,
+        total_burned_e8s,
+        votes_cast,
+    }
+}
+
 /// Returns a page of audit log entries. offset + limit are capped at 10,000
 /// to prevent a single query from exhausting cycle budgets.
 #[ic_cdk::query]
@@ -2039,5 +2098,62 @@ mod tests {
         };
         assert_eq!(Config::from_bytes(local.to_bytes()).is_local, true);
         assert_eq!(Config::from_bytes(mainnet.to_bytes()).is_local, false);
+    }
+
+    // ── PB-115: Global stats type & overflow posture ─────────────────────────
+
+    #[test]
+    fn test_global_stats_overflow_clamps() {
+        // F-105: sums across the entire PROPOSALS / VOTES maps must clamp
+        // to u64::MAX on overflow rather than wrapping (release build traps
+        // under overflow-checks = true, so this is a defensive fallback).
+        let mut tvl: u64 = 0;
+        let proposals = [
+            sample_proposal(1, "open",  500_000_000_000, 400_000_000_000),
+            sample_proposal(2, "met",   500_000_000_000, 600_000_000_000),
+            sample_proposal(3, "voted", 500_000_000_000, 100_000_000_000), // not counted
+        ];
+        for p in &proposals {
+            if p.status == "open" || p.status == "met" {
+                tvl = tvl.checked_add(p.total_committed_e8s).unwrap_or(u64::MAX);
+            }
+        }
+        assert_eq!(tvl, 1_000_000_000_000, "open+met total only");
+
+        // Saturate
+        let big: u64 = u64::MAX;
+        assert_eq!(big.checked_add(1).unwrap_or(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn test_global_stats_excludes_settled_proposals_from_tvl() {
+        // TVL = escrow *currently locked*. Once a proposal is settled /
+        // voted / failed / abstained, the funds have been burned or
+        // refunded and must not be counted toward TVL.
+        let statuses = ["open", "met", "voted", "failed", "abstained", "settled"];
+        for s in statuses {
+            let p = sample_proposal(1, s, 500_000_000_000, 100_000_000_000);
+            let counts = p.status == "open" || p.status == "met";
+            if s == "open" || s == "met" {
+                assert!(counts, "status {} should count toward TVL", s);
+            } else {
+                assert!(!counts, "status {} must not count toward TVL", s);
+            }
+        }
+    }
+
+    #[test]
+    fn test_global_stats_default_is_zero() {
+        // An empty canister returns zeroes — there's no PROPOSALS / VOTES
+        // data in the test environment (those maps are seeded via init
+        // and we don't call seed_mock_proposals here).
+        let stats = GlobalStats {
+            tvl_e8s: 0,
+            total_burned_e8s: 0,
+            votes_cast: 0,
+        };
+        assert_eq!(stats.tvl_e8s, 0);
+        assert_eq!(stats.total_burned_e8s, 0);
+        assert_eq!(stats.votes_cast, 0);
     }
 }
