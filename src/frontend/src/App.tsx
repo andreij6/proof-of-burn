@@ -821,94 +821,91 @@ export default function App() {
         <main style={{ flex: 1, minWidth: 320 }}>
           <div className="dashboard-container">
 
-            {/* ── PB-116: Global stats strip (TVL / Total burned / Votes cast) ──
-                Visible to all users (anonymous included) since the data is
-                public. Placed above the Tier 3 user-strip and the neuron
-                block per the request. */}
-            <Reveal delay={30} motion={motion}>
-              <div className="row" data-testid="global-stats-strip" style={{
-                border: '1px solid var(--burn)', borderRadius: 10, background: 'var(--burn-950)',
-                padding: '14px 6px'
-              }}>
-                <div className="col" style={{ gap: 4, flex: 1, alignItems: 'center', textAlign: 'center' }}>
-                  <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-                    <Icon name="coins" size={15} stroke="var(--burn)" />
-                    <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
-                      {globalStats ? `${fmtICP(globalStats.tvl_e8s)} ICP` : "…"}
-                    </span>
-                  </span>
-                  <Eyrow>Locked in escrow</Eyrow>
-                </div>
-                <div className="col" style={{
-                  gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
-                  borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
-                }}>
-                  <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-                    <Icon name="flame" size={15} stroke="var(--burn)" />
-                    <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
-                      {globalStats ? `${fmtICP(globalStats.total_burned_e8s)} ICP` : "…"}
-                    </span>
-                  </span>
-                  <Eyrow>Burned to date</Eyrow>
-                </div>
-                <div className="col" style={{
-                  gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
-                  borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
-                }}>
-                  <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-                    <Icon name="checkCircle" size={15} stroke="var(--burn)" />
-                    <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
-                      {globalStats ? globalStats.votes_cast.toString() : "…"}
-                    </span>
-                  </span>
-                  <Eyrow>Votes cast</Eyrow>
-                </div>
-              </div>
-            </Reveal>
-
-            {/* Tier 3 Dashboard Strip */}
+            {/* ── Your activity (Tier 3) — PRIMARY, prominent ──
+                Personal stats matter more than site-wide totals, so when the
+                user has activity this renders first as the bold hero strip. */}
             {tier >= 3 && (
-              <Reveal delay={40} motion={motion}>
-                <div className="row" style={{
-                  border: '1px solid var(--burn)', borderRadius: 10, background: 'var(--burn-950)',
-                  padding: '14px 6px'
-                }}>
-                  <div className="col" style={{ gap: 4, flex: 1, alignItems: 'center', textAlign: 'center' }}>
-                    <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-                      <Icon name="coins" size={15} stroke="var(--burn)" />
-                      <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
-                        {fmtICP(totalCommitted)} ICP
-                      </span>
-                    </span>
-                    <Eyrow>Committed</Eyrow>
+              <Reveal delay={30} motion={motion}>
+                <div className="col" style={{ gap: 8 }}>
+                  <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                    <Icon name="wallet" size={13} stroke="var(--burn)" />
+                    <Eyebrow>Your activity</Eyebrow>
                   </div>
-                  <div className="col" style={{
-                    gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
-                    borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
+                  <div className="row" data-testid="user-stats-strip" style={{
+                    border: '1px solid var(--burn)', borderRadius: 12, background: 'var(--burn-950)',
+                    padding: '18px 8px', boxShadow: '0 0 0 1px color-mix(in srgb, var(--burn) 25%, transparent)'
                   }}>
-                    <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-                      <Icon name="flame" size={15} stroke="var(--burn)" />
-                      <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
-                        {fmtICP(totalBurned)} ICP
+                    <div className="col" style={{ gap: 4, flex: 1, alignItems: 'center', textAlign: 'center' }}>
+                      <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+                        <Icon name="coins" size={16} stroke="var(--burn)" />
+                        <span className="mono" style={{ fontSize: 22, fontWeight: 600, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
+                          {fmtICP(totalCommitted)} ICP
+                        </span>
                       </span>
-                    </span>
-                    <Eyrow>→ Cycles to date</Eyrow>
-                  </div>
-                  <div className="col" style={{
-                    gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
-                    borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
-                  }}>
-                    <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-                      <Icon name="checkCircle" size={15} stroke="var(--burn)" />
-                      <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
-                        {proposalsJoined}
+                      <Eyrow>Committed</Eyrow>
+                    </div>
+                    <div className="col" style={{
+                      gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
+                      borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
+                    }}>
+                      <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+                        <Icon name="flame" size={16} stroke="var(--burn)" />
+                        <span className="mono" style={{ fontSize: 22, fontWeight: 600, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
+                          {fmtICP(totalBurned)} ICP
+                        </span>
                       </span>
-                    </span>
-                    <Eyrow>Proposals joined</Eyrow>
+                      <Eyrow>Burned to date</Eyrow>
+                    </div>
+                    <div className="col" style={{
+                      gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
+                      borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
+                    }}>
+                      <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+                        <Icon name="checkCircle" size={16} stroke="var(--burn)" />
+                        <span className="mono" style={{ fontSize: 22, fontWeight: 600, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
+                          {proposalsJoined}
+                        </span>
+                      </span>
+                      <Eyrow>Proposals joined</Eyrow>
+                    </div>
                   </div>
                 </div>
               </Reveal>
             )}
+
+            {/* ── Protocol totals — SECONDARY, compact & muted ──
+                Public site-wide data. Rendered as a slim, subdued single-line bar
+                so it never competes with the user's own stats above. */}
+            <Reveal delay={40} motion={motion}>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow style={{ color: 'var(--fg-3)' }}>Protocol totals · all participants</Eyebrow>
+                <div className="row" data-testid="global-stats-strip" style={{
+                  border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-alt)',
+                  padding: '10px 14px', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap'
+                }}>
+                  <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                    <span>TVL</span>
+                    <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
+                      {globalStats ? `${fmtICP(globalStats.tvl_e8s)} ICP` : "…"}
+                    </span>
+                  </span>
+                  <span style={{ color: 'var(--border-hi)' }}>·</span>
+                  <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                    <span>Burned</span>
+                    <span className="mono" style={{ fontSize: 14, color: 'var(--burn-300)' }}>
+                      {globalStats ? `${fmtICP(globalStats.total_burned_e8s)} ICP` : "…"}
+                    </span>
+                  </span>
+                  <span style={{ color: 'var(--border-hi)' }}>·</span>
+                  <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                    <span>Votes cast</span>
+                    <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
+                      {globalStats ? globalStats.votes_cast.toString() : "…"}
+                    </span>
+                  </span>
+                </div>
+              </div>
+            </Reveal>
 
             {/* ── Tagline ── */}
             <Reveal delay={50} motion={motion}>
