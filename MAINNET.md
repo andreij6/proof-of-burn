@@ -29,7 +29,7 @@ and NNS Governance (`rrkah-fqaaa-aaaaa-aaaaq-cai`) are hard-coded and need no co
 
 These will silently break mainnet if skipped.
 
-### B1 — Set the production `init_args` in `icp.yaml`
+### B1 — Set the production `owner` in `icp.yaml`
 
 `init_args` is **shared across all environments** (local, staging, production) in
 `icp.yaml`. The committed value is the *local dev* config. The backend's `init`
@@ -40,10 +40,9 @@ let is_local = payload.owner.to_text() == "gwrne-...(dev1)...";   // lib.rs init
 let ledger_id = if is_local { <local ledger> } else { ryjl3-...(mainnet) };
 ```
 
-So if you deploy to mainnet **without changing `owner`**, `is_local` stays `true`,
-the canister points at a local ledger that doesn't exist on mainnet, and the NNS
-mock fallbacks (PB-110) stay enabled. **You must swap `init_args` to production
-values for the production deploy:**
+So if you deploy to mainnet **without changing `owner`**, `is_local` stays `true`
+and the canister points at a local ledger that doesn't exist on mainnet (and the
+NNS mock fallbacks stay enabled). **You must set a real mainnet `owner`:**
 
 ```yaml
 # icp.yaml — backend canister, production init_args
@@ -55,12 +54,21 @@ init_args: '(record {
 })'
 ```
 
+**The leader neuron is pinned in code, not trusted from init_args.** On any
+non-local deploy (`is_local = false`), `init` forces
+`primary_neuron_id = 17_802_688_826_615_984_104`
+(`MAINNET_PRIMARY_NEURON_ID` in `lib.rs`, via `resolve_primary_neuron_id`),
+**regardless of what `init_args` says**. So even a stale/mistaken neuron in
+`init_args` cannot point production at the wrong neuron. Keep the value above for
+clarity, but the guarantee comes from code. To change the production neuron you
+must edit `MAINNET_PRIMARY_NEURON_ID` and ship a code upgrade.
+
 After deploy, confirm `get_config` shows `is_local = false`,
 `ledger_canister_id = ryjl3-tyaaa-aaaaa-aaaba-cai`, and
 `primary_neuron_id = 17_802_688_826_615_984_104`.
 
-> Tip: keep the local `init_args` in git and swap only at deploy time, or maintain
-> a `icp.prod.yaml`. Do not commit the dev owner as the production owner.
+> Tip: keep the local `init_args` in git and swap only `owner` at deploy time, or
+> maintain a `icp.prod.yaml`. Do not commit the dev owner as the production owner.
 
 ### B2 — Point the frontend at the real neuron
 
@@ -245,7 +253,7 @@ register via the boundary-node API. See PB-101.
 | Votes use internal key not `nns_proposal_id` | Mis-vote once live proposals ingested | PB-115 |
 | Frontend hard-codes neuron 4821667 | Users follow wrong neuron | B2 (file a task) |
 | Proposals are seeded mocks, not live NNS | Stale/fake proposals | PB-031 v2 |
-| `primary_neuron_id` not changeable post-deploy | Can't rotate neuron without reinstall | needs `set_primary_neuron` admin setter |
+| Neuron rotation needs a code upgrade | Pinned in code (`MAINNET_PRIMARY_NEURON_ID`); changing it = edit + `icp deploy` upgrade (state preserved). An admin `set_primary_neuron` setter would allow rotation without a code change. | optional |
 
 ---
 

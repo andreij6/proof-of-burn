@@ -14,7 +14,17 @@ const MAX_COMMITMENTS_PER_USER: usize = 25;
 const MAX_PROPOSALS: usize = 500;
 const MIN_COMMIT_E8S: u64 = 100_000_000;        // 1 ICP
 const MAX_COMMIT_E8S: u64 = 100_000_000_000_000; // 1,000,000 ICP (sanity ceiling)
-const MAX_NEURON_ID: u64 = u64::MAX / 2;
+
+/// The leader neuron this app votes with on mainnet. Hard-pinned in code so a
+/// stale or mistaken `init_args` can never point production at the wrong neuron —
+/// on any non-local deploy this value overrides whatever was passed to `init`.
+const MAINNET_PRIMARY_NEURON_ID: u64 = 17_802_688_826_615_984_104;
+
+/// On mainnet, force the pinned leader neuron; locally, honour the init arg so
+/// dev can point at a test neuron.
+fn resolve_primary_neuron_id(is_local: bool, requested: u64) -> u64 {
+    if is_local { requested } else { MAINNET_PRIMARY_NEURON_ID }
+}
 
 // ==========================================
 // NNS Governance & Ledger Types
@@ -337,7 +347,7 @@ fn init(payload: InitPayload) {
         Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
     };
     let config = Config {
-        primary_neuron_id: payload.primary_neuron_id,
+        primary_neuron_id: resolve_primary_neuron_id(is_local, payload.primary_neuron_id),
         admins: vec![payload.owner],
         default_threshold: payload.default_threshold_e8s,
         ai_price_e8s: payload.ai_price_e8s,
@@ -618,7 +628,8 @@ async fn register_neuron(neuron_id: u64) -> Result<(), String> {
     require_authenticated()?;
     let caller = ic_cdk::caller();
 
-    if neuron_id == 0 || neuron_id > MAX_NEURON_ID {
+    // Neuron IDs are arbitrary u64 values (no meaningful upper bound); only 0 is invalid.
+    if neuron_id == 0 {
         return Err("INVALID_NEURON_ID".to_string());
     }
 
@@ -1786,12 +1797,23 @@ mod tests {
     }
 
     #[test]
-    fn test_neuron_id_validation() {
-        // 0 and values above MAX_NEURON_ID must be rejected
-        assert_eq!(0u64, 0);
-        assert!(0u64 == 0 || true); // 0 is invalid
-        assert!(MAX_NEURON_ID < u64::MAX);
-        assert!(MAX_NEURON_ID + 1 > MAX_NEURON_ID); // ensure sentinel is reachable
+    fn test_mainnet_neuron_is_pinned() {
+        // On mainnet (is_local = false) the configured neuron is forced to the
+        // pinned production neuron, regardless of what init_args requested.
+        assert_eq!(
+            resolve_primary_neuron_id(false, 4821667),
+            MAINNET_PRIMARY_NEURON_ID
+        );
+        assert_eq!(resolve_primary_neuron_id(false, 0), MAINNET_PRIMARY_NEURON_ID);
+        // The pinned value is the agreed production leader neuron.
+        assert_eq!(MAINNET_PRIMARY_NEURON_ID, 17_802_688_826_615_984_104);
+    }
+
+    #[test]
+    fn test_local_neuron_honours_init_arg() {
+        // Locally, the requested neuron id passes through unchanged.
+        assert_eq!(resolve_primary_neuron_id(true, 4821667), 4821667);
+        assert_eq!(resolve_primary_neuron_id(true, 999), 999);
     }
 
     #[test]
