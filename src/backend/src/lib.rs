@@ -374,7 +374,7 @@ fn init(payload: InitPayload) {
     let is_local = payload.owner.to_text() == "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe";
     let ledger_id = payload.ledger_canister_id.unwrap_or_else(|| {
         if is_local {
-            Principal::from_text("aiewf-lx777-77775-aaaca-cai").unwrap()
+            Principal::from_text("a5dhi-k7777-77775-aaabq-cai").unwrap()
         } else {
             Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
         }

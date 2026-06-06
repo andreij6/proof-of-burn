@@ -123,7 +123,7 @@ after deploy. See `DEPLOY.md` §4.
 **Setting:** `Config.ledger_canister_id: Principal`
 **Default values:**
 
-- Local dev: `aiewf-lx777-77775-aaaca-cai` (local ICRC-1 ledger from
+- Local dev: `a5dhi-k7777-77775-aaabq-cai` (local ICRC-1 ledger from
   `icp.yaml`'s `ledger` canister)
 - Mainnet: `ryjl3-tyaaa-aaaaa-aaaba-cai` (the canonical ICP ledger)
 **Where it's set:**

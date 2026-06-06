@@ -312,9 +312,9 @@ export default function App() {
   }>();
 
   const host = window.location.origin;
-  const backendCanisterId = env?.['PUBLIC_CANISTER_ID:backend'] || "a5dhi-k7777-77775-aaabq-cai";
-  const ledgerCanisterId = env?.['PUBLIC_CANISTER_ID:ledger'] || "aiewf-lx777-77775-aaaca-cai";
   const isLocal = host.includes("localhost") || host.includes("127.0.0.1");
+  const backendCanisterId = env?.['PUBLIC_CANISTER_ID:backend'] || (isLocal ? "aiewf-lx777-77775-aaaca-cai" : "");
+  const ledgerCanisterId = env?.['PUBLIC_CANISTER_ID:ledger'] || (isLocal ? "a5dhi-k7777-77775-aaabq-cai" : "ryjl3-tyaaa-aaaaa-aaaba-cai");
   const identityProviderUrl = isLocal
     ? "http://id.ai.localhost:8000"
     : "https://identity.ic0.app";
