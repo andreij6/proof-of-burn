@@ -264,6 +264,21 @@ thread_local! {
 // 4. Security Guards
 // ==========================================
 
+/// Ingress-level gate: rejects anonymous callers on all update methods
+/// before the call is executed. This runs before the method body so it
+/// can't be bypassed by forgetting to call require_authenticated() inside.
+/// Note: inspect_message only fires for direct ingress calls, not inter-canister.
+#[ic_cdk::inspect_message]
+fn inspect_message() {
+    let caller = ic_cdk::caller();
+    // wallet_receive is the only update callable without authentication
+    let method = ic_cdk::api::call::method_name();
+    if caller == Principal::anonymous() && method != "wallet_receive" {
+        ic_cdk::trap("Anonymous callers are not permitted");
+    }
+    ic_cdk::api::call::accept_message();
+}
+
 fn require_authenticated() -> Result<(), String> {
     if ic_cdk::caller() == Principal::anonymous() {
         return Err("Anonymous principal is not allowed".to_string());
