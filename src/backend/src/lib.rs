@@ -94,6 +94,11 @@ pub struct Commitment {
     pub stance: Stance,
     pub subaccount: [u8; 32],
     pub settled_at: Option<u64>,
+    /// Block index of the CMC ledger transfer performed in Phase A of
+    /// `burn_to_cycles`. Stored so a retry after a failed `notify_top_up`
+    /// skips the transfer and goes straight to notifying the CMC.
+    /// `None` until Phase A has succeeded.
+    pub cmc_block_index: Option<u64>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -674,6 +679,10 @@ const TREASURY_SUBACCOUNT: [u8; 32] = [1u8; 32];
 thread_local! {
     static ACTIVE_CALLERS: RefCell<std::collections::HashSet<Principal>> = RefCell::new(std::collections::HashSet::new());
     static ACTIVE_PROPOSALS: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+    // F-103: stores the most recent treasury→CMC topup transfer block index
+    // so a retry of `cycle_topup_check` can skip the transfer and just notify
+    // the CMC. Reset to None on a successful `notify_top_up`.
+    static LAST_TOPUP_BLOCK: RefCell<Option<u64>> = const { RefCell::new(None) };
 }
 
 pub struct CallerGuard {
@@ -828,18 +837,43 @@ async fn call_ledger_transfer(
 /// The ICP is burned by the CMC (removed from ledger supply) and the resulting
 /// cycles are credited to this canister. The net supply effect is identical to
 /// a direct burn — only the value destination changes (cycles fuel vs. destruction).
-async fn burn_to_cycles(ledger_id: Principal, from_subaccount: [u8; 32], amount_e8s: u64) -> Result<u128, String> {
+///
+/// F-103: the function is split into two idempotent phases. The `cmc_block_index`
+/// on the `Commitment` records Phase A's result; on a retry, Phase A is skipped
+/// and only Phase B (`notify_top_up`) is called. Phase B's `AlreadyNotified` /
+/// `Refunded` results are treated as terminal success.
+async fn burn_to_cycles(
+    ledger_id: Principal,
+    from_subaccount: [u8; 32],
+    amount_e8s: u64,
+    commitment: &mut Commitment,
+) -> Result<u128, String> {
     let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
     let cmc_dest = LedgerAccount { owner: cmc, subaccount: None };
 
-    let block_index = call_ledger_transfer(
-        ledger_id,
-        Some(from_subaccount),
-        cmc_dest,
-        amount_e8s,
-        Some(10_000),
-    ).await.map_err(|e| format!("CMC transfer failed: {}", e))?;
+    // Phase A: transfer escrowed ICP → CMC. Skip if a previous attempt already
+    // produced a block index — repeating this transfer would double-spend from
+    // the user's (now-empty) subaccount and strand the prior funds at the CMC.
+    let block_index = match commitment.cmc_block_index {
+        Some(b) => b,
+        None => {
+            let b = call_ledger_transfer(
+                ledger_id,
+                Some(from_subaccount),
+                cmc_dest,
+                amount_e8s,
+                Some(10_000),
+            )
+            .await
+            .map_err(|e| format!("CMC transfer failed: {}", e))?;
+            commitment.cmc_block_index = Some(b);
+            b
+        }
+    };
 
+    // Phase B: notify the CMC to mint cycles for the block index. Idempotent
+    // on the CMC side; if it has already been notified (e.g. a retry after a
+    // transient `notify_top_up` reject), `AlreadyNotified` is success.
     let notify_args = NotifyTopUpArgs {
         canister_id: ic_cdk::id(),
         block_index: candid::Nat::from(block_index),
@@ -851,6 +885,19 @@ async fn burn_to_cycles(ledger_id: Principal, from_subaccount: [u8; 32], amount_
         Ok((NotifyTopUpResult::Ok(cycles_nat),)) => {
             let cycles: u128 = cycles_nat.0.try_into().unwrap_or(0);
             Ok(cycles)
+        }
+        Ok((NotifyTopUpResult::Err(NotifyError::AlreadyNotified),)) => {
+            // Phase B is idempotent; treat a previous successful notify as success.
+            // The cycles are already credited to this canister — return 0 to indicate
+            // "no new cycles minted" rather than failing the settlement.
+            Ok(0)
+        }
+        Ok((NotifyTopUpResult::Err(NotifyError::Refunded { .. }),)) => {
+            // The CMC refunded the transfer (e.g. invalid recipient). The
+            // funds are back at the user's subaccount; surface as a burn
+            // failure so the commitment is marked FailedBurn and a future
+            // retry / sweep can attempt a fresh burn once the cause is fixed.
+            Err("CMC_REFUNDED".to_string())
         }
         Ok((NotifyTopUpResult::Err(e),)) => Err(format!("CMC notify_top_up error: {:?}", e)),
         Err((code, msg)) => Err(format!("CMC call rejected ({:?}): {}", code, msg)),
@@ -1013,6 +1060,7 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         stance: stance.clone(),
         subaccount,
         settled_at: None,
+        cmc_block_index: None,
     };
 
     COMMITMENTS.with(|map| {
@@ -1258,16 +1306,23 @@ async fn settle_proposal_commitments(proposal_id: u64) {
         if is_voted {
             // Route committed ICP through the CMC: ICP is burned from supply,
             // cycles are credited to this canister to fund its operation.
-            match burn_to_cycles(ledger_id, commitment.subaccount, commitment.amount_e8s).await {
+            match burn_to_cycles(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
                 Ok(cycles_minted) => {
                     commitment.status = CommitmentStatus::Burned;
                     commitment.settled_at = Some(now);
-                    total_burned_this_sweep += commitment.amount_e8s;
+                    // F-105: checked addition — clamp to u64::MAX on overflow
+                    // rather than silently wrapping (release build traps under
+                    // overflow-checks = true, so this is a defensive fallback).
+                    total_burned_this_sweep = total_burned_this_sweep
+                        .checked_add(commitment.amount_e8s)
+                        .unwrap_or(u64::MAX);
 
                     USER_AGGREGATES.with(|map| {
                         if let Some(mut agg) = map.borrow().get(&user) {
                             agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
-                            agg.total_burned += commitment.amount_e8s;
+                            agg.total_burned = agg.total_burned
+                                .checked_add(commitment.amount_e8s)
+                                .unwrap_or(agg.total_burned);
                             map.borrow_mut().insert(user, agg);
                         }
                     });
@@ -1410,11 +1465,19 @@ async fn retry_failed_settlements() {
         let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key)).unwrap();
 
         if commitment.status == CommitmentStatus::FailedBurn {
-            if let Ok(_) = burn_to_cycles(ledger_id, commitment.subaccount, commitment.amount_e8s).await {
+            // F-103: idempotent retry — if a previous attempt's `notify_top_up`
+            // failed but the CMC transfer already landed, `cmc_block_index`
+            // is `Some`, so burn_to_cycles skips Phase A and only notifies
+            // the CMC again. No second transfer, no stranded funds.
+            if let Ok(_) = burn_to_cycles(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
                 commitment.status = CommitmentStatus::Burned;
                 commitment.settled_at = Some(now);
             }
         } else if commitment.status == CommitmentStatus::FailedRefund {
+            // Refund path is naturally idempotent: the user's subaccount
+            // balance is unchanged after a failed transfer, so a retry
+            // simply performs the transfer again. The balance check in
+            // commit() ensures we never refund more than was escrowed.
             let user_dest = LedgerAccount {
                 owner: user,
                 subaccount: None,
@@ -1443,36 +1506,63 @@ async fn cycle_topup_check() {
     if cycles < 5_000_000_000_000 {
         let config = CONFIG.with(|cell| cell.borrow().get().clone());
         let ledger_id = config.ledger_canister_id;
-        
+
         let treasury_account = LedgerAccount {
             owner: ic_cdk::id(),
             subaccount: Some(TREASURY_SUBACCOUNT),
         };
-        
-        let balance_res = call_ledger_balance(ledger_id, treasury_account).await;
-        if let Ok(balance) = balance_res {
-            if balance > 1_000_000_000 {
-                let cmc_principal = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
-                let cmc_dest = LedgerAccount {
-                    owner: cmc_principal,
-                    subaccount: None,
+
+        let cmc_principal = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+        let cmc_dest = LedgerAccount {
+            owner: cmc_principal,
+            subaccount: None,
+        };
+
+        // F-103: Phase A — transfer treasury → CMC. Skip if a previous attempt
+        // already produced a block index (and so the funds are already at the
+        // CMC); only Phase B needs to be re-attempted.
+        let block_index = match LAST_TOPUP_BLOCK.with(|cell| *cell.borrow()) {
+            Some(b) => b,
+            None => {
+                let balance_res = call_ledger_balance(ledger_id, treasury_account).await;
+                let balance = match balance_res {
+                    Ok(b) if b > 1_000_000_000 => b,
+                    _ => return,
                 };
-                
                 let transfer_res = call_ledger_transfer(
                     ledger_id,
                     Some(TREASURY_SUBACCOUNT),
                     cmc_dest,
                     balance - 10_000,
                     Some(10_000),
-                ).await;
-
-                if let Ok(block_index) = transfer_res {
-                    let notify_args = NotifyTopUpArgs {
-                        canister_id: ic_cdk::id(),
-                        block_index: candid::Nat::from(block_index),
-                    };
-                    let _: Result<(NotifyTopUpResult,), _> = ic_cdk::call(cmc_principal, "notify_top_up", (notify_args,)).await;
+                )
+                .await;
+                match transfer_res {
+                    Ok(b) => {
+                        LAST_TOPUP_BLOCK.with(|cell| *cell.borrow_mut() = Some(b));
+                        b
+                    }
+                    Err(_) => return,
                 }
+            }
+        };
+
+        // Phase B: notify the CMC. Idempotent — `AlreadyNotified` is success.
+        let notify_args = NotifyTopUpArgs {
+            canister_id: ic_cdk::id(),
+            block_index: candid::Nat::from(block_index),
+        };
+        let notify_res: Result<(NotifyTopUpResult,), _> =
+            ic_cdk::call(cmc_principal, "notify_top_up", (notify_args,)).await;
+        match notify_res {
+            Ok((NotifyTopUpResult::Ok(_) | NotifyTopUpResult::Err(NotifyError::AlreadyNotified),)) => {
+                // Success — clear the persisted block index so the next sweep
+                // re-evaluates the treasury balance fresh.
+                LAST_TOPUP_BLOCK.with(|cell| *cell.borrow_mut() = None);
+            }
+            _ => {
+                // Transient failure — leave the block index persisted so the
+                // next timer tick retries Phase B only (no double transfer).
             }
         }
     }
@@ -1557,6 +1647,7 @@ mod tests {
             stance: Stance::Adopt,
             subaccount: derive_subaccount(&principal, proposal_id),
             settled_at: None,
+            cmc_block_index: None,
         }
     }
 
@@ -1755,6 +1846,7 @@ mod tests {
             stance: Stance::Reject,
             subaccount: derive_subaccount(&principal, 9999),
             settled_at: Some(1_700_001_000_000_000_000),
+            cmc_block_index: Some(123_456),
         };
         let bytes = commitment.to_bytes();
         let decoded = Commitment::from_bytes(bytes);
@@ -1765,6 +1857,7 @@ mod tests {
         assert_eq!(decoded.stance, commitment.stance);
         assert_eq!(decoded.subaccount, commitment.subaccount);
         assert_eq!(decoded.settled_at, commitment.settled_at);
+        assert_eq!(decoded.cmc_block_index, commitment.cmc_block_index);
     }
 
     #[test]
