@@ -1240,8 +1240,8 @@ export default function App() {
           </div>
         </main>
 
-        {/* Right Column: Tweak panel & Progression Ladder */}
-        <aside style={{
+        {/* Right Column: Tweak panel & Progression Ladder — local dev only */}
+        {isLocal && <aside style={{
           width: 320, padding: 24, borderLeft: '1px solid var(--border)', background: 'var(--bg-alt)',
           display: 'flex', flexDirection: 'column', gap: 24, flexShrink: 0
         }}>
@@ -1366,7 +1366,7 @@ export default function App() {
               </Btn>
             </div>
           )}
-        </aside>
+        </aside>}
 
       </div>
 
