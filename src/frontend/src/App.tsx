@@ -221,9 +221,12 @@ function fmtICP(n: number | bigint) {
 }
 
 // Neuron IDs are u64 and exceed Number.MAX_SAFE_INTEGER — keep them BigInt.
+// Displayed as plain decimal digits with no separators — the NNS itself
+// shows neuron ids without commas, and a comma at "4,821,667" reads like
+// a formatted money amount rather than an opaque identifier.
 function formatNeuronId(id: bigint | null | undefined): string {
   if (id === null || id === undefined) return "…";
-  return id.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return id.toString();
 }
 
 function formatPrincipal(p: Principal | null): string {
@@ -307,6 +310,8 @@ export default function App() {
 
   // Derived / Application state
   const [isFollowing, setIsFollowing] = useState(false);
+  const [neuronIdInput, setNeuronIdInput] = useState("");
+  const [hotkeyCopied, setHotkeyCopied] = useState(false);
   const [eligibility, setEligibility] = useState<EligibilityInfo | null>(null);
   const [voteHistory, setVoteHistory] = useState<VoteRecord[]>([]);
   const [holdings, setHoldings] = useState<bigint>(0n);
@@ -465,10 +470,24 @@ export default function App() {
 
   const handleFollowNeuron = async () => {
     if (!actor || isVerifying) return;
-    if (!config) { alert("Config not loaded yet — please retry in a moment."); return; }
+    // Parse the user's OWN neuron id (u64 — keep as BigInt, never Number).
+    let userNeuronId: bigint;
+    try {
+      userNeuronId = BigInt((neuronIdInput || "").trim());
+    } catch {
+      alert("Enter a valid neuron ID (digits only).");
+      return;
+    }
+    if (userNeuronId <= 0n) {
+      alert("Enter a valid neuron ID.");
+      return;
+    }
     setIsVerifying(true);
     try {
-      const res = await actor.register_neuron(config.primary_neuron_id);
+      // register_neuron verifies on-chain that THIS neuron is controlled by the
+      // caller and follows the leader neuron. Requires the user to have added
+      // this app's canister as a hotkey on their neuron first.
+      const res = await actor.register_neuron(userNeuronId);
       if (res.__kind__ === "Ok") {
         setIsFollowing(true);
         await refreshEligibility();
@@ -972,13 +991,12 @@ export default function App() {
                   {!isFollowing ? (
                     !principal || principal.isAnonymous() ? (
                       <span className="row" style={{ gap: 6, color: 'var(--burn)', fontSize: 12.5, whiteSpace: 'nowrap' }}>
-                        <Icon name="arrowUp" size={13} stroke="var(--burn)" /> Sign in to follow
+                        <Icon name="arrowUp" size={13} stroke="var(--burn)" /> Sign in to verify
                       </span>
                     ) : (
-                      <Btn variant="primary" sm onClick={handleFollowNeuron} disabled={isVerifying}>
-                        {isVerifying ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />}
-                        {isVerifying ? " Verifying with NNS..." : " Follow neuron"}
-                      </Btn>
+                      <span className="row" style={{ gap: 6, color: 'var(--fg-3)', fontSize: 12.5, whiteSpace: 'nowrap' }}>
+                        <Icon name="lock" size={13} stroke="var(--fg-3)" /> Not verified
+                      </span>
                     )
                   ) : (
                     <span className="row" style={{ gap: 6, color: 'var(--sprout)', fontSize: 12.5 }}>
@@ -986,6 +1004,64 @@ export default function App() {
                     </span>
                   )}
                 </div>
+
+                {/* Guided on-chain verification: prove the user owns a neuron
+                    that follows the leader. Real verification (controller==caller
+                    + follows leader) happens in register_neuron on the backend. */}
+                {principal && !principal.isAnonymous() && !isFollowing && (
+                  <div className="col" style={{
+                    gap: 12, marginTop: 12, paddingTop: 14, borderTop: '1px solid var(--border)'
+                  }}>
+                    <Eyrow>Verify your neuron</Eyrow>
+
+                    <div className="col" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                      <span><b style={{ color: 'var(--fg)' }}>1.</b> In the NNS, set your neuron to <b>follow neuron {formatNeuronId(config?.primary_neuron_id)}</b> on Governance.</span>
+                      <span><b style={{ color: 'var(--fg)' }}>2.</b> Add this app as a <b>hotkey</b> on your neuron so it can read it on-chain:</span>
+                    </div>
+
+                    {/* Hotkey = this app's backend canister principal */}
+                    <div className="row" style={{
+                      gap: 8, alignItems: 'center', justifyContent: 'space-between',
+                      padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)'
+                    }}>
+                      <span className="mono" style={{ fontSize: 12, color: 'var(--fg)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {backendCanisterId}
+                      </span>
+                      <button onClick={() => {
+                        navigator.clipboard.writeText(backendCanisterId);
+                        setHotkeyCopied(true);
+                        setTimeout(() => setHotkeyCopied(false), 2000);
+                      }} title="Copy hotkey principal" style={{
+                        display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0,
+                        borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer'
+                      }}>
+                        <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--fg-3)"} />
+                      </button>
+                    </div>
+
+                    <div className="col" style={{ gap: 8 }}>
+                      <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}><b style={{ color: 'var(--fg)' }}>3.</b> Enter your neuron ID and verify:</span>
+                      <div className="row" style={{ gap: 8 }}>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="Your neuron ID"
+                          className="burn-input"
+                          style={{ flex: 1, fontFamily: 'var(--font-mono)' }}
+                          value={neuronIdInput}
+                          onChange={(e) => setNeuronIdInput(e.target.value.replace(/[^0-9]/g, ''))}
+                        />
+                        <Btn variant="primary" sm onClick={handleFollowNeuron} disabled={isVerifying || !neuronIdInput}>
+                          {isVerifying ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />}
+                          {isVerifying ? " Verifying…" : " Verify"}
+                        </Btn>
+                      </div>
+                      <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+                        <Icon name="info" size={12} stroke="var(--fg-3)" /> We check on-chain that this neuron is yours and follows the leader.
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             </Reveal>
 
