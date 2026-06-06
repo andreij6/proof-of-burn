@@ -373,10 +373,19 @@ export default function App() {
     try {
       const cycles = await currentActor.get_cycle_balance();
       setCycleBalance(cycles);
-      
-      const treasuryRes = await currentActor.get_treasury_balance();
-      if (treasuryRes.__kind__ === "Ok") {
-        setTreasuryBalance(treasuryRes.Ok);
+
+      // F-107: get_treasury_balance is admin-gated. Non-admin callers will
+      // hit the require_admin guard; silently skip in that case so the rest
+      // of the system-health panel still renders.
+      try {
+        const treasuryRes = await currentActor.get_treasury_balance();
+        if ("Ok" in treasuryRes) {
+          setTreasuryBalance(treasuryRes.Ok);
+        } else {
+          setTreasuryBalance(null);
+        }
+      } catch {
+        setTreasuryBalance(null);
       }
     } catch (err) {
       console.error("Failed to fetch system health:", err);

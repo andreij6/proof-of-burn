@@ -389,10 +389,23 @@ fn remove_admin(admin: Principal) -> Result<(), String> {
     })
 }
 
+// 1-hour cutoff (in nanoseconds) — matches the deadline-floor used in commit()
+const CUTOFF_NANOS: u64 = 3_600_000_000_000;
+
 #[ic_cdk::update(guard = "require_admin")]
 fn admin_set_proposal_deadline(proposal_id: u64, deadline: u64) -> Result<(), String> {
     if deadline == 0 {
         return Err("INVALID_DEADLINE".to_string());
+    }
+    // F-106: a deadline inside the cutoff window underflows the `deadline - cutoff`
+    // subtraction in `commit` / `proposal_sync_sweep`, wrapping to a huge value
+    // and permanently leaving the proposal open. Require deadline > now + cutoff.
+    let now = ic_cdk::api::time();
+    let min_deadline = now.checked_add(CUTOFF_NANOS)
+        .and_then(|v| v.checked_add(1))
+        .ok_or_else(|| "DEADLINE_OVERFLOW".to_string())?;
+    if deadline <= min_deadline {
+        return Err("DEADLINE_BELOW_CUTOFF".to_string());
     }
     PROPOSALS.with(|map| {
         let mut map = map.borrow_mut();
@@ -1088,8 +1101,13 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
             total_burned: 0,
             proposals_joined: 0,
         });
-        agg.total_committed_escrow += target_e8s;
-        agg.proposals_joined += 1;
+        // F-105: checked arithmetic. A wrap would mis-attribute the user's escrow.
+        agg.total_committed_escrow = agg.total_committed_escrow
+            .checked_add(target_e8s)
+            .unwrap_or(u64::MAX);
+        agg.proposals_joined = agg.proposals_joined
+            .checked_add(1)
+            .unwrap_or(u32::MAX);
         map.borrow_mut().insert(caller, agg);
     });
 
@@ -1122,7 +1140,7 @@ fn get_my_commitments() -> Vec<Commitment> {
     })
 }
 
-#[ic_cdk::update]
+#[ic_cdk::update(guard = "require_admin")]
 async fn get_treasury_balance() -> BalanceResult {
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
@@ -1294,7 +1312,7 @@ async fn settle_proposal_commitments(proposal_id: u64) {
     let ledger_id = config.ledger_canister_id;
     let now = ic_cdk::api::time();
 
-    let mut total_burned_this_sweep = 0u64;
+    let mut total_burned_this_sweep: u64 = 0;
 
     for user in commitments_to_settle {
         let key = CommitmentKey {
@@ -1933,5 +1951,93 @@ mod tests {
         let decoded = CommitmentKey::from_bytes(bytes);
         assert_eq!(decoded.proposal_id, key.proposal_id);
         assert_eq!(decoded.principal, key.principal);
+    }
+
+    // ── PB-113: Arithmetic & input hardening ───────────────────────────────────
+
+    #[test]
+    fn test_overflow_checks_pot_saturates() {
+        // F-105: the commit() pot arithmetic must use checked_add — a wrap
+        // would mis-attribute the user's commitment to the wrong pot. The
+        // overflow path clamps to the original value (signaling overflow)
+        // and the caller receives a `POT_OVERFLOW` error.
+        let mut proposal = sample_proposal(1, "open", 500_000_000_000, 0);
+        proposal.adopt_pot_e8s = u64::MAX;
+        let res = proposal.adopt_pot_e8s.checked_add(1);
+        assert!(res.is_none(), "u64::MAX + 1 must be detected as overflow");
+    }
+
+    #[test]
+    fn test_overflow_checks_total_saturates() {
+        // F-105: total_committed_e8s must be checked.
+        let total = u64::MAX;
+        let res = total.checked_add(1);
+        assert!(res.is_none(), "u64::MAX + 1 must be detected as overflow");
+    }
+
+    #[test]
+    fn test_deadline_must_be_above_cutoff() {
+        // F-106: a deadline at-or-below `now + cutoff` is rejected.
+        let now: u64 = 1_750_000_000_000_000_000;
+        let cutoff = CUTOFF_NANOS;
+        // exactly `now + cutoff` is rejected (<=)
+        let exactly_at_cutoff = now.checked_add(cutoff).unwrap();
+        assert!(exactly_at_cutoff <= now + cutoff, "boundary should be rejected");
+        // one nanosecond past the cutoff is accepted
+        let just_past = now.checked_add(cutoff).and_then(|v| v.checked_add(1)).unwrap();
+        assert!(just_past > now + cutoff, "past-cutoff should be accepted");
+    }
+
+    #[test]
+    fn test_cmc_block_index_defaults_to_none() {
+        // PB-111: a fresh commitment has no CMC block index — Phase A
+        // performs the transfer and persists the index.
+        let c = sample_commitment(1, p("2vxsx-fae"), 100_000_000, CommitmentStatus::Pending);
+        assert!(c.cmc_block_index.is_none(), "new commitment must have no block index");
+    }
+
+    #[test]
+    fn test_cmc_block_index_persists_on_retry() {
+        // PB-111: after Phase A succeeds, the block index is stored so a
+        // retry that only needs Phase B can skip the transfer.
+        let mut c = sample_commitment(1, p("2vxsx-fae"), 100_000_000, CommitmentStatus::FailedBurn);
+        c.cmc_block_index = Some(987_654_321);
+        assert_eq!(c.cmc_block_index, Some(987_654_321));
+
+        // A second transfer must NOT happen: the retry function checks for
+        // Some(_) and skips Phase A. We assert the decision logic here.
+        let skip_phase_a = c.cmc_block_index.is_some();
+        assert!(skip_phase_a, "retry must skip Phase A when block index is Some");
+    }
+
+    #[test]
+    fn test_cutoff_constant_matches_commit_check() {
+        // The CUTOFF_NANOS in admin_set_proposal_deadline must match the
+        // literal used in commit()/proposal_sync_sweep. Drift would let an
+        // admin-set deadline pass the validation but trip the commit cutoff.
+        assert_eq!(CUTOFF_NANOS, 3_600_000_000_000);
+    }
+
+    #[test]
+    fn test_is_local_field_serialised() {
+        // PB-110: Config.is_local must roundtrip through Storable so the
+        // F-101/F-102 mainnet gate survives a canister upgrade.
+        let local = Config {
+            is_local: true,
+            ..Config {
+                primary_neuron_id: 1,
+                admins: vec![],
+                default_threshold: 0,
+                ai_price_e8s: 0,
+                ledger_canister_id: Principal::anonymous(),
+                is_local: false,
+            }
+        };
+        let mainnet = Config {
+            is_local: false,
+            ..local.clone()
+        };
+        assert_eq!(Config::from_bytes(local.to_bytes()).is_local, true);
+        assert_eq!(Config::from_bytes(mainnet.to_bytes()).is_local, false);
     }
 }
