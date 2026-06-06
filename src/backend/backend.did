@@ -66,6 +66,9 @@ type InitPayload = record {
   owner : principal;
   ai_price_e8s : nat64;
   primary_neuron_id : nat64;
+  // Optional explicit ledger canister id. Absent → derived from is_local
+  // (local test ledger vs mainnet ICP ledger).
+  ledger_canister_id : opt principal;
 };
 type LedgerAccount = record { owner : principal; subaccount : opt blob };
 type Proposal = record {

@@ -195,6 +195,10 @@ pub struct InitPayload {
     pub primary_neuron_id: u64,
     pub default_threshold_e8s: u64,
     pub ai_price_e8s: u64,
+    /// Optional explicit ledger canister id. When absent, the ledger is derived
+    /// from `is_local` (local test ledger vs. mainnet ICP ledger). Lets staging
+    /// and integration tests point at a custom/locally-installed ledger.
+    pub ledger_canister_id: Option<Principal>,
 }
 
 /// App-wide totals used by the global stats strip in the UI.
@@ -341,11 +345,13 @@ fn require_admin() -> Result<(), String> {
 #[ic_cdk::init]
 fn init(payload: InitPayload) {
     let is_local = payload.owner.to_text() == "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe";
-    let ledger_id = if is_local {
-        Principal::from_text("aiewf-lx777-77775-aaaca-cai").unwrap()
-    } else {
-        Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
-    };
+    let ledger_id = payload.ledger_canister_id.unwrap_or_else(|| {
+        if is_local {
+            Principal::from_text("aiewf-lx777-77775-aaaca-cai").unwrap()
+        } else {
+            Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
+        }
+    });
     let config = Config {
         primary_neuron_id: resolve_primary_neuron_id(is_local, payload.primary_neuron_id),
         admins: vec![payload.owner],
@@ -1533,15 +1539,14 @@ async fn settle_proposal_commitments(proposal_id: u64) {
                         .checked_add(commitment.amount_e8s)
                         .unwrap_or(u64::MAX);
 
-                    USER_AGGREGATES.with(|map| {
-                        if let Some(mut agg) = map.borrow().get(&user) {
-                            agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
-                            agg.total_burned = agg.total_burned
-                                .checked_add(commitment.amount_e8s)
-                                .unwrap_or(agg.total_burned);
-                            map.borrow_mut().insert(user, agg);
-                        }
-                    });
+                    let existing = USER_AGGREGATES.with(|map| map.borrow().get(&user));
+                    if let Some(mut agg) = existing {
+                        agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
+                        agg.total_burned = agg.total_burned
+                            .checked_add(commitment.amount_e8s)
+                            .unwrap_or(agg.total_burned);
+                        USER_AGGREGATES.with(|map| { map.borrow_mut().insert(user, agg); });
+                    }
 
                     let log_entry = AuditLogEntry {
                         timestamp: now,
@@ -1593,12 +1598,11 @@ async fn settle_proposal_commitments(proposal_id: u64) {
                     commitment.status = CommitmentStatus::Returned;
                     commitment.settled_at = Some(now);
 
-                    USER_AGGREGATES.with(|map| {
-                        if let Some(mut agg) = map.borrow().get(&user) {
-                            agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
-                            map.borrow_mut().insert(user, agg);
-                        }
-                    });
+                    let existing = USER_AGGREGATES.with(|map| map.borrow().get(&user));
+                    if let Some(mut agg) = existing {
+                        agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
+                        USER_AGGREGATES.with(|map| { map.borrow_mut().insert(user, agg); });
+                    }
 
                     let log_entry = AuditLogEntry {
                         timestamp: now,

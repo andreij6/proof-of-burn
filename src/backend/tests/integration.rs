@@ -14,13 +14,19 @@
 //! rather than failing, so `cargo test` stays green for contributors who haven't
 //! built the wasm.
 //!
-//! Scope covered here (no external canisters required):
+//! Access-control / query coverage (no external canisters required):
 //!   - anonymous ingress is rejected on update methods
 //!   - admin guards reject non-admins; owner is admin
 //!   - public queries return seeded data and correct anonymous eligibility
 //!
-//! Out of scope here (needs mock NNS + ICRC ledger + CMC subnets — tracked in
-//! PB-112 as the remaining saga coverage): commit→settle→burn/refund end-to-end.
+//! Saga coverage (installs the project's ICRC ledger into PocketIC):
+//!   - commit happy-path: deposit → commit → Pending, pots updated
+//!   - refund: threshold missed → abstain → exact-target refund, escrow drained
+//!   - burn idempotency (PB-111): threshold met → vote → burn; CMC notify fails →
+//!     FailedBurn with block index persisted; retry does NOT transfer to the CMC
+//!     twice (no double-spend)
+//!
+//! Burn *success* (a stubbed CMC returning notify Ok) remains future scope.
 
 use candid::{encode_args, encode_one, decode_one, CandidType, Principal};
 use pocket_ic::PocketIc;
@@ -34,6 +40,7 @@ struct InitPayload {
     primary_neuron_id: u64,
     default_threshold_e8s: u64,
     ai_price_e8s: u64,
+    ledger_canister_id: Option<Principal>,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
@@ -107,6 +114,7 @@ fn setup() -> Option<(PocketIc, Principal)> {
         primary_neuron_id: 4821667,
         default_threshold_e8s: 500_000_000_000,
         ai_price_e8s: 5_000_000,
+        ledger_canister_id: None,
     };
     pic.install_canister(
         canister,
@@ -207,4 +215,434 @@ struct ProposalLite {
     reject_pot_e8s: u64,
     vote_executed_at: Option<u64>,
     total_burned_e8s: Option<u64>,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PB-112 — Burn/refund saga against a real ICRC ledger
+// ════════════════════════════════════════════════════════════════════════════
+// These install the project's ICRC-1 ledger wasm into PocketIC and drive the
+// full deposit → commit → settle lifecycle. The backend points at the
+// PocketIC-assigned ledger id via InitPayload.ledger_canister_id.
+//
+// NNS Governance and the CMC do not exist in the PocketIC instance, so:
+//   - register_neuron / vote: the is_local mock fallback treats the NNS reject
+//     as "following" / "vote cast" (exactly the local-dev behaviour).
+//   - burn_to_cycles: the ledger transfer to the CMC account succeeds, but the
+//     CMC notify_top_up rejects → FailedBurn. This lets us assert the PB-111
+//     idempotency guarantee (a retry does NOT transfer to the CMC twice).
+// Burn *success* (a stubbed CMC returning notify Ok) remains future scope.
+
+const CMC_PRINCIPAL: &str = "rkp4c-7iaaa-aaaaa-aaaca-cai";
+
+#[derive(CandidType, Clone)]
+struct LAccount {
+    owner: Principal,
+    subaccount: Option<Vec<u8>>,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+struct LAccountDe {
+    owner: Principal,
+    subaccount: Option<Vec<u8>>,
+}
+
+#[derive(CandidType)]
+enum MetadataValue {
+    Nat(candid::Nat),
+    Int(i64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+#[derive(CandidType)]
+struct ArchiveOptions {
+    num_blocks_to_archive: u64,
+    trigger_threshold: u64,
+    controller_id: Principal,
+}
+
+#[derive(CandidType)]
+struct FeatureFlags {
+    icrc2: bool,
+}
+
+#[derive(CandidType)]
+struct LedgerInitArgs {
+    minting_account: LAccount,
+    transfer_fee: candid::Nat,
+    token_symbol: String,
+    token_name: String,
+    decimals: Option<u8>,
+    metadata: Vec<(String, MetadataValue)>,
+    initial_balances: Vec<(LAccount, candid::Nat)>,
+    archive_options: ArchiveOptions,
+    feature_flags: Option<FeatureFlags>,
+}
+
+#[derive(CandidType)]
+enum LedgerArg {
+    Init(LedgerInitArgs),
+    Upgrade(Option<()>),
+}
+
+#[derive(CandidType)]
+struct TransferArg {
+    from_subaccount: Option<Vec<u8>>,
+    to: LAccount,
+    amount: candid::Nat,
+    fee: Option<candid::Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+enum TransferError {
+    BadFee { expected_fee: candid::Nat },
+    BadBurn { min_burn_amount: candid::Nat },
+    InsufficientFunds { balance: candid::Nat },
+    TooOld,
+    CreatedInFuture { ledger_time: u64 },
+    Duplicate { duplicate_of: candid::Nat },
+    TemporarilyUnavailable,
+    GenericError { error_code: candid::Nat, message: String },
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+enum TransferResult {
+    Ok(candid::Nat),
+    Err(TransferError),
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+enum Stance {
+    Adopt,
+    Reject,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+enum CommitmentStatus {
+    Pending,
+    ThresholdMet,
+    Burned,
+    Returned,
+    FailedBurn,
+    FailedRefund,
+    StuckFunds,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct Commitment {
+    proposal_id: u64,
+    principal: Principal,
+    amount_e8s: u64,
+    status: CommitmentStatus,
+    created_at: u64,
+    stance: Stance,
+    subaccount: Vec<u8>,
+    settled_at: Option<u64>,
+    cmc_block_index: Option<u64>,
+}
+
+fn ledger_wasm() -> Option<Vec<u8>> {
+    let candidates = [
+        "ledger.wasm.gz",
+        "src/backend/ledger.wasm.gz",
+        "../../src/backend/ledger.wasm.gz",
+    ];
+    candidates
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+        .map(|p| std::fs::read(p).expect("read ledger wasm"))
+}
+
+struct SagaEnv {
+    pic: PocketIc,
+    backend: Principal,
+    ledger: Principal,
+    user: Principal,
+    minter: Principal,
+}
+
+impl SagaEnv {
+    /// Mint ICP to an account by transferring from the ledger minting account.
+    fn mint(&self, to: Principal, amount_e8s: u64) {
+        let xfer = TransferArg {
+            from_subaccount: None,
+            to: LAccount { owner: to, subaccount: None },
+            amount: candid::Nat::from(amount_e8s),
+            fee: None, // minting transfers pay no fee
+            memo: None,
+            created_at_time: None,
+        };
+        let res = self
+            .pic
+            .update_call(self.ledger, self.minter, "icrc1_transfer", encode_one(xfer).unwrap())
+            .expect("mint call");
+        let res: TransferResult = decode_one(&res).unwrap();
+        assert!(matches!(res, TransferResult::Ok(_)), "mint failed: {:?}", res);
+    }
+}
+
+/// Full environment: ICRC ledger (user pre-funded) + backend pointed at it.
+fn setup_saga() -> Option<SagaEnv> {
+    let wasm = wasm_path()?;
+    let lwasm = match ledger_wasm() {
+        Some(w) => w,
+        None => {
+            eprintln!("SKIP: ledger.wasm.gz not found");
+            return None;
+        }
+    };
+    if std::env::var("POCKET_IC_BIN").is_err() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let probes = [
+            format!("{home}/.cache/pocket-ic/pocket-ic"),
+            format!("{home}/.cache/dfinity/versions/0.29.2/pocket-ic"),
+        ];
+        match probes.iter().find(|p| std::path::Path::new(p).exists()) {
+            Some(bin) => std::env::set_var("POCKET_IC_BIN", bin),
+            None => {
+                eprintln!("SKIP: no PocketIC server binary");
+                return None;
+            }
+        }
+    }
+
+    let pic = PocketIc::new();
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    let user = Principal::from_slice(&[7, 7, 7, 7, 7, 7]);
+    let minter = Principal::from_slice(&[1]);
+
+    // Install ICRC ledger at a PocketIC-assigned id, funding the test user.
+    let ledger = pic.create_canister();
+    pic.add_cycles(ledger, 4_000_000_000_000);
+    let ledger_init = LedgerArg::Init(LedgerInitArgs {
+        minting_account: LAccount { owner: minter, subaccount: None },
+        transfer_fee: candid::Nat::from(10_000u64),
+        token_symbol: "ICP".to_string(),
+        token_name: "Internet Computer".to_string(),
+        decimals: Some(8),
+        metadata: vec![],
+        initial_balances: vec![(
+            LAccount { owner: user, subaccount: None },
+            candid::Nat::from(10_000_000_000_000u64), // 100,000 ICP
+        )],
+        archive_options: ArchiveOptions {
+            num_blocks_to_archive: 1000,
+            trigger_threshold: 2000,
+            controller_id: owner,
+        },
+        feature_flags: Some(FeatureFlags { icrc2: true }),
+    });
+    pic.install_canister(ledger, lwasm, encode_one(ledger_init).unwrap(), None);
+
+    // Install backend pointed at that ledger.
+    let backend = pic.create_canister();
+    pic.add_cycles(backend, 4_000_000_000_000);
+    let init = InitPayload {
+        owner,
+        primary_neuron_id: 4821667,
+        // 100 ICP threshold — reachable within the 1000 ICP mock stake cap so the
+        // burn-path test can actually meet it; refund test commits below it.
+        default_threshold_e8s: 10_000_000_000,
+        ai_price_e8s: 5_000_000,
+        ledger_canister_id: Some(ledger),
+    };
+    pic.install_canister(backend, std::fs::read(&wasm).unwrap(), encode_one(init).unwrap(), None);
+
+    Some(SagaEnv { pic, backend, ledger, user, minter })
+}
+
+fn balance_of(env: &SagaEnv, owner: Principal, sub: Option<Vec<u8>>) -> u64 {
+    let acct = LAccount { owner, subaccount: sub };
+    let reply = env
+        .pic
+        .query_call(env.ledger, Principal::anonymous(), "icrc1_balance_of", encode_one(acct).unwrap())
+        .expect("balance query");
+    let n: candid::Nat = decode_one(&reply).unwrap();
+    n.0.try_into().unwrap_or(0)
+}
+
+fn my_commitments(env: &SagaEnv) -> Vec<Commitment> {
+    let reply = env
+        .pic
+        .query_call(env.backend, env.user, "get_my_commitments", encode_one(()).unwrap())
+        .expect("get_my_commitments");
+    decode_one(&reply).unwrap()
+}
+
+/// mint → register → deposit escrow → commit, as `user`. Returns the commit Result.
+fn do_commit_as(env: &SagaEnv, user: Principal, proposal_id: u64, stance: Stance, target_e8s: u64) -> UnitResult {
+    // 0. ensure the user has funds (target + protocol/ledger fees + headroom)
+    env.mint(user, target_e8s + 1_000_000);
+
+    // 1. register neuron (is_local mock makes the user a follower with 1000 ICP stake)
+    let reg = env
+        .pic
+        .update_call(env.backend, user, "register_neuron", encode_one(4821667u64).unwrap())
+        .expect("register_neuron call");
+    let reg: UnitResult = decode_one(&reg).unwrap();
+    assert!(matches!(reg, UnitResult::Ok), "register_neuron should succeed in is_local: {:?}", reg);
+
+    // 2. fetch escrow deposit address
+    let reply = env
+        .pic
+        .query_call(env.backend, user, "get_deposit_address", encode_one(proposal_id).unwrap())
+        .expect("get_deposit_address");
+    let escrow: LAccountDe = decode_one(&reply).unwrap();
+
+    // 3. user deposits target + 520_000 into escrow
+    let deposit = target_e8s + 520_000;
+    let xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount { owner: escrow.owner, subaccount: escrow.subaccount },
+        amount: candid::Nat::from(deposit),
+        fee: Some(candid::Nat::from(10_000u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let res = env
+        .pic
+        .update_call(env.ledger, user, "icrc1_transfer", encode_one(xfer).unwrap())
+        .expect("icrc1_transfer call");
+    let res: TransferResult = decode_one(&res).unwrap();
+    assert!(matches!(res, TransferResult::Ok(_)), "escrow deposit failed: {:?}", res);
+
+    // 4. commit
+    let reply = env
+        .pic
+        .update_call(env.backend, user, "commit", encode_args((proposal_id, stance, target_e8s)).unwrap())
+        .expect("commit call");
+    decode_one(&reply).unwrap()
+}
+
+/// Convenience: commit as the env's default pre-funded user.
+fn do_commit(env: &SagaEnv, proposal_id: u64, stance: Stance, target_e8s: u64) -> UnitResult {
+    do_commit_as(env, env.user, proposal_id, stance, target_e8s)
+}
+
+/// Move past the proposal's 1h commit cutoff and run settlement.
+fn trigger_settlement(env: &SagaEnv, proposal_id: u64) {
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    let pic_now = env.pic.get_time().as_nanos_since_unix_epoch();
+    // deadline just beyond now+cutoff to pass validation, then advance time past it.
+    let deadline = pic_now + 3_600_000_000_000 + 60_000_000_000;
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            owner,
+            "admin_set_proposal_deadline",
+            encode_args((proposal_id, deadline)).unwrap(),
+        )
+        .expect("set deadline");
+    let r: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(r, UnitResult::Ok), "set deadline: {:?}", r);
+
+    env.pic.advance_time(std::time::Duration::from_secs(7200)); // +2h
+    env.pic.tick();
+
+    let r = env
+        .pic
+        .update_call(env.backend, owner, "admin_trigger_sweep", encode_one(()).unwrap())
+        .expect("admin_trigger_sweep");
+    let _: UnitResult = decode_one(&r).unwrap();
+    // Flush any inter-canister settlement messages.
+    for _ in 0..5 {
+        env.pic.tick();
+    }
+}
+
+#[test]
+fn saga_commit_happy_path() {
+    let Some(env) = setup_saga() else { return };
+    let target = 50_000_000_000u64; // 500 ICP — meets threshold
+    let res = do_commit(&env, 138402, Stance::Adopt, target);
+    assert!(matches!(res, UnitResult::Ok), "commit should succeed: {:?}", res);
+
+    let commits = my_commitments(&env);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].amount_e8s, target);
+    assert_eq!(commits[0].status, CommitmentStatus::Pending);
+    assert_eq!(commits[0].stance, Stance::Adopt);
+    assert!(commits[0].cmc_block_index.is_none());
+}
+
+#[test]
+fn saga_refund_when_threshold_missed() {
+    let Some(env) = setup_saga() else { return };
+    let target = 5_000_000_000u64; // 50 ICP — keeps 138402 below its 5000 ICP threshold
+    let res = do_commit(&env, 138402, Stance::Reject, target);
+    assert!(matches!(res, UnitResult::Ok), "commit: {:?}", res);
+
+    // Balance after the escrow deposit, before settlement.
+    let mid = balance_of(&env, env.user, None);
+
+    trigger_settlement(&env, 138402);
+
+    let commits = my_commitments(&env);
+    assert_eq!(commits[0].status, CommitmentStatus::Returned, "unmet threshold must refund");
+
+    // Refund returns exactly the target to the user (the refund's ledger fee is
+    // covered by the extra reserve held in escrow, not the returned amount).
+    let after = balance_of(&env, env.user, None);
+    assert_eq!(after, mid + target, "refund must return exactly the committed target");
+
+    // Escrow subaccount is fully drained after refund.
+    let reply = env
+        .pic
+        .query_call(env.backend, env.user, "get_deposit_address", encode_one(138402u64).unwrap())
+        .expect("get_deposit_address");
+    let escrow: LAccountDe = decode_one(&reply).unwrap();
+    let escrow_bal = balance_of(&env, escrow.owner, escrow.subaccount);
+    assert_eq!(escrow_bal, 0, "escrow should be empty after refund");
+}
+
+#[test]
+fn saga_burn_is_idempotent_on_cmc_failure() {
+    let Some(env) = setup_saga() else { return };
+    // Proposal 138402's seeded threshold is 5000 ICP and the per-user stake cap is
+    // 1000 ICP, so meeting it requires several committers. 6 × 1000 ICP = 6000 ICP.
+    // Proposal 138402 is seeded with 3180 ICP already committed against a 5000 ICP
+    // threshold, so 2 more committers (× 1000 ICP, the stake cap) cross it.
+    let per_user = 100_000_000_000u64; // 1000 ICP (== stake cap, allowed)
+    let n_users = 2u64;
+    for i in 0..n_users {
+        let u = Principal::from_slice(&[0xA0 + i as u8; 16]);
+        let res = do_commit_as(&env, u, 138402, Stance::Adopt, per_user);
+        assert!(matches!(res, UnitResult::Ok), "commit {i}: {:?}", res);
+    }
+    let total = per_user * n_users;
+    let cmc = Principal::from_text(CMC_PRINCIPAL).unwrap();
+
+    // First sweep: threshold met → vote (is_local mock Ok) → settle → each
+    // burn_to_cycles transfers to the CMC (succeeds) but notify_top_up rejects
+    // (no CMC canister) → FailedBurn, block index persisted for retry.
+    trigger_settlement(&env, 138402);
+
+
+    let first_user = Principal::from_slice(&[0xA0; 16]);
+    let reply = env
+        .pic
+        .query_call(env.backend, first_user, "get_my_commitments", encode_one(()).unwrap())
+        .expect("get_my_commitments");
+    let commits: Vec<Commitment> = decode_one(&reply).unwrap();
+    assert_eq!(commits[0].status, CommitmentStatus::FailedBurn, "CMC notify fails → FailedBurn");
+    assert!(commits[0].cmc_block_index.is_some(), "PB-111: block index persisted for retry");
+
+    let cmc_after_first = balance_of(&env, cmc, None);
+    assert_eq!(cmc_after_first, total, "exactly the committed total reached the CMC once");
+
+    // Second sweep: retry_failed_settlements re-runs burn_to_cycles. Because each
+    // block index is set it must SKIP Phase A (the transfer) and only re-notify.
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    let r = env.pic.update_call(env.backend, owner, "admin_trigger_sweep", encode_one(()).unwrap()).expect("sweep2");
+    let _: UnitResult = decode_one(&r).unwrap();
+
+    let cmc_after_second = balance_of(&env, cmc, None);
+    assert_eq!(
+        cmc_after_second, total,
+        "PB-111: retry must NOT transfer to the CMC again (no double-spend)"
+    );
 }
