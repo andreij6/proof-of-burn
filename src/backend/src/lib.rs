@@ -388,6 +388,35 @@ fn seed_mock_proposals() {
             });
         }
     });
+
+    VOTES.with(|map| {
+        let mut m = map.borrow_mut();
+        if m.is_empty() {
+            let now = ic_cdk::api::time();
+            let dur_1d = 24 * 60 * 60 * 1_000_000_000;
+            m.insert(138300, VoteRecord {
+                proposal_id: 138300,
+                vote: Vote::Yes,
+                icp_burned_e8s: 1_240_000_000,
+                decided_at: now - 5 * dur_1d,
+                nns_outcome: Some("adopted".to_string()),
+            });
+            m.insert(138250, VoteRecord {
+                proposal_id: 138250,
+                vote: Vote::No,
+                icp_burned_e8s: 600_000_000,
+                decided_at: now - 10 * dur_1d,
+                nns_outcome: Some("rejected".to_string()),
+            });
+            m.insert(138200, VoteRecord {
+                proposal_id: 138200,
+                vote: Vote::Yes,
+                icp_burned_e8s: 2_010_000_000,
+                decided_at: now - 15 * dur_1d,
+                nns_outcome: Some("adopted".to_string()),
+            });
+        }
+    });
 }
 
 // ==========================================
