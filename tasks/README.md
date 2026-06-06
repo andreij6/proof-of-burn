@@ -41,18 +41,17 @@ Engineering breakdown for building **Proof of Burn** as an Internet Computer (IC
 3. **C — Auth & Eligibility** — PB-020…023
 4. **D — NNS Governance Integration** — PB-030…033
 5. **E — Burn-to-Vote Mechanism** — PB-040…045
-6. **G — Social Broadcasting (X)** — PB-060…061
-7. **H — Frontend SPA (progressive disclosure)** — PB-070…078
-8. **I — Security & Hardening** — PB-080…082
-9. **J — Testing & QA** — PB-090…093
-10. **K — Deployment & Ops** — PB-100…102
+6. **H — Frontend SPA (progressive disclosure)** — PB-070…078
+7. **I — Security & Hardening** — PB-080…082
+8. **J — Testing & QA** — PB-090…093
+9. **K — Deployment & Ops** — PB-100…102
 
 ## Suggested milestones
 - **M1 — Skeleton on-chain:** A (all) + PB-010/011/012, PB-020/021, PB-031, PB-072. A signed-in user sees live proposals from a deployed canister.
 - **M2 — Eligibility & history:** PB-022/023, PB-030/032, PB-073/075. Follow verification + vote history.
 - **M3 — Burn core (highest risk):** PB-040…045, PB-074, PB-080. Commit → escrow → threshold → burn/refund, security-reviewed.
 - **M4 — Vote execution:** PB-033.
-- **M5 — Social + polish + mainnet:** PB-060/061, PB-076/078, PB-081, PB-090…093, PB-100…102.
+- **M5 — Polish + mainnet:** PB-076/078, PB-081, PB-090…093, PB-100…102.
 
 ## Critical-path dependency notes
 - The **burn mechanism (Epic E)** is the riskiest surface: it moves real ICP and crosses `await` boundaries. PB-045 (reentrancy/saga) and PB-080 (security review) gate any mainnet burn.
@@ -65,7 +64,6 @@ Engineering breakdown for building **Proof of Burn** as an Internet Computer (IC
 - [ ] **Escrow model for burn:** ICRC-2 `approve` + `transfer_from` into a per-proposal canister subaccount (recommended) vs. direct deposit. See PB-040.
 - [ ] **"Burn" semantics:** transferring ICP **to the ICP minting account** is the on-chain burn (fee = 0). Confirm the minting-account destination. See PB-042.
 - [ ] **Threshold source:** flat per-proposal config (v1) vs. dynamic/governance. v1 = admin-set flat. See PB-012/041.
-- [ ] **X posting:** API tier + auth (OAuth2 bearer) feasibility from a canister outcall. See PB-060.
 
 ## Status legend
 `todo` · `in-progress` · `blocked` · `review` · `done`
