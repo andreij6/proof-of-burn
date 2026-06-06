@@ -126,22 +126,33 @@ function Btn({ variant = 'secondary', sm, children, disabled, style, onClick }: 
 
 function HeatBar({ pct = 0, committed, req, met }: { pct?: number; committed?: string; req?: string; met?: boolean }) {
   const barPct = Math.min(100, pct); // visual bar caps at 100%
-  const oversubscribed = pct > 100;
+  const isOversubscribed = pct >= 100;
+
+  if (isOversubscribed) {
+    return (
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
+        <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg-1)', whiteSpace: 'nowrap' }}>
+          {committed}
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className="col" style={{ gap: 7 }}>
       <div style={{ height: 8, borderRadius: 999, background: 'var(--char-800)', overflow: 'hidden' }}>
         <div style={{
           width: `${barPct}%`, height: '100%', borderRadius: 999,
-          background: oversubscribed ? 'var(--burn)' : met ? 'var(--sprout)' : 'var(--burn)',
+          background: met ? 'var(--sprout)' : 'var(--burn)',
           transition: 'width 1s var(--ease-out)',
-          boxShadow: oversubscribed ? '0 0 8px var(--burn)' : 'none',
+          boxShadow: 'none',
         }} />
       </div>
       {(committed || req) && (
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
           <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg-1)', whiteSpace: 'nowrap' }}>{committed}</span>
-          <span className="mono" style={{ fontSize: 12, color: oversubscribed ? 'var(--burn)' : met ? 'var(--sprout)' : 'var(--burn)', fontWeight: 500, whiteSpace: 'nowrap' }}>
-            {oversubscribed ? `${pct}% · oversubscribed` : req}
+          <span className="mono" style={{ fontSize: 12, color: met ? 'var(--sprout)' : 'var(--burn)', fontWeight: 500, whiteSpace: 'nowrap' }}>
+            {req}
           </span>
         </div>
       )}

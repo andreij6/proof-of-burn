@@ -269,17 +269,17 @@ describe('PB-115 global stats: votes_cast count', () => {
 
 function formatNeuronId(id: bigint | null | undefined): string {
   if (id === null || id === undefined) return '…';
-  return id.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return id.toString();
 }
 
 describe('PB-116 formatNeuronId', () => {
-  it('groups thousands', () => {
-    expect(formatNeuronId(4821667n)).toBe('4,821,667');
+  it('renders plain decimal digits with no separators', () => {
+    expect(formatNeuronId(4821667n)).toBe('4821667');
   });
 
   it('handles the production neuron id beyond Number.MAX_SAFE_INTEGER', () => {
     // 17802688826615984104 > 2^53 — must not lose precision
-    expect(formatNeuronId(17802688826615984104n)).toBe('17,802,688,826,615,984,104');
+    expect(formatNeuronId(17802688826615984104n)).toBe('17802688826615984104');
   });
 
   it('renders a placeholder when config not yet loaded', () => {
