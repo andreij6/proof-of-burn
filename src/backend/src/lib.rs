@@ -1393,3 +1393,47 @@ fn list_vote_history() -> Vec<VoteRecord> {
 }
 
 ic_cdk::export_candid!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_derive_subaccount_deterministic() {
+        let principal1 = Principal::from_text("2vxsx-fae").unwrap();
+        let principal2 = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+        
+        let sub1_p1 = derive_subaccount(&principal1, 138402);
+        let sub2_p1 = derive_subaccount(&principal1, 138402);
+        let sub1_p2 = derive_subaccount(&principal2, 138402);
+        let sub3_p1 = derive_subaccount(&principal1, 138388);
+
+        // Deterministic: same inputs yield same subaccount
+        assert_eq!(sub1_p1, sub2_p1);
+        
+        // Different principals yield different subaccounts
+        assert_ne!(sub1_p1, sub1_p2);
+        
+        // Different proposal IDs yield different subaccounts
+        assert_ne!(sub1_p1, sub3_p1);
+    }
+
+    #[test]
+    fn test_storable_config_roundtrip() {
+        let config = Config {
+            primary_neuron_id: 12345,
+            admins: vec![Principal::anonymous()],
+            default_threshold: 1000,
+            ai_price_e8s: 50,
+            ledger_canister_id: Principal::anonymous(),
+        };
+
+        let bytes = config.to_bytes();
+        let decoded = Config::from_bytes(bytes);
+        assert_eq!(decoded.primary_neuron_id, config.primary_neuron_id);
+        assert_eq!(decoded.admins, config.admins);
+        assert_eq!(decoded.default_threshold, config.default_threshold);
+        assert_eq!(decoded.ai_price_e8s, config.ai_price_e8s);
+        assert_eq!(decoded.ledger_canister_id, config.ledger_canister_id);
+    }
+}
