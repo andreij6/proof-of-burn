@@ -1,0 +1,39 @@
+canisters:
+  - name: backend
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: backend
+        candid: src/backend/backend.did
+    settings:
+      freezing_threshold: 2592000
+  - name: frontend
+    recipe:
+      type: "@dfinity/asset-canister@v2.1.0"
+      configuration:
+        dir: src/frontend/dist
+        build:
+          - npm --prefix src/frontend install --cache=./.npm-cache
+          - npm --prefix src/frontend run build
+
+networks:
+  - name: local
+    mode: managed
+    ii: true
+
+environments:
+  - name: local
+    network: local
+    canisters:
+      - backend
+      - frontend
+  - name: staging
+    network: ic
+    canisters:
+      - backend
+      - frontend
+  - name: production
+    network: ic
+    canisters:
+      - backend
+      - frontend
