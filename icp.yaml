@@ -19,8 +19,8 @@ canisters:
     recipe:
       type: "@dfinity/prebuilt@v2.0.0"
       configuration:
-        candid: src/backend/ic-icrc1-ledger.did
-        path: src/backend/ic-icrc1-ledger.wasm.gz
+        candid: src/backend/ledger.did
+        path: src/backend/ledger.wasm.gz
     init_args: '(variant { Init = record { token_symbol = "ICP"; token_name = "Internet Computer Protocol"; decimals = opt 8; transfer_fee = 10_000; minting_account = record { owner = principal "m4zh5-ybqlr-txnmf-v26f2-2h77i-rlufn-z33hj-wrt5i-yzav5-iab77-wae" }; initial_balances = vec { record { record { owner = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; 100_000_000_000 }; record { record { owner = principal "p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe" }; 100_000_000_000 } }; archive_options = record { num_blocks_to_archive = 1000; trigger_threshold = 2000; controller_id = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; feature_flags = opt record { icrc2 = true } } })'
 
 networks:

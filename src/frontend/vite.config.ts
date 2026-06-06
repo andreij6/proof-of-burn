@@ -11,7 +11,7 @@ export default defineConfig({
       outDir: './src/bindings',
     }),
     icpBindgen({
-      didFile: '../backend/ic-icrc1-ledger.did',
+      didFile: '../backend/ledger.did',
       outDir: './src/bindings',
     }),
   ],
