@@ -951,7 +951,8 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         None => return Err("PROPOSAL_NOT_FOUND".to_string()),
     };
 
-    if proposal.status != "open" {
+    // "met" proposals remain open for further commits — threshold is a floor, not a cap
+    if proposal.status != "open" && proposal.status != "met" {
         return Err("COMMITMENT_CLOSED".to_string());
     }
 
