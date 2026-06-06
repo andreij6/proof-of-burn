@@ -520,9 +520,9 @@ fn seed_mock_proposals() {
                 deadline: now + dur_2d_14h,
                 nns_proposal_id: Some(138402),
                 status: "open".to_string(),
-                threshold_e8s: 500_000_000_000,
-                total_committed_e8s: 318_000_000_000,
-                adopt_pot_e8s: 318_000_000_000,
+                threshold_e8s: 10_000_000_000,    // 100 ICP
+                total_committed_e8s: 2_000_000_000, // 20 ICP (~20%)
+                adopt_pot_e8s: 2_000_000_000,
                 reject_pot_e8s: 0,
                 vote_executed_at: None,
                 total_burned_e8s: None,
@@ -535,9 +535,9 @@ fn seed_mock_proposals() {
                 deadline: now + dur_5d_2h,
                 nns_proposal_id: Some(138388),
                 status: "met".to_string(),
-                threshold_e8s: 500_000_000_000,
-                total_committed_e8s: 500_000_000_000,
-                adopt_pot_e8s: 500_000_000_000,
+                threshold_e8s: 10_000_000_000,      // 100 ICP
+                total_committed_e8s: 10_000_000_000, // 100 ICP (met)
+                adopt_pot_e8s: 10_000_000_000,
                 reject_pot_e8s: 0,
                 vote_executed_at: None,
                 total_burned_e8s: None,
@@ -550,9 +550,9 @@ fn seed_mock_proposals() {
                 deadline: now + dur_14h,
                 nns_proposal_id: Some(138376),
                 status: "open".to_string(),
-                threshold_e8s: 500_000_000_000,
-                total_committed_e8s: 141_000_000_000,
-                adopt_pot_e8s: 141_000_000_000,
+                threshold_e8s: 10_000_000_000,    // 100 ICP
+                total_committed_e8s: 4_500_000_000, // 45 ICP (~45%)
+                adopt_pot_e8s: 4_500_000_000,
                 reject_pot_e8s: 0,
                 vote_executed_at: None,
                 total_burned_e8s: None,

@@ -604,8 +604,8 @@ fn saga_burn_is_idempotent_on_cmc_failure() {
     let Some(env) = setup_saga() else { return };
     // Proposal 138402's seeded threshold is 5000 ICP and the per-user stake cap is
     // 1000 ICP, so meeting it requires several committers. 6 × 1000 ICP = 6000 ICP.
-    // Proposal 138402 is seeded with 3180 ICP already committed against a 5000 ICP
-    // threshold, so 2 more committers (× 1000 ICP, the stake cap) cross it.
+    // Proposal 138402 is seeded with 20 ICP committed against a 100 ICP threshold;
+    // two committers (× 1000 ICP, the stake cap) comfortably cross it.
     let per_user = 100_000_000_000u64; // 1000 ICP (== stake cap, allowed)
     let n_users = 2u64;
     for i in 0..n_users {
