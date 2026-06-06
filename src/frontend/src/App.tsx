@@ -960,11 +960,11 @@ export default function App() {
             <Reveal delay={50} motion={motion}>
               <div className="col" style={{ gap: 10 }}>
                 <p style={{ fontSize: 22, lineHeight: 1.25, fontFamily: 'var(--font-display)', fontWeight: 600, color: 'var(--fg)', margin: 0, textWrap: 'balance' }}>
-                  Democratizing<br />
-                  <span style={{ color: 'var(--burn)' }}>Voting Power</span>
+                  Deflationary Power,<br />
+                  <span style={{ color: 'var(--burn)' }}>Direct Control</span>
                 </p>
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, maxWidth: 480 }}>
-                  Burn ICP to signal conviction on proposals you care about — your committed weight determines which way the neuron votes. Every ICP burned is gone forever, tightening the supply for every holder.
+                  Signal conviction on key NNS proposals. Your burned ICP directly steers governance decisions while permanently shrinking the circulating supply to benefit every holder.
                 </p>
               </div>
             </Reveal>
