@@ -283,6 +283,10 @@ export default function App() {
   const host = window.location.origin;
   const backendCanisterId = env?.['PUBLIC_CANISTER_ID:backend'] || "a5dhi-k7777-77775-aaabq-cai";
   const ledgerCanisterId = env?.['PUBLIC_CANISTER_ID:ledger'] || "aiewf-lx777-77775-aaaca-cai";
+  const isLocal = host.includes("localhost") || host.includes("127.0.0.1");
+  const identityProviderUrl = isLocal
+    ? `http://rdmx6-jaaaa-aaaaa-aaadq-cai.localhost:8000`
+    : "https://identity.ic0.app";
 
   // Auth & Identity state
   const [authClient, setAuthClient] = useState<AuthClient | null>(null);
@@ -514,7 +518,7 @@ export default function App() {
     if (!authClient) return;
     setIsSigningIn(true);
     await authClient.login({
-      identityProvider: "http://id.ai.localhost:8000",
+      identityProvider: identityProviderUrl,
       maxTimeToLive: BigInt(8 * 60 * 60 * 1_000_000_000), // 8h
       onSuccess: async () => {
         const id = authClient.getIdentity();
