@@ -7,10 +7,10 @@ use std::cell::RefCell;
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 
 // ==========================================
-// NNS Governance Types
+// NNS Governance & Ledger Types
 // ==========================================
 
-#[derive(CandidType, Deserialize, Clone, Debug)]
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct NeuronId {
     pub id: u64,
 }
@@ -31,6 +31,7 @@ pub struct Neuron {
     pub id: Option<NeuronId>,
     pub controller: Option<Principal>,
     pub followees: Vec<(i32, Followees)>,
+    pub cached_neuron_stake_e8s: u64,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -44,6 +45,7 @@ pub struct UserNeuronState {
     pub neuron_id: u64,
     pub is_following: bool,
     pub verified_at: u64,
+    pub cached_stake_e8s: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -53,6 +55,41 @@ pub struct EligibilityInfo {
     pub following: bool,
     pub has_committed: bool,
     pub holdings_e8s: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum Stance {
+    Adopt,
+    Reject,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum CommitmentStatus {
+    Pending,
+    ThresholdMet,
+    Burned,
+    Returned,
+    FailedBurn,
+    FailedRefund,
+    StuckFunds,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Commitment {
+    pub proposal_id: u64,
+    pub principal: Principal,
+    pub amount_e8s: u64,
+    pub status: CommitmentStatus,
+    pub created_at: u64,
+    pub stance: Stance,
+    pub subaccount: [u8; 32],
+    pub settled_at: Option<u64>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LedgerAccount {
+    pub owner: Principal,
+    pub subaccount: Option<[u8; 32]>,
 }
 
 // ==========================================
@@ -65,6 +102,7 @@ pub struct Config {
     pub admins: Vec<Principal>,
     pub default_threshold: u64,
     pub ai_price_e8s: u64,
+    pub ledger_canister_id: Principal,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -74,26 +112,13 @@ pub struct Proposal {
     pub category: String,
     pub deadline: u64, // nanoseconds since epoch
     pub nns_proposal_id: Option<u64>,
-    pub status: String, // "open" | "met" | "voted" | "failed"
+    pub status: String, // "open" | "met" | "voted" | "failed" | "settled" | "abstained"
     pub threshold_e8s: u64,
     pub total_committed_e8s: u64,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum CommitmentStatus {
-    Pending,
-    ThresholdMet,
-    Burned,
-    Returned,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct Commitment {
-    pub proposal_id: u64,
-    pub principal: Principal,
-    pub amount_e8s: u64,
-    pub status: CommitmentStatus,
-    pub created_at: u64,
+    pub adopt_pot_e8s: u64,
+    pub reject_pot_e8s: u64,
+    pub vote_executed_at: Option<u64>,
+    pub total_burned_e8s: Option<u64>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -191,6 +216,7 @@ thread_local! {
             admins: vec![],
             default_threshold: 250_000_000_000,
             ai_price_e8s: 5_000_000,
+            ledger_canister_id: Principal::anonymous(),
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -254,23 +280,32 @@ fn require_admin() -> Result<(), String> {
 
 #[ic_cdk::init]
 fn init(payload: InitPayload) {
+    let is_local = payload.owner.to_text() == "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe";
+    let ledger_id = if is_local {
+        Principal::from_text("aiewf-lx777-77775-aaaca-cai").unwrap()
+    } else {
+        Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
+    };
     let config = Config {
         primary_neuron_id: payload.primary_neuron_id,
         admins: vec![payload.owner],
         default_threshold: payload.default_threshold_e8s,
         ai_price_e8s: payload.ai_price_e8s,
+        ledger_canister_id: ledger_id,
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
     });
     
     seed_mock_proposals();
+    setup_timers();
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     // Stable data auto-restores; re-seed if empty
     seed_mock_proposals();
+    setup_timers();
 }
 
 // ==========================================
@@ -363,6 +398,10 @@ fn seed_mock_proposals() {
                 status: "open".to_string(),
                 threshold_e8s: 500_000_000_000,
                 total_committed_e8s: 318_000_000_000,
+                adopt_pot_e8s: 318_000_000_000,
+                reject_pot_e8s: 0,
+                vote_executed_at: None,
+                total_burned_e8s: None,
             });
 
             m.insert(138388, Proposal {
@@ -374,6 +413,10 @@ fn seed_mock_proposals() {
                 status: "met".to_string(),
                 threshold_e8s: 500_000_000_000,
                 total_committed_e8s: 500_000_000_000,
+                adopt_pot_e8s: 500_000_000_000,
+                reject_pot_e8s: 0,
+                vote_executed_at: None,
+                total_burned_e8s: None,
             });
 
             m.insert(138376, Proposal {
@@ -385,6 +428,10 @@ fn seed_mock_proposals() {
                 status: "open".to_string(),
                 threshold_e8s: 500_000_000_000,
                 total_committed_e8s: 141_000_000_000,
+                adopt_pot_e8s: 141_000_000_000,
+                reject_pot_e8s: 0,
+                vote_executed_at: None,
+                total_burned_e8s: None,
             });
         }
     });
@@ -423,7 +470,7 @@ fn seed_mock_proposals() {
 // 9. Eligibility & Verification Endpoints
 // ==========================================
 
-async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> Result<bool, String> {
+async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> Result<(bool, u64), String> {
     let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
     
     let response: Result<(Result_2,), _> = ic_cdk::call(nns_gov, "get_full_neuron", (neuron_id,)).await;
@@ -445,7 +492,7 @@ async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> 
                     }
                 }
             }
-            Ok(following)
+            Ok((following, neuron.cached_neuron_stake_e8s))
         }
         Ok((Result_2::Err(err),)) => {
             Err(format!("NNS Governance returned error: {}", err.error_message))
@@ -455,7 +502,7 @@ async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> 
                 || code == ic_cdk::api::call::RejectionCode::CanisterError
                 || code == ic_cdk::api::call::RejectionCode::CanisterReject
             {
-                Ok(true)
+                Ok((true, 100_000_000_000u64))
             } else {
                 Err(format!("NNS call rejected (code {:?}): {}", code, msg))
             }
@@ -471,7 +518,7 @@ async fn register_neuron(neuron_id: u64) -> Result<(), String> {
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let leader_id = config.primary_neuron_id;
 
-    let verified = check_nns_follow(neuron_id, caller, leader_id).await?;
+    let (verified, stake) = check_nns_follow(neuron_id, caller, leader_id).await?;
 
     if !verified {
         return Err("Neuron is not following the primary neuron".to_string());
@@ -481,6 +528,7 @@ async fn register_neuron(neuron_id: u64) -> Result<(), String> {
         neuron_id,
         is_following: true,
         verified_at: ic_cdk::api::time(),
+        cached_stake_e8s: stake,
     };
     
     USER_NEURONS.with(|map| {
@@ -541,6 +589,798 @@ fn get_eligibility() -> EligibilityInfo {
 // ==========================================
 // 10. Vote History Endpoints
 // ==========================================
+
+// ==========================================
+// 11. Escrow, Sagas, and Lifecycle Logic
+// ==========================================
+
+const TREASURY_SUBACCOUNT: [u8; 32] = [1u8; 32];
+
+thread_local! {
+    static ACTIVE_CALLERS: RefCell<std::collections::HashSet<Principal>> = RefCell::new(std::collections::HashSet::new());
+    static ACTIVE_PROPOSALS: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+}
+
+pub struct CallerGuard {
+    caller: Principal,
+}
+
+impl CallerGuard {
+    pub fn new(caller: Principal) -> Result<Self, String> {
+        let inserted = ACTIVE_CALLERS.with(|set| set.borrow_mut().insert(caller));
+        if !inserted {
+            return Err("Another transaction is already in progress for this principal".to_string());
+        }
+        Ok(Self { caller })
+    }
+}
+
+impl Drop for CallerGuard {
+    fn drop(&mut self) {
+        ACTIVE_CALLERS.with(|set| set.borrow_mut().remove(&self.caller));
+    }
+}
+
+pub struct ProposalLock {
+    proposal_id: u64,
+}
+
+impl ProposalLock {
+    pub fn new(proposal_id: u64) -> Result<Self, String> {
+        let inserted = ACTIVE_PROPOSALS.with(|set| set.borrow_mut().insert(proposal_id));
+        if !inserted {
+            return Err("Proposal processing is already in progress".to_string());
+        }
+        Ok(Self { proposal_id })
+    }
+}
+
+impl Drop for ProposalLock {
+    fn drop(&mut self) {
+        ACTIVE_PROPOSALS.with(|set| set.borrow_mut().remove(&self.proposal_id));
+    }
+}
+
+fn derive_subaccount(user: &Principal, proposal_id: u64) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_escrow_v1");
+    hasher.update(user.as_slice());
+    hasher.update(&proposal_id.to_be_bytes());
+    let result = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&result);
+    sub
+}
+
+// Ledger Call Structs
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TransferArgs {
+    pub from_subaccount: Option<[u8; 32]>,
+    pub to: LedgerAccount,
+    pub amount: candid::Nat,
+    pub fee: Option<candid::Nat>,
+    pub memo: Option<Vec<u8>>,
+    pub created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub enum TransferError {
+    BadFee { expected_fee: candid::Nat },
+    BadBurn { min_burn_amount: candid::Nat },
+    InsufficientFunds { balance: candid::Nat },
+    TooOld,
+    CreatedInFuture { ledger_time: u64 },
+    Duplicate { duplicate_of: candid::Nat },
+    TemporarilyUnavailable,
+    GenericError { error_code: candid::Nat, message: String },
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub enum TransferResult {
+    Ok(candid::Nat),
+    Err(TransferError),
+}
+
+#[derive(CandidType, Serialize, Debug)]
+pub struct NotifyTopUpArgs {
+    pub canister_id: Principal,
+    pub block_index: candid::Nat,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub enum NotifyTopUpResult {
+    Ok(candid::Nat),
+    Err(NotifyError),
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub enum NotifyError {
+    Refunded { refund_block_index: Option<candid::Nat>, reason: String },
+    InvalidTokenLedger,
+    TransactionNotFound,
+    TransactionTooOld,
+    AlreadyNotified,
+    Other { error_code: u64, error_message: String },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum BalanceResult {
+    Ok(u64),
+    Err(String),
+}
+
+async fn call_ledger_balance(ledger_id: Principal, account: LedgerAccount) -> Result<u64, String> {
+    let response: Result<(candid::Nat,), _> = ic_cdk::call(ledger_id, "icrc1_balance_of", (account,)).await;
+    match response {
+        Ok((balance,)) => {
+            let bal_str = balance.to_string();
+            let bal_u64 = bal_str.parse::<u64>().map_err(|e| format!("Failed to parse balance: {}", e))?;
+            Ok(bal_u64)
+        }
+        Err((code, msg)) => Err(format!("Ledger call failed (code {:?}): {}", code, msg)),
+    }
+}
+
+async fn call_ledger_transfer(
+    ledger_id: Principal,
+    from_sub: Option<[u8; 32]>,
+    to: LedgerAccount,
+    amount_e8s: u64,
+    fee_e8s: Option<u64>,
+) -> Result<u64, String> {
+    let args = TransferArgs {
+        from_subaccount: from_sub,
+        to,
+        amount: candid::Nat::from(amount_e8s),
+        fee: fee_e8s.map(candid::Nat::from),
+        memo: None,
+        created_at_time: None,
+    };
+    let response: Result<(TransferResult,), _> = ic_cdk::call(ledger_id, "icrc1_transfer", (args,)).await;
+    match response {
+        Ok((TransferResult::Ok(block_index),)) => {
+            let block_str = block_index.to_string();
+            let block_u64 = block_str.parse::<u64>().map_err(|e| format!("Failed to parse block index: {}", e))?;
+            Ok(block_u64)
+        }
+        Ok((TransferResult::Err(err),)) => Err(format!("Ledger transfer returned error: {:?}", err)),
+        Err((code, msg)) => Err(format!("Ledger transfer call failed (code {:?}): {}", code, msg)),
+    }
+}
+
+async fn get_minting_account(ledger_id: Principal) -> Result<LedgerAccount, String> {
+    let response: Result<(Option<LedgerAccount>,), _> = ic_cdk::call(ledger_id, "icrc1_minting_account", ()).await;
+    match response {
+        Ok((Some(account),)) => Ok(account),
+        Ok((None,)) => Err("Ledger has no minting account".to_string()),
+        Err((code, msg)) => Err(format!("Failed to get minting account (code {:?}): {}", code, msg)),
+    }
+}
+
+// Endpoints
+#[ic_cdk::update]
+async fn verify_follow() -> Result<(), String> {
+    require_authenticated()?;
+    let caller = ic_cdk::caller();
+
+    let neuron_id = USER_NEURONS.with(|map| {
+        map.borrow().get(&caller).map(|s| s.neuron_id)
+    });
+
+    let neuron_id = match neuron_id {
+        Some(id) => id,
+        None => return Err("No neuron registered for caller".to_string()),
+    };
+
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let leader_id = config.primary_neuron_id;
+
+    let (verified, stake) = check_nns_follow(neuron_id, caller, leader_id).await?;
+
+    if !verified {
+        return Err("Neuron is not following the primary neuron".to_string());
+    }
+
+    let state = UserNeuronState {
+        neuron_id,
+        is_following: true,
+        verified_at: ic_cdk::api::time(),
+        cached_stake_e8s: stake,
+    };
+    
+    USER_NEURONS.with(|map| {
+        map.borrow_mut().insert(caller, state);
+    });
+
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_deposit_address(proposal_id: u64) -> LedgerAccount {
+    let caller = ic_cdk::caller();
+    let sub = derive_subaccount(&caller, proposal_id);
+    LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(sub),
+    }
+}
+
+#[ic_cdk::update]
+async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = ic_cdk::caller();
+
+    let _guard = CallerGuard::new(caller)?;
+
+    let user_neuron = USER_NEURONS.with(|map| map.borrow().get(&caller));
+    let user_neuron = match user_neuron {
+        Some(state) => state,
+        None => return Err("NEURON_NOT_REGISTERED".to_string()),
+    };
+
+    if !user_neuron.is_following {
+        return Err("NOT_FOLLOWING".to_string());
+    }
+
+    let key = CommitmentKey {
+        proposal_id,
+        principal: caller,
+    };
+    let existing_amount = COMMITMENTS.with(|map| {
+        map.borrow().get(&key).map(|c| c.amount_e8s).unwrap_or(0)
+    });
+
+    if existing_amount > 0 {
+        return Err("ALREADY_COMMITTED".to_string());
+    }
+
+    if target_e8s < 100_000_000 {
+        return Err("BELOW_MINIMUM".to_string());
+    }
+
+    if target_e8s > user_neuron.cached_stake_e8s {
+        return Err("EXCEEDS_STAKE_CAP".to_string());
+    }
+
+    let proposal = PROPOSALS.with(|map| map.borrow().get(&proposal_id));
+    let mut proposal = match proposal {
+        Some(p) => p,
+        None => return Err("PROPOSAL_NOT_FOUND".to_string()),
+    };
+
+    if proposal.status != "open" {
+        return Err("COMMITMENT_CLOSED".to_string());
+    }
+
+    let now = ic_cdk::api::time();
+    if now >= proposal.deadline - 3_600_000_000_000 {
+        return Err("COMMITMENT_CLOSED".to_string());
+    }
+
+    let subaccount = derive_subaccount(&caller, proposal_id);
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+
+    let escrow_account = LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(subaccount),
+    };
+
+    let balance = call_ledger_balance(ledger_id, escrow_account).await?;
+    let required_deposit = target_e8s + 520_000;
+
+    if balance < required_deposit {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+
+    let treasury_dest = LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+
+    call_ledger_transfer(
+        ledger_id,
+        Some(subaccount),
+        treasury_dest,
+        500_000,
+        Some(10_000),
+    ).await.map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
+
+    let commitment = Commitment {
+        proposal_id,
+        principal: caller,
+        amount_e8s: target_e8s,
+        status: CommitmentStatus::Pending,
+        created_at: now,
+        stance: stance.clone(),
+        subaccount,
+        settled_at: None,
+    };
+
+    COMMITMENTS.with(|map| {
+        map.borrow_mut().insert(key, commitment);
+    });
+
+    if stance == Stance::Adopt {
+        proposal.adopt_pot_e8s += target_e8s;
+    } else {
+        proposal.reject_pot_e8s += target_e8s;
+    }
+    proposal.total_committed_e8s += target_e8s;
+
+    if proposal.total_committed_e8s >= proposal.threshold_e8s {
+        proposal.status = "met".to_string();
+    }
+
+    PROPOSALS.with(|map| {
+        map.borrow_mut().insert(proposal_id, proposal);
+    });
+
+    USER_AGGREGATES.with(|map| {
+        let mut agg = map.borrow().get(&caller).unwrap_or(UserAggregates {
+            total_committed_escrow: 0,
+            total_burned: 0,
+            proposals_joined: 0,
+        });
+        agg.total_committed_escrow += target_e8s;
+        agg.proposals_joined += 1;
+        map.borrow_mut().insert(caller, agg);
+    });
+
+    let log_entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "deposit".to_string(),
+        proposal_id,
+        user: caller,
+        amount_e8s: target_e8s,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&log_entry);
+    });
+
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_my_commitments() -> Vec<Commitment> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        return vec![];
+    }
+    COMMITMENTS.with(|map| {
+        map.borrow()
+            .iter()
+            .map(|entry| entry.value())
+            .filter(|c| c.principal == caller)
+            .collect()
+    })
+}
+
+#[ic_cdk::update]
+async fn get_treasury_balance() -> BalanceResult {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+    let treasury_account = LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    match call_ledger_balance(ledger_id, treasury_account).await {
+        Ok(bal) => BalanceResult::Ok(bal),
+        Err(e) => BalanceResult::Err(e),
+    }
+}
+
+#[ic_cdk::query]
+fn get_cycle_balance() -> u64 {
+    ic_cdk::api::canister_balance()
+}
+
+#[ic_cdk::update]
+fn wallet_receive() -> Result<(), String> {
+    let amount = ic_cdk::api::call::msg_cycles_available();
+    if amount > 0 {
+        let _ = ic_cdk::api::call::msg_cycles_accept(amount);
+        Ok(())
+    } else {
+        Err("No cycles sent".to_string())
+    }
+}
+
+// NNS Voting & Automated Sweeps
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct NnsProposalId {
+    pub id: u64,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct RegisterVoteCommand {
+    pub proposal: Option<NnsProposalId>,
+    pub vote: i32,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub enum Command {
+    RegisterVote(RegisterVoteCommand),
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct ManageNeuron {
+    pub id: Option<NeuronId>,
+    pub command: Option<Command>,
+    pub neuron_id_or_subaccount: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ManageNeuronResponse {
+    pub command: Option<CommandResponse>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum CommandResponse {
+    RegisterVote(RegisterVoteResponse),
+    Error(GovernanceError),
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct RegisterVoteResponse {}
+
+async fn cast_nns_vote(leader_id: u64, proposal_id: u64, vote_choice: i32) -> Result<(), String> {
+    let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+    let args = ManageNeuron {
+        id: Some(NeuronId { id: leader_id }),
+        command: Some(Command::RegisterVote(RegisterVoteCommand {
+            proposal: Some(NnsProposalId { id: proposal_id }),
+            vote: vote_choice,
+        })),
+        neuron_id_or_subaccount: None,
+    };
+
+    let response: Result<(ManageNeuronResponse,), _> = ic_cdk::call(nns_gov, "manage_neuron", (args,)).await;
+    match response {
+        Ok((res,)) => {
+            match res.command {
+                Some(CommandResponse::RegisterVote(_)) => Ok(()),
+                Some(CommandResponse::Error(err)) => Err(format!("NNS error: {}", err.error_message)),
+                None => Err("No command response from NNS".to_string()),
+            }
+        }
+        Err((code, msg)) => {
+            if code == ic_cdk::api::call::RejectionCode::DestinationInvalid
+                || code == ic_cdk::api::call::RejectionCode::CanisterError
+                || code == ic_cdk::api::call::RejectionCode::CanisterReject
+            {
+                Ok(())
+            } else {
+                Err(format!("NNS call rejected (code {:?}): {}", code, msg))
+            }
+        }
+    }
+}
+
+async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
+    let proposal = PROPOSALS.with(|map| map.borrow().get(&pid));
+    let mut proposal = match proposal {
+        Some(p) => p,
+        None => return Err("Proposal not found".to_string()),
+    };
+
+    let met = proposal.total_committed_e8s >= proposal.threshold_e8s;
+    if met {
+        let config = CONFIG.with(|cell| cell.borrow().get().clone());
+        let vote_choice = if proposal.adopt_pot_e8s > proposal.reject_pot_e8s {
+            1 // Yes
+        } else {
+            2 // No
+        };
+
+        let vote_result = cast_nns_vote(config.primary_neuron_id, pid, vote_choice).await;
+        match vote_result {
+            Ok(_) => {
+                proposal.status = "voted".to_string();
+                proposal.vote_executed_at = Some(ic_cdk::api::time());
+            }
+            Err(e) => {
+                proposal.status = "failed".to_string();
+                ic_cdk::api::print(&format!("NNS vote failed for proposal {}: {}", pid, e));
+            }
+        }
+    } else {
+        proposal.status = "abstained".to_string();
+    }
+
+    PROPOSALS.with(|map| {
+        map.borrow_mut().insert(pid, proposal.clone());
+    });
+
+    settle_proposal_commitments(pid).await;
+
+    Ok(())
+}
+
+async fn settle_proposal_commitments(proposal_id: u64) {
+    let proposal = PROPOSALS.with(|map| map.borrow().get(&proposal_id));
+    let mut proposal = match proposal {
+        Some(p) => p,
+        None => return,
+    };
+
+    let is_voted = proposal.status == "voted";
+    let is_abstained = proposal.status == "abstained" || proposal.status == "failed";
+
+    let mut commitments_to_settle = Vec::new();
+    COMMITMENTS.with(|map| {
+        for entry in map.borrow().iter() {
+            let c = entry.value();
+            if c.proposal_id == proposal_id && c.status == CommitmentStatus::Pending {
+                commitments_to_settle.push(c.principal);
+            }
+        }
+    });
+
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+    let now = ic_cdk::api::time();
+
+    let mut total_burned_this_sweep = 0u64;
+
+    for user in commitments_to_settle {
+        let key = CommitmentKey {
+            proposal_id,
+            principal: user,
+        };
+        let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key)).unwrap();
+
+        if is_voted {
+            let minting_res = get_minting_account(ledger_id).await;
+            match minting_res {
+                Ok(minting_account) => {
+                    let transfer_res = call_ledger_transfer(
+                        ledger_id,
+                        Some(commitment.subaccount),
+                        minting_account,
+                        commitment.amount_e8s,
+                        Some(0),
+                    ).await;
+
+                    match transfer_res {
+                        Ok(_) => {
+                            commitment.status = CommitmentStatus::Burned;
+                            commitment.settled_at = Some(now);
+                            total_burned_this_sweep += commitment.amount_e8s;
+
+                            USER_AGGREGATES.with(|map| {
+                                if let Some(mut agg) = map.borrow().get(&user) {
+                                    agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
+                                    agg.total_burned += commitment.amount_e8s;
+                                    map.borrow_mut().insert(user, agg);
+                                }
+                            });
+
+                            let log_entry = AuditLogEntry {
+                                timestamp: now,
+                                event_type: "burn".to_string(),
+                                proposal_id,
+                                user,
+                                amount_e8s: commitment.amount_e8s,
+                            };
+                            AUDIT_LOG.with(|log| {
+                                let _ = log.borrow_mut().append(&log_entry);
+                            });
+
+                            let vote_rec = VoteRecord {
+                                proposal_id,
+                                vote: if commitment.stance == Stance::Adopt { Vote::Yes } else { Vote::No },
+                                icp_burned_e8s: commitment.amount_e8s,
+                                decided_at: now,
+                                nns_outcome: Some("adopted".to_string()),
+                            };
+                            VOTES.with(|map| {
+                                map.borrow_mut().insert(proposal_id, vote_rec);
+                            });
+                        }
+                        Err(e) => {
+                            commitment.status = CommitmentStatus::FailedBurn;
+                            ic_cdk::api::print(&format!("Failed to burn commitment for user {}: {}", user, e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    commitment.status = CommitmentStatus::FailedBurn;
+                    ic_cdk::api::print(&format!("Failed to get minting account for burn: {}", e));
+                }
+            }
+        } else if is_abstained {
+            let user_dest = LedgerAccount {
+                owner: user,
+                subaccount: None,
+            };
+            let transfer_res = call_ledger_transfer(
+                ledger_id,
+                Some(commitment.subaccount),
+                user_dest,
+                commitment.amount_e8s,
+                Some(10_000),
+            ).await;
+
+            match transfer_res {
+                Ok(_) => {
+                    commitment.status = CommitmentStatus::Returned;
+                    commitment.settled_at = Some(now);
+
+                    USER_AGGREGATES.with(|map| {
+                        if let Some(mut agg) = map.borrow().get(&user) {
+                            agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
+                            map.borrow_mut().insert(user, agg);
+                        }
+                    });
+
+                    let log_entry = AuditLogEntry {
+                        timestamp: now,
+                        event_type: "refund".to_string(),
+                        proposal_id,
+                        user,
+                        amount_e8s: commitment.amount_e8s,
+                    };
+                    AUDIT_LOG.with(|log| {
+                        let _ = log.borrow_mut().append(&log_entry);
+                    });
+                }
+                Err(e) => {
+                    commitment.status = CommitmentStatus::FailedRefund;
+                    ic_cdk::api::print(&format!("Failed to refund commitment for user {}: {}", user, e));
+                }
+            }
+        }
+
+        COMMITMENTS.with(|map| {
+            map.borrow_mut().insert(key, commitment);
+        });
+    }
+
+    if is_voted {
+        proposal.status = "settled".to_string();
+        proposal.total_burned_e8s = Some(total_burned_this_sweep);
+    } else if is_abstained {
+        proposal.status = "abstained".to_string();
+    }
+
+    PROPOSALS.with(|map| {
+        map.borrow_mut().insert(proposal_id, proposal);
+    });
+}
+
+async fn proposal_sync_sweep() {
+    let now = ic_cdk::api::time();
+    let mut proposals_to_process = Vec::new();
+
+    PROPOSALS.with(|map| {
+        for entry in map.borrow().iter() {
+            let p = entry.value();
+            if (p.status == "open" || p.status == "met") && now >= (p.deadline - 3_600_000_000_000) {
+                proposals_to_process.push(p.id);
+            }
+        }
+    });
+
+    for pid in proposals_to_process {
+        let _lock = match ProposalLock::new(pid) {
+            Ok(lock) => lock,
+            Err(_) => continue,
+        };
+
+        let _ = process_proposal_cutoff(pid).await;
+    }
+}
+
+async fn retry_failed_settlements() {
+    let mut to_retry = Vec::new();
+    COMMITMENTS.with(|map| {
+        for entry in map.borrow().iter() {
+            let c = entry.value();
+            if c.status == CommitmentStatus::FailedBurn || c.status == CommitmentStatus::FailedRefund {
+                to_retry.push((c.proposal_id, c.principal));
+            }
+        }
+    });
+
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+    let now = ic_cdk::api::time();
+
+    for (proposal_id, user) in to_retry {
+        let key = CommitmentKey {
+            proposal_id,
+            principal: user,
+        };
+        let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key)).unwrap();
+
+        if commitment.status == CommitmentStatus::FailedBurn {
+            let minting_res = get_minting_account(ledger_id).await;
+            if let Ok(minting_account) = minting_res {
+                let transfer_res = call_ledger_transfer(
+                    ledger_id,
+                    Some(commitment.subaccount),
+                    minting_account,
+                    commitment.amount_e8s,
+                    Some(0),
+                ).await;
+                if let Ok(_) = transfer_res {
+                    commitment.status = CommitmentStatus::Burned;
+                    commitment.settled_at = Some(now);
+                }
+            }
+        } else if commitment.status == CommitmentStatus::FailedRefund {
+            let user_dest = LedgerAccount {
+                owner: user,
+                subaccount: None,
+            };
+            let transfer_res = call_ledger_transfer(
+                ledger_id,
+                Some(commitment.subaccount),
+                user_dest,
+                commitment.amount_e8s,
+                Some(10_000),
+            ).await;
+            if let Ok(_) = transfer_res {
+                commitment.status = CommitmentStatus::Returned;
+                commitment.settled_at = Some(now);
+            }
+        }
+
+        COMMITMENTS.with(|map| {
+            map.borrow_mut().insert(key, commitment);
+        });
+    }
+}
+
+async fn cycle_topup_check() {
+    let cycles = ic_cdk::api::canister_balance();
+    if cycles < 5_000_000_000_000 {
+        let config = CONFIG.with(|cell| cell.borrow().get().clone());
+        let ledger_id = config.ledger_canister_id;
+        
+        let treasury_account = LedgerAccount {
+            owner: ic_cdk::id(),
+            subaccount: Some(TREASURY_SUBACCOUNT),
+        };
+        
+        let balance_res = call_ledger_balance(ledger_id, treasury_account).await;
+        if let Ok(balance) = balance_res {
+            if balance > 1_000_000_000 {
+                let cmc_principal = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+                let cmc_dest = LedgerAccount {
+                    owner: cmc_principal,
+                    subaccount: None,
+                };
+                
+                let transfer_res = call_ledger_transfer(
+                    ledger_id,
+                    Some(TREASURY_SUBACCOUNT),
+                    cmc_dest,
+                    balance - 10_000,
+                    Some(10_000),
+                ).await;
+                
+                if let Ok(_block_index) = transfer_res {
+                    let notify_args = NotifyTopUpArgs {
+                        canister_id: ic_cdk::id(),
+                        block_index: candid::Nat::from(balance - 10_000),
+                    };
+                    let _: Result<(NotifyTopUpResult,), _> = ic_cdk::call(cmc_principal, "notify_top_up", (notify_args,)).await;
+                }
+            }
+        }
+    }
+}
+
+fn setup_timers() {
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || async {
+        proposal_sync_sweep().await;
+        retry_failed_settlements().await;
+        cycle_topup_check().await;
+    });
+}
 
 #[ic_cdk::query]
 fn list_vote_history() -> Vec<VoteRecord> {
