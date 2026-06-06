@@ -1404,7 +1404,7 @@ export default function App() {
                 <div className="col" style={{ gap: 4 }}>
                   <h5 style={{ margin: 0, color: 'var(--fg)' }}>Commitment Registered!</h5>
                   <p style={{ fontSize: 13, color: 'var(--fg-2)' }}>
-                    Your {confirmAmount} ICP is now locked in escrow. If the proposal passes threshold, it will be converted to canister cycles — keeping this app running forever.
+                    Your {confirmAmount} ICP is locked in escrow. If the proposal reaches threshold, it will be <b>permanently burned</b> — removed from the ICP supply forever as proof of your conviction.
                   </p>
                 </div>
                 <Btn variant="primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setIsConfirming(false)}>
