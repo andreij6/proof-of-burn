@@ -7,6 +7,16 @@ use std::cell::RefCell;
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 
 // ==========================================
+// Storage Quotas & Validation Constants
+// ==========================================
+
+const MAX_COMMITMENTS_PER_USER: usize = 25;
+const MAX_PROPOSALS: usize = 500;
+const MIN_COMMIT_E8S: u64 = 100_000_000;        // 1 ICP
+const MAX_COMMIT_E8S: u64 = 100_000_000_000_000; // 1,000,000 ICP (sanity ceiling)
+const MAX_NEURON_ID: u64 = u64::MAX / 2;
+
+// ==========================================
 // NNS Governance & Ledger Types
 // ==========================================
 
@@ -354,6 +364,9 @@ fn remove_admin(admin: Principal) -> Result<(), String> {
 
 #[ic_cdk::update(guard = "require_admin")]
 fn admin_set_proposal_deadline(proposal_id: u64, deadline: u64) -> Result<(), String> {
+    if deadline == 0 {
+        return Err("INVALID_DEADLINE".to_string());
+    }
     PROPOSALS.with(|map| {
         let mut map = map.borrow_mut();
         if let Some(mut p) = map.get(&proposal_id) {
@@ -364,6 +377,10 @@ fn admin_set_proposal_deadline(proposal_id: u64, deadline: u64) -> Result<(), St
             Err("Proposal not found".to_string())
         }
     })
+}
+
+fn proposals_at_quota() -> bool {
+    PROPOSALS.with(|map| map.borrow().len() as usize >= MAX_PROPOSALS)
 }
 
 #[ic_cdk::update(guard = "require_admin")]
@@ -399,6 +416,9 @@ fn get_proposal(proposal_id: u64) -> Option<Proposal> {
 // ==========================================
 
 fn seed_mock_proposals() {
+    if proposals_at_quota() {
+        return;
+    }
     PROPOSALS.with(|map| {
         let mut m = map.borrow_mut();
         if m.is_empty() {
@@ -536,7 +556,11 @@ async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> 
 async fn register_neuron(neuron_id: u64) -> Result<(), String> {
     require_authenticated()?;
     let caller = ic_cdk::caller();
-    
+
+    if neuron_id == 0 || neuron_id > MAX_NEURON_ID {
+        return Err("INVALID_NEURON_ID".to_string());
+    }
+
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let leader_id = config.primary_neuron_id;
 
@@ -857,8 +881,25 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         return Err("ALREADY_COMMITTED".to_string());
     }
 
-    if target_e8s < 100_000_000 {
+    // Per-user storage quota: cap open commitment slots
+    let active_count = COMMITMENTS.with(|map| {
+        map.borrow().iter()
+            .filter(|e| {
+                let c = e.value();
+                c.principal == caller && c.status == CommitmentStatus::Pending
+            })
+            .count()
+    });
+    if active_count >= MAX_COMMITMENTS_PER_USER {
+        return Err("TOO_MANY_COMMITMENTS".to_string());
+    }
+
+    if target_e8s < MIN_COMMIT_E8S {
         return Err("BELOW_MINIMUM".to_string());
+    }
+
+    if target_e8s > MAX_COMMIT_E8S {
+        return Err("EXCEEDS_GLOBAL_CAP".to_string());
     }
 
     if target_e8s > user_neuron.cached_stake_e8s {
