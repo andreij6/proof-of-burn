@@ -113,6 +113,11 @@ pub struct Config {
     pub default_threshold: u64,
     pub ai_price_e8s: u64,
     pub ledger_canister_id: Principal,
+    /// True when the canister was initialised against a local dev network
+    /// (detected from the owner's principal or ledger canister id at init).
+    /// Gating the NNS mock fallback on this flag — not re-deriving environment
+    /// per call — is what prevents the F-101/F-102 mainnet bypass.
+    pub is_local: bool,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -227,6 +232,7 @@ thread_local! {
             default_threshold: 250_000_000_000,
             ai_price_e8s: 5_000_000,
             ledger_canister_id: Principal::anonymous(),
+            is_local: false,
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -317,11 +323,12 @@ fn init(payload: InitPayload) {
         default_threshold: payload.default_threshold_e8s,
         ai_price_e8s: payload.ai_price_e8s,
         ledger_canister_id: ledger_id,
+        is_local,
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
     });
-    
+
     seed_mock_proposals();
     setup_timers();
 }
@@ -529,7 +536,7 @@ fn seed_mock_proposals() {
 
 async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> Result<(bool, u64), String> {
     let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
-    
+
     let response: Result<(Result_2,), _> = ic_cdk::call(nns_gov, "get_full_neuron", (neuron_id,)).await;
 
     match response {
@@ -537,7 +544,7 @@ async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> 
             if neuron.controller != Some(caller) {
                 return Err("Neuron controller principal does not match caller principal".to_string());
             }
-            
+
             let mut following = false;
             for (topic, followees_list) in neuron.followees {
                 if topic == 1 || topic == 0 {
@@ -555,9 +562,16 @@ async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> 
             Err(format!("NNS Governance returned error: {}", err.error_message))
         }
         Err((code, msg)) => {
-            if code == ic_cdk::api::call::RejectionCode::DestinationInvalid
-                || code == ic_cdk::api::call::RejectionCode::CanisterError
-                || code == ic_cdk::api::call::RejectionCode::CanisterReject
+            // F-101: on mainnet, a rejected `get_full_neuron` must NOT grant
+            // follow eligibility or a fake 1000 ICP stake — that would let any
+            // caller bypass the controller check and the stake cap. The local
+            // dev fallback (which pretends the neuron is following with 1000
+            // ICP) is only safe when `is_local` was set at init.
+            let is_local = CONFIG.with(|cell| cell.borrow().get().is_local);
+            if is_local
+                && (code == ic_cdk::api::call::RejectionCode::DestinationInvalid
+                    || code == ic_cdk::api::call::RejectionCode::CanisterError
+                    || code == ic_cdk::api::call::RejectionCode::CanisterReject)
             {
                 Ok((true, 100_000_000_000u64))
             } else {
@@ -1149,9 +1163,16 @@ async fn cast_nns_vote(leader_id: u64, proposal_id: u64, vote_choice: i32) -> Re
             }
         }
         Err((code, msg)) => {
-            if code == ic_cdk::api::call::RejectionCode::DestinationInvalid
-                || code == ic_cdk::api::call::RejectionCode::CanisterError
-                || code == ic_cdk::api::call::RejectionCode::CanisterReject
+            // F-102: on mainnet, a rejected `manage_neuron` vote must NOT be
+            // reported as success — that would mark the proposal `"voted"` and
+            // burn all committed ICP despite no vote being cast. The local-only
+            // fallback short-circuits to Ok(()) so dev can simulate a successful
+            // vote against a stub NNS canister.
+            let is_local = CONFIG.with(|cell| cell.borrow().get().is_local);
+            if is_local
+                && (code == ic_cdk::api::call::RejectionCode::DestinationInvalid
+                    || code == ic_cdk::api::call::RejectionCode::CanisterError
+                    || code == ic_cdk::api::call::RejectionCode::CanisterReject)
             {
                 Ok(())
             } else {
@@ -1684,6 +1705,7 @@ mod tests {
             default_threshold: 500_000_000_000,
             ai_price_e8s: 5_000_000,
             ledger_canister_id: p("ryjl3-tyaaa-aaaaa-aaaba-cai"),
+            is_local: false,
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -1692,6 +1714,7 @@ mod tests {
         assert_eq!(decoded.default_threshold, config.default_threshold);
         assert_eq!(decoded.ai_price_e8s, config.ai_price_e8s);
         assert_eq!(decoded.ledger_canister_id, config.ledger_canister_id);
+        assert_eq!(decoded.is_local, config.is_local);
     }
 
     #[test]
