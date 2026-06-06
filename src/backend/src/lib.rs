@@ -262,7 +262,7 @@ thread_local! {
         let default_config = Config {
             primary_neuron_id: 4821667,
             admins: vec![],
-            default_threshold: 250_000_000_000,
+            default_threshold: 10_000_000_000, // 100 ICP (overwritten by init from init_args)
             ai_price_e8s: 5_000_000,
             ledger_canister_id: Principal::anonymous(),
             is_local: false,
