@@ -4,9 +4,18 @@ Operational reference for the deployed backend canister. See `DEPLOY.md` for ini
 
 ## Cycles Management
 
-### Auto top-up (on-chain)
+### Primary source: burn-to-cycles on every settled vote
 
-The backend runs a 5-minute timer (`cycle_topup_check`) that automatically tops up its own cycles from the treasury subaccount when the cycle balance falls below **5 T cycles**:
+When a proposal passes its threshold and the NNS vote is cast, all committed ICP is routed through the **Cycles Minting Canister** (CMC, `rkp4c-7iaaa-aaaaa-aaaca-cai`) via `burn_to_cycles`. The CMC burns the ICP from the ledger supply and credits cycles directly to the backend canister. This is the primary funding mechanism — governance activity directly sustains the infrastructure.
+
+The flow per settled commitment:
+1. Transfer `commitment.amount_e8s` from escrow subaccount → CMC (ledger fee `10_000 e8s`).
+2. Call `notify_top_up` with the resulting block index and this canister's ID.
+3. CMC mints cycles and credits them to the backend canister immediately.
+
+### Secondary source: treasury auto top-up
+
+The backend also runs a 5-minute timer (`cycle_topup_check`) that tops up from the treasury subaccount when the cycle balance falls below **5 T cycles** — a safety net for periods with no active governance settlements:
 
 1. Checks canister cycle balance via `ic_cdk::api::canister_balance()`.
 2. If below 5 T, transfers treasury ICP → CMC (`rkp4c-7iaaa-aaaaa-aaaca-cai`) via `notify_top_up`.

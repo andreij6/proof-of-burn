@@ -772,7 +772,7 @@ export default function App() {
                         {fmtICP(totalBurned)} ICP
                       </span>
                     </span>
-                    <Eyrow>Burned to date</Eyrow>
+                    <Eyrow>→ Cycles to date</Eyrow>
                   </div>
                   <div className="col" style={{
                     gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
@@ -916,7 +916,7 @@ export default function App() {
                   const mineBadge = myCommitment && (
                     <Chip tone={mineBadgeTone}>
                       {myCommitment.status === CommitmentStatus.Burned ? (
-                        <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Burned</>
+                        <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP → Cycles</>
                       ) : myCommitment.status === CommitmentStatus.Returned ? (
                         <><Icon name="checkCircle" size={11} stroke="var(--sprout)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Returned</>
                       ) : (myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund) ? (
@@ -1044,7 +1044,7 @@ export default function App() {
 
                             {/* No-burn safety note */}
                             <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                              <Icon name="info" size={12} stroke="var(--fg-3)" /> No burn if threshold misses — committed ICP is returned.
+                              <Icon name="info" size={12} stroke="var(--fg-3)" /> No conversion if threshold misses — committed ICP is returned.
                             </span>
                           </div>
                         )}
@@ -1063,7 +1063,7 @@ export default function App() {
                     <Icon name="list" size={15} stroke="var(--fg-2)" />
                     <b style={{ fontSize: 14, color: 'var(--fg)' }}>Vote history</b>
                   </span>
-                  <Eyebrow>neuron votes · outcome · burned</Eyebrow>
+                  <Eyebrow>neuron votes · outcome · cycles generated</Eyebrow>
                 </div>
 
                 {tier >= 1 ? (
@@ -1091,7 +1091,7 @@ export default function App() {
                             <div className="row" style={{ gap: 9, flexShrink: 0 }}>
                               <Chip tone={voteStr === 'against' ? 'muted' : 'ok'} style={{ height: 20, fontSize: 11 }}>{voteStr}</Chip>
                               <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)', width: 78, textAlign: 'right' }}>
-                                {burnedStr} burned
+                                {burnedStr} → cycles
                               </span>
                             </div>
                           </div>
@@ -1243,7 +1243,7 @@ export default function App() {
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
                 <Icon name="flame" size={18} stroke="var(--burn)" />
-                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Confirm Burn Conviction</h4>
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Confirm Conviction Burn</h4>
               </span>
               {!isTransacting && (
                 <button onClick={() => setIsConfirming(false)} style={{
@@ -1276,7 +1276,7 @@ export default function App() {
                 <div className="col" style={{ gap: 4 }}>
                   <h5 style={{ margin: 0, color: 'var(--fg)' }}>Commitment Registered!</h5>
                   <p style={{ fontSize: 13, color: 'var(--fg-2)' }}>
-                    Your {confirmAmount} ICP is now locked in escrow. It will be burned if the proposal passes threshold.
+                    Your {confirmAmount} ICP is now locked in escrow. If the proposal passes threshold, it will be converted to canister cycles — keeping this app running forever.
                   </p>
                 </div>
                 <Btn variant="primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setIsConfirming(false)}>
@@ -1303,7 +1303,7 @@ export default function App() {
                   
                   <div className="col" style={{ gap: 8, fontSize: 13 }}>
                     <div className="row" style={{ justifyContent: 'space-between' }}>
-                      <span style={{ color: 'var(--fg-2)' }}>Target Burn Amount</span>
+                      <span style={{ color: 'var(--fg-2)' }}>Target Amount (→ Cycles)</span>
                       <span className="mono">{confirmAmount ? parseFloat(confirmAmount).toFixed(4) : "0.0000"} ICP</span>
                     </div>
                     <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -1325,7 +1325,7 @@ export default function App() {
                 </div>
 
                 <div style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
-                  ⚠️ <b>Conviction is Final.</b> By confirming, you authorize a transfer from your wallet to a deterministic escrow subaccount. The 0.005 ICP protocol fee is consumed immediately. The target ICP will be burned to the NNS Minting Account if the proposal threshold is met, or returned to your wallet (minus 0.0001 ICP) if the threshold fails.
+                  ⚠️ <b>Conviction is Final.</b> By confirming, you authorize a transfer from your wallet to a deterministic escrow subaccount. The 0.005 ICP protocol fee is consumed immediately. If the proposal threshold is met, the target ICP is sent to the Cycles Minting Canister — burned from the ICP supply and converted to cycles that fund this canister's operation. If threshold is not met, your ICP is returned (minus 0.0001 ICP ledger fee).
                 </div>
 
                 {isTransacting ? (

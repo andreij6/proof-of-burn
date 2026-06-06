@@ -15,9 +15,9 @@ In traditional liquid democracy, users delegate their voting power to a trusted 
 * **Weighted Tally & Threshold Execution:**
   - Votes are weighted by the amount of ICP committed to the burn ($10^8$ votes per 1.0 ICP).
   - The canister checks the combined committed ICP ($B_{\text{adopt}} + B_{\text{reject}}$) against an initial flat threshold of **250 ICP**.
-  - **Case A: Threshold Met $\ge$ 250 ICP:** The Leader Neuron automatically votes with the winning community choice (majority of committed ICP). **All committed ICP in both pots (Adopt and Reject) is permanently burned**, cementing the skin-in-the-game conviction of both sides.
+  - **Case A: Threshold Met $\ge$ 250 ICP:** The Leader Neuron automatically votes with the winning community choice (majority of committed ICP). **All committed ICP in both pots (Adopt and Reject) is sent to the Cycles Minting Canister (CMC)** — burned from the ICP supply and converted to canister cycles that fund this application's operation indefinitely. Your conviction powers the infrastructure.
   - **Case B: Threshold Failed < 250 ICP:** The Leader Neuron **abstains** from voting, and **all committed ICP is refunded** to the users (minus the 0.0001 ICP refund transfer fee).
-* **Self-Sustaining Transaction Fees:** Users pay a flat **0.0002 ICP** fee overhead on deposit. 0.0001 ICP covers the ledger transfer into escrow, and the remaining 0.0001 ICP is reserved in escrow to cover the outgoing ledger transfer (either burn or refund), keeping canister operating costs at zero.
+* **Self-Sustaining by Design:** Governance activity directly funds the canister. Every successful threshold converts committed ICP into cycles, making the app increasingly self-sufficient the more it is used. The 0.005 ICP protocol fee on deposit covers treasury overhead; the remaining committed ICP either becomes cycles (threshold met) or is returned (threshold missed).
 
 ---
 
@@ -28,7 +28,7 @@ To prevent user overwhelm, the Single-Page Application (SPA) uses **progressive 
 1. **Tier 0 — Anonymous Visitor:** Can copy the Leader Neuron ID and view the list of active proposals (titles only). All commitment inputs and vote logs are hidden behind a blurred lock overlay.
 2. **Tier 1 — Authenticated User:** signs in via **Internet Identity (II)**. Unlocks detailed proposal cards showing live burn progress bars and the Leader Neuron's complete historical vote log.
 3. **Tier 2 — Verified Follower:** Triggers when the canister verifies on-chain that the user follows the Leader Neuron. To simplify this onboarding, a **Guided Walkthrough Modal** guides the user through copy-pasting the Leader Neuron ID to follow in NNS, and copying/pasting the App Canister Principal as a neuron hotkey (which authorizes on-chain follow verification). This unlocks the "Commit ADOPT/REJECT" inputs.
-4. **Tier 3 — Active Participant:** Triggers once the user has committed ICP to at least one proposal. Displays a sticky **Personal Dashboard Strip** showing their total committed escrow, total ICP burned to date, and active proposal status badges.
+4. **Tier 3 — Active Participant:** Triggers once the user has committed ICP to at least one proposal. Displays a sticky **Personal Dashboard Strip** showing their total committed escrow, total ICP converted to cycles to date, and active proposal status badges.
 
 ---
 
@@ -43,4 +43,4 @@ To prevent user overwhelm, the Single-Page Application (SPA) uses **progressive 
 ## 4. Technical Feasibility & Architecture Highlights
 
 * **Canister Hotkey Pattern:** Because follow configuration is private on the NNS Governance canister, our App Canister is added as a hotkey to the user's neuron. This allows our canister to securely query `get_full_neuron` to verify follow status and controller principal matches.
-* **Ledger Burn Transactions:** Token burning is executed trustlessly by calling the ICP Ledger Canister's ICRC-1 `icrc1_transfer` method to transfer escrowed funds to the ledger's designated `icrc1_minting_account` (the Cycles Minting Canister).
+* **Burn-to-Cycles Settlement:** When a proposal threshold is met, committed ICP is transferred to the Cycles Minting Canister (`rkp4c-7iaaa-aaaaa-aaaca-cai`) via `icrc1_transfer`, then `notify_top_up` is called to mint cycles credited to the backend canister. The ICP is burned from the ledger supply — the same net effect as a direct burn — but the value is captured as computation fuel rather than destroyed outright. This makes the governance app self-sustaining: the more proposals pass threshold, the longer the canister runs without external top-up.

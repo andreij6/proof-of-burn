@@ -20,7 +20,7 @@ This document records the IC canister-security checklist review for the backend 
 |---|---|---|
 | `CallerGuard` on `commit` | ✅ Verified | Prevents concurrent commit calls from the same principal (reentrancy defence). |
 | `ProposalLock` on settlement | ✅ Verified | Prevents double-settlement of a proposal during the async sweep. |
-| Burn uses minting account with fee=0 | ✅ Verified | `get_minting_account` fetches the real ledger minting account; `icrc1_transfer` fee=0. |
+| Burn routes through CMC, not raw minting account | ✅ Verified | `burn_to_cycles` transfers ICP to the CMC (`rkp4c-7iaaa-aaaaa-aaaca-cai`) which burns it from supply and mints cycles to this canister. Net ICP supply effect identical to a direct burn; value is captured as computation fuel. |
 | Refund subtracts correct ledger fee | ✅ Verified | Refunds use `fee = Some(10_000)` (standard ICP transfer fee). |
 | Escrow subaccount is deterministic + principal-bound | ✅ Verified | `derive_subaccount` uses SHA-256 of `"proof_of_burn_escrow_v1" ‖ principal ‖ proposal_id`. |
 | No reentrancy across `await` on state writes | ✅ Verified | All state reads happen before awaits; state writes happen after. `CallerGuard`/`ProposalLock` guard concurrent ingress. |
@@ -59,7 +59,9 @@ This document records the IC canister-security checklist review for the backend 
 | ID | Finding | Resolution | Commit |
 |---|---|---|---|
 | F-001 | `get_eligibility` returned `total_committed_escrow` as `holdings_e8s` instead of neuron stake cap | Fixed to return `cached_stake_e8s` | bc74a0e |
-| F-002 | No ingress-level anonymous rejection | Added `inspect_message` hook | this PR |
+| F-002 | No ingress-level anonymous rejection | Added `inspect_message` hook | b7b488d |
 | F-003 | No per-user commitment slot quota | Added `MAX_COMMITMENTS_PER_USER = 25` | 0d7c360 |
 | F-004 | No global proposal storage bound | Added `MAX_PROPOSALS = 500` | 0d7c360 |
 | F-005 | `neuron_id = 0` accepted in `register_neuron` | Added input validation check | 0d7c360 |
+| F-006 | `cycle_topup_check` passed ledger balance as `block_index` instead of transfer result | Fixed to use the block index returned by `call_ledger_transfer` | this PR |
+| F-007 | Committed ICP burned to minting account (value lost) | Rerouted through CMC: ICP burned from supply, value captured as cycles | this PR |

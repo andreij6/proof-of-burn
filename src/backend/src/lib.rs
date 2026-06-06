@@ -810,12 +810,36 @@ async fn call_ledger_transfer(
     }
 }
 
-async fn get_minting_account(ledger_id: Principal) -> Result<LedgerAccount, String> {
-    let response: Result<(Option<LedgerAccount>,), _> = ic_cdk::call(ledger_id, "icrc1_minting_account", ()).await;
-    match response {
-        Ok((Some(account),)) => Ok(account),
-        Ok((None,)) => Err("Ledger has no minting account".to_string()),
-        Err((code, msg)) => Err(format!("Failed to get minting account (code {:?}): {}", code, msg)),
+/// Converts committed ICP to canister cycles via the Cycles Minting Canister (CMC).
+/// The ICP is burned by the CMC (removed from ledger supply) and the resulting
+/// cycles are credited to this canister. The net supply effect is identical to
+/// a direct burn — only the value destination changes (cycles fuel vs. destruction).
+async fn burn_to_cycles(ledger_id: Principal, from_subaccount: [u8; 32], amount_e8s: u64) -> Result<u128, String> {
+    let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+    let cmc_dest = LedgerAccount { owner: cmc, subaccount: None };
+
+    let block_index = call_ledger_transfer(
+        ledger_id,
+        Some(from_subaccount),
+        cmc_dest,
+        amount_e8s,
+        Some(10_000),
+    ).await.map_err(|e| format!("CMC transfer failed: {}", e))?;
+
+    let notify_args = NotifyTopUpArgs {
+        canister_id: ic_cdk::id(),
+        block_index: candid::Nat::from(block_index),
+    };
+    let result: Result<(NotifyTopUpResult,), _> =
+        ic_cdk::call(cmc, "notify_top_up", (notify_args,)).await;
+
+    match result {
+        Ok((NotifyTopUpResult::Ok(cycles_nat),)) => {
+            let cycles: u128 = cycles_nat.0.try_into().unwrap_or(0);
+            Ok(cycles)
+        }
+        Ok((NotifyTopUpResult::Err(e),)) => Err(format!("CMC notify_top_up error: {:?}", e)),
+        Err((code, msg)) => Err(format!("CMC call rejected ({:?}): {}", code, msg)),
     }
 }
 
@@ -1210,62 +1234,52 @@ async fn settle_proposal_commitments(proposal_id: u64) {
         let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key)).unwrap();
 
         if is_voted {
-            let minting_res = get_minting_account(ledger_id).await;
-            match minting_res {
-                Ok(minting_account) => {
-                    let transfer_res = call_ledger_transfer(
-                        ledger_id,
-                        Some(commitment.subaccount),
-                        minting_account,
-                        commitment.amount_e8s,
-                        Some(0),
-                    ).await;
+            // Route committed ICP through the CMC: ICP is burned from supply,
+            // cycles are credited to this canister to fund its operation.
+            match burn_to_cycles(ledger_id, commitment.subaccount, commitment.amount_e8s).await {
+                Ok(cycles_minted) => {
+                    commitment.status = CommitmentStatus::Burned;
+                    commitment.settled_at = Some(now);
+                    total_burned_this_sweep += commitment.amount_e8s;
 
-                    match transfer_res {
-                        Ok(_) => {
-                            commitment.status = CommitmentStatus::Burned;
-                            commitment.settled_at = Some(now);
-                            total_burned_this_sweep += commitment.amount_e8s;
-
-                            USER_AGGREGATES.with(|map| {
-                                if let Some(mut agg) = map.borrow().get(&user) {
-                                    agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
-                                    agg.total_burned += commitment.amount_e8s;
-                                    map.borrow_mut().insert(user, agg);
-                                }
-                            });
-
-                            let log_entry = AuditLogEntry {
-                                timestamp: now,
-                                event_type: "burn".to_string(),
-                                proposal_id,
-                                user,
-                                amount_e8s: commitment.amount_e8s,
-                            };
-                            AUDIT_LOG.with(|log| {
-                                let _ = log.borrow_mut().append(&log_entry);
-                            });
-
-                            let vote_rec = VoteRecord {
-                                proposal_id,
-                                vote: if commitment.stance == Stance::Adopt { Vote::Yes } else { Vote::No },
-                                icp_burned_e8s: commitment.amount_e8s,
-                                decided_at: now,
-                                nns_outcome: Some("adopted".to_string()),
-                            };
-                            VOTES.with(|map| {
-                                map.borrow_mut().insert(proposal_id, vote_rec);
-                            });
+                    USER_AGGREGATES.with(|map| {
+                        if let Some(mut agg) = map.borrow().get(&user) {
+                            agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
+                            agg.total_burned += commitment.amount_e8s;
+                            map.borrow_mut().insert(user, agg);
                         }
-                        Err(e) => {
-                            commitment.status = CommitmentStatus::FailedBurn;
-                            ic_cdk::api::print(&format!("Failed to burn commitment for user {}: {}", user, e));
-                        }
-                    }
+                    });
+
+                    let log_entry = AuditLogEntry {
+                        timestamp: now,
+                        event_type: "burn".to_string(),
+                        proposal_id,
+                        user,
+                        amount_e8s: commitment.amount_e8s,
+                    };
+                    AUDIT_LOG.with(|log| {
+                        let _ = log.borrow_mut().append(&log_entry);
+                    });
+
+                    let vote_rec = VoteRecord {
+                        proposal_id,
+                        vote: if commitment.stance == Stance::Adopt { Vote::Yes } else { Vote::No },
+                        icp_burned_e8s: commitment.amount_e8s,
+                        decided_at: now,
+                        nns_outcome: Some("adopted".to_string()),
+                    };
+                    VOTES.with(|map| {
+                        map.borrow_mut().insert(proposal_id, vote_rec);
+                    });
+
+                    ic_cdk::api::print(&format!(
+                        "Commitment settled: {} e8s ICP → {} cycles for user {}",
+                        commitment.amount_e8s, cycles_minted, user
+                    ));
                 }
                 Err(e) => {
                     commitment.status = CommitmentStatus::FailedBurn;
-                    ic_cdk::api::print(&format!("Failed to get minting account for burn: {}", e));
+                    ic_cdk::api::print(&format!("burn_to_cycles failed for user {}: {}", user, e));
                 }
             }
         } else if is_abstained {
@@ -1374,19 +1388,9 @@ async fn retry_failed_settlements() {
         let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key)).unwrap();
 
         if commitment.status == CommitmentStatus::FailedBurn {
-            let minting_res = get_minting_account(ledger_id).await;
-            if let Ok(minting_account) = minting_res {
-                let transfer_res = call_ledger_transfer(
-                    ledger_id,
-                    Some(commitment.subaccount),
-                    minting_account,
-                    commitment.amount_e8s,
-                    Some(0),
-                ).await;
-                if let Ok(_) = transfer_res {
-                    commitment.status = CommitmentStatus::Burned;
-                    commitment.settled_at = Some(now);
-                }
+            if let Ok(_) = burn_to_cycles(ledger_id, commitment.subaccount, commitment.amount_e8s).await {
+                commitment.status = CommitmentStatus::Burned;
+                commitment.settled_at = Some(now);
             }
         } else if commitment.status == CommitmentStatus::FailedRefund {
             let user_dest = LedgerAccount {
@@ -1439,11 +1443,11 @@ async fn cycle_topup_check() {
                     balance - 10_000,
                     Some(10_000),
                 ).await;
-                
-                if let Ok(_block_index) = transfer_res {
+
+                if let Ok(block_index) = transfer_res {
                     let notify_args = NotifyTopUpArgs {
                         canister_id: ic_cdk::id(),
-                        block_index: candid::Nat::from(balance - 10_000),
+                        block_index: candid::Nat::from(block_index),
                     };
                     let _: Result<(NotifyTopUpResult,), _> = ic_cdk::call(cmc_principal, "notify_top_up", (notify_args,)).await;
                 }
