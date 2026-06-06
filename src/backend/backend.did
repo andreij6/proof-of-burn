@@ -65,6 +65,8 @@ type VoteRecord = record {
 };
 service : (InitPayload) -> {
   add_admin : (principal) -> (Result);
+  admin_set_proposal_deadline : (nat64, nat64) -> (Result);
+  admin_trigger_sweep : () -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
   get_caller_principal : () -> (principal) query;
   get_config : () -> (Config) query;

@@ -378,3 +378,41 @@ a:hover {
   padding: var(--sp-3);
   gap: var(--sp-2);
 }
+
+/* =============================================================
+   Mobile responsiveness — 640px breakpoint
+   ============================================================= */
+
+@media (max-width: 640px) {
+  .dashboard-container {
+    padding: var(--sp-4) var(--sp-3) var(--sp-14);
+    gap: var(--sp-4);
+  }
+
+  /* Header: stack logo + actions vertically */
+  header .row {
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+  }
+
+  /* Proposal card action rows wrap */
+  .card .row {
+    flex-wrap: wrap;
+  }
+
+  /* Burn input full width on mobile */
+  .burn-input {
+    font-size: var(--size-sm);
+  }
+
+  /* Dashboard strip: tighten stat columns */
+  h1, .h1 { font-size: var(--size-3xl); line-height: var(--lh-3xl); }
+  h2, .h2 { font-size: var(--size-2xl); line-height: var(--lh-2xl); }
+}
+
+/* Sidebar: hide on mobile, show as bottom sheet at medium screens */
+@media (max-width: 900px) {
+  .simulator-panel {
+    display: none;
+  }
+}

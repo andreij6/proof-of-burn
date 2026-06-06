@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { AuthClient } from "@icp-sdk/auth/client";
 import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
 import { Principal } from "@icp-sdk/core/principal";
-import { createActor as createBackendActor, Vote } from "./bindings/backend";
+import { createActor as createBackendActor, Vote, Stance, CommitmentStatus } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import type { Proposal, EligibilityInfo, VoteRecord } from "./bindings/backend";
+import type { Proposal, EligibilityInfo, VoteRecord, Commitment } from "./bindings/backend";
 
 // ==========================================
 // 1. Icon Component (Clean, inline SVG paths)
@@ -295,9 +295,25 @@ export default function App() {
   const [eligibility, setEligibility] = useState<EligibilityInfo | null>(null);
   const [voteHistory, setVoteHistory] = useState<VoteRecord[]>([]);
   const [holdings, setHoldings] = useState<bigint>(0n);
-  const [commitments, setCommitments] = useState<Record<string, bigint>>({});
+  const [myCommitments, setMyCommitments] = useState<Commitment[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+
+  // Transaction / Modal state
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [isTransacting, setIsTransacting] = useState(false);
+  const [txStep, setTxStep] = useState<string>("");
+  const [txError, setTxError] = useState<string | null>(null);
+  const [txSuccess, setTxSuccess] = useState(false);
+  const [confirmProposalId, setConfirmProposalId] = useState<bigint | null>(null);
+  const [confirmAmount, setConfirmAmount] = useState<string>("");
+  const [confirmStance, setConfirmStance] = useState<Stance | null>(null);
+
+  // System health state
+  const [cycleBalance, setCycleBalance] = useState<bigint | null>(null);
+  const [treasuryBalance, setTreasuryBalance] = useState<bigint | null>(null);
 
   // Tweak / simulator options
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -334,6 +350,57 @@ export default function App() {
     }
   };
 
+  const fetchMyCommitments = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      const list = await currentActor.get_my_commitments();
+      setMyCommitments(list);
+    } catch (err) {
+      console.error("Failed to fetch commitments:", err);
+    }
+  };
+
+  const fetchSystemHealth = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      const cycles = await currentActor.get_cycle_balance();
+      setCycleBalance(cycles);
+      
+      const treasuryRes = await currentActor.get_treasury_balance();
+      if (treasuryRes.__kind__ === "Ok") {
+        setTreasuryBalance(treasuryRes.Ok);
+      }
+    } catch (err) {
+      console.error("Failed to fetch system health:", err);
+    }
+  };
+
+  const refreshAllData = async () => {
+    if (!actor) return;
+    setIsLoading(true);
+    try {
+      await Promise.all([
+        refreshEligibility(actor),
+        fetchVoteHistory(actor),
+        fetchMyCommitments(actor),
+        fetchSystemHealth(actor),
+        actor.list_active_proposals().then((list: Proposal[]) => setProposals(list)),
+      ]);
+      // Also fetch balance
+      if (principal && !principal.isAnonymous() && identity) {
+        const ledgerActor = createLedgerActor(ledgerCanisterId, {
+          agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
+        });
+        const bal = await ledgerActor.icrc1_balance_of({ owner: principal });
+        setHoldings(bal);
+      }
+    } catch (err) {
+      console.error("Failed to refresh data:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const getProposalTitle = (proposalId: bigint) => {
     const p = proposals.find(x => x.id === proposalId);
     if (p) return p.title;
@@ -346,18 +413,22 @@ export default function App() {
   };
 
   const handleFollowNeuron = async () => {
-    if (!actor) return;
+    if (!actor || isVerifying) return;
+    setIsVerifying(true);
     try {
       const res = await actor.register_neuron(4821667n);
       if (res.__kind__ === "Ok") {
         setIsFollowing(true);
         await refreshEligibility();
+        await fetchSystemHealth();
       } else {
         alert(`Verification failed: ${res.Err}`);
       }
     } catch (err: any) {
       console.error("Failed to verify follow:", err);
       alert(`Error verifying follow: ${err.message || err}`);
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -366,7 +437,7 @@ export default function App() {
     ? 0
     : !isFollowing
     ? 1
-    : (Object.keys(commitments).length > 0 || (eligibility?.has_committed ?? false))
+    : (myCommitments.length > 0 || (eligibility?.has_committed ?? false))
     ? 3
     : 2;
 
@@ -414,6 +485,8 @@ export default function App() {
     if (!actor) return;
     refreshEligibility(actor);
     fetchVoteHistory(actor);
+    fetchMyCommitments(actor);
+    fetchSystemHealth(actor);
   }, [actor]);
 
   // Fetch Ledger Balance
@@ -439,6 +512,7 @@ export default function App() {
   // Handle Internet Identity login
   const handleLogin = async () => {
     if (!authClient) return;
+    setIsSigningIn(true);
     await authClient.login({
       identityProvider: "http://id.ai.localhost:8000",
       maxTimeToLive: BigInt(8 * 60 * 60 * 1_000_000_000), // 8h
@@ -451,7 +525,9 @@ export default function App() {
           agentOptions: { host, identity: id, rootKey: env?.IC_ROOT_KEY }
         });
         setActor(newActor);
-      }
+        setIsSigningIn(false);
+      },
+      onError: () => setIsSigningIn(false),
     });
   };
 
@@ -468,7 +544,9 @@ export default function App() {
     setEligibility(null);
     setVoteHistory([]);
     setHoldings(0n);
-    setCommitments({});
+    setMyCommitments([]);
+    setCycleBalance(null);
+    setTreasuryBalance(null);
   };
 
   // Handle Neuron Copy
@@ -478,40 +556,98 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Handle Commit to Burn
-  const handleCommit = (proposalId: bigint, amountStr: string) => {
+  // Handle Commit button click
+  const handleCommitClick = (proposalId: bigint, amountStr: string, stance: Stance) => {
     const amount = parseFloat(amountStr);
-    if (isNaN(amount) || amount <= 0) {
-      alert("Please enter a valid amount.");
+    if (isNaN(amount) || amount < 1.0) {
+      alert("Please enter a valid amount (minimum 1.0 ICP).");
       return;
     }
     const amountE8s = BigInt(Math.floor(amount * 100_000_000));
-    if (amountE8s > holdings) {
-      alert("Commitment exceeds your verified ICP holdings!");
+    
+    // Check neuron stake cap (backend enforces same constraint)
+    const neuronStakeCap = eligibility?.holdings_e8s ?? 0n;
+    if (neuronStakeCap > 0n && amountE8s > neuronStakeCap) {
+      alert(`Exceeds your neuron stake cap of ${fmtICP(neuronStakeCap)} ICP. You cannot commit more than your verified neuron holds.`);
+      return;
+    }
+    // Check wallet balance covers deposit + fees
+    const requiredTotal = amountE8s + 530_000n; // target + fee + ledger fees
+    if (requiredTotal > holdings) {
+      alert(`Insufficient wallet balance! You need at least ${fmtICP(requiredTotal)} ICP to cover the commit amount and protocol/ledger fees.`);
       return;
     }
 
-    setCommitments(prev => ({
-      ...prev,
-      [proposalId.toString()]: (prev[proposalId.toString()] || 0n) + amountE8s
-    }));
+    setConfirmProposalId(proposalId);
+    setConfirmAmount(amountStr);
+    setConfirmStance(stance);
+    setIsConfirming(true);
+    setTxSuccess(false);
+    setTxError(null);
+    setTxStep("");
+  };
 
-    setProposals(prev => prev.map(p => {
-      if (p.id === proposalId) {
-        const updatedCommitted = p.total_committed_e8s + amountE8s;
-        return {
-          ...p,
-          total_committed_e8s: updatedCommitted,
-          status: updatedCommitted >= p.threshold_e8s ? "met" : p.status
-        };
+  // Execute actual ledger + escrow saga
+  const executeTransaction = async () => {
+    if (!actor || !confirmProposalId || !confirmStance || !confirmAmount) return;
+    
+    const amount = parseFloat(confirmAmount);
+    const amountE8s = BigInt(Math.floor(amount * 100_000_000));
+    const requiredDeposit = amountE8s + 520_000n; // target + fee + ledger fee to reserve
+
+    setIsTransacting(true);
+    setTxError(null);
+    
+    try {
+      // Step 1: Get deterministic escrow address
+      setTxStep("Deriving secure escrow subaccount...");
+      const depositAccount = await actor.get_deposit_address(confirmProposalId);
+      
+      // Step 2: Transfer funds using ledger canister actor
+      setTxStep("Step 1/2: Depositing ICP into escrow subaccount...");
+      const ledgerActor = createLedgerActor(ledgerCanisterId, {
+        agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
+      });
+
+      const transferResult = await ledgerActor.icrc1_transfer({
+        to: {
+          owner: depositAccount.owner,
+          subaccount: depositAccount.subaccount ? depositAccount.subaccount : undefined
+        },
+        amount: requiredDeposit,
+      });
+
+      if (transferResult.__kind__ === "Err") {
+        throw new Error(`Ledger transfer failed: ${JSON.stringify(transferResult.Err)}`);
       }
-      return p;
-    }));
 
-    setBurnInputs(prev => ({
-      ...prev,
-      [proposalId.toString()]: ""
-    }));
+      // Step 3: Finalize commit on backend
+      setTxStep("Step 2/2: Finalizing commitment on-chain...");
+      const commitResult = await actor.commit(confirmProposalId, confirmStance, amountE8s);
+
+      if (commitResult.__kind__ === "Err") {
+        throw new Error(`Commit registration failed: ${commitResult.Err}`);
+      }
+
+      // Success!
+      setTxSuccess(true);
+      setTxStep("Commitment finalized successfully!");
+      
+      // Clear input
+      setBurnInputs(prev => ({
+        ...prev,
+        [confirmProposalId.toString()]: ""
+      }));
+
+      // Refresh data
+      await refreshAllData();
+      
+    } catch (err: any) {
+      console.error("Transaction error:", err);
+      setTxError(err.message || String(err));
+    } finally {
+      setIsTransacting(false);
+    }
   };
 
   // AI reviews Mock map
@@ -540,9 +676,15 @@ export default function App() {
   }, [theme]);
 
   // Aggregate user stats for Tier 3
-  const totalCommitted = Object.values(commitments).reduce((a, b) => a + b, 0n);
-  const totalBurned = 0n; // In Milestone 1, they are not finalized on-chain yet
-  const proposalsJoined = Object.keys(commitments).length;
+  const totalCommitted = myCommitments
+    .filter(c => c.status === CommitmentStatus.Pending || c.status === CommitmentStatus.ThresholdMet || c.status === CommitmentStatus.FailedBurn)
+    .reduce((sum, c) => sum + c.amount_e8s, 0n);
+
+  const totalBurned = myCommitments
+    .filter(c => c.status === CommitmentStatus.Burned)
+    .reduce((sum, c) => sum + c.amount_e8s, 0n);
+
+  const proposalsJoined = new Set(myCommitments.map(c => c.proposal_id.toString())).size;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg)' }}>
@@ -569,8 +711,9 @@ export default function App() {
           </Btn>
 
           {!principal || principal.isAnonymous() ? (
-            <Btn variant="primary" sm onClick={handleLogin}>
-              <Icon name="key" size={14} stroke="var(--char-950)" /> Sign in
+            <Btn variant="primary" sm onClick={handleLogin} disabled={isSigningIn}>
+              {isSigningIn ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="key" size={14} stroke="var(--char-950)" />}
+              {isSigningIn ? " Opening Internet Identity..." : " Sign in"}
             </Btn>
           ) : (
             <span className="row" style={{
@@ -702,8 +845,9 @@ export default function App() {
                         <Icon name="arrowUp" size={13} stroke="var(--burn)" /> Sign in to follow
                       </span>
                     ) : (
-                      <Btn variant="primary" sm onClick={handleFollowNeuron}>
-                        <Icon name="check" size={13} stroke="var(--char-950)" /> Follow neuron
+                      <Btn variant="primary" sm onClick={handleFollowNeuron} disabled={isVerifying}>
+                        {isVerifying ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />}
+                        {isVerifying ? " Verifying with NNS..." : " Follow neuron"}
                       </Btn>
                     )
                   ) : (
@@ -762,11 +906,26 @@ export default function App() {
                     ? `${remainingD}d ${remainingH % 24}h`
                     : `${remainingH}h`;
 
-                  const committedAmount = commitments[proposalIdStr];
-                  const mineBadge = committedAmount && (
-                    <Chip tone={met ? "burn" : "dashed"}>
-                      {met ? <Icon name="flame" size={11} stroke="var(--burn)" /> : null}
-                      You · {fmtICP(committedAmount)} ICP {met ? "burning soon" : "pending"}
+                  const myCommitment = myCommitments.find(c => c.proposal_id === p.id);
+                  const mineBadgeTone = myCommitment
+                    ? myCommitment.status === CommitmentStatus.Burned ? "burn"
+                    : myCommitment.status === CommitmentStatus.Returned ? "ok"
+                    : (myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund) ? "danger"
+                    : met ? "burn" : "dashed"
+                    : "dashed";
+                  const mineBadge = myCommitment && (
+                    <Chip tone={mineBadgeTone}>
+                      {myCommitment.status === CommitmentStatus.Burned ? (
+                        <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Burned</>
+                      ) : myCommitment.status === CommitmentStatus.Returned ? (
+                        <><Icon name="checkCircle" size={11} stroke="var(--sprout)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Returned</>
+                      ) : (myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund) ? (
+                        <><Icon name="x" size={11} /> Settlement error — retrying</>
+                      ) : met ? (
+                        <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP burning soon</>
+                      ) : (
+                        <>You · {fmtICP(myCommitment.amount_e8s)} ICP pending ({myCommitment.stance === Stance.Adopt ? "ADOPT" : "REJECT"})</>
+                      )}
                     </Chip>
                   );
 
@@ -821,8 +980,8 @@ export default function App() {
 
                         {canCommit && (
                           <div className="col" style={{ gap: 10 }}>
-                            <div className="row" style={{ gap: 8 }}>
-                              <div style={{ flex: 1, position: 'relative' }}>
+                            <div className="col" style={{ gap: 8 }}>
+                              <div style={{ position: 'relative' }}>
                                 <input
                                   type="number"
                                   placeholder="Amount to burn"
@@ -837,19 +996,38 @@ export default function App() {
                                   ICP
                                 </span>
                               </div>
-                              <Btn
-                                variant="primary"
-                                sm
-                                onClick={() => handleCommit(p.id, burnInputs[proposalIdStr] || "")}
-                              >
-                                <Icon name="flame" size={13} stroke="var(--char-950)" /> Commit
-                              </Btn>
+                              <div className="row" style={{ gap: 8, width: '100%' }}>
+                                <Btn
+                                  variant="primary"
+                                  sm
+                                  style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
+                                  onClick={() => handleCommitClick(p.id, burnInputs[proposalIdStr] || "", Stance.Adopt)}
+                                >
+                                  <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> Commit ADOPT
+                                </Btn>
+                                <Btn
+                                  variant="danger"
+                                  sm
+                                  style={{ flex: 1 }}
+                                  onClick={() => handleCommitClick(p.id, burnInputs[proposalIdStr] || "", Stance.Reject)}
+                                >
+                                  <Icon name="x" size={13} /> Commit REJECT
+                                </Btn>
+                              </div>
                             </div>
 
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-                              <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-2)', whiteSpace: 'nowrap', flexShrink: 0 }}>
-                                <Icon name="coins" size={12} stroke="var(--fg-3)" /> Holdings: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(holdings)} ICP</span>
-                                <span style={{ color: 'var(--fg-3)' }}>· cap enforced</span>
+                              <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-2)', whiteSpace: 'nowrap', flexShrink: 0, flexWrap: 'wrap' }}>
+                                <span className="row" style={{ gap: 4 }}>
+                                  <Icon name="coins" size={12} stroke="var(--fg-3)" />
+                                  <span>Wallet: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(holdings)}</span></span>
+                                </span>
+                                {eligibility?.holdings_e8s && eligibility.holdings_e8s > 0n && (
+                                  <span className="row" style={{ gap: 4 }}>
+                                    <span style={{ color: 'var(--fg-3)' }}>·</span>
+                                    <span>Neuron stake cap: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(eligibility.holdings_e8s)}</span></span>
+                                  </span>
+                                )}
                               </span>
                               {mineBadge}
                             </div>
@@ -984,6 +1162,33 @@ export default function App() {
 
           <hr />
 
+          {/* System Health Section */}
+          <div className="col" style={{ gap: 12 }}>
+            <Eyebrow>System Health</Eyebrow>
+            <div className="col" style={{ gap: 8, fontSize: 13 }}>
+              <div className="row" style={{ justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--fg-2)' }}>Canister Cycles</span>
+                <span className="mono">
+                  {cycleBalance !== null ? `${(Number(cycleBalance) / 1_000_000_000_000).toFixed(2)} T` : "..."}
+                </span>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--fg-2)' }}>Treasury Balance</span>
+                <span className="mono">
+                  {treasuryBalance !== null ? `${fmtICP(treasuryBalance)} ICP` : "..."}
+                </span>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                <span style={{ color: 'var(--fg-2)', fontSize: 12.5 }}>Status</span>
+                <span className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--sprout)' }}>
+                  <LiveDot color="var(--sprout)" size={6} /> Active / Healthy
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <hr />
+
           {/* Progression Ladder */}
           <div className="col" style={{ gap: 12 }}>
             <Eyebrow>The Four Tiers</Eyebrow>
@@ -1023,6 +1228,126 @@ export default function App() {
         </aside>
 
       </div>
+
+      {/* ── Transaction Confirmation Modal ── */}
+      {isConfirming && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }}>
+          <div className="card col" style={{
+            maxWidth: 440, width: '100%', gap: 20, background: 'var(--surface)',
+            border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)'
+          }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="flame" size={18} stroke="var(--burn)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Confirm Burn Conviction</h4>
+              </span>
+              {!isTransacting && (
+                <button onClick={() => setIsConfirming(false)} style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)'
+                }}>
+                  <Icon name="x" size={16} />
+                </button>
+              )}
+            </div>
+
+            {txError && (
+              <div style={{
+                padding: 12, borderRadius: 6, background: 'var(--ember-dim)',
+                border: '1px solid var(--ember)', color: 'var(--ember)', fontSize: 13,
+                lineHeight: 1.4
+              }}>
+                <b>Transaction Failed:</b> {txError}
+              </div>
+            )}
+
+            {txSuccess ? (
+              <div className="col" style={{ alignItems: 'center', textAlign: 'center', gap: 14, padding: '10px 0' }}>
+                <div style={{
+                  width: 48, height: 48, borderRadius: 999, background: 'var(--sprout-dim)',
+                  border: '1px solid var(--sprout)', display: 'grid', placeItems: 'center',
+                  color: 'var(--sprout)'
+                }}>
+                  <Icon name="checkCircle" size={24} stroke="var(--sprout)" />
+                </div>
+                <div className="col" style={{ gap: 4 }}>
+                  <h5 style={{ margin: 0, color: 'var(--fg)' }}>Commitment Registered!</h5>
+                  <p style={{ fontSize: 13, color: 'var(--fg-2)' }}>
+                    Your {confirmAmount} ICP is now locked in escrow. It will be burned if the proposal passes threshold.
+                  </p>
+                </div>
+                <Btn variant="primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setIsConfirming(false)}>
+                  Close
+                </Btn>
+              </div>
+            ) : (
+              <div className="col" style={{ gap: 16 }}>
+                <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+                  <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>PROPOSAL</span>
+                  <span style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--fg)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                    {getProposalTitle(confirmProposalId || 0n)}
+                  </span>
+                  <div className="row" style={{ justifyContent: 'space-between', marginTop: 4 }}>
+                    <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>STANCE</span>
+                    <Chip tone={confirmStance === Stance.Adopt ? "ok" : "danger"} style={{ height: 18, fontSize: 10.5 }}>
+                      {confirmStance === Stance.Adopt ? "ADOPT" : "REJECT"}
+                    </Chip>
+                  </div>
+                </div>
+
+                <div className="col" style={{ gap: 10 }}>
+                  <Eyebrow>Fee & Deposit Breakdown</Eyebrow>
+                  
+                  <div className="col" style={{ gap: 8, fontSize: 13 }}>
+                    <div className="row" style={{ justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--fg-2)' }}>Target Burn Amount</span>
+                      <span className="mono">{confirmAmount ? parseFloat(confirmAmount).toFixed(4) : "0.0000"} ICP</span>
+                    </div>
+                    <div className="row" style={{ justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--fg-2)' }}>Protocol Fee (Non-refundable)</span>
+                      <span className="mono">0.0050 ICP</span>
+                    </div>
+                    <div className="row" style={{ justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--fg-2)' }}>Ledger Tx & Reserve Fees</span>
+                      <span className="mono">0.0003 ICP</span>
+                    </div>
+                    <hr />
+                    <div className="row" style={{ justifyContent: 'space-between', fontWeight: 600 }}>
+                      <span style={{ color: 'var(--fg)' }}>Total Wallet Debit</span>
+                      <span className="mono" style={{ color: 'var(--burn)' }}>
+                        {confirmAmount ? (parseFloat(confirmAmount) + 0.0053).toFixed(4) : "0.0053"} ICP
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
+                  ⚠️ <b>Conviction is Final.</b> By confirming, you authorize a transfer from your wallet to a deterministic escrow subaccount. The 0.005 ICP protocol fee is consumed immediately. The target ICP will be burned to the NNS Minting Account if the proposal threshold is met, or returned to your wallet (minus 0.0001 ICP) if the threshold fails.
+                </div>
+
+                {isTransacting ? (
+                  <div className="col" style={{ alignItems: 'center', gap: 10, padding: '8px 0' }}>
+                    <LiveDot size={8} color="var(--burn)" />
+                    <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>{txStep}</span>
+                  </div>
+                ) : (
+                  <div className="row" style={{ gap: 12 }}>
+                    <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setIsConfirming(false)}>
+                      Cancel
+                    </Btn>
+                    <Btn variant="primary" style={{ flex: 1 }} onClick={executeTransaction}>
+                      Confirm & Deposit
+                    </Btn>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

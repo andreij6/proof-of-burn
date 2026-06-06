@@ -352,6 +352,28 @@ fn remove_admin(admin: Principal) -> Result<(), String> {
     })
 }
 
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_proposal_deadline(proposal_id: u64, deadline: u64) -> Result<(), String> {
+    PROPOSALS.with(|map| {
+        let mut map = map.borrow_mut();
+        if let Some(mut p) = map.get(&proposal_id) {
+            p.deadline = deadline;
+            map.insert(proposal_id, p);
+            Ok(())
+        } else {
+            Err("Proposal not found".to_string())
+        }
+    })
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_trigger_sweep() -> Result<(), String> {
+    proposal_sync_sweep().await;
+    retry_failed_settlements().await;
+    cycle_topup_check().await;
+    Ok(())
+}
+
 // ==========================================
 // 7. Proposals Queries
 // ==========================================
@@ -570,8 +592,8 @@ fn get_eligibility() -> EligibilityInfo {
     };
 
     let holdings_e8s = if authenticated {
-        USER_AGGREGATES.with(|map| {
-            map.borrow().get(&caller).map(|agg| agg.total_committed_escrow).unwrap_or(0)
+        USER_NEURONS.with(|map| {
+            map.borrow().get(&caller).map(|n| n.cached_stake_e8s).unwrap_or(0)
         })
     } else {
         0
@@ -714,7 +736,7 @@ async fn call_ledger_balance(ledger_id: Principal, account: LedgerAccount) -> Re
     let response: Result<(candid::Nat,), _> = ic_cdk::call(ledger_id, "icrc1_balance_of", (account,)).await;
     match response {
         Ok((balance,)) => {
-            let bal_str = balance.to_string();
+            let bal_str = balance.to_string().replace('_', "");
             let bal_u64 = bal_str.parse::<u64>().map_err(|e| format!("Failed to parse balance: {}", e))?;
             Ok(bal_u64)
         }
@@ -740,7 +762,7 @@ async fn call_ledger_transfer(
     let response: Result<(TransferResult,), _> = ic_cdk::call(ledger_id, "icrc1_transfer", (args,)).await;
     match response {
         Ok((TransferResult::Ok(block_index),)) => {
-            let block_str = block_index.to_string();
+            let block_str = block_index.to_string().replace('_', "");
             let block_u64 = block_str.parse::<u64>().map_err(|e| format!("Failed to parse block index: {}", e))?;
             Ok(block_u64)
         }
