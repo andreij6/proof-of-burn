@@ -621,13 +621,13 @@ export default function App() {
         const err = transferResult.Err;
         const kind = err.__kind__;
         const detail =
-          kind === "BadFee"        ? `expected fee ${fmtICP(err.expected_fee)} ICP` :
-          kind === "InsufficientFunds" ? `balance is ${fmtICP(err.balance)} ICP` :
+          kind === "BadFee"        ? `expected fee ${fmtICP((err as any).BadFee.expected_fee)} ICP` :
+          kind === "InsufficientFunds" ? `balance is ${fmtICP((err as any).InsufficientFunds.balance)} ICP` :
           kind === "TooOld"        ? "transaction window expired" :
           kind === "CreatedInFuture" ? "clock skew — try again" :
-          kind === "Duplicate"     ? `duplicate of block ${err.duplicate_of}` :
+          kind === "Duplicate"     ? `duplicate of block ${(err as any).Duplicate.duplicate_of}` :
           kind === "TemporarilyUnavailable" ? "ledger temporarily unavailable" :
-          kind === "GenericError"  ? err.message :
+          kind === "GenericError"  ? (err as any).GenericError.message :
           JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
         throw new Error(`Ledger transfer failed (${kind}): ${detail}`);
       }
