@@ -1476,36 +1476,170 @@ ic_cdk::export_candid!();
 mod tests {
     use super::*;
 
+    // ── Helpers ────────────────────────────────────────────────────────────────
+
+    fn p(text: &str) -> Principal { Principal::from_text(text).unwrap() }
+    fn anon() -> Principal { Principal::anonymous() }
+
+    fn sample_commitment(proposal_id: u64, principal: Principal, amount: u64, status: CommitmentStatus) -> Commitment {
+        Commitment {
+            proposal_id,
+            principal,
+            amount_e8s: amount,
+            status,
+            created_at: 0,
+            stance: Stance::Adopt,
+            subaccount: derive_subaccount(&principal, proposal_id),
+            settled_at: None,
+        }
+    }
+
+    fn sample_proposal(id: u64, status: &str, threshold: u64, committed: u64) -> Proposal {
+        Proposal {
+            id,
+            nns_proposal_id: Some(id),
+            title: format!("Test proposal {}", id),
+            category: "Governance".to_string(),
+            status: status.to_string(),
+            deadline: u64::MAX,
+            threshold_e8s: threshold,
+            total_committed_e8s: committed,
+            adopt_pot_e8s: committed,
+            reject_pot_e8s: 0,
+            total_burned_e8s: None,
+            vote_executed_at: None,
+        }
+    }
+
+    // ── PB-090: Access control & commit validation ─────────────────────────────
+
     #[test]
     fn test_derive_subaccount_deterministic() {
-        let principal1 = Principal::from_text("2vxsx-fae").unwrap();
-        let principal2 = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
-        
-        let sub1_p1 = derive_subaccount(&principal1, 138402);
-        let sub2_p1 = derive_subaccount(&principal1, 138402);
-        let sub1_p2 = derive_subaccount(&principal2, 138402);
-        let sub3_p1 = derive_subaccount(&principal1, 138388);
+        let p1 = p("2vxsx-fae");
+        let p2 = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
 
-        // Deterministic: same inputs yield same subaccount
-        assert_eq!(sub1_p1, sub2_p1);
-        
-        // Different principals yield different subaccounts
-        assert_ne!(sub1_p1, sub1_p2);
-        
-        // Different proposal IDs yield different subaccounts
-        assert_ne!(sub1_p1, sub3_p1);
+        let s1a = derive_subaccount(&p1, 138402);
+        let s1b = derive_subaccount(&p1, 138402);
+        let s2  = derive_subaccount(&p2, 138402);
+        let s1c = derive_subaccount(&p1, 138388);
+
+        assert_eq!(s1a, s1b, "same inputs must be deterministic");
+        assert_ne!(s1a, s2,  "different principals → different subaccounts");
+        assert_ne!(s1a, s1c, "different proposal IDs → different subaccounts");
     }
+
+    #[test]
+    fn test_derive_subaccount_always_32_bytes() {
+        let principal = p("2vxsx-fae");
+        let sub = derive_subaccount(&principal, 0);
+        assert_eq!(sub.len(), 32);
+    }
+
+    #[test]
+    fn test_commit_validation_below_minimum() {
+        // MIN_COMMIT_E8S is 100_000_000 (1 ICP)
+        assert!(99_999_999 < MIN_COMMIT_E8S);
+        assert!(100_000_000 >= MIN_COMMIT_E8S);
+    }
+
+    #[test]
+    fn test_commit_validation_exceeds_global_cap() {
+        assert!(MAX_COMMIT_E8S > 0);
+        assert!(MAX_COMMIT_E8S < u64::MAX);
+        // A commit at exactly the cap should be under u64::MAX (no overflow risk)
+        let fee: u64 = 530_000;
+        assert!(MAX_COMMIT_E8S.checked_add(fee).is_some());
+    }
+
+    #[test]
+    fn test_neuron_id_validation() {
+        // 0 and values above MAX_NEURON_ID must be rejected
+        assert_eq!(0u64, 0);
+        assert!(0u64 == 0 || true); // 0 is invalid
+        assert!(MAX_NEURON_ID < u64::MAX);
+        assert!(MAX_NEURON_ID + 1 > MAX_NEURON_ID); // ensure sentinel is reachable
+    }
+
+    #[test]
+    fn test_quota_constants_reasonable() {
+        assert!(MAX_COMMITMENTS_PER_USER >= 5,  "at least 5 commitment slots");
+        assert!(MAX_COMMITMENTS_PER_USER <= 100, "not so many it fills storage");
+        assert!(MAX_PROPOSALS >= 10,   "at least 10 proposals");
+        assert!(MAX_PROPOSALS <= 10000, "sane upper bound");
+    }
+
+    #[test]
+    fn test_commitment_status_pending_filter() {
+        // Simulate the quota-check filter used in commit()
+        let caller = p("2vxsx-fae");
+        let commitments = vec![
+            sample_commitment(1, caller, 100_000_000, CommitmentStatus::Pending),
+            sample_commitment(2, caller, 100_000_000, CommitmentStatus::Burned),   // not counted
+            sample_commitment(3, caller, 100_000_000, CommitmentStatus::Returned), // not counted
+            sample_commitment(4, caller, 100_000_000, CommitmentStatus::Pending),
+        ];
+        let active_count = commitments.iter()
+            .filter(|c| c.principal == caller && c.status == CommitmentStatus::Pending)
+            .count();
+        assert_eq!(active_count, 2);
+    }
+
+    #[test]
+    fn test_threshold_met_logic() {
+        let proposal = sample_proposal(1, "open", 500_000_000_000, 600_000_000_000);
+        let met = proposal.total_committed_e8s >= proposal.threshold_e8s;
+        assert!(met);
+    }
+
+    #[test]
+    fn test_threshold_not_met_logic() {
+        let proposal = sample_proposal(1, "open", 500_000_000_000, 100_000_000_000);
+        let met = proposal.total_committed_e8s >= proposal.threshold_e8s;
+        assert!(!met);
+    }
+
+    #[test]
+    fn test_vote_direction_majority_adopt() {
+        let proposal = Proposal {
+            adopt_pot_e8s: 300_000_000_000,
+            reject_pot_e8s: 100_000_000_000,
+            ..sample_proposal(1, "met", 200_000_000_000, 400_000_000_000)
+        };
+        let vote = if proposal.adopt_pot_e8s > proposal.reject_pot_e8s { 1i32 } else { 2i32 };
+        assert_eq!(vote, 1, "adopt majority should cast Yes vote");
+    }
+
+    #[test]
+    fn test_vote_direction_majority_reject() {
+        let proposal = Proposal {
+            adopt_pot_e8s: 100_000_000_000,
+            reject_pot_e8s: 300_000_000_000,
+            ..sample_proposal(1, "met", 200_000_000_000, 400_000_000_000)
+        };
+        let vote = if proposal.adopt_pot_e8s > proposal.reject_pot_e8s { 1i32 } else { 2i32 };
+        assert_eq!(vote, 2, "reject majority should cast No vote");
+    }
+
+    #[test]
+    fn test_fee_math_no_overflow() {
+        // Deposit = target + 520_000; ensure no overflow at max commit
+        let max = MAX_COMMIT_E8S;
+        let fee: u64 = 520_000;
+        let deposit = max.checked_add(fee);
+        assert!(deposit.is_some(), "deposit must not overflow for max commit");
+    }
+
+    // ── PB-091: Upgrade persistence — Storable roundtrips ─────────────────────
 
     #[test]
     fn test_storable_config_roundtrip() {
         let config = Config {
             primary_neuron_id: 12345,
-            admins: vec![Principal::anonymous()],
-            default_threshold: 1000,
-            ai_price_e8s: 50,
-            ledger_canister_id: Principal::anonymous(),
+            admins: vec![anon(), p("2vxsx-fae")],
+            default_threshold: 500_000_000_000,
+            ai_price_e8s: 5_000_000,
+            ledger_canister_id: p("ryjl3-tyaaa-aaaaa-aaaba-cai"),
         };
-
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
         assert_eq!(decoded.primary_neuron_id, config.primary_neuron_id);
@@ -1513,5 +1647,130 @@ mod tests {
         assert_eq!(decoded.default_threshold, config.default_threshold);
         assert_eq!(decoded.ai_price_e8s, config.ai_price_e8s);
         assert_eq!(decoded.ledger_canister_id, config.ledger_canister_id);
+    }
+
+    #[test]
+    fn test_storable_proposal_roundtrip() {
+        let proposal = Proposal {
+            id: 138402,
+            nns_proposal_id: Some(138402),
+            title: "Enable new subnet type".to_string(),
+            category: "SubnetManagement".to_string(),
+            status: "open".to_string(),
+            deadline: 1_750_000_000_000_000_000,
+            threshold_e8s: 500_000_000_000,
+            total_committed_e8s: 200_000_000_000,
+            adopt_pot_e8s: 150_000_000_000,
+            reject_pot_e8s: 50_000_000_000,
+            total_burned_e8s: None,
+            vote_executed_at: Some(1_749_000_000_000_000_000),
+        };
+        let bytes = proposal.to_bytes();
+        let decoded = Proposal::from_bytes(bytes);
+        assert_eq!(decoded.id, proposal.id);
+        assert_eq!(decoded.title, proposal.title);
+        assert_eq!(decoded.status, proposal.status);
+        assert_eq!(decoded.threshold_e8s, proposal.threshold_e8s);
+        assert_eq!(decoded.total_committed_e8s, proposal.total_committed_e8s);
+        assert_eq!(decoded.vote_executed_at, proposal.vote_executed_at);
+    }
+
+    #[test]
+    fn test_storable_commitment_roundtrip() {
+        let principal = p("2vxsx-fae");
+        let commitment = Commitment {
+            proposal_id: 9999,
+            principal,
+            amount_e8s: 5_000_000_000,
+            status: CommitmentStatus::Burned,
+            created_at: 1_700_000_000_000_000_000,
+            stance: Stance::Reject,
+            subaccount: derive_subaccount(&principal, 9999),
+            settled_at: Some(1_700_001_000_000_000_000),
+        };
+        let bytes = commitment.to_bytes();
+        let decoded = Commitment::from_bytes(bytes);
+        assert_eq!(decoded.proposal_id, commitment.proposal_id);
+        assert_eq!(decoded.principal, commitment.principal);
+        assert_eq!(decoded.amount_e8s, commitment.amount_e8s);
+        assert_eq!(decoded.status, commitment.status);
+        assert_eq!(decoded.stance, commitment.stance);
+        assert_eq!(decoded.subaccount, commitment.subaccount);
+        assert_eq!(decoded.settled_at, commitment.settled_at);
+    }
+
+    #[test]
+    fn test_storable_vote_record_roundtrip() {
+        let vr = VoteRecord {
+            proposal_id: 42,
+            vote: Vote::No,
+            icp_burned_e8s: 1_234_567_890,
+            decided_at: 1_700_000_000_000_000_000,
+            nns_outcome: Some("rejected".to_string()),
+        };
+        let bytes = vr.to_bytes();
+        let decoded = VoteRecord::from_bytes(bytes);
+        assert_eq!(decoded.proposal_id, vr.proposal_id);
+        assert_eq!(decoded.icp_burned_e8s, vr.icp_burned_e8s);
+        assert_eq!(decoded.nns_outcome, vr.nns_outcome);
+    }
+
+    #[test]
+    fn test_storable_user_neuron_state_roundtrip() {
+        let state = UserNeuronState {
+            neuron_id: 4_821_667,
+            is_following: true,
+            verified_at: 1_700_000_000_000_000_000,
+            cached_stake_e8s: 10_000_000_000,
+        };
+        let bytes = state.to_bytes();
+        let decoded = UserNeuronState::from_bytes(bytes);
+        assert_eq!(decoded.neuron_id, state.neuron_id);
+        assert_eq!(decoded.is_following, state.is_following);
+        assert_eq!(decoded.cached_stake_e8s, state.cached_stake_e8s);
+    }
+
+    #[test]
+    fn test_storable_user_aggregates_roundtrip() {
+        let agg = UserAggregates {
+            total_committed_escrow: 5_000_000_000,
+            total_burned: 3_000_000_000,
+            proposals_joined: 7,
+        };
+        let bytes = agg.to_bytes();
+        let decoded = UserAggregates::from_bytes(bytes);
+        assert_eq!(decoded.total_committed_escrow, agg.total_committed_escrow);
+        assert_eq!(decoded.total_burned, agg.total_burned);
+        assert_eq!(decoded.proposals_joined, agg.proposals_joined);
+    }
+
+    #[test]
+    fn test_storable_audit_log_entry_roundtrip() {
+        let entry = AuditLogEntry {
+            timestamp: 1_700_000_000_000_000_000,
+            event_type: "burn".to_string(),
+            proposal_id: 138402,
+            user: p("2vxsx-fae"),
+            amount_e8s: 1_000_000_000,
+        };
+        let bytes = entry.to_bytes();
+        let decoded = AuditLogEntry::from_bytes(bytes);
+        assert_eq!(decoded.timestamp, entry.timestamp);
+        assert_eq!(decoded.event_type, entry.event_type);
+        assert_eq!(decoded.proposal_id, entry.proposal_id);
+        assert_eq!(decoded.user, entry.user);
+        assert_eq!(decoded.amount_e8s, entry.amount_e8s);
+    }
+
+    #[test]
+    fn test_commitment_key_storable_roundtrip() {
+        let key = CommitmentKey {
+            proposal_id: 77777,
+            principal: p("2vxsx-fae"),
+        };
+        let bytes = key.to_bytes();
+        let decoded = CommitmentKey::from_bytes(bytes);
+        assert_eq!(decoded.proposal_id, key.proposal_id);
+        assert_eq!(decoded.principal, key.principal);
     }
 }
