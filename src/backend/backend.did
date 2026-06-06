@@ -1,8 +1,36 @@
+type BalanceResult = variant { Ok : nat64; Err : text };
+type Commitment = record {
+  stance : Stance;
+  status : CommitmentStatus;
+  "principal" : principal;
+  subaccount : blob;
+  created_at : nat64;
+  amount_e8s : nat64;
+  proposal_id : nat64;
+  settled_at : opt nat64;
+};
+type CommitmentStatus = variant {
+  Burned;
+  ThresholdMet;
+  StuckFunds;
+  FailedBurn;
+  FailedRefund;
+  Returned;
+  Pending;
+};
 type Config = record {
   default_threshold : nat64;
   admins : vec principal;
+  ledger_canister_id : principal;
   ai_price_e8s : nat64;
   primary_neuron_id : nat64;
+};
+type EligibilityInfo = record {
+  holdings_e8s : nat64;
+  tier : nat8;
+  following : bool;
+  authenticated : bool;
+  has_committed : bool;
 };
 type InitPayload = record {
   default_threshold_e8s : nat64;
@@ -10,44 +38,46 @@ type InitPayload = record {
   ai_price_e8s : nat64;
   primary_neuron_id : nat64;
 };
+type LedgerAccount = record { owner : principal; subaccount : opt blob };
 type Proposal = record {
   id : nat64;
   status : text;
   nns_proposal_id : opt nat64;
+  reject_pot_e8s : nat64;
   title : text;
   deadline : nat64;
+  adopt_pot_e8s : nat64;
   threshold_e8s : nat64;
+  total_burned_e8s : opt nat64;
+  vote_executed_at : opt nat64;
   category : text;
   total_committed_e8s : nat64;
 };
-type EligibilityInfo = record {
-  tier : nat8;
-  authenticated : bool;
-  following : bool;
-  has_committed : bool;
-  holdings_e8s : nat64;
-};
-type Vote = variant {
-  Yes;
-  No;
-  Abstain;
-};
-type VoteRecord = record {
-  proposal_id : nat64;
-  vote : Vote;
-  icp_burned_e8s : nat64;
-  decided_at : nat64;
-  nns_outcome : opt text;
-};
 type Result = variant { Ok; Err : text };
+type Stance = variant { Reject; Adopt };
+type Vote = variant { No; Yes; Abstain };
+type VoteRecord = record {
+  vote : Vote;
+  proposal_id : nat64;
+  nns_outcome : opt text;
+  decided_at : nat64;
+  icp_burned_e8s : nat64;
+};
 service : (InitPayload) -> {
   add_admin : (principal) -> (Result);
+  commit : (nat64, Stance, nat64) -> (Result);
   get_caller_principal : () -> (principal) query;
   get_config : () -> (Config) query;
+  get_cycle_balance : () -> (nat64) query;
+  get_deposit_address : (nat64) -> (LedgerAccount) query;
   get_eligibility : () -> (EligibilityInfo) query;
+  get_my_commitments : () -> (vec Commitment) query;
   get_proposal : (nat64) -> (opt Proposal) query;
+  get_treasury_balance : () -> (BalanceResult);
   list_active_proposals : () -> (vec Proposal) query;
   list_vote_history : () -> (vec VoteRecord) query;
   register_neuron : (nat64) -> (Result);
   remove_admin : (principal) -> (Result);
+  verify_follow : () -> (Result);
+  wallet_receive : () -> (Result);
 }
