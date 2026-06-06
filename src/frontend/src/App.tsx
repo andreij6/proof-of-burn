@@ -4,7 +4,7 @@ import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
 import { Principal } from "@icp-sdk/core/principal";
 import { createActor as createBackendActor, Vote, Stance, CommitmentStatus } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import type { Proposal, EligibilityInfo, VoteRecord, Commitment, GlobalStats, Config } from "./bindings/backend";
+import type { Proposal, EligibilityInfo, VoteRecord, Commitment, GlobalStats, Config, LeaderNeuronInfo } from "./bindings/backend";
 
 // ==========================================
 // 1. Icon Component (Clean, inline SVG paths)
@@ -229,6 +229,19 @@ function formatNeuronId(id: bigint | null | undefined): string {
   return id.toString();
 }
 
+// NNS voting power is reported in e8s units (1 VP = 1e8). Show whole VP, grouped.
+function fmtVP(vp: bigint): string {
+  const whole = vp / 100_000_000n;
+  return whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function fmtYears(seconds: bigint): string {
+  const years = Number(seconds) / (365 * 24 * 60 * 60);
+  if (years >= 1) return `${years.toFixed(years < 10 ? 1 : 0)}y dissolve`;
+  const days = Math.round(Number(seconds) / (24 * 60 * 60));
+  return `${days}d dissolve`;
+}
+
 function formatPrincipal(p: Principal | null): string {
   if (!p) return "anon";
   const s = p.toString();
@@ -319,6 +332,7 @@ export default function App() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
+  const [leaderInfo, setLeaderInfo] = useState<LeaderNeuronInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -429,6 +443,16 @@ export default function App() {
     }
   };
 
+  const fetchLeaderInfo = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      const info = await currentActor.get_leader_neuron_info();
+      setLeaderInfo(info);
+    } catch (err) {
+      console.error("Failed to fetch leader neuron info:", err);
+    }
+  };
+
   const refreshAllData = async () => {
     if (!actor) return;
     setIsLoading(true);
@@ -440,6 +464,7 @@ export default function App() {
         fetchSystemHealth(actor),
         fetchGlobalStats(actor),
         fetchConfig(actor),
+        fetchLeaderInfo(actor),
         actor.list_active_proposals().then((list: Proposal[]) => setProposals(list)),
       ]);
       // Also fetch balance
@@ -560,6 +585,7 @@ export default function App() {
     fetchSystemHealth(actor);
     fetchGlobalStats(actor);
     fetchConfig(actor);
+    fetchLeaderInfo(actor);
   }, [actor]);
 
   // Fetch Ledger Balance
@@ -970,10 +996,15 @@ export default function App() {
                   </div>
                   <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
                     <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>
-                      Primary leader neuron
+                      Community Leader Neuron
                     </span>
                     <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)', whiteSpace: 'nowrap', flexShrink: 0 }}>
-                      8y dissolve
+                      {leaderInfo && leaderInfo.voting_power > 0n
+                        ? `${fmtVP(leaderInfo.voting_power)} VP`
+                        : "… VP"}
+                      {leaderInfo && leaderInfo.dissolve_delay_seconds > 0n
+                        ? ` · ${fmtYears(leaderInfo.dissolve_delay_seconds)}`
+                        : ""}
                     </span>
                   </div>
                 </div>

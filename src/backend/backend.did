@@ -49,6 +49,15 @@ type EligibilityInfo = record {
   authenticated : bool;
   has_committed : bool;
 };
+// Cached public stats for the community leader neuron (voting power, dissolve
+// delay, stake). updated_at == 0 means not yet fetched from the NNS.
+type LeaderNeuronInfo = record {
+  neuron_id : nat64;
+  voting_power : nat64;
+  dissolve_delay_seconds : nat64;
+  stake_e8s : nat64;
+  updated_at : nat64;
+};
 // App-wide totals used by the global stats strip in the UI.
 // - `tvl_e8s`: sum of `total_committed_e8s` over all proposals whose status
 // is `open` or `met` (i.e. escrow currently locked).
@@ -118,6 +127,7 @@ service : (InitPayload) -> {
   // Pure read over in-memory maps — `O(n)` over proposals + votes. Safe for any
   // reasonable n; documented in the task.
   get_global_stats : () -> (GlobalStats) query;
+  get_leader_neuron_info : () -> (LeaderNeuronInfo) query;
   get_my_commitments : () -> (vec Commitment) query;
   get_proposal : (nat64) -> (opt Proposal) query;
   get_treasury_balance : () -> (BalanceResult);

@@ -60,6 +60,30 @@ pub enum Result_2 {
     Err(GovernanceError),
 }
 
+// NNS `get_neuron_info` — a public query (no hotkey needed). Subset-decoded.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct NeuronInfo {
+    pub dissolve_delay_seconds: u64,
+    pub stake_e8s: u64,
+    pub voting_power: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum GetNeuronInfoResult {
+    Ok(NeuronInfo),
+    Err(GovernanceError),
+}
+
+/// Cached public stats for the community leader neuron, served to the UI.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct LeaderNeuronInfo {
+    pub neuron_id: u64,
+    pub voting_power: u64,         // raw NNS voting power (e8s units)
+    pub dissolve_delay_seconds: u64,
+    pub stake_e8s: u64,
+    pub updated_at: u64,           // 0 until first successful fetch
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct UserNeuronState {
     pub neuron_id: u64,
@@ -297,6 +321,9 @@ thread_local! {
     static USER_NEURONS: RefCell<StableBTreeMap<Principal, UserNeuronState, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(7))))
     });
+
+    // Transient cache of the leader neuron's public stats (refreshed on the timer).
+    static LEADER_INFO: RefCell<Option<LeaderNeuronInfo>> = const { RefCell::new(None) };
 }
 
 // ==========================================
@@ -371,6 +398,8 @@ fn init(payload: InitPayload) {
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
     }
+    // Populate the leader-neuron stats (real on mainnet, mock on local).
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
     setup_timers();
 }
 
@@ -384,6 +413,7 @@ fn post_upgrade() {
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
     }
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
     setup_timers();
 }
 
@@ -593,6 +623,64 @@ fn seed_mock_proposals() {
 // ==========================================
 // 9. Eligibility & Verification Endpoints
 // ==========================================
+
+/// Refresh the cached leader-neuron stats from the NNS (`get_neuron_info` is a
+/// public query — no hotkey required). On local, where there is no NNS canister,
+/// the call rejects and we cache a representative mock so the UI shows a value.
+async fn fetch_leader_neuron_info() {
+    let (leader_id, is_local) = CONFIG.with(|c| {
+        let cfg = c.borrow();
+        let cfg = cfg.get();
+        (cfg.primary_neuron_id, cfg.is_local)
+    });
+    let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+    let now = ic_cdk::api::time();
+
+    let response: Result<(GetNeuronInfoResult,), _> =
+        ic_cdk::call(nns_gov, "get_neuron_info", (leader_id,)).await;
+
+    match response {
+        Ok((GetNeuronInfoResult::Ok(info),)) => {
+            LEADER_INFO.with(|cell| {
+                *cell.borrow_mut() = Some(LeaderNeuronInfo {
+                    neuron_id: leader_id,
+                    voting_power: info.voting_power,
+                    dissolve_delay_seconds: info.dissolve_delay_seconds,
+                    stake_e8s: info.stake_e8s,
+                    updated_at: now,
+                });
+            });
+        }
+        _ if is_local => {
+            // Local dev mock so the neuron block renders a value.
+            LEADER_INFO.with(|cell| {
+                *cell.borrow_mut() = Some(LeaderNeuronInfo {
+                    neuron_id: leader_id,
+                    voting_power: 1_284_500_000_000, // ~12,845 VP
+                    dissolve_delay_seconds: 8 * 365 * 24 * 60 * 60, // 8y
+                    stake_e8s: 1_000_000_000_000, // 10,000 ICP
+                    updated_at: now,
+                });
+            });
+        }
+        Ok((GetNeuronInfoResult::Err(e),)) => {
+            ic_cdk::api::print(&format!("get_neuron_info error: {}", e.error_message));
+        }
+        Err((code, msg)) => {
+            ic_cdk::api::print(&format!("get_neuron_info call failed (code {:?}): {}", code, msg));
+        }
+    }
+}
+
+/// Cached public stats for the community leader neuron (voting power, dissolve
+/// delay, stake). `updated_at == 0` means not yet fetched.
+#[ic_cdk::query]
+fn get_leader_neuron_info() -> LeaderNeuronInfo {
+    LEADER_INFO.with(|cell| cell.borrow().clone()).unwrap_or_else(|| {
+        let leader_id = CONFIG.with(|c| c.borrow().get().primary_neuron_id);
+        LeaderNeuronInfo { neuron_id: leader_id, ..Default::default() }
+    })
+}
 
 async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> Result<(bool, u64), String> {
     let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
@@ -1795,6 +1883,7 @@ fn setup_timers() {
         if !is_local {
             fetch_live_proposals().await;
         }
+        fetch_leader_neuron_info().await;
         proposal_sync_sweep().await;
         retry_failed_settlements().await;
         cycle_topup_check().await;
