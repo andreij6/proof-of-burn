@@ -285,7 +285,7 @@ export default function App() {
   const ledgerCanisterId = env?.['PUBLIC_CANISTER_ID:ledger'] || "aiewf-lx777-77775-aaaca-cai";
   const isLocal = host.includes("localhost") || host.includes("127.0.0.1");
   const identityProviderUrl = isLocal
-    ? `http://rdmx6-jaaaa-aaaaa-aaadq-cai.localhost:8000`
+    ? "http://id.ai.localhost:8000"
     : "https://identity.ic0.app";
 
   // Auth & Identity state
