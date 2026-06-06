@@ -4,7 +4,7 @@ import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
 import { Principal } from "@icp-sdk/core/principal";
 import { createActor as createBackendActor, Vote, Stance, CommitmentStatus } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import type { Proposal, EligibilityInfo, VoteRecord, Commitment } from "./bindings/backend";
+import type { Proposal, EligibilityInfo, VoteRecord, Commitment, GlobalStats } from "./bindings/backend";
 
 // ==========================================
 // 1. Icon Component (Clean, inline SVG paths)
@@ -306,6 +306,7 @@ export default function App() {
   const [holdings, setHoldings] = useState<bigint>(0n);
   const [myCommitments, setMyCommitments] = useState<Commitment[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -392,6 +393,18 @@ export default function App() {
     }
   };
 
+  const fetchGlobalStats = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      // PB-115: app-wide totals (TVL, total burned, votes cast). Public
+      // query — safe to call for anonymous viewers.
+      const stats = await currentActor.get_global_stats();
+      setGlobalStats(stats);
+    } catch (err) {
+      console.error("Failed to fetch global stats:", err);
+    }
+  };
+
   const refreshAllData = async () => {
     if (!actor) return;
     setIsLoading(true);
@@ -401,6 +414,7 @@ export default function App() {
         fetchVoteHistory(actor),
         fetchMyCommitments(actor),
         fetchSystemHealth(actor),
+        fetchGlobalStats(actor),
         actor.list_active_proposals().then((list: Proposal[]) => setProposals(list)),
       ]);
       // Also fetch balance
@@ -782,7 +796,52 @@ export default function App() {
         {/* Left Column: Dashboard content */}
         <main style={{ flex: 1, minWidth: 320 }}>
           <div className="dashboard-container">
-            
+
+            {/* ── PB-116: Global stats strip (TVL / Total burned / Votes cast) ──
+                Visible to all users (anonymous included) since the data is
+                public. Placed above the Tier 3 user-strip and the neuron
+                block per the request. */}
+            <Reveal delay={30} motion={motion}>
+              <div className="row" data-testid="global-stats-strip" style={{
+                border: '1px solid var(--burn)', borderRadius: 10, background: 'var(--burn-950)',
+                padding: '14px 6px'
+              }}>
+                <div className="col" style={{ gap: 4, flex: 1, alignItems: 'center', textAlign: 'center' }}>
+                  <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+                    <Icon name="coins" size={15} stroke="var(--burn)" />
+                    <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
+                      {globalStats ? `${fmtICP(globalStats.tvl_e8s)} ICP` : "…"}
+                    </span>
+                  </span>
+                  <Eyrow>Locked in escrow</Eyrow>
+                </div>
+                <div className="col" style={{
+                  gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
+                  borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
+                }}>
+                  <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+                    <Icon name="flame" size={15} stroke="var(--burn)" />
+                    <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
+                      {globalStats ? `${fmtICP(globalStats.total_burned_e8s)} ICP` : "…"}
+                    </span>
+                  </span>
+                  <Eyrow>Burned to date</Eyrow>
+                </div>
+                <div className="col" style={{
+                  gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
+                  borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
+                }}>
+                  <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+                    <Icon name="checkCircle" size={15} stroke="var(--burn)" />
+                    <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
+                      {globalStats ? globalStats.votes_cast.toString() : "…"}
+                    </span>
+                  </span>
+                  <Eyrow>Votes cast</Eyrow>
+                </div>
+              </div>
+            </Reveal>
+
             {/* Tier 3 Dashboard Strip */}
             {tier >= 3 && (
               <Reveal delay={40} motion={motion}>

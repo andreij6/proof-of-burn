@@ -184,3 +184,83 @@ describe('PB-082 constant alignment', () => {
     expect(FEES_E8S).toBeGreaterThan(0n);
   });
 });
+
+// ── PB-115 / PB-116: Global stats strip ──────────────────────────────────────
+
+// Mirrors the open/met filter used by the backend get_global_stats query.
+function isLockedStatus(status: string): boolean {
+  return status === 'open' || status === 'met';
+}
+
+function sumTvlE8s(proposals: { status: string; total_committed_e8s: bigint }[]): bigint {
+  return proposals
+    .filter((p) => isLockedStatus(p.status))
+    .reduce((acc, p) => acc + p.total_committed_e8s, 0n);
+}
+
+describe('PB-115 global stats: TVL filter', () => {
+  it('includes open proposals', () => {
+    const proposals = [{ status: 'open', total_committed_e8s: 100_000_000n }];
+    expect(sumTvlE8s(proposals)).toBe(100_000_000n);
+  });
+
+  it('includes met proposals', () => {
+    const proposals = [{ status: 'met', total_committed_e8s: 200_000_000n }];
+    expect(sumTvlE8s(proposals)).toBe(200_000_000n);
+  });
+
+  it('excludes settled / voted / failed / abstained', () => {
+    const proposals = [
+      { status: 'settled',  total_committed_e8s: 1_000n },
+      { status: 'voted',    total_committed_e8s: 1_000n },
+      { status: 'failed',   total_committed_e8s: 1_000n },
+      { status: 'abstained', total_committed_e8s: 1_000n },
+    ];
+    expect(sumTvlE8s(proposals)).toBe(0n);
+  });
+
+  it('sums only open+met when mixed', () => {
+    const proposals = [
+      { status: 'open',   total_committed_e8s: 318_000_000_000n },
+      { status: 'met',    total_committed_e8s: 500_000_000_000n },
+      { status: 'open',   total_committed_e8s: 141_000_000_000n },
+      { status: 'settled', total_committed_e8s: 1_000_000_000n }, // excluded
+    ];
+    // 318 + 500 + 141 = 959 (in ICP, since e8s)
+    expect(sumTvlE8s(proposals)).toBe(959_000_000_000n);
+  });
+});
+
+describe('PB-115 global stats: total burned', () => {
+  // Mirrors the backend summation over VoteRecord.icp_burned_e8s.
+  function sumBurnedE8s(votes: { icp_burned_e8s: bigint }[]): bigint {
+    return votes.reduce((acc, v) => acc + v.icp_burned_e8s, 0n);
+  }
+
+  it('sums multiple votes', () => {
+    const votes = [
+      { icp_burned_e8s: 1_240_000_000n },   // 12.4 ICP
+      { icp_burned_e8s: 600_000_000n },      // 6.0 ICP
+      { icp_burned_e8s: 2_010_000_000n },    // 20.1 ICP
+    ];
+    expect(sumBurnedE8s(votes)).toBe(3_850_000_000n);
+  });
+
+  it('returns 0 for empty vote list', () => {
+    expect(sumBurnedE8s([])).toBe(0n);
+  });
+});
+
+describe('PB-115 global stats: votes_cast count', () => {
+  function countVotes(votes: unknown[]): bigint {
+    return BigInt(votes.length);
+  }
+
+  it('counts distinct proposals voted on', () => {
+    expect(countVotes([{}, {}, {}])).toBe(3n);
+  });
+
+  it('returns 0 when no votes yet', () => {
+    expect(countVotes([])).toBe(0n);
+  });
+});

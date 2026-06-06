@@ -1,12 +1,17 @@
 type AuditLogEntry = record {
+  user : principal;
+  amount_e8s : nat64;
+  proposal_id : nat64;
   timestamp : nat64;
   event_type : text;
-  proposal_id : nat64;
-  "user" : principal;
-  amount_e8s : nat64;
 };
 type BalanceResult = variant { Ok : nat64; Err : text };
 type Commitment = record {
+  // Block index of the CMC ledger transfer performed in Phase A of
+  // `burn_to_cycles`. Stored so a retry after a failed `notify_top_up`
+  // skips the transfer and goes straight to notifying the CMC.
+  // `None` until Phase A has succeeded.
+  cmc_block_index : opt nat64;
   stance : Stance;
   status : CommitmentStatus;
   "principal" : principal;
@@ -27,6 +32,11 @@ type CommitmentStatus = variant {
 };
 type Config = record {
   default_threshold : nat64;
+  // True when the canister was initialised against a local dev network
+  // (detected from the owner's principal or ledger canister id at init).
+  // Gating the NNS mock fallback on this flag — not re-deriving environment
+  // per call — is what prevents the F-101/F-102 mainnet bypass.
+  is_local : bool;
   admins : vec principal;
   ledger_canister_id : principal;
   ai_price_e8s : nat64;
@@ -38,6 +48,18 @@ type EligibilityInfo = record {
   following : bool;
   authenticated : bool;
   has_committed : bool;
+};
+// App-wide totals used by the global stats strip in the UI.
+// - `tvl_e8s`: sum of `total_committed_e8s` over all proposals whose status
+// is `open` or `met` (i.e. escrow currently locked).
+// - `total_burned_e8s`: cumulative ICP burned through this app, summed over
+// every `VoteRecord` (the canonical burn ledger).
+// - `votes_cast`: count of distinct NNS proposals the app has voted on,
+// derived from `VOTES.len()`.
+type GlobalStats = record {
+  votes_cast : nat64;
+  tvl_e8s : nat64;
+  total_burned_e8s : nat64;
 };
 type InitPayload = record {
   default_threshold_e8s : nat64;
@@ -75,13 +97,24 @@ service : (InitPayload) -> {
   admin_set_proposal_deadline : (nat64, nat64) -> (Result);
   admin_trigger_sweep : () -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
+  // Local-dev faucet — sends 100 ICP from the canister's own account to the caller.
+  // Rejected on mainnet (ledger canister ID check). Never callable by anonymous.
   dev_faucet : () -> (Result);
+  // Returns a page of audit log entries. offset + limit are capped at 10,000
+  // to prevent a single query from exhausting cycle budgets.
   get_audit_log : (nat64, nat64) -> (vec AuditLogEntry) query;
   get_caller_principal : () -> (principal) query;
   get_config : () -> (Config) query;
   get_cycle_balance : () -> (nat64) query;
   get_deposit_address : (nat64) -> (LedgerAccount) query;
   get_eligibility : () -> (EligibilityInfo) query;
+  // App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
+  // cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
+  // the count of distinct NNS proposals this app has cast a vote on.
+  // 
+  // Pure read over in-memory maps — `O(n)` over proposals + votes. Safe for any
+  // reasonable n; documented in the task.
+  get_global_stats : () -> (GlobalStats) query;
   get_my_commitments : () -> (vec Commitment) query;
   get_proposal : (nat64) -> (opt Proposal) query;
   get_treasury_balance : () -> (BalanceResult);
