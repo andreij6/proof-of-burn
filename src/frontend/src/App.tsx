@@ -368,6 +368,9 @@ export default function App() {
   // Neuron copy status
   const [copied, setCopied] = useState(false);
 
+  // Active tab selection
+  const [activeTab, setActiveTab] = useState<'open' | 'committed' | 'history'>('open');
+
   // Eligibility & Vote History Helpers
   const refreshEligibility = async (currentActor = actor) => {
     if (!currentActor) return;
@@ -541,6 +544,13 @@ export default function App() {
     : (myCommitments.length > 0 || (eligibility?.has_committed ?? false))
     ? 3
     : 2;
+
+  // Redirect back to open if active tab is committed and tier drops below 2
+  useEffect(() => {
+    if (tier < 2 && activeTab === 'committed') {
+      setActiveTab('open');
+    }
+  }, [tier, activeTab]);
 
   // Initialize Auth
   useEffect(() => {
@@ -1119,334 +1129,405 @@ export default function App() {
                 Fetching active NNS proposals...
               </div>
             ) : (
-              <div className="col" style={{ gap: 28 }}>
+                            <div className="col" style={{ gap: 20 }}>
+                {/* ── Tab Bar ── */}
+                <Reveal delay={80} motion={motion}>
+                  <div className="row" style={{
+                    borderBottom: '1px solid var(--border)',
+                    paddingBottom: 2,
+                    gap: 16,
+                    width: '100%',
+                    overflowX: 'auto',
+                    scrollbarWidth: 'none',
+                  }}>
+                    <button
+                      onClick={() => setActiveTab('open')}
+                      style={{
+                        background: 'transparent', border: 'none',
+                        color: activeTab === 'open' ? 'var(--burn)' : 'var(--fg-3)',
+                        fontSize: 14, fontWeight: activeTab === 'open' ? 600 : 500,
+                        cursor: 'pointer', padding: '6px 4px', position: 'relative',
+                        transition: 'color var(--dur-fast) var(--ease-out)',
+                      }}
+                    >
+                      Open <span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>({openProposals.length})</span>
+                      {activeTab === 'open' && (
+                        <div style={{
+                          position: 'absolute', bottom: -3, left: 0, right: 0,
+                          height: 2, background: 'var(--burn)', borderRadius: 999
+                        }} />
+                      )}
+                    </button>
+                    
+                    {tier >= 2 && (
+                      <button
+                        onClick={() => setActiveTab('committed')}
+                        style={{
+                          background: 'transparent', border: 'none',
+                          color: activeTab === 'committed' ? 'var(--burn)' : 'var(--fg-3)',
+                          fontSize: 14, fontWeight: activeTab === 'committed' ? 600 : 500,
+                          cursor: 'pointer', padding: '6px 4px', position: 'relative',
+                          transition: 'color var(--dur-fast) var(--ease-out)',
+                        }}
+                      >
+                        Committed <span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>({committedProposals.length})</span>
+                        {activeTab === 'committed' && (
+                          <div style={{
+                            position: 'absolute', bottom: -3, left: 0, right: 0,
+                            height: 2, background: 'var(--burn)', borderRadius: 999
+                          }} />
+                        )}
+                      </button>
+                    )}
 
-              {/* ── OPEN ── */}
-              <div className="col" style={{ gap: 12 }}>
-                <Reveal delay={100} motion={motion}>
-                  <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
-                    <span className="row" style={{ gap: 8 }}>
-                      <LiveDot on={motion !== 'off'} color="var(--sprout)" size={7} />
-                      <b style={{ fontSize: 14, color: 'var(--fg)' }}>Open</b>
-                      <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {openProposals.length}</span>
-                    </span>
-                    <Eyebrow style={{ whiteSpace: 'nowrap' }}>vote your stance</Eyebrow>
+                    <button
+                      onClick={() => setActiveTab('history')}
+                      style={{
+                        background: 'transparent', border: 'none',
+                        color: activeTab === 'history' ? 'var(--burn)' : 'var(--fg-3)',
+                        fontSize: 14, fontWeight: activeTab === 'history' ? 600 : 500,
+                        cursor: 'pointer', padding: '6px 4px', position: 'relative',
+                        transition: 'color var(--dur-fast) var(--ease-out)',
+                      }}
+                    >
+                      History <span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>({historyProposals.length + (tier >= 1 ? voteHistory.filter(r => !historyProposals.find(p => p.id === r.proposal_id)).length : 0)})</span>
+                      {activeTab === 'history' && (
+                        <div style={{
+                          position: 'absolute', bottom: -3, left: 0, right: 0,
+                          height: 2, background: 'var(--burn)', borderRadius: 999
+                        }} />
+                      )}
+                    </button>
                   </div>
                 </Reveal>
-                {openProposals.length === 0 && !isLoading && (
-                  <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No open proposals right now.</div>
-                )}
-                {openProposals.map((p, i) => {
-                  const showBurn = tier >= 1;
-                  const canCommit = tier >= 2;
-                  const proposalIdStr = p.id.toString();
-                  const aiReview = aiReviews[proposalIdStr];
-                  const aiOpen = aiOpenMap[proposalIdStr] || (aiMode === 'expanded' && i === 0);
 
-                  const pct = Math.floor((Number(p.total_committed_e8s) / Number(p.threshold_e8s)) * 100);
-                  const met = p.status === 'met' || p.total_committed_e8s >= p.threshold_e8s;
-
-                  const committedLabel = `${fmtICP(p.total_committed_e8s)} ICP committed`;
-                  const reqLabel = pct > 100 ? `${pct}% · oversubscribed` : met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`;
-
-                  const statusChip = met ? (
-                    <Chip tone="ok"><Icon name="check" size={11} /> Threshold met</Chip>
-                  ) : (
-                    <Chip tone="muted"><LiveDot on={motion !== 'off'} /> Open</Chip>
-                  );
-
-                  // Calculate deadline string
-                  const remainingNs = Number(p.deadline) - Date.now() * 1_000_000;
-                  const remainingH = Math.max(0, Math.floor(remainingNs / (3600 * 1_000_000_000)));
-                  const remainingD = Math.floor(remainingH / 24);
-                  const deadlineStr = remainingD > 0
-                    ? `${remainingD}d ${remainingH % 24}h`
-                    : `${remainingH}h`;
-
-                  const myCommitment = myCommitments.find(c => c.proposal_id === p.id);
-                  const mineBadgeTone = myCommitment
-                    ? myCommitment.status === CommitmentStatus.Burned ? "burn"
-                    : myCommitment.status === CommitmentStatus.Returned ? "ok"
-                    : (myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund) ? "danger"
-                    : met ? "burn" : "dashed"
-                    : "dashed";
-                  const mineBadge = myCommitment && (
-                    <Chip tone={mineBadgeTone}>
-                      {myCommitment.status === CommitmentStatus.Burned ? (
-                        <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP → Cycles</>
-                      ) : myCommitment.status === CommitmentStatus.Returned ? (
-                        <><Icon name="checkCircle" size={11} stroke="var(--sprout)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Returned</>
-                      ) : (myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund) ? (
-                        <><Icon name="x" size={11} /> Settlement error — retrying</>
-                      ) : met ? (
-                        <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP burning soon</>
-                      ) : (
-                        <>You · {fmtICP(myCommitment.amount_e8s)} ICP pending ({myCommitment.stance === Stance.Adopt ? "ADOPT" : "REJECT"})</>
-                      )}
-                    </Chip>
-                  );
-
-                  return (
-                    <Reveal key={proposalIdStr} delay={120 + i * 70} motion={motion}>
-                      <div className="col" style={{
-                        gap: 12, border: `1px solid ${met ? 'var(--sprout)' : 'var(--border)'}`,
-                        borderRadius: 8, background: 'var(--surface)', padding: 14
-                      }}>
-                        {/* Title and stats header */}
-                        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                          <div className="col" style={{ gap: 7, minWidth: 0, flex: 1 }}>
-                            <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                              <Chip tone="muted" style={{ height: 20, fontSize: 11 }}>{p.category}</Chip>
-                              <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>
-                                #{proposalIdStr}
-                              </span>
-                            </div>
-                            <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 500, textWrap: 'pretty' }}>
-                              {p.title}
-                            </span>
-                          </div>
-                          <div className="col" style={{ alignItems: 'flex-end', gap: 7, flexShrink: 0 }}>
-                            <Chip tone="muted" style={{ height: 22 }}>
-                              <Icon name="clock" size={11} /> {deadlineStr}
-                            </Chip>
-                            {tier >= 1 && statusChip}
-                          </div>
-                        </div>
-
-                        {/* Burn progress (gated for anonymous) */}
-                        {showBurn ? (
-                          <HeatBar pct={pct} committed={committedLabel} req={reqLabel} met={met} />
-                        ) : (
-                          <Gate hint="Sign in to unlock" height={44} gating={gating}>
-                            <HeatBar pct={48} committed="●●● ICP committed" req="●● of ●●● ICP" />
-                          </Gate>
-                        )}
-
-                        {/* Action zone */}
-                        {tier >= 1 && <div style={{ borderTop: '1px solid var(--border)' }} />}
-
-                        {tier === 1 && (
-                          <Gate hint="Follow neuron to unlock" next height={42} gating={gating}>
-                            <div className="row" style={{ gap: 8 }}>
-                              <Btn variant="primary" sm style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }} disabled>
-                                <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> ADOPT
-                              </Btn>
-                              <Btn variant="danger" sm style={{ flex: 1 }} disabled>
-                                <Icon name="x" size={13} /> REJECT
-                              </Btn>
-                            </div>
-                          </Gate>
-                        )}
-
-                        {canCommit && (
-                          <div className="col" style={{ gap: 10 }}>
-                            <div className="row" style={{ gap: 8 }}>
-                              <Btn
-                                variant="primary"
-                                sm
-                                style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
-                                onClick={() => handleCommitClick(p.id, Stance.Adopt)}
-                              >
-                                <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> ADOPT
-                              </Btn>
-                              <Btn
-                                variant="danger"
-                                sm
-                                style={{ flex: 1 }}
-                                onClick={() => handleCommitClick(p.id, Stance.Reject)}
-                              >
-                                <Icon name="x" size={13} /> REJECT
-                              </Btn>
-                            </div>
-
-                            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-                              <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-2)', flexWrap: 'wrap' }}>
-                                <span className="row" style={{ gap: 4 }}>
-                                  <Icon name="coins" size={12} stroke="var(--fg-3)" />
-                                  <span>Wallet: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(holdings)}</span></span>
-                                </span>
-                                {eligibility?.holdings_e8s && eligibility.holdings_e8s > 0n && (
-                                  <span className="row" style={{ gap: 4 }}>
-                                    <span style={{ color: 'var(--fg-3)' }}>·</span>
-                                    <span>Stake cap: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(eligibility.holdings_e8s)}</span></span>
-                                  </span>
-                                )}
-                              </span>
-                              {mineBadge}
-                            </div>
-
-                            {/* AI Review Panel */}
-                            {aiReview && aiMode !== 'hidden' && (
-                              <AIPanel
-                                open={aiOpen}
-                                onToggle={() => setAiOpenMap({ ...aiOpenMap, [proposalIdStr]: !aiOpen })}
-                                score={aiReview.score}
-                                text={aiReview.text}
-                              />
-                            )}
-
-                            {/* No-burn safety note */}
-                            <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                              <Icon name="info" size={12} stroke="var(--fg-3)" /> No conversion if threshold misses — committed ICP is returned.
-                            </span>
-                          </div>
-                        )}
+                {/* ── Tab Content ── */}
+                {activeTab === 'open' && (
+                  <div className="col" style={{ gap: 12 }}>
+                    <Reveal delay={100} motion={motion}>
+                      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
+                        <span className="row" style={{ gap: 8 }}>
+                          <LiveDot on={motion !== 'off'} color="var(--sprout)" size={7} />
+                          <b style={{ fontSize: 14, color: 'var(--fg)' }}>Open</b>
+                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {openProposals.length}</span>
+                        </span>
+                        <Eyebrow style={{ whiteSpace: 'nowrap' }}>vote your stance</Eyebrow>
                       </div>
                     </Reveal>
-                  );
-                })}
-              </div>{/* end openProposals */}
+                    {openProposals.length === 0 && !isLoading && (
+                      <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No open proposals right now.</div>
+                    )}
+                    {openProposals.map((p, i) => {
+                      const showBurn = tier >= 1;
+                      const canCommit = tier >= 2;
+                      const proposalIdStr = p.id.toString();
+                      const aiReview = aiReviews[proposalIdStr];
+                      const aiOpen = aiOpenMap[proposalIdStr] || (aiMode === 'expanded' && i === 0);
 
-              {/* ── COMMITTED ── */}
-              {tier >= 2 && (
-                <div className="col" style={{ gap: 12 }}>
-                  <Reveal delay={120} motion={motion}>
-                    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
-                      <span className="row" style={{ gap: 8 }}>
-                        <Icon name="flame" size={13} stroke="var(--burn)" />
-                        <b style={{ fontSize: 14, color: 'var(--fg)' }}>Committed</b>
-                        <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {committedProposals.length}</span>
-                      </span>
-                      <Eyebrow style={{ whiteSpace: 'nowrap' }}>your active stake</Eyebrow>
-                    </div>
-                  </Reveal>
-                  {committedProposals.length === 0 ? (
-                    <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No active commitments yet.</div>
-                  ) : committedProposals.map((p, _i) => {
-                    const myCommitment = myCommitments.find(c => c.proposal_id === p.id)!;
-                    const pct = Math.floor((Number(p.total_committed_e8s) / Number(p.threshold_e8s)) * 100);
-                    const met = p.status === 'met' || p.total_committed_e8s >= p.threshold_e8s;
-                    const remainingNs = Number(p.deadline) - Date.now() * 1_000_000;
-                    const remainingH = Math.max(0, Math.floor(remainingNs / (3600 * 1_000_000_000)));
-                    const remainingD = Math.floor(remainingH / 24);
-                    const deadlineStr = remainingD > 0 ? `${remainingD}d ${remainingH % 24}h` : `${remainingH}h`;
-                    const isRetrying = myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund;
-                    return (
-                      <Reveal key={p.id.toString()} delay={140} motion={motion}>
-                        <div className="col" style={{
-                          gap: 10, border: `1px solid ${met ? 'var(--burn)' : 'var(--border)'}`,
-                          borderRadius: 8, background: 'var(--surface)', padding: 14
-                        }}>
-                          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                            <div className="col" style={{ gap: 5, minWidth: 0, flex: 1 }}>
-                              <Chip tone="muted" style={{ height: 18, fontSize: 10.5, alignSelf: 'flex-start' }}>{p.category}</Chip>
-                              <span style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--fg)', textWrap: 'pretty' }}>{p.title}</span>
+                      const pct = Math.floor((Number(p.total_committed_e8s) / Number(p.threshold_e8s)) * 100);
+                      const met = p.status === 'met' || p.total_committed_e8s >= p.threshold_e8s;
+
+                      const committedLabel = `${fmtICP(p.total_committed_e8s)} ICP committed`;
+                      const reqLabel = pct > 100 ? `${pct}% · oversubscribed` : met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`;
+
+                      const statusChip = met ? (
+                        <Chip tone="ok"><Icon name="check" size={11} /> Threshold met</Chip>
+                      ) : (
+                        <Chip tone="muted"><LiveDot on={motion !== 'off'} /> Open</Chip>
+                      );
+
+                      // Calculate deadline string
+                      const remainingNs = Number(p.deadline) - Date.now() * 1_000_000;
+                      const remainingH = Math.max(0, Math.floor(remainingNs / (3600 * 1_000_000_000)));
+                      const remainingD = Math.floor(remainingH / 24);
+                      const deadlineStr = remainingD > 0
+                        ? `${remainingD}d ${remainingH % 24}h`
+                        : `${remainingH}h`;
+
+                      const myCommitment = myCommitments.find(c => c.proposal_id === p.id);
+                      const mineBadgeTone = myCommitment
+                        ? myCommitment.status === CommitmentStatus.Burned ? "burn"
+                        : myCommitment.status === CommitmentStatus.Returned ? "ok"
+                        : (myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund) ? "danger"
+                        : met ? "burn" : "dashed"
+                        : "dashed";
+                      const mineBadge = myCommitment && (
+                        <Chip tone={mineBadgeTone}>
+                          {myCommitment.status === CommitmentStatus.Burned ? (
+                            <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP → Cycles</>
+                          ) : myCommitment.status === CommitmentStatus.Returned ? (
+                            <><Icon name="checkCircle" size={11} stroke="var(--sprout)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Returned</>
+                          ) : (myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund) ? (
+                            <><Icon name="x" size={11} /> Settlement error — retrying</>
+                          ) : met ? (
+                            <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP burning soon</>
+                          ) : (
+                            <>You · {fmtICP(myCommitment.amount_e8s)} ICP pending ({myCommitment.stance === Stance.Adopt ? "ADOPT" : "REJECT"})</>
+                          )}
+                        </Chip>
+                      );
+
+                      return (
+                        <Reveal key={proposalIdStr} delay={120 + i * 70} motion={motion}>
+                          <div className="col" style={{
+                            gap: 12, border: `1px solid ${met ? 'var(--sprout)' : 'var(--border)'}`,
+                            borderRadius: 8, background: 'var(--surface)', padding: 14
+                          }}>
+                            {/* Title and stats header */}
+                            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                              <div className="col" style={{ gap: 7, minWidth: 0, flex: 1 }}>
+                                <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                  <Chip tone="muted" style={{ height: 20, fontSize: 11 }}>{p.category}</Chip>
+                                  <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>
+                                    #{proposalIdStr}
+                                  </span>
+                                </div>
+                                <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 500, textWrap: 'pretty' }}>
+                                  {p.title}
+                                </span>
+                              </div>
+                              <div className="col" style={{ alignItems: 'flex-end', gap: 7, flexShrink: 0 }}>
+                                <Chip tone="muted" style={{ height: 22 }}>
+                                  <Icon name="clock" size={11} /> {deadlineStr}
+                                </Chip>
+                                {tier >= 1 && statusChip}
+                              </div>
                             </div>
-                            <div className="col" style={{ alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
-                              <Chip tone="muted" style={{ height: 20 }}><Icon name="clock" size={11} /> {deadlineStr}</Chip>
-                              {met
-                                ? <Chip tone="burn"><Icon name="flame" size={11} stroke="var(--burn)" /> Threshold met</Chip>
-                                : <Chip tone="muted"><LiveDot on={motion !== 'off'} /> Open</Chip>}
-                            </div>
-                          </div>
-                          <HeatBar pct={pct} committed={`${fmtICP(p.total_committed_e8s)} ICP`} req={met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`} met={met} />
-                          <div style={{ borderTop: '1px solid var(--border)' }} />
-                          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                            <span className="row" style={{ gap: 8, fontSize: 12.5 }}>
-                              <span style={{ color: 'var(--fg-3)' }}>Your commitment</span>
-                              <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtICP(myCommitment.amount_e8s)} ICP</span>
-                              <Chip tone={myCommitment.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 18, fontSize: 10.5 }}>
-                                {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
-                              </Chip>
-                            </span>
-                            {isRetrying && (
-                              <Chip tone="danger" style={{ fontSize: 11 }}><Icon name="x" size={10} /> Error — retrying</Chip>
+
+                            {/* Burn progress (gated for anonymous) */}
+                            {showBurn ? (
+                              <HeatBar pct={pct} committed={committedLabel} req={reqLabel} met={met} />
+                            ) : (
+                              <Gate hint="Sign in to unlock" height={44} gating={gating}>
+                                <HeatBar pct={48} committed="●●● ICP committed" req="●● of ●●● ICP" />
+                              </Gate>
+                            )}
+
+                            {/* Action zone */}
+                            {tier >= 1 && <div style={{ borderTop: '1px solid var(--border)' }} />}
+
+                            {tier === 1 && (
+                              <Gate hint="Follow neuron to unlock" next height={42} gating={gating}>
+                                <div className="row" style={{ gap: 8 }}>
+                                  <Btn variant="primary" sm style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }} disabled>
+                                    <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> ADOPT
+                                  </Btn>
+                                  <Btn variant="danger" sm style={{ flex: 1 }} disabled>
+                                    <Icon name="x" size={13} /> REJECT
+                                  </Btn>
+                                </div>
+                              </Gate>
+                            )}
+
+                            {canCommit && (
+                              <div className="col" style={{ gap: 10 }}>
+                                <div className="row" style={{ gap: 8 }}>
+                                  <Btn
+                                    variant="primary"
+                                    sm
+                                    style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
+                                    onClick={() => handleCommitClick(p.id, Stance.Adopt)}
+                                  >
+                                    <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> ADOPT
+                                  </Btn>
+                                  <Btn
+                                    variant="danger"
+                                    sm
+                                    style={{ flex: 1 }}
+                                    onClick={() => handleCommitClick(p.id, Stance.Reject)}
+                                  >
+                                    <Icon name="x" size={13} /> REJECT
+                                  </Btn>
+                                </div>
+
+                                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                                  <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-2)', flexWrap: 'wrap' }}>
+                                    <span className="row" style={{ gap: 4 }}>
+                                      <Icon name="coins" size={12} stroke="var(--fg-3)" />
+                                      <span>Wallet: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(holdings)}</span></span>
+                                    </span>
+                                    {eligibility?.holdings_e8s && eligibility.holdings_e8s > 0n && (
+                                      <span className="row" style={{ gap: 4 }}>
+                                        <span style={{ color: 'var(--fg-3)' }}>·</span>
+                                        <span>Stake cap: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(eligibility.holdings_e8s)}</span></span>
+                                      </span>
+                                    )}
+                                  </span>
+                                  {mineBadge}
+                                </div>
+
+                                {/* AI Review Panel */}
+                                {aiReview && aiMode !== 'hidden' && (
+                                  <AIPanel
+                                    open={aiOpen}
+                                    onToggle={() => setAiOpenMap({ ...aiOpenMap, [proposalIdStr]: !aiOpen })}
+                                    score={aiReview.score}
+                                    text={aiReview.text}
+                                  />
+                                )}
+
+                                {/* No-burn safety note */}
+                                <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+                                  <Icon name="info" size={12} stroke="var(--fg-3)" /> No conversion if threshold misses — committed ICP is returned.
+                                </span>
+                              </div>
                             )}
                           </div>
-                          <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                            <Icon name="info" size={12} stroke="var(--fg-3)" />
-                            {met
-                              ? 'Threshold met — ICP will convert to cycles when the canister votes.'
-                              : 'No conversion if threshold misses — committed ICP is returned.'}
-                          </span>
-                        </div>
-                      </Reveal>
-                    );
-                  })}
-                </div>
-              )}
-
-              {/* ── HISTORY ── */}
-              <div className="col" style={{ gap: 12 }}>
-                <Reveal delay={160} motion={motion}>
-                  <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
-                    <span className="row" style={{ gap: 8 }}>
-                      <Icon name="list" size={13} stroke="var(--fg-2)" />
-                      <b style={{ fontSize: 14, color: 'var(--fg)' }}>History</b>
-                      <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {historyProposals.length + (tier >= 1 ? voteHistory.filter(r => !historyProposals.find(p => p.id === r.proposal_id)).length : 0)}</span>
-                    </span>
-                    <Eyebrow style={{ whiteSpace: 'nowrap' }}>settled · cycles · returned</Eyebrow>
-                  </div>
-                </Reveal>
-
-                {tier < 1 ? (
-                  <Gate hint="Sign in to unlock" height={80} gating={gating}>
-                    <div style={{ height: 60 }} />
-                  </Gate>
-                ) : historyProposals.length === 0 && voteHistory.length === 0 ? (
-                  <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No settled proposals yet.</div>
-                ) : (
-                  <div className="col" style={{ gap: 0 }}>
-                    {/* Proposals where the user committed and it settled */}
-                    {historyProposals.map((p, _i) => {
-                      const myCommitment = myCommitments.find(c => c.proposal_id === p.id);
-                      const voteRec = voteHistory.find(r => r.proposal_id === p.id);
-                      const isBurned = myCommitment?.status === CommitmentStatus.Burned;
-                      return (
-                        <div key={p.id.toString()} className="col" style={{
-                          gap: 8, padding: '12px 0',
-                          borderBottom: '1px solid var(--border)'
-                        }}>
-                          <div className="row" style={{ justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
-                            <span style={{ fontSize: 13, color: 'var(--fg-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={p.title}>
-                              {p.title}
-                            </span>
-                            <div className="row" style={{ gap: 8, flexShrink: 0 }}>
-                              {voteRec && (
-                                <Chip tone={voteRec.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>
-                                  {voteRec.vote === Vote.Yes ? 'voted yes' : voteRec.vote === Vote.No ? 'voted no' : 'abstained'}
-                                </Chip>
-                              )}
-                            </div>
-                          </div>
-                          {myCommitment && (
-                            <div className="row" style={{ gap: 10, fontSize: 12, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
-                              <Chip tone={myCommitment.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 17, fontSize: 10 }}>
-                                {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
-                              </Chip>
-                              <span className="mono" style={{ color: isBurned ? 'var(--burn)' : 'var(--sprout)' }}>
-                                {fmtICP(myCommitment.amount_e8s)} ICP {isBurned ? '→ cycles' : 'returned'}
-                              </span>
-                            </div>
-                          )}
-                        </div>
+                        </Reveal>
                       );
                     })}
-                    {/* Canister-level votes where user didn't personally commit */}
-                    {voteHistory
-                      .filter(r => !historyProposals.find(p => p.id === r.proposal_id))
-                      .map((record, _i) => {
-                        const title = getProposalTitle(record.proposal_id);
-                        const voteStr = record.vote === Vote.Yes ? 'voted yes' : record.vote === Vote.No ? 'voted no' : 'abstained';
-                        return (
-                          <div key={record.proposal_id.toString()} className="row" style={{
-                            justifyContent: 'space-between', gap: 12, padding: '12px 0',
-                            borderBottom: '1px solid var(--border)'
-                          }}>
-                            <span style={{ fontSize: 13, color: 'var(--fg-3)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={title}>
-                              {title}
-                            </span>
-                            <div className="row" style={{ gap: 8, flexShrink: 0 }}>
-                              <Chip tone={record.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>{voteStr}</Chip>
-                              <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)' }}>{fmtICP(record.icp_burned_e8s)} → cycles</span>
-                            </div>
-                          </div>
-                        );
-                      })}
                   </div>
                 )}
-              </div>
 
+                {activeTab === 'committed' && tier >= 2 && (
+                  <div className="col" style={{ gap: 12 }}>
+                    <Reveal delay={120} motion={motion}>
+                      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
+                        <span className="row" style={{ gap: 8 }}>
+                          <Icon name="flame" size={13} stroke="var(--burn)" />
+                          <b style={{ fontSize: 14, color: 'var(--fg)' }}>Committed</b>
+                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {committedProposals.length}</span>
+                        </span>
+                        <Eyebrow style={{ whiteSpace: 'nowrap' }}>your active stake</Eyebrow>
+                      </div>
+                    </Reveal>
+                    {committedProposals.length === 0 ? (
+                      <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No active commitments yet.</div>
+                    ) : committedProposals.map(p => {
+                      const myCommitment = myCommitments.find(c => c.proposal_id === p.id)!;
+                      const pct = Math.floor((Number(p.total_committed_e8s) / Number(p.threshold_e8s)) * 100);
+                      const met = p.status === 'met' || p.total_committed_e8s >= p.threshold_e8s;
+                      const remainingNs = Number(p.deadline) - Date.now() * 1_000_000;
+                      const remainingH = Math.max(0, Math.floor(remainingNs / (3600 * 1_000_000_000)));
+                      const remainingD = Math.floor(remainingH / 24);
+                      const deadlineStr = remainingD > 0 ? `${remainingD}d ${remainingH % 24}h` : `${remainingH}h`;
+                      const isRetrying = myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund;
+                      return (
+                        <Reveal key={p.id.toString()} delay={140} motion={motion}>
+                          <div className="col" style={{
+                            gap: 10, border: `1px solid ${met ? 'var(--burn)' : 'var(--border)'}`,
+                            borderRadius: 8, background: 'var(--surface)', padding: 14
+                          }}>
+                            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                              <div className="col" style={{ gap: 5, minWidth: 0, flex: 1 }}>
+                                <Chip tone="muted" style={{ height: 18, fontSize: 10.5, alignSelf: 'flex-start' }}>{p.category}</Chip>
+                                <span style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--fg)', textWrap: 'pretty' }}>{p.title}</span>
+                              </div>
+                              <div className="col" style={{ alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
+                                <Chip tone="muted" style={{ height: 20 }}><Icon name="clock" size={11} /> {deadlineStr}</Chip>
+                                {met
+                                  ? <Chip tone="burn"><Icon name="flame" size={11} stroke="var(--burn)" /> Threshold met</Chip>
+                                  : <Chip tone="muted"><LiveDot on={motion !== 'off'} /> Open</Chip>}
+                              </div>
+                            </div>
+                            <HeatBar pct={pct} committed={`${fmtICP(p.total_committed_e8s)} ICP`} req={met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`} met={met} />
+                            <div style={{ borderTop: '1px solid var(--border)' }} />
+                            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                              <span className="row" style={{ gap: 8, fontSize: 12.5 }}>
+                                <span style={{ color: 'var(--fg-3)' }}>Your commitment</span>
+                                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtICP(myCommitment.amount_e8s)} ICP</span>
+                                <Chip tone={myCommitment.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 18, fontSize: 10.5 }}>
+                                  {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
+                                </Chip>
+                              </span>
+                              {isRetrying && (
+                                <Chip tone="danger" style={{ fontSize: 11 }}><Icon name="x" size={10} /> Error — retrying</Chip>
+                              )}
+                            </div>
+                            <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+                              <Icon name="info" size={12} stroke="var(--fg-3)" />
+                              {met
+                                ? 'Threshold met — ICP will convert to cycles when the canister votes.'
+                                : 'No conversion if threshold misses — committed ICP is returned.'}
+                            </span>
+                          </div>
+                        </Reveal>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {activeTab === 'history' && (
+                  <div className="col" style={{ gap: 12 }}>
+                    <Reveal delay={160} motion={motion}>
+                      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
+                        <span className="row" style={{ gap: 8 }}>
+                          <Icon name="list" size={13} stroke="var(--fg-2)" />
+                          <b style={{ fontSize: 14, color: 'var(--fg)' }}>History</b>
+                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {historyProposals.length + (tier >= 1 ? voteHistory.filter(r => !historyProposals.find(p => p.id === r.proposal_id)).length : 0)}</span>
+                        </span>
+                        <Eyebrow style={{ whiteSpace: 'nowrap' }}>settled · cycles · returned</Eyebrow>
+                      </div>
+                    </Reveal>
+
+                    {tier < 1 ? (
+                      <Gate hint="Sign in to unlock" height={80} gating={gating}>
+                        <div style={{ height: 60 }} />
+                      </Gate>
+                    ) : historyProposals.length === 0 && voteHistory.length === 0 ? (
+                      <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No settled proposals yet.</div>
+                    ) : (
+                      <div className="col" style={{ gap: 0 }}>
+                        {/* Proposals where the user committed and it settled */}
+                        {historyProposals.map(p => {
+                          const myCommitment = myCommitments.find(c => c.proposal_id === p.id);
+                          const voteRec = voteHistory.find(r => r.proposal_id === p.id);
+                          const isBurned = myCommitment?.status === CommitmentStatus.Burned;
+                          return (
+                            <div key={p.id.toString()} className="col" style={{
+                              gap: 8, padding: '12px 0',
+                              borderBottom: '1px solid var(--border)'
+                            }}>
+                              <div className="row" style={{ justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+                                <span style={{ fontSize: 13, color: 'var(--fg-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={p.title}>
+                                  {p.title}
+                                </span>
+                                <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                                  {voteRec && (
+                                    <Chip tone={voteRec.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>
+                                      {voteRec.vote === Vote.Yes ? 'voted yes' : voteRec.vote === Vote.No ? 'voted no' : 'abstained'}
+                                    </Chip>
+                                  )}
+                                </div>
+                              </div>
+                              {myCommitment && (
+                                <div className="row" style={{ gap: 10, fontSize: 12, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
+                                  <Chip tone={myCommitment.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 17, fontSize: 10 }}>
+                                    {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
+                                  </Chip>
+                                  <span className="mono" style={{ color: isBurned ? 'var(--burn)' : 'var(--sprout)' }}>
+                                    {fmtICP(myCommitment.amount_e8s)} ICP {isBurned ? '→ cycles' : 'returned'}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                        {/* Canister-level votes where user didn't personally commit */}
+                        {voteHistory
+                          .filter(r => !historyProposals.find(p => p.id === r.proposal_id))
+                          .map(record => {
+                            const title = getProposalTitle(record.proposal_id);
+                            const voteStr = record.vote === Vote.Yes ? 'voted yes' : record.vote === Vote.No ? 'voted no' : 'abstained';
+                            return (
+                              <div key={record.proposal_id.toString()} className="row" style={{
+                                justifyContent: 'space-between', gap: 12, padding: '12px 0',
+                                borderBottom: '1px solid var(--border)'
+                              }}>
+                                <span style={{ fontSize: 13, color: 'var(--fg-3)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={title}>
+                                  {title}
+                                </span>
+                                <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                                  <Chip tone={record.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>{voteStr}</Chip>
+                                  <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)' }}>{fmtICP(record.icp_burned_e8s)} → cycles</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
