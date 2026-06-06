@@ -326,7 +326,6 @@ export default function App() {
   const [motion, setMotion] = useState<string>('expressive');
 
   // Input states for each proposal
-  const [burnInputs, setBurnInputs] = useState<Record<string, string>>({});
   const [aiOpenMap, setAiOpenMap] = useState<Record<string, boolean>>({});
 
   // Neuron copy status
@@ -560,31 +559,11 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Handle Commit button click
-  const handleCommitClick = (proposalId: bigint, amountStr: string, stance: Stance) => {
-    const amount = parseFloat(amountStr);
-    if (isNaN(amount) || amount < 1.0) {
-      alert("Please enter a valid amount (minimum 1.0 ICP).");
-      return;
-    }
-    const amountE8s = BigInt(Math.floor(amount * 100_000_000));
-    
-    // Check neuron stake cap (backend enforces same constraint)
-    const neuronStakeCap = eligibility?.holdings_e8s ?? 0n;
-    if (neuronStakeCap > 0n && amountE8s > neuronStakeCap) {
-      alert(`Exceeds your neuron stake cap of ${fmtICP(neuronStakeCap)} ICP. You cannot commit more than your verified neuron holds.`);
-      return;
-    }
-    // Check wallet balance covers deposit + fees
-    const requiredTotal = amountE8s + 530_000n; // target + fee + ledger fees
-    if (requiredTotal > holdings) {
-      alert(`Insufficient wallet balance! You need at least ${fmtICP(requiredTotal)} ICP to cover the commit amount and protocol/ledger fees.`);
-      return;
-    }
-
+  // Open modal with stance pre-selected; amount is entered inside the modal
+  const handleCommitClick = (proposalId: bigint, stance: Stance) => {
     setConfirmProposalId(proposalId);
-    setConfirmAmount(amountStr);
     setConfirmStance(stance);
+    setConfirmAmount("");
     setIsConfirming(true);
     setTxSuccess(false);
     setTxError(null);
@@ -593,12 +572,26 @@ export default function App() {
 
   // Execute actual ledger + escrow saga
   const executeTransaction = async () => {
-    if (!actor || !confirmProposalId || !confirmStance || !confirmAmount) return;
-    
-    const amount = parseFloat(confirmAmount);
-    const amountE8s = BigInt(Math.floor(amount * 100_000_000));
-    const requiredDeposit = amountE8s + 520_000n; // target + fee + ledger fee to reserve
+    if (!actor || !confirmProposalId || !confirmStance) return;
 
+    const amount = parseFloat(confirmAmount);
+    if (isNaN(amount) || amount < 1.0) {
+      setTxError("Please enter a valid amount (minimum 1.0 ICP).");
+      return;
+    }
+    const amountE8s = BigInt(Math.floor(amount * 100_000_000));
+    const neuronStakeCap = eligibility?.holdings_e8s ?? 0n;
+    if (neuronStakeCap > 0n && amountE8s > neuronStakeCap) {
+      setTxError(`Exceeds your neuron stake cap of ${fmtICP(neuronStakeCap)} ICP.`);
+      return;
+    }
+    const requiredTotal = amountE8s + 530_000n;
+    if (requiredTotal > holdings) {
+      setTxError(`Insufficient wallet balance — need at least ${fmtICP(requiredTotal)} ICP (amount + fees).`);
+      return;
+    }
+
+    const requiredDeposit = amountE8s + 520_000n;
     setIsTransacting(true);
     setTxError(null);
     
@@ -648,12 +641,6 @@ export default function App() {
       setTxSuccess(true);
       setTxStep("Commitment finalized successfully!");
       
-      // Clear input
-      setBurnInputs(prev => ({
-        ...prev,
-        [confirmProposalId.toString()]: ""
-      }));
-
       // Refresh data
       await refreshAllData();
       
@@ -986,53 +973,39 @@ export default function App() {
                         {tier === 1 && (
                           <Gate hint="Follow neuron to unlock" next height={42} gating={gating}>
                             <div className="row" style={{ gap: 8 }}>
-                              <input type="text" disabled placeholder="Amount to burn" className="burn-input" />
-                              <Btn variant="primary" sm>Commit</Btn>
-                              <Btn variant="ghost" sm><Icon name="spark" size={13} /> AI</Btn>
+                              <Btn variant="primary" sm style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }} disabled>
+                                <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> ADOPT
+                              </Btn>
+                              <Btn variant="danger" sm style={{ flex: 1 }} disabled>
+                                <Icon name="x" size={13} /> REJECT
+                              </Btn>
                             </div>
                           </Gate>
                         )}
 
                         {canCommit && (
                           <div className="col" style={{ gap: 10 }}>
-                            <div className="col" style={{ gap: 8 }}>
-                              <div style={{ position: 'relative' }}>
-                                <input
-                                  type="number"
-                                  placeholder="Amount to burn"
-                                  className="burn-input"
-                                  value={burnInputs[proposalIdStr] || ""}
-                                  onChange={(e) => setBurnInputs({ ...burnInputs, [proposalIdStr]: e.target.value })}
-                                />
-                                <span className="mono" style={{
-                                  position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
-                                  fontSize: 13, color: 'var(--fg-3)'
-                                }}>
-                                  ICP
-                                </span>
-                              </div>
-                              <div className="row" style={{ gap: 8, width: '100%' }}>
-                                <Btn
-                                  variant="primary"
-                                  sm
-                                  style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
-                                  onClick={() => handleCommitClick(p.id, burnInputs[proposalIdStr] || "", Stance.Adopt)}
-                                >
-                                  <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> Commit ADOPT
-                                </Btn>
-                                <Btn
-                                  variant="danger"
-                                  sm
-                                  style={{ flex: 1 }}
-                                  onClick={() => handleCommitClick(p.id, burnInputs[proposalIdStr] || "", Stance.Reject)}
-                                >
-                                  <Icon name="x" size={13} /> Commit REJECT
-                                </Btn>
-                              </div>
+                            <div className="row" style={{ gap: 8 }}>
+                              <Btn
+                                variant="primary"
+                                sm
+                                style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
+                                onClick={() => handleCommitClick(p.id, Stance.Adopt)}
+                              >
+                                <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> ADOPT
+                              </Btn>
+                              <Btn
+                                variant="danger"
+                                sm
+                                style={{ flex: 1 }}
+                                onClick={() => handleCommitClick(p.id, Stance.Reject)}
+                              >
+                                <Icon name="x" size={13} /> REJECT
+                              </Btn>
                             </div>
 
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-                              <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-2)', whiteSpace: 'nowrap', flexShrink: 0, flexWrap: 'wrap' }}>
+                              <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-2)', flexWrap: 'wrap' }}>
                                 <span className="row" style={{ gap: 4 }}>
                                   <Icon name="coins" size={12} stroke="var(--fg-3)" />
                                   <span>Wallet: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(holdings)}</span></span>
@@ -1040,7 +1013,7 @@ export default function App() {
                                 {eligibility?.holdings_e8s && eligibility.holdings_e8s > 0n && (
                                   <span className="row" style={{ gap: 4 }}>
                                     <span style={{ color: 'var(--fg-3)' }}>·</span>
-                                    <span>Neuron stake cap: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(eligibility.holdings_e8s)}</span></span>
+                                    <span>Stake cap: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(eligibility.holdings_e8s)}</span></span>
                                   </span>
                                 )}
                               </span>
@@ -1300,42 +1273,74 @@ export default function App() {
               </div>
             ) : (
               <div className="col" style={{ gap: 16 }}>
+                {/* Proposal + stance summary */}
                 <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
                   <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>PROPOSAL</span>
                   <span style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--fg)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
                     {getProposalTitle(confirmProposalId || 0n)}
                   </span>
-                  <div className="row" style={{ justifyContent: 'space-between', marginTop: 4 }}>
-                    <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>STANCE</span>
-                    <Chip tone={confirmStance === Stance.Adopt ? "ok" : "danger"} style={{ height: 18, fontSize: 10.5 }}>
-                      {confirmStance === Stance.Adopt ? "ADOPT" : "REJECT"}
+                  <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                    <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>YOUR STANCE</span>
+                    <Chip tone={confirmStance === Stance.Adopt ? "ok" : "danger"} style={{ height: 20, fontSize: 11 }}>
+                      {confirmStance === Stance.Adopt
+                        ? <><Icon name="checkCircle" size={11} stroke="var(--sprout)" /> ADOPT</>
+                        : <><Icon name="x" size={11} /> REJECT</>}
                     </Chip>
                   </div>
                 </div>
 
-                <div className="col" style={{ gap: 10 }}>
-                  <Eyebrow>Fee & Deposit Breakdown</Eyebrow>
-                  
-                  <div className="col" style={{ gap: 8, fontSize: 13 }}>
-                    <div className="row" style={{ justifyContent: 'space-between' }}>
-                      <span style={{ color: 'var(--fg-2)' }}>Target Amount (→ Cycles)</span>
-                      <span className="mono">{confirmAmount ? parseFloat(confirmAmount).toFixed(4) : "0.0000"} ICP</span>
-                    </div>
-                    <div className="row" style={{ justifyContent: 'space-between' }}>
-                      <span style={{ color: 'var(--fg-2)' }}>Protocol Fee (Non-refundable)</span>
-                      <span className="mono">0.0050 ICP</span>
-                    </div>
-                    <div className="row" style={{ justifyContent: 'space-between' }}>
-                      <span style={{ color: 'var(--fg-2)' }}>Ledger Tx & Reserve Fees</span>
-                      <span className="mono">0.0003 ICP</span>
-                    </div>
-                    <hr />
-                    <div className="row" style={{ justifyContent: 'space-between', fontWeight: 600 }}>
-                      <span style={{ color: 'var(--fg)' }}>Total Wallet Debit</span>
-                      <span className="mono" style={{ color: 'var(--burn)' }}>
-                        {confirmAmount ? (parseFloat(confirmAmount) + 0.0053).toFixed(4) : "0.0053"} ICP
-                      </span>
-                    </div>
+                {/* Amount input */}
+                <div className="col" style={{ gap: 8 }}>
+                  <label style={{ fontSize: 12, color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
+                    How much ICP to burn?
+                  </label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      type="number"
+                      min="1"
+                      step="0.1"
+                      placeholder="0.0"
+                      className="burn-input"
+                      style={{ fontSize: 22, padding: '10px 52px 10px 14px', fontFamily: 'var(--font-mono)' }}
+                      value={confirmAmount}
+                      onChange={(e) => { setConfirmAmount(e.target.value); setTxError(null); }}
+                      autoFocus
+                    />
+                    <span className="mono" style={{
+                      position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
+                      fontSize: 14, color: 'var(--fg-3)', pointerEvents: 'none'
+                    }}>ICP</span>
+                  </div>
+                  {/* Inline limits */}
+                  <div className="row" style={{ gap: 12, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
+                    <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>1.0 ICP</span></span>
+                    <span>Wallet: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(holdings)} ICP</span></span>
+                    {eligibility?.holdings_e8s && eligibility.holdings_e8s > 0n && (
+                      <span>Stake cap: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(eligibility.holdings_e8s)} ICP</span></span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Live fee breakdown */}
+                <div className="col" style={{ gap: 8, fontSize: 13, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+                  <div className="row" style={{ justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--fg-2)' }}>Target (→ Cycles)</span>
+                    <span className="mono">{confirmAmount ? parseFloat(confirmAmount).toFixed(4) : "—"} ICP</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--fg-2)' }}>Protocol fee</span>
+                    <span className="mono">0.0050 ICP</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--fg-2)' }}>Ledger fees</span>
+                    <span className="mono">0.0003 ICP</span>
+                  </div>
+                  <hr />
+                  <div className="row" style={{ justifyContent: 'space-between', fontWeight: 600 }}>
+                    <span style={{ color: 'var(--fg)' }}>Total debit</span>
+                    <span className="mono" style={{ color: confirmAmount ? 'var(--burn)' : 'var(--fg-3)' }}>
+                      {confirmAmount ? (parseFloat(confirmAmount) + 0.0053).toFixed(4) : "—"} ICP
+                    </span>
                   </div>
                 </div>
 
@@ -1353,8 +1358,12 @@ export default function App() {
                     <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setIsConfirming(false)}>
                       Cancel
                     </Btn>
-                    <Btn variant="primary" style={{ flex: 1 }} onClick={executeTransaction}>
-                      Confirm & Deposit
+                    <Btn
+                      variant="primary"
+                      style={{ flex: 1, opacity: confirmAmount && parseFloat(confirmAmount) >= 1 ? 1 : 0.45 }}
+                      onClick={executeTransaction}
+                    >
+                      <Icon name="flame" size={14} stroke="var(--char-950)" /> Burn {confirmAmount ? `${parseFloat(confirmAmount).toFixed(1)} ICP` : "ICP"}
                     </Btn>
                   </div>
                 )}
