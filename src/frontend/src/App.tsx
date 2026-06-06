@@ -618,7 +618,18 @@ export default function App() {
       });
 
       if (transferResult.__kind__ === "Err") {
-        throw new Error(`Ledger transfer failed: ${JSON.stringify(transferResult.Err)}`);
+        const err = transferResult.Err;
+        const kind = err.__kind__;
+        const detail =
+          kind === "BadFee"        ? `expected fee ${fmtICP(err.expected_fee)} ICP` :
+          kind === "InsufficientFunds" ? `balance is ${fmtICP(err.balance)} ICP` :
+          kind === "TooOld"        ? "transaction window expired" :
+          kind === "CreatedInFuture" ? "clock skew — try again" :
+          kind === "Duplicate"     ? `duplicate of block ${err.duplicate_of}` :
+          kind === "TemporarilyUnavailable" ? "ledger temporarily unavailable" :
+          kind === "GenericError"  ? err.message :
+          JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
+        throw new Error(`Ledger transfer failed (${kind}): ${detail}`);
       }
 
       // Step 3: Finalize commit on backend
