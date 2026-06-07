@@ -13,12 +13,12 @@ Work top to bottom. Nothing here is optional unless marked so.
 | Constant | Value |
 |---|---|
 | **Primary (leader) neuron ID** | `17802688826615984104` |
-| **Mainnet owner / admin principal** | `vx7jq-7hzke-2htid-ghjwp-foj2y-ah3e7-d3wqn-3yfce-7fhcu-bahq2-xqe` |
+| **Mainnet owner / admin principal** | `xpvre-j76fs-hptuk-4sfn2-eci54-x53uq-zkjkg-ge2xb-5vpif-hzlip-vae` |
 | Backup controller principal | `__FILL_IN__` |
 | Default threshold (e8s) | `200000000` (= 2 ICP) — adjustable at runtime via `admin_set_default_threshold` |
 | AI price (e8s) | `5000000` (= 0.05 ICP) |
-| Backend canister ID | _(filled after first deploy)_ |
-| Frontend canister ID | _(filled after first deploy)_ |
+| Backend canister ID | `k7dn6-qiaaa-aaaap-qutha-cai` |
+| Frontend canister ID | `kyclk-5qaaa-aaaap-quthq-cai` |
 
 The ICP ledger (`ryjl3-tyaaa-aaaaa-aaaba-cai`), CMC (`rkp4c-7iaaa-aaaaa-aaaca-cai`),
 and NNS Governance (`rrkah-fqaaa-aaaaa-aaaaq-cai`) are hard-coded and need no config.

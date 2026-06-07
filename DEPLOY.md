@@ -164,7 +164,7 @@ Always keep the previous WASM artifact. Consider versioning WASM builds by git t
 
 | Canister | Mainnet ID |
 |---|---|
-| backend | `—` |
-| frontend | `—` |
+| backend | `k7dn6-qiaaa-aaaap-qutha-cai` |
+| frontend | `kyclk-5qaaa-aaaap-quthq-cai` |
 
 *Update this table after the initial deploy.*

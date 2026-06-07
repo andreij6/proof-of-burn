@@ -581,5 +581,24 @@ service : (ledger_arg : LedgerArg) -> {
 
   icrc106_get_index_principal : () -> (GetIndexPrincipalResult) query;
 
-  is_ledger_ready : () -> (bool) query
+  is_ledger_ready : () -> (bool) query;
+
+  transfer : (record {
+    memo : nat64;
+    amount : record { e8s : nat64 };
+    fee : record { e8s : nat64 };
+    from_subaccount : opt blob;
+    to : blob;
+    created_at_time : opt record { timestamp_nanos : nat64 };
+  }) -> (variant {
+    Ok : nat64;
+    Err : variant {
+      BadFee : record { expected_fee : record { e8s : nat64 } };
+      InsufficientFunds : record { balance : record { e8s : nat64 } };
+      TxTooOld : record { allowed_window_nanos : nat64 };
+      TxCreatedInFuture;
+      TxDuplicate : record { duplicate_of : nat64 };
+    };
+  });
 }
+
