@@ -163,6 +163,10 @@ pub struct Config {
 pub struct Proposal {
     pub id: u64,
     pub title: String,
+    /// NNS proposal summary/description (distinct from the title). Defaulted on
+    /// decode so older stored proposals upgrade cleanly.
+    #[serde(default)]
+    pub summary: String,
     pub category: String,
     pub deadline: u64, // nanoseconds since epoch
     pub nns_proposal_id: Option<u64>,
@@ -590,6 +594,7 @@ fn seed_mock_proposals() {
             m.insert(138402, Proposal {
                 id: 138402,
                 title: "Reduce node-provider rewards by 12% to slow inflation".to_string(),
+                summary: "Lower the monthly node-provider reward rate to curb ICP inflation while the network is over-provisioned.".to_string(),
                 category: "Network economics".to_string(),
                 deadline: now + dur_2d_14h,
                 nns_proposal_id: Some(138402),
@@ -605,6 +610,7 @@ fn seed_mock_proposals() {
             m.insert(138388, Proposal {
                 id: 138388,
                 title: "Adopt SNS-3 treasury allocation framework".to_string(),
+                summary: "Ratify the SNS-3 framework governing how treasury funds are allocated across grants and liquidity.".to_string(),
                 category: "Governance".to_string(),
                 deadline: now + dur_5d_2h,
                 nns_proposal_id: Some(138388),
@@ -620,6 +626,7 @@ fn seed_mock_proposals() {
             m.insert(138376, Proposal {
                 id: 138376,
                 title: "Onboard eu-central-2 datacenter to the subnet".to_string(),
+                summary: "Add the eu-central-2 datacenter and its node operators to expand subnet geographic diversity.".to_string(),
                 category: "Node provider".to_string(),
                 deadline: now + dur_14h,
                 nns_proposal_id: Some(138376),
@@ -1503,19 +1510,20 @@ async fn fetch_live_proposals() {
             break;
         }
 
-        let title = info
-            .proposal
-            .as_ref()
+        // Keep title and summary as distinct fields (the NNS shows both). When a
+        // proposal has no explicit title (common for action-derived ones), fall
+        // back to a topic + id label rather than swallowing the summary.
+        let nns_proposal = info.proposal.as_ref();
+        let summary = nns_proposal.map(|p| p.summary.clone()).unwrap_or_default();
+        let title = nns_proposal
             .and_then(|p| p.title.clone())
-            .or_else(|| info.proposal.as_ref().map(|p| {
-                let s = &p.summary;
-                if s.len() > 80 { format!("{}…", &s[..80]) } else { s.clone() }
-            }))
-            .unwrap_or_else(|| format!("NNS Proposal #{}", nns_id));
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| format!("{} · #{}", nns_topic_label(info.topic), nns_id));
 
         let proposal = Proposal {
             id: nns_id,
             title,
+            summary,
             category: nns_topic_label(info.topic),
             deadline: deadline_ns,
             nns_proposal_id: Some(nns_id),
@@ -2070,6 +2078,7 @@ mod tests {
             id,
             nns_proposal_id: Some(id),
             title: format!("Test proposal {}", id),
+            summary: format!("Summary for proposal {}", id),
             category: "Governance".to_string(),
             status: status.to_string(),
             deadline: u64::MAX,
@@ -2239,6 +2248,7 @@ mod tests {
             id: 138402,
             nns_proposal_id: Some(138402),
             title: "Enable new subnet type".to_string(),
+            summary: "Enable a new subnet type for testing".to_string(),
             category: "SubnetManagement".to_string(),
             status: "open".to_string(),
             deadline: 1_750_000_000_000_000_000,

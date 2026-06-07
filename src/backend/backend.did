@@ -87,6 +87,7 @@ type Proposal = record {
   nns_proposal_id : opt nat64;
   reject_pot_e8s : nat64;
   title : text;
+  summary : text;
   deadline : nat64;
   adopt_pot_e8s : nat64;
   threshold_e8s : nat64;

@@ -849,19 +849,25 @@ export default function App() {
   ]);
   const SETTLED_STATUSES = new Set([CommitmentStatus.Burned, CommitmentStatus.Returned]);
 
+  // Newest proposals first (match the NNS), by NNS proposal id descending.
+  const byNewest = (a: Proposal, b: Proposal) => {
+    const ai = a.nns_proposal_id ?? a.id;
+    const bi = b.nns_proposal_id ?? b.id;
+    return bi > ai ? 1 : bi < ai ? -1 : 0;
+  };
   const openProposals = proposals.filter(p => {
     const c = myCommitments.find(m => m.proposal_id === p.id);
     return !c && (p.status === 'open' || p.status === 'met');
-  });
+  }).sort(byNewest);
   const committedProposals = proposals.filter(p => {
     const c = myCommitments.find(m => m.proposal_id === p.id);
     return c && ACTIVE_STATUSES.has(c.status);
-  });
+  }).sort(byNewest);
   const historyProposals = proposals.filter(p => {
     const c = myCommitments.find(m => m.proposal_id === p.id);
     return (c && SETTLED_STATUSES.has(c.status)) ||
            (!c && (p.status === 'voted' || p.status === 'settled' || p.status === 'abstained'));
-  });
+  }).sort(byNewest);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg)' }}>
@@ -1385,9 +1391,17 @@ export default function App() {
                                     #{proposalIdStr}
                                   </span>
                                 </div>
-                                <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 500, textWrap: 'pretty' }}>
+                                <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 600, textWrap: 'pretty' }}>
                                   {p.title}
                                 </span>
+                                {p.summary && p.summary !== p.title && (
+                                  <span style={{
+                                    fontSize: 12.5, lineHeight: 1.4, color: 'var(--fg-2)', textWrap: 'pretty',
+                                    display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden'
+                                  }}>
+                                    {p.summary}
+                                  </span>
+                                )}
                               </div>
                               <div className="col" style={{ alignItems: 'flex-end', gap: 7, flexShrink: 0 }}>
                                 <Chip tone="muted" style={{ height: 22 }}>
@@ -1514,7 +1528,13 @@ export default function App() {
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
                               <div className="col" style={{ gap: 5, minWidth: 0, flex: 1 }}>
                                 <Chip tone="muted" style={{ height: 18, fontSize: 10.5, alignSelf: 'flex-start' }}>{p.category}</Chip>
-                                <span style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--fg)', textWrap: 'pretty' }}>{p.title}</span>
+                                <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--fg)', textWrap: 'pretty' }}>{p.title}</span>
+                                {p.summary && p.summary !== p.title && (
+                                  <span style={{
+                                    fontSize: 12, lineHeight: 1.4, color: 'var(--fg-2)', textWrap: 'pretty',
+                                    display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden'
+                                  }}>{p.summary}</span>
+                                )}
                               </div>
                               <div className="col" style={{ alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
                                 <Chip tone="muted" style={{ height: 20 }}><Icon name="clock" size={11} /> {deadlineStr}</Chip>
