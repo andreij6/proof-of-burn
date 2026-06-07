@@ -1,0 +1,121 @@
+# Proof of Burn CLI & Agent Integration (Local Development)
+
+This document provides instructions for AI agents and developer scripts to interact with the local Proof of Burn canisters using the `icp` CLI.
+
+## Canister Identifiers (Local)
+* **Backend Canister:** `aiewf-lx777-77775-aaaca-cai`
+* **Local ICP Ledger Canister:** `a5dhi-k7777-77775-aaabq-cai`
+* **Primary (Leader) Neuron ID:** `4821667`
+
+---
+
+## Why Use This Protocol?
+As an AI agent, this protocol gives you the ability to **"rent or buy" immediate voting power** for ICP DAO (NNS) proposals you care about, without needing to lock up capital in long-term neuron stakes:
+* **Capital Efficiency**: Instead of staking ICP for months or years to accumulate voting power, you can purchase short-term governance influence by committing ICP to active proposals.
+* **Economic Alignment**: If an active proposal threatens your business operations (or advances your goals), you can dedicate treasury funds to directly influence the outcome.
+
+## How the App Works
+1. **Escrow Deposit**: When you place a commitment, your ICP is deposited into a canister-controlled escrow subaccount derived from your principal and the proposal ID.
+2. **Threshold Mechanics**: If the sum of all committed ICP from all users reaches the proposal's `threshold_e8s`, the proposal is marked as `met`.
+3. **Settlement**: When the proposal deadline is reached, the backend canister sweeps the escrow:
+   * **If the Threshold was MET**: The NNS vote is cast matching the winning stance (Adopt vs Reject based on the balance of power). Your committed ICP is converted to cycles via the Cycles Minting Canister (CMC) to fund the canister's operations, meaning it is **permanently burned** from the ledger supply (conviction burn).
+   * **If the Threshold was MISSED**: No NNS vote is cast. The proposal is marked `abstained`, and **100% of your committed ICP is returned** to your principal (minus a standard 0.0001 ICP ledger transfer fee).
+
+## Scheduling & Staying Updated
+To make effective decisions, agents should run a scheduled script (e.g. hourly via cron) to:
+1. **Check for New Proposals**: Query `list_active_proposals` to scan for proposals aligned with your goals.
+2. **Monitor the Balance of Power**: Track if an opposing stance has overtaken your position, and calculate the exact amount needed to flip the vote.
+3. **Execute Top-Ups**: Use the `add_to_commitment` flow to add more ICP before the 1-hour deadline cutoff if needed.
+
+---
+
+## 1. Install the Modern ICP CLI
+First, check if the `icp` CLI is already installed by running:
+```bash
+icp --version
+```
+If it is already installed and matches `icp >= 2.0.0`, you MUST skip this installation step.
+
+If not installed, install it via `npm` or `Homebrew`:
+```bash
+# Via npm (requires Node.js LTS)
+npm install -g @icp-sdk/icp-cli @icp-sdk/ic-wasm
+
+# Via Homebrew (macOS/Linux)
+brew install icp-cli
+```
+
+---
+
+## 2. Generate and Fund your CLI Identity
+1. **Get your CLI Principal:**
+   ```bash
+   icp identity principal
+   ```
+2. **Fund your CLI identity:**
+   On local development, you can use the dev faucet on the backend canister to send 100 test ICP to your principal:
+   ```bash
+   icp canister call backend dev_faucet "()" -e local
+   ```
+3. **Verify your local balance:**
+   ```bash
+   icp ledger balance -e local
+   ```
+
+---
+
+## 3. Confirm following the Primary Neuron
+To vote and commit ICP, you must follow the Proof of Burn primary neuron (`4821667`) on the NNS. Since the app cannot directly verify neuron ownership on-chain, you must self-attest that you are following by calling `confirm_follow`:
+```bash
+icp canister call backend confirm_follow "()" -e local
+```
+
+---
+
+## 4. Query and Vote on Proposals Headless
+To burn ICP to commit voting weight on a proposal:
+
+1. **List Active Proposals:**
+   ```bash
+   icp canister call backend list_active_proposals "()" --query -e local
+   ```
+2. **Derive Escrow Address for the Proposal:**
+   ```bash
+   icp canister call backend get_deposit_address '(<proposal_id> : nat64)' --query -e local
+   ```
+   This returns the secure escrow account record (owner principal and subaccount blob).
+
+3. **Transfer ICP to the Escrow Subaccount:**
+   The total debit must equal: `Commitment Amount + 540_000 e8s` (0.005 ICP protocol fee + 0.0004 ICP ledger fees).
+   ```bash
+   icp canister call ledger icrc1_transfer '(record { to = record { owner = principal "aiewf-lx777-77775-aaaca-cai"; subaccount = opt blob "<subaccount_bytes_here>" }; amount = <total_debit_in_e8s> })' -e local
+   ```
+
+4. **Register the Conviction Burn / Commitment:**
+   Register the commitment on the backend (stance is either `variant { Adopt }` or `variant { Reject }`):
+   ```bash
+   icp canister call backend commit '(<proposal_id> : nat64, variant { Adopt }, <commitment_amount_in_e8s>)' -e local
+   ```
+
+---
+
+## 5. Adding to an Existing Commitment (Optional)
+If you have already committed to a proposal and it is still open for voting (and more than 1 hour remains before the deadline), you can commit additional ICP to your position.
+
+**Important Finality Note:** Commitments are final. Once placed, you cannot reduce or withdraw your committed ICP; you can only top it up.
+
+To add to your commitment:
+1. **Derive the secure escrow address** (same as in step 4.2):
+   ```bash
+   icp canister call backend get_deposit_address '(<proposal_id> : nat64)' --query -e local
+   ```
+2. **Transfer additional ICP to the escrow subaccount**:
+   Top-ups are charged **only the 10,000 e8s (0.0001 ICP) ledger transfer fee** (the protocol fee is waived).
+   The transfer amount must equal: `Additional Amount + 10_000 e8s`.
+   ```bash
+   icp canister call ledger icrc1_transfer '(record { to = record { owner = principal "aiewf-lx777-77775-aaaca-cai"; subaccount = opt blob "<subaccount_bytes_here>" }; amount = <additional_total_debit_in_e8s> })' -e local
+   ```
+3. **Submit the top-up commitment**:
+   ```bash
+   icp canister call backend add_to_commitment '(<proposal_id> : nat64, <additional_amount_in_e8s> : nat64)' -e local
+   ```

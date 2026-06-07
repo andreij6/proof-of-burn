@@ -1286,6 +1286,102 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
     Ok(())
 }
 
+#[ic_cdk::update]
+async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = ic_cdk::caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    // 1. Lookup existing commitment — must exist and be Pending
+    let key = CommitmentKey { proposal_id, principal: caller };
+    let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key))
+        .ok_or("NO_EXISTING_COMMITMENT")?;
+    if commitment.status != CommitmentStatus::Pending {
+        return Err("COMMITMENT_NOT_PENDING".to_string());
+    }
+
+    // 2. Validate additional amount
+    if additional_e8s < MIN_COMMIT_E8S {
+        return Err("BELOW_MINIMUM".to_string());
+    }
+    let new_amount = commitment.amount_e8s
+        .checked_add(additional_e8s)
+        .ok_or("AMOUNT_OVERFLOW")?;
+    if new_amount > MAX_COMMIT_E8S {
+        return Err("EXCEEDS_GLOBAL_CAP".to_string());
+    }
+
+    // 3. Validate proposal is still open for voting
+    let mut proposal = PROPOSALS.with(|map| map.borrow().get(&proposal_id))
+        .ok_or("PROPOSAL_NOT_FOUND")?;
+    if proposal.status != "open" && proposal.status != "met" {
+        return Err("COMMITMENT_CLOSED".to_string());
+    }
+    let now = ic_cdk::api::time();
+    if now >= proposal.deadline - 3_600_000_000_000 {
+        return Err("COMMITMENT_CLOSED".to_string());
+    }
+
+    // 4. Escrow balance check — no protocol fee on top-ups, only need
+    //    the additional amount deposited. The 30,000 e8s settlement fee
+    //    reserve was already deposited with the original commit.
+    let subaccount = commitment.subaccount;
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+    let escrow_account = LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(subaccount),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow_account).await?;
+    let required_balance = new_amount
+        .checked_add(30_000)
+        .ok_or("OVERFLOW")?;
+    if balance < required_balance {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+
+    // 5. Update commitment amount (no protocol fee transfer)
+    commitment.amount_e8s = new_amount;
+    COMMITMENTS.with(|map| { map.borrow_mut().insert(key, commitment.clone()); });
+
+    // 6. Update proposal pots
+    if commitment.stance == Stance::Adopt {
+        proposal.adopt_pot_e8s = proposal.adopt_pot_e8s
+            .checked_add(additional_e8s).ok_or("POT_OVERFLOW")?;
+    } else {
+        proposal.reject_pot_e8s = proposal.reject_pot_e8s
+            .checked_add(additional_e8s).ok_or("POT_OVERFLOW")?;
+    }
+    proposal.total_committed_e8s = proposal.total_committed_e8s
+        .checked_add(additional_e8s).ok_or("POT_OVERFLOW")?;
+    if proposal.total_committed_e8s >= proposal.threshold_e8s {
+        proposal.status = "met".to_string();
+    }
+    PROPOSALS.with(|map| { map.borrow_mut().insert(proposal_id, proposal); });
+
+    // 7. Update user aggregates (don't increment proposals_joined)
+    USER_AGGREGATES.with(|map| {
+        let mut agg = map.borrow().get(&caller).unwrap_or(UserAggregates {
+            total_committed_escrow: 0, total_burned: 0, proposals_joined: 0,
+        });
+        agg.total_committed_escrow = agg.total_committed_escrow
+            .checked_add(additional_e8s).unwrap_or(u64::MAX);
+        map.borrow_mut().insert(caller, agg);
+    });
+
+    // 8. Audit log
+    let log_entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "add_commitment".to_string(),
+        proposal_id,
+        user: caller,
+        amount_e8s: additional_e8s,
+    };
+    AUDIT_LOG.with(|log| { let _ = log.borrow_mut().append(&log_entry); });
+
+    Ok(())
+}
+
 #[ic_cdk::query]
 fn get_my_commitments() -> Vec<Commitment> {
     let caller = ic_cdk::caller();

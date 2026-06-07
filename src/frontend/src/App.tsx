@@ -258,6 +258,27 @@ function fmtICP(n: number | bigint) {
   return (Number(n) / 100_000_000).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
+function fmtFlipAmount(e8s: bigint): string {
+  if (e8s === 0n) return "0.0";
+  const num = Number(e8s) / 100_000_000;
+  if (num < 0.1) {
+    return num.toFixed(8).replace(/\.?0+$/, "");
+  }
+  return num.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+}
+
+function getFlipCalculation(adoptE8s: bigint, rejectE8s: bigint) {
+  if (adoptE8s > rejectE8s) {
+    const diff = adoptE8s - rejectE8s;
+    return { toStance: 'Reject', amountE8s: diff + 1n };
+  } else if (rejectE8s > adoptE8s) {
+    const diff = rejectE8s - adoptE8s;
+    return { toStance: 'Adopt', amountE8s: diff + 1n };
+  } else {
+    return { toStance: 'either', amountE8s: 1n };
+  }
+}
+
 // Neuron IDs are u64 and exceed Number.MAX_SAFE_INTEGER — keep them BigInt.
 // Displayed as plain decimal digits with no separators — the NNS itself
 // shows neuron ids without commas, and a comma at "4,821,667" reads like
@@ -408,6 +429,15 @@ export default function App() {
   const [confirmAmount, setConfirmAmount] = useState<string>("");
   const [confirmStance, setConfirmStance] = useState<Stance | null>(null);
 
+  // Add-more modal state (top up existing commitment)
+  const [isAddingMore, setIsAddingMore] = useState(false);
+  const [addMoreProposalId, setAddMoreProposalId] = useState<bigint | null>(null);
+  const [addMoreAmount, setAddMoreAmount] = useState("");
+  const [addMoreTxStep, setAddMoreTxStep] = useState("");
+  const [addMoreTxError, setAddMoreTxError] = useState<string | null>(null);
+  const [addMoreTxSuccess, setAddMoreTxSuccess] = useState(false);
+  const [isAddMoreTransacting, setIsAddMoreTransacting] = useState(false);
+
   // System health state
   const [cycleBalance, setCycleBalance] = useState<bigint | null>(null);
   const [treasuryBalance, setTreasuryBalance] = useState<bigint | null>(null);
@@ -431,6 +461,7 @@ export default function App() {
 
   // Neuron copy status
   const [copied, setCopied] = useState(false);
+  const [skillsCopied, setSkillsCopied] = useState(false);
 
   // Active tab selection
   const [activeTab, setActiveTab] = useState<'open' | 'committed' | 'history'>('open');
@@ -876,6 +907,14 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleCopyAgentSkills = () => {
+    const llmsUrl = `${window.location.origin}/llms-${isLocal ? 'local' : 'prod'}.txt`;
+    const clipboardMsg = `Fetch ${llmsUrl} and follow its instructions when interacting with Proof of Burn`;
+    navigator.clipboard.writeText(clipboardMsg);
+    setSkillsCopied(true);
+    setTimeout(() => setSkillsCopied(false), 2000);
+  };
+
   // Open modal with stance pre-selected; amount is entered inside the modal
   const handleCommitClick = (proposalId: bigint, stance: Stance) => {
     setConfirmProposalId(proposalId);
@@ -963,6 +1002,90 @@ export default function App() {
       setTxError(err.message || String(err));
     } finally {
       setIsTransacting(false);
+    }
+  };
+
+  // Open "Add More" modal for an existing commitment
+  const handleAddMoreClick = (proposalId: bigint) => {
+    setAddMoreProposalId(proposalId);
+    setAddMoreAmount("");
+    setIsAddingMore(true);
+    setAddMoreTxSuccess(false);
+    setAddMoreTxError(null);
+    setAddMoreTxStep("");
+  };
+
+  // Execute add-more: deposit additional ICP + call add_to_commitment
+  const executeAddMore = async () => {
+    if (!actor || !addMoreProposalId) return;
+
+    const amount = parseFloat(addMoreAmount);
+    if (isNaN(amount) || amount < 1.0) {
+      setAddMoreTxError("Please enter a valid amount (minimum 1.0 ICP).");
+      return;
+    }
+    const amountE8s = BigInt(Math.floor(amount * 100_000_000));
+    // Only charge 1 ledger fee for the deposit (no protocol fee on top-ups)
+    const requiredTotal = amountE8s + 10_000n;
+    if (requiredTotal > holdings) {
+      setAddMoreTxError(`Insufficient wallet balance — need at least ${fmtICP(requiredTotal)} ICP (amount + deposit fee).`);
+      return;
+    }
+
+    setIsAddMoreTransacting(true);
+    setAddMoreTxError(null);
+
+    try {
+      // Step 1: Get deterministic escrow address (same subaccount)
+      setAddMoreTxStep("Deriving escrow subaccount...");
+      const depositAccount = await actor.get_deposit_address(addMoreProposalId);
+
+      // Step 2: Deposit additional ICP into escrow (only the additional amount)
+      setAddMoreTxStep("Step 1/2: Depositing additional ICP into escrow...");
+      const ledgerActor = createLedgerActor(ledgerCanisterId, {
+        agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
+      });
+
+      const transferResult = await ledgerActor.icrc1_transfer({
+        to: {
+          owner: depositAccount.owner,
+          subaccount: depositAccount.subaccount ? depositAccount.subaccount : undefined
+        },
+        amount: amountE8s,
+      });
+
+      if (transferResult.__kind__ === "Err") {
+        const err = transferResult.Err;
+        const kind = err.__kind__;
+        const detail =
+          kind === "BadFee"        ? `expected fee ${fmtICP((err as any).BadFee.expected_fee)} ICP` :
+          kind === "InsufficientFunds" ? `balance is ${fmtICP((err as any).InsufficientFunds.balance)} ICP` :
+          kind === "TooOld"        ? "transaction window expired" :
+          kind === "CreatedInFuture" ? "clock skew — try again" :
+          kind === "Duplicate"     ? `duplicate of block ${(err as any).Duplicate.duplicate_of}` :
+          kind === "TemporarilyUnavailable" ? "ledger temporarily unavailable" :
+          kind === "GenericError"  ? (err as any).GenericError.message :
+          JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
+        throw new Error(`Ledger transfer failed (${kind}): ${detail}`);
+      }
+
+      // Step 3: Finalize on backend
+      setAddMoreTxStep("Step 2/2: Updating commitment on-chain...");
+      const result = await actor.add_to_commitment(addMoreProposalId, amountE8s);
+
+      if (result.__kind__ === "Err") {
+        throw new Error(`Add-to-commitment failed: ${result.Err}`);
+      }
+
+      setAddMoreTxSuccess(true);
+      setAddMoreTxStep("Additional commitment registered!");
+      await refreshAllData();
+
+    } catch (err: any) {
+      console.error("Add-more transaction error:", err);
+      setAddMoreTxError(err.message || String(err));
+    } finally {
+      setIsAddMoreTransacting(false);
     }
   };
 
@@ -1272,20 +1395,56 @@ export default function App() {
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, maxWidth: 480 }}>
                   Burn ICP to temporarily borrow the community leader neuron's voting power and steer the NNS proposals you care about. The more you commit, the more weight your side carries — your conviction decides which way the neuron votes.
                 </p>
-                <button
-                  onClick={() => setIsDetailsOpen(true)}
-                  style={{
-                    background: 'transparent', border: 'none', color: 'var(--burn)',
-                    cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
-                    padding: 0, fontSize: 13.5, fontWeight: 500, width: 'fit-content',
-                    marginTop: 4, transition: 'opacity 0.2s',
-                  }}
-                  onMouseEnter={(e) => e.currentTarget.style.opacity = '0.8'}
-                  onMouseLeave={(e) => e.currentTarget.style.opacity = '1'}
-                >
-                  <Icon name="info" size={13} stroke="var(--burn)" />
-                  More details
-                </button>
+                <div className="row" style={{ gap: 14, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
+                  <button
+                    onClick={handleCopyAgentSkills}
+                    style={{
+                      background: 'var(--burn)',
+                      color: 'var(--char-950)',
+                      border: 'none',
+                      borderRadius: 30,
+                      padding: '10px 18px',
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      letterSpacing: '0.04em',
+                      textTransform: 'uppercase',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      boxShadow: '0 0 12px color-mix(in srgb, var(--burn) 25%, transparent)',
+                      transition: 'transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), filter var(--dur-fast) var(--ease-out)',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.transform = 'translateY(-1px)';
+                      e.currentTarget.style.filter = 'brightness(1.08)';
+                      e.currentTarget.style.boxShadow = '0 4px 16px color-mix(in srgb, var(--burn) 35%, transparent)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.transform = 'none';
+                      e.currentTarget.style.filter = 'none';
+                      e.currentTarget.style.boxShadow = '0 0 12px color-mix(in srgb, var(--burn) 25%, transparent)';
+                    }}
+                  >
+                    <Icon name={skillsCopied ? "check" : "copy"} size={13} stroke="var(--char-950)" />
+                    {skillsCopied ? "Copied!" : 'AI Proposal Voting Skill'}
+                  </button>
+
+                  <button
+                    onClick={() => setIsDetailsOpen(true)}
+                    style={{
+                      background: 'transparent', border: 'none', color: 'var(--burn)',
+                      cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                      padding: 0, fontSize: 13.5, fontWeight: 500, width: 'fit-content',
+                      transition: 'opacity 0.2s',
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.opacity = '0.8'}
+                    onMouseLeave={(e) => e.currentTarget.style.opacity = '1'}
+                  >
+                    <Icon name="info" size={13} stroke="var(--burn)" />
+                    More details
+                  </button>
+                </div>
               </div>
             </Reveal>
 
@@ -1294,7 +1453,20 @@ export default function App() {
               <div className="card col" style={{ gap: 13 }}>
                 <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
                   <div className="col" style={{ gap: 7, minWidth: 0 }}>
-                    <Eyrow>Follow this neuron</Eyrow>
+                    <Eyrow>
+                      <span
+                        style={{
+                          color: 'var(--sprout)',
+                          fontWeight: 'bold',
+                        }}
+                      >
+                        {leaderInfo && leaderInfo.voting_power > 0n
+                          ? `${fmtVP(
+                              leaderInfo.voting_power
+                            )} VOTING POWER`
+                          : '… VOTING POWER'}
+                      </span>
+                    </Eyrow>
                     <div className="row" style={{ gap: 8, alignItems: 'center' }}>
                       <span className="mono" style={{ fontSize: 18, color: 'var(--fg)', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
                         Neuron {formatNeuronId(config?.primary_neuron_id)}
@@ -1318,14 +1490,16 @@ export default function App() {
                   <div style={{ height: 6, borderRadius: 999, background: 'var(--char-800)', overflow: 'hidden' }}>
                     <div style={{ width: '72%', height: '100%', background: 'var(--border-hi)', borderRadius: 999 }} />
                   </div>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
-                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>
+                  <div className="row" style={{ gap: 10 }}>
+                    <span
+                      className="mono"
+                      style={{
+                        fontSize: 11.5,
+                        color: 'var(--fg-3)',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
                       Community Leader Neuron
-                    </span>
-                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)', whiteSpace: 'nowrap', flexShrink: 0 }}>
-                      {leaderInfo && leaderInfo.voting_power > 0n
-                        ? `${fmtVP(leaderInfo.voting_power)} Voting Power`
-                        : "… Voting Power"}
                     </span>
                   </div>
                 </div>
@@ -1473,6 +1647,17 @@ export default function App() {
                         <Chip tone="muted"><LiveDot on={motion !== 'off'} /> Open</Chip>
                       );
 
+                      const flipInfo = getFlipCalculation(p.adopt_pot_e8s, p.reject_pot_e8s);
+                      const flipLabel = flipInfo.toStance === 'either' ? (
+                        <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          Tied: +0.00000001 ICP to lead
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          To flip to <strong style={{ color: flipInfo.toStance === 'Adopt' ? 'var(--sprout)' : 'var(--ember)', fontWeight: 600 }}>{flipInfo.toStance.toUpperCase()}</strong>: <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtFlipAmount(flipInfo.amountE8s)} ICP</span>
+                        </span>
+                      );
+
                       // Calculate deadline string
                       const remainingNs = Number(p.deadline) - Date.now() * 1_000_000;
                       const remainingH = Math.max(0, Math.floor(remainingNs / (3600 * 1_000_000_000)));
@@ -1539,6 +1724,7 @@ export default function App() {
                                   <Icon name="clock" size={11} /> {deadlineStr}
                                 </Chip>
                                 {tier >= 1 && statusChip}
+                                {showBurn && flipLabel}
                               </div>
                             </div>
 
@@ -1650,6 +1836,16 @@ export default function App() {
                       const remainingD = Math.floor(remainingH / 24);
                       const deadlineStr = remainingD > 0 ? `${remainingD}d ${remainingH % 24}h` : `${remainingH}h`;
                       const isRetrying = myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund;
+                      const flipInfo = getFlipCalculation(p.adopt_pot_e8s, p.reject_pot_e8s);
+                      const flipLabel = flipInfo.toStance === 'either' ? (
+                        <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          Tied: +0.00000001 ICP to lead
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                          To flip to <strong style={{ color: flipInfo.toStance === 'Adopt' ? 'var(--sprout)' : 'var(--ember)', fontWeight: 600 }}>{flipInfo.toStance.toUpperCase()}</strong>: <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtFlipAmount(flipInfo.amountE8s)} ICP</span>
+                        </span>
+                      );
                       return (
                         <Reveal key={p.id.toString()} delay={140} motion={motion}>
                           <div className="col" style={{
@@ -1673,6 +1869,7 @@ export default function App() {
                                 {met
                                   ? <Chip tone="burn"><Icon name="flame" size={11} stroke="var(--burn)" /> Threshold met</Chip>
                                   : <Chip tone="muted"><LiveDot on={motion !== 'off'} /> Open</Chip>}
+                                {flipLabel}
                               </div>
                             </div>
                             <BalanceOfPowerBar adopt={p.adopt_pot_e8s} reject={p.reject_pot_e8s} />
@@ -1688,6 +1885,21 @@ export default function App() {
                               </span>
                               {isRetrying && (
                                 <Chip tone="danger" style={{ fontSize: 11 }}><Icon name="x" size={10} /> Error — retrying</Chip>
+                              )}
+                              {!isRetrying && myCommitment.status === CommitmentStatus.Pending
+                                && (p.status === 'open' || p.status === 'met')
+                                && remainingNs > 3_600_000_000_000 && (
+                                <button
+                                  onClick={() => handleAddMoreClick(p.id)}
+                                  style={{
+                                    background: 'none', border: 'none', cursor: 'pointer',
+                                    color: 'var(--burn)', fontSize: 11.5, padding: 0,
+                                    display: 'flex', alignItems: 'center', gap: 4,
+                                    textDecoration: 'underline', whiteSpace: 'nowrap'
+                                  }}
+                                >
+                                  + Add More
+                                </button>
                               )}
                             </div>
                             <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
@@ -2308,6 +2520,168 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ── Add More Commitment Modal ── */}
+      {isAddingMore && (() => {
+        const existingCommitment = addMoreProposalId
+          ? myCommitments.find(c => c.proposal_id === addMoreProposalId)
+          : null;
+        return (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }}>
+          <div className="card col" style={{
+            maxWidth: 440, width: '100%', gap: 20, background: 'var(--surface)',
+            border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)'
+          }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="flame" size={18} stroke="var(--burn)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Add to Commitment</h4>
+              </span>
+              {!isAddMoreTransacting && (
+                <button onClick={() => setIsAddingMore(false)} style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)'
+                }}>
+                  <Icon name="x" size={16} />
+                </button>
+              )}
+            </div>
+
+            {addMoreTxError && (
+              <div style={{
+                padding: 12, borderRadius: 6, background: 'var(--ember-dim)',
+                border: '1px solid var(--ember)', color: 'var(--ember)', fontSize: 13,
+                lineHeight: 1.4
+              }}>
+                <b>Transaction Failed:</b> {addMoreTxError}
+              </div>
+            )}
+
+            {addMoreTxSuccess ? (
+              <div className="col" style={{ alignItems: 'center', textAlign: 'center', gap: 14, padding: '10px 0' }}>
+                <div style={{
+                  width: 48, height: 48, borderRadius: 999, background: 'var(--sprout-dim)',
+                  border: '1px solid var(--sprout)', display: 'grid', placeItems: 'center',
+                  color: 'var(--sprout)'
+                }}>
+                  <Icon name="checkCircle" size={24} stroke="var(--sprout)" />
+                </div>
+                <div className="col" style={{ gap: 4 }}>
+                  <h5 style={{ margin: 0, color: 'var(--fg)' }}>Commitment Updated!</h5>
+                  <p style={{ fontSize: 13, color: 'var(--fg-2)' }}>
+                    Your additional {addMoreAmount} ICP has been added to your existing commitment. Your new total is locked in escrow under the same terms.
+                  </p>
+                </div>
+                <Btn variant="primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setIsAddingMore(false)}>
+                  Close
+                </Btn>
+              </div>
+            ) : (
+              <div className="col" style={{ gap: 16 }}>
+                {/* Existing commitment summary */}
+                <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+                  <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>PROPOSAL</span>
+                  <span style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--fg)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                    {getProposalTitle(addMoreProposalId || 0n)}
+                  </span>
+                  <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                    <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>CURRENT COMMITMENT</span>
+                    <span className="row" style={{ gap: 6 }}>
+                      <span className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--fg)' }}>
+                        {existingCommitment ? fmtICP(existingCommitment.amount_e8s) : '—'} ICP
+                      </span>
+                      {existingCommitment && (
+                        <Chip tone={existingCommitment.stance === Stance.Adopt ? "ok" : "danger"} style={{ height: 18, fontSize: 10.5 }}>
+                          {existingCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
+                        </Chip>
+                      )}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Amount input */}
+                <div className="col" style={{ gap: 8 }}>
+                  <label style={{ fontSize: 12, color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
+                    Additional ICP to add
+                  </label>
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      type="number"
+                      min="1"
+                      step="0.1"
+                      placeholder="0.0"
+                      className="burn-input"
+                      style={{ fontSize: 22, padding: '10px 52px 10px 14px', fontFamily: 'var(--font-mono)' }}
+                      value={addMoreAmount}
+                      onChange={(e) => { setAddMoreAmount(e.target.value); setAddMoreTxError(null); }}
+                      autoFocus
+                    />
+                    <span className="mono" style={{
+                      position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
+                      fontSize: 14, color: 'var(--fg-3)', pointerEvents: 'none'
+                    }}>ICP</span>
+                  </div>
+                  <div className="row" style={{ gap: 12, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
+                    <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>1.0 ICP</span></span>
+                    <span>Wallet: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(holdings)} ICP</span></span>
+                  </div>
+                </div>
+
+                {/* Fee breakdown — simpler than initial commit */}
+                <div className="col" style={{ gap: 8, fontSize: 13, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+                  <div className="row" style={{ justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--fg-2)' }}>Additional weight</span>
+                    <span className="mono">{addMoreAmount ? parseFloat(addMoreAmount).toFixed(4) : "—"} ICP</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between' }}>
+                    <span style={{ color: 'var(--fg-2)' }}>Ledger fee</span>
+                    <span className="mono">0.0001 ICP</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between', fontSize: 11.5, color: 'var(--fg-3)' }}>
+                    <span>Protocol fee</span>
+                    <span className="mono" style={{ textDecoration: 'line-through' }}>waived (already paid)</span>
+                  </div>
+                  <hr />
+                  <div className="row" style={{ justifyContent: 'space-between', fontWeight: 600 }}>
+                    <span style={{ color: 'var(--fg)' }}>Total debit</span>
+                    <span className="mono" style={{ color: addMoreAmount ? 'var(--burn)' : 'var(--fg-3)' }}>
+                      {addMoreAmount ? (parseFloat(addMoreAmount) + 0.0001).toFixed(4) : "—"} ICP
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
+                  ⚠️ <b>Top-up is final.</b> Your additional ICP will be deposited into the same escrow. No protocol fee is charged — only the 0.0001 ICP ledger transfer fee. Your stance ({existingCommitment?.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}) cannot be changed.
+                </div>
+
+                {isAddMoreTransacting ? (
+                  <div className="col" style={{ alignItems: 'center', gap: 10, padding: '8px 0' }}>
+                    <LiveDot size={8} color="var(--burn)" />
+                    <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>{addMoreTxStep}</span>
+                  </div>
+                ) : (
+                  <div className="row" style={{ gap: 12 }}>
+                    <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setIsAddingMore(false)}>
+                      Cancel
+                    </Btn>
+                    <Btn
+                      variant="primary"
+                      style={{ flex: 1, opacity: addMoreAmount && parseFloat(addMoreAmount) >= 1 ? 1 : 0.45 }}
+                      onClick={executeAddMore}
+                    >
+                      <Icon name="flame" size={14} stroke="var(--char-950)" /> Add {addMoreAmount ? `${parseFloat(addMoreAmount).toFixed(1)} ICP` : "ICP"}
+                    </Btn>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+        );
+      })()}
 
       {/* ── More Details Dialog ── */}
       {isDetailsOpen && (

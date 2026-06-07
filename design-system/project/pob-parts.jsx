@@ -77,7 +77,14 @@ function NeuronBlock({ tier }) {
       background: 'var(--surface)', padding: 16 }}>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
         <div className="col" style={{ gap: 7, minWidth: 0 }}>
-          <Eyebrow>Follow this neuron</Eyebrow>
+          <Eyebrow
+            style={{
+              color: 'var(--sprout)',
+              fontWeight: 'bold',
+            }}
+          >
+            4,821,667 VOTING POWER
+          </Eyebrow>
           <div className="row" style={{ gap: 8, alignItems: 'center' }}>
             <span className="mono" style={{ fontSize: 18, color: 'var(--fg)', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>Neuron 4.821.667</span>
             <button title="Copy neuron ID" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24,
@@ -94,7 +101,16 @@ function NeuronBlock({ tier }) {
         <div style={{ height: 6, borderRadius: 999, background: 'var(--char-800)', overflow: 'hidden' }}>
           <div style={{ width: '72%', height: '100%', background: 'var(--border-hi)', borderRadius: 999 }} /></div>
         <div className="row" style={{ justifyContent: 'space-between', gap: 10 }}>
-          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>VP 4,821,667 · 1,204 votes</span>
+          <span
+            className="mono"
+            style={{
+              fontSize: 11.5,
+              color: 'var(--fg-3)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            1,204 votes
+          </span>
           <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)', whiteSpace: 'nowrap', flexShrink: 0 }}>8y dissolve</span>
         </div>
       </div>

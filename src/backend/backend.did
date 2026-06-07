@@ -125,6 +125,10 @@ service : (InitPayload) -> {
   // Admin: withdraw ICP from the treasury subaccount to a destination principal.
   admin_withdraw_treasury : (principal, nat64) -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
+  // Top up an existing commitment with additional ICP. No protocol fee is
+  // charged — only the deposit ledger fee (0.0001 ICP). The proposal must
+  // still be open/met and >1 hour from deadline.
+  add_to_commitment : (nat64, nat64) -> (Result);
   // Local-dev faucet — sends 100 ICP from the canister's own account to the caller.
   // Rejected on mainnet (ledger canister ID check). Never callable by anonymous.
   dev_faucet : () -> (Result);

@@ -33,11 +33,11 @@ step() { echo -e "\n── $1 ──"; }
 # ── Setup identities ──────────────────────────────────────────────────────────
 
 step "Setup test identities"
-icp identity new alice --storage-mode=plaintext 2>/dev/null || true
-icp identity new bob   --storage-mode=plaintext 2>/dev/null || true
+icp identity new alice --storage plaintext 2>/dev/null || true
+icp identity new bob   --storage plaintext 2>/dev/null || true
 
-ALICE=$(icp identity get-principal --identity alice)
-BOB=$(icp identity get-principal   --identity bob)
+ALICE=$(icp identity principal --identity alice)
+BOB=$(icp identity principal   --identity bob)
 echo "Alice: $ALICE"
 echo "Bob:   $BOB"
 
@@ -46,17 +46,17 @@ step "Scenario A — threshold met → burn + vote"
 
 PROPOSAL_ID=138402
 
-# 1. Alice registers her neuron (mock: neuron follows primary in local mode)
-step "A.1 Alice registers neuron"
-RESULT=$(icp canister call $BACKEND register_neuron "(4821667 : nat64)" \
+# 1. Alice confirms follow
+step "A.1 Alice confirms follow"
+RESULT=$(icp canister call $BACKEND confirm_follow "()" \
   --identity alice -e $ENV 2>&1)
 echo "$RESULT"
-[[ "$RESULT" == *"Ok"* ]] || fail "Alice register_neuron"
-pass "Alice neuron registered"
+[[ "$RESULT" == *"Ok"* ]] || fail "Alice confirm_follow"
+pass "Alice follow confirmed"
 
 # 2. Alice checks eligibility (expect tier 2)
 step "A.2 Alice eligibility"
-ELIG=$(icp canister call $BACKEND get_eligibility --identity alice -e $ENV --query)
+ELIG=$(icp canister call $BACKEND get_eligibility "()" --identity alice -e $ENV --query)
 echo "$ELIG"
 [[ "$ELIG" == *"tier = 2"* ]] || echo "⚠️  tier check: $ELIG (mock NNS may differ locally)"
 
@@ -93,7 +93,7 @@ icp canister call $BACKEND admin_set_proposal_deadline \
 
 # 7. Trigger manual sweep
 step "A.7 Trigger sweep"
-SWEEP=$(icp canister call $BACKEND admin_trigger_sweep -e $ENV 2>&1)
+SWEEP=$(icp canister call $BACKEND admin_trigger_sweep "()" -e $ENV 2>&1)
 echo "$SWEEP"
 [[ "$SWEEP" == *"Ok"* ]] && pass "Sweep triggered" || echo "Sweep: $SWEEP"
 

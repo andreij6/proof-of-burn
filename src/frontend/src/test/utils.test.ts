@@ -413,3 +413,57 @@ describe('PB-123 balance-of-power split', () => {
     expect(adoptPercent(100_000_000_000_000n, 300_000_000_000_000n)).toBe(25);
   });
 });
+
+// ── Add-more validation (mirrors executeAddMore guards) ───────────────────────
+
+const ADD_MORE_FEE_E8S = 10_000n; // only 1 ledger fee for the deposit
+
+function validateAddMore(
+  amountStr: string,
+  holdings: bigint,
+): string | null {
+  const amount = parseFloat(amountStr);
+  if (isNaN(amount) || amount < MIN_COMMIT_ICP) return 'BELOW_MINIMUM';
+  const amountE8s = BigInt(Math.floor(amount * 100_000_000));
+  if (amountE8s + ADD_MORE_FEE_E8S > holdings) return 'INSUFFICIENT_BALANCE';
+  return null;
+}
+
+describe('validateAddMore — top-up validation', () => {
+  it('accepts a valid add-more amount', () => {
+    expect(validateAddMore('2.0', 10_000_000_000n)).toBeNull();
+  });
+
+  it('rejects below-minimum (< 1 ICP)', () => {
+    expect(validateAddMore('0.5', 10_000_000_000n)).toBe('BELOW_MINIMUM');
+  });
+
+  it('rejects NaN', () => {
+    expect(validateAddMore('abc', 10_000_000_000n)).toBe('BELOW_MINIMUM');
+  });
+
+  it('rejects empty string', () => {
+    expect(validateAddMore('', 10_000_000_000n)).toBe('BELOW_MINIMUM');
+  });
+
+  it('rejects insufficient balance (amount + 0.0001 fee > holdings)', () => {
+    // 2 ICP + 0.0001 fee > 2 ICP wallet
+    expect(validateAddMore('2.0', 200_000_000n)).toBe('INSUFFICIENT_BALANCE');
+  });
+
+  it('accepts exact minimum (1.0 ICP)', () => {
+    expect(validateAddMore('1.0', 10_000_000_000n)).toBeNull();
+  });
+
+  it('fee is only 0.0001 ICP (10,000 e8s), not 0.0055', () => {
+    // With 1.0001 ICP wallet, should be able to add 1 ICP
+    // 1 ICP (100_000_000) + 10_000 = 100_010_000
+    // Holdings = 100_010_000 → exactly enough
+    expect(validateAddMore('1.0', 100_010_000n)).toBeNull();
+  });
+
+  it('fails when wallet is 1 e8s short of fee coverage', () => {
+    // 100_009_999 < 100_010_000 (1 ICP + fee)
+    expect(validateAddMore('1.0', 100_009_999n)).toBe('INSUFFICIENT_BALANCE');
+  });
+});
