@@ -341,6 +341,8 @@ struct Commitment {
     subaccount: Vec<u8>,
     settled_at: Option<u64>,
     cmc_block_index: Option<u64>,
+    treasury_block: Option<u64>,
+    frontend_cmc_block: Option<u64>,
 }
 
 fn ledger_wasm() -> Option<Vec<u8>> {
@@ -439,7 +441,9 @@ fn setup_saga() -> Option<SagaEnv> {
 
     // Install backend pointed at that ledger.
     let backend = pic.create_canister();
-    pic.add_cycles(backend, 4_000_000_000_000);
+    // Above the 5T cycle_topup_check floor so auto-topup doesn't sweep the
+    // treasury → CMC during settlement and skew the split-balance assertions.
+    pic.add_cycles(backend, 50_000_000_000_000);
     let init = InitPayload {
         owner,
         primary_neuron_id: 4821667,
@@ -492,8 +496,9 @@ fn do_commit_as(env: &SagaEnv, user: Principal, proposal_id: u64, stance: Stance
         .expect("get_deposit_address");
     let escrow: LAccountDe = decode_one(&reply).unwrap();
 
-    // 3. user deposits target + 520_000 into escrow
-    let deposit = target_e8s + 520_000;
+    // 3. user deposits target + 540_000 into escrow (covers the commit fee +
+    //    the three settlement-split transfers' ledger fees)
+    let deposit = target_e8s + 540_000;
     let xfer = TransferArg {
         from_subaccount: None,
         to: LAccount { owner: escrow.owner, subaccount: escrow.subaccount },
@@ -596,7 +601,9 @@ fn saga_refund_when_threshold_missed() {
         .expect("get_deposit_address");
     let escrow: LAccountDe = decode_one(&reply).unwrap();
     let escrow_bal = balance_of(&env, escrow.owner, escrow.subaccount);
-    assert_eq!(escrow_bal, 0, "escrow should be empty after refund");
+    // The refund returns the target; the unused settlement-fee reserve (~20_000)
+    // remains as dust in the escrow subaccount (sweepable later).
+    assert_eq!(escrow_bal, 20_000, "only the unused fee reserve remains after refund");
 }
 
 #[test]
@@ -604,6 +611,8 @@ fn saga_burn_is_idempotent_on_cmc_failure() {
     let Some(env) = setup_saga() else { return };
     // Proposal 138402's seeded threshold is 5000 ICP and the per-user stake cap is
     // 1000 ICP, so meeting it requires several committers. 6 × 1000 ICP = 6000 ICP.
+    // Proposal 138402 is seeded open against a 2 ICP threshold; two committers
+    // (× 1000 ICP, the stake cap) comfortably cross it.
     // Proposal 138402 is seeded open against a 2 ICP threshold; two committers
     // (× 1000 ICP, the stake cap) comfortably cross it.
     let per_user = 100_000_000_000u64; // 1000 ICP (== stake cap, allowed)
@@ -615,12 +624,12 @@ fn saga_burn_is_idempotent_on_cmc_failure() {
     }
     let total = per_user * n_users;
     let cmc = Principal::from_text(CMC_PRINCIPAL).unwrap();
+    let treasury_sub = Some(vec![1u8; 32]); // TREASURY_SUBACCOUNT
 
-    // First sweep: threshold met → vote (is_local mock Ok) → settle → each
-    // burn_to_cycles transfers to the CMC (succeeds) but notify_top_up rejects
-    // (no CMC canister) → FailedBurn, block index persisted for retry.
+    // First sweep: threshold met → vote (is_local mock Ok) → settle_burn_split:
+    // 50% → treasury (ok), 25% → CMC transfer (ok), then notify_top_up rejects
+    // (no CMC canister) → FailedBurn before the frontend 25% transfer.
     trigger_settlement(&env, 138402);
-
 
     let first_user = Principal::from_slice(&[0xA0; 16]);
     let reply = env
@@ -629,22 +638,25 @@ fn saga_burn_is_idempotent_on_cmc_failure() {
         .expect("get_my_commitments");
     let commits: Vec<Commitment> = decode_one(&reply).unwrap();
     assert_eq!(commits[0].status, CommitmentStatus::FailedBurn, "CMC notify fails → FailedBurn");
-    assert!(commits[0].cmc_block_index.is_some(), "PB-111: block index persisted for retry");
+    assert!(commits[0].treasury_block.is_some(), "treasury 50% transferred");
+    assert!(commits[0].cmc_block_index.is_some(), "backend-cycles 25% transferred");
+    assert!(commits[0].frontend_cmc_block.is_none(), "frontend 25% not reached (notify failed first)");
 
+    // 50% reached the treasury; 25% reached the CMC (backend share).
+    let treasury_after_first = balance_of(&env, env.backend, treasury_sub.clone());
     let cmc_after_first = balance_of(&env, cmc, None);
-    assert_eq!(cmc_after_first, total, "exactly the committed total reached the CMC once");
+    assert_eq!(cmc_after_first, total / 4, "25% backend share reached the CMC once");
+    // treasury = 50% of proceeds + the per-commit protocol fee (500_000 each).
+    assert_eq!(treasury_after_first, total / 2 + n_users * 500_000, "50% + protocol fees in treasury");
 
-    // Second sweep: retry_failed_settlements re-runs burn_to_cycles. Because each
-    // block index is set it must SKIP Phase A (the transfer) and only re-notify.
+    // Retry: completed transfers (treasury, backend CMC) are skipped — only the
+    // failing notify re-runs. No funds move again.
     let owner = Principal::from_text(OWNER_TEXT).unwrap();
     let r = env.pic.update_call(env.backend, owner, "admin_trigger_sweep", encode_one(()).unwrap()).expect("sweep2");
     let _: UnitResult = decode_one(&r).unwrap();
 
-    let cmc_after_second = balance_of(&env, cmc, None);
-    assert_eq!(
-        cmc_after_second, total,
-        "PB-111: retry must NOT transfer to the CMC again (no double-spend)"
-    );
+    assert_eq!(balance_of(&env, cmc, None), cmc_after_first, "PB-111: no double CMC transfer on retry");
+    assert_eq!(balance_of(&env, env.backend, treasury_sub), treasury_after_first, "no double treasury transfer on retry");
 }
 
 // ── admin_set_default_threshold (runtime threshold control) ──────────────────

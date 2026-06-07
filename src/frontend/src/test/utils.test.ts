@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { isValidAccountId } from '../App';
 
 // ── Formatting helpers (duplicated here to avoid import-cycle with App.tsx) ──
 
@@ -333,5 +334,82 @@ describe('PB-114 proposal partitioning', () => {
 
   it('settled proposal with no personal commitment → History', () => {
     expect(bucketOf({ id: 9n, status: 'voted' }, [])).toBe('history');
+  });
+});
+
+describe('isValidAccountId', () => {
+  it('accepts a valid 64-character lowercase hex Account ID', () => {
+    const valid = 'a'.repeat(64);
+    expect(isValidAccountId(valid)).toBe(true);
+  });
+
+  it('accepts a valid 64-character uppercase hex Account ID', () => {
+    const valid = 'F'.repeat(64);
+    expect(isValidAccountId(valid)).toBe(true);
+  });
+
+  it('accepts a valid 64-character mixed-case hex Account ID', () => {
+    const valid = 'a1B2' + 'c3D4'.repeat(15);
+    expect(isValidAccountId(valid)).toBe(true);
+  });
+
+  it('accepts a valid Account ID with leading or trailing whitespace', () => {
+    const valid = '  ' + 'b'.repeat(64) + ' \n ';
+    expect(isValidAccountId(valid)).toBe(true);
+  });
+
+  it('rejects an Account ID that is too short (63 characters)', () => {
+    const invalid = 'a'.repeat(63);
+    expect(isValidAccountId(invalid)).toBe(false);
+  });
+
+  it('rejects an Account ID that is too long (65 characters)', () => {
+    const invalid = 'a'.repeat(65);
+    expect(isValidAccountId(invalid)).toBe(false);
+  });
+
+  it('rejects an Account ID containing non-hex characters', () => {
+    const invalid = 'g' + 'a'.repeat(63);
+    expect(isValidAccountId(invalid)).toBe(false);
+  });
+
+  it('rejects an empty or whitespace-only string', () => {
+    expect(isValidAccountId('')).toBe(false);
+    expect(isValidAccountId('   ')).toBe(false);
+  });
+});
+
+
+// ── PB-123: balance-of-power split (mirrors BalanceOfPowerBar) ───────────────
+
+function adoptPercent(adopt: bigint, reject: bigint): number {
+  const total = adopt + reject;
+  return total > 0n ? Number((adopt * 10000n) / total) / 100 : 50;
+}
+
+describe('PB-123 balance-of-power split', () => {
+  it('two equal commits → 50/50', () => {
+    expect(adoptPercent(100_000_000n, 100_000_000n)).toBe(50);
+  });
+
+  it('proportional to ICP weight (75/25)', () => {
+    expect(adoptPercent(300_000_000n, 100_000_000n)).toBe(75);
+  });
+
+  it('all adopt → 100%', () => {
+    expect(adoptPercent(500_000_000n, 0n)).toBe(100);
+  });
+
+  it('all reject → 0% adopt', () => {
+    expect(adoptPercent(0n, 500_000_000n)).toBe(0);
+  });
+
+  it('no commits → neutral 50 (empty bar)', () => {
+    expect(adoptPercent(0n, 0n)).toBe(50);
+  });
+
+  it('handles large bigint weights without precision loss', () => {
+    // 1,000,000 ICP vs 3,000,000 ICP → 25% adopt
+    expect(adoptPercent(100_000_000_000_000n, 300_000_000_000_000n)).toBe(25);
   });
 });

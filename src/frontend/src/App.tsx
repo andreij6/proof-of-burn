@@ -124,6 +124,33 @@ function Btn({ variant = 'secondary', sm, children, disabled, style, onClick }: 
   );
 }
 
+// PB-123: balance-of-power bar — ADOPT (yes) vs REJECT (no), weighted by ICP.
+function BalanceOfPowerBar({ adopt, reject }: { adopt: bigint; reject: bigint }) {
+  const total = adopt + reject;
+  const adoptPct = total > 0n ? Number((adopt * 10000n) / total) / 100 : 50;
+  const rejectPct = 100 - adoptPct;
+  const empty = total === 0n;
+  return (
+    <div className="col" style={{ gap: 5 }}>
+      <div className="row" style={{ justifyContent: 'space-between', fontSize: 11, fontFamily: 'var(--font-mono)' }}>
+        <span style={{ color: 'var(--sprout)' }}>ADOPT {empty ? "—" : `${adoptPct.toFixed(0)}%`}</span>
+        <span style={{ color: 'var(--fg-3)' }}>balance of power</span>
+        <span style={{ color: 'var(--ember)' }}>{empty ? "—" : `${rejectPct.toFixed(0)}%`} REJECT</span>
+      </div>
+      <div className="row" style={{ height: 8, borderRadius: 999, overflow: 'hidden', background: 'var(--char-800)' }}>
+        {empty ? (
+          <div style={{ width: '100%', height: '100%', background: 'var(--char-800)' }} />
+        ) : (
+          <>
+            <div style={{ width: `${adoptPct}%`, height: '100%', background: 'var(--sprout)', transition: 'width .6s var(--ease-out)' }} />
+            <div style={{ width: `${rejectPct}%`, height: '100%', background: 'var(--ember)', transition: 'width .6s var(--ease-out)' }} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function HeatBar({ pct = 0, committed, req, met }: { pct?: number; committed?: string; req?: string; met?: boolean }) {
   const barPct = Math.min(100, pct); // visual bar caps at 100%
   const isOversubscribed = pct >= 100;
@@ -384,6 +411,13 @@ export default function App() {
   // System health state
   const [cycleBalance, setCycleBalance] = useState<bigint | null>(null);
   const [treasuryBalance, setTreasuryBalance] = useState<bigint | null>(null);
+  // Treasury Wallet (admin) modal
+  const [isTreasuryOpen, setIsTreasuryOpen] = useState(false);
+  const [treasuryWithdrawTo, setTreasuryWithdrawTo] = useState("");
+  const [treasuryWithdrawAmount, setTreasuryWithdrawAmount] = useState("");
+  const [isTreasuryWithdrawing, setIsTreasuryWithdrawing] = useState(false);
+  const [treasuryError, setTreasuryError] = useState<string | null>(null);
+  const [treasurySuccess, setTreasurySuccess] = useState(false);
 
   // Tweak / simulator options
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -634,6 +668,56 @@ export default function App() {
     }
   };
 
+  // Admin: open the Treasury Wallet and refresh the (update-call) balance.
+  const openTreasury = async () => {
+    setIsTreasuryOpen(true);
+    setTreasuryError(null);
+    setTreasurySuccess(false);
+    if (!actor) return;
+    try {
+      const res = await actor.get_treasury_balance();
+      if (res.__kind__ === "Ok") setTreasuryBalance(res.Ok);
+    } catch (err) {
+      console.error("Failed to fetch treasury balance:", err);
+    }
+  };
+
+  // Admin: withdraw ICP from the treasury to a destination principal.
+  const handleTreasuryWithdraw = async () => {
+    if (!actor || isTreasuryWithdrawing) return;
+    setTreasuryError(null);
+    let dest: Principal;
+    try {
+      dest = Principal.fromText(treasuryWithdrawTo.trim());
+    } catch {
+      setTreasuryError("Enter a valid destination principal.");
+      return;
+    }
+    const amt = parseFloat(treasuryWithdrawAmount);
+    if (isNaN(amt) || amt <= 0) {
+      setTreasuryError("Enter a valid amount.");
+      return;
+    }
+    const e8s = BigInt(Math.floor(amt * 100_000_000));
+    setIsTreasuryWithdrawing(true);
+    try {
+      const res = await actor.admin_withdraw_treasury(dest, e8s);
+      if (res.__kind__ === "Err") {
+        setTreasuryError(`Withdraw failed: ${res.Err}`);
+        return;
+      }
+      setTreasurySuccess(true);
+      setTreasuryWithdrawAmount("");
+      setTreasuryWithdrawTo("");
+      const bal = await actor.get_treasury_balance();
+      if (bal.__kind__ === "Ok") setTreasuryBalance(bal.Ok);
+    } catch (err: any) {
+      setTreasuryError(err.message || String(err));
+    } finally {
+      setIsTreasuryWithdrawing(false);
+    }
+  };
+
   // Option C: self-attested follow. The user confirms they've followed the
   // leader neuron (or chooses to proceed); we record it without on-chain check.
   const handleConfirmFollow = async () => {
@@ -814,13 +898,14 @@ export default function App() {
     }
     const amountE8s = BigInt(Math.floor(amount * 100_000_000));
     // Option C: capped by wallet balance only (no neuron stake cap).
-    const requiredTotal = amountE8s + 530_000n;
+    // 0.005 protocol fee + 5×0.0001 ledger fees (deposit + commit-fee + 3 split transfers).
+    const requiredTotal = amountE8s + 550_000n;
     if (requiredTotal > holdings) {
       setTxError(`Insufficient wallet balance — need at least ${fmtICP(requiredTotal)} ICP (amount + fees).`);
       return;
     }
 
-    const requiredDeposit = amountE8s + 520_000n;
+    const requiredDeposit = amountE8s + 540_000n;
     setIsTransacting(true);
     setTxError(null);
     
@@ -1076,6 +1161,10 @@ export default function App() {
                   <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
                     <Icon name="info" size={12} stroke="var(--fg-3)" /> Applies to new proposals and re-thresholds all open ones. Min 1 ICP. No redeploy.
                   </span>
+                  <div style={{ borderTop: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)' }} />
+                  <Btn variant="secondary" sm onClick={openTreasury} style={{ alignSelf: 'flex-start' }}>
+                    <Icon name="wallet" size={13} stroke="var(--burn)" /> Treasury Wallet
+                  </Btn>
                 </div>
               </Reveal>
             )}
@@ -1177,11 +1266,11 @@ export default function App() {
             <Reveal delay={50} motion={motion}>
               <div className="col" style={{ gap: 10 }}>
                 <p style={{ fontSize: 22, lineHeight: 1.25, fontFamily: 'var(--font-display)', fontWeight: 600, color: 'var(--fg)', margin: 0, textWrap: 'balance' }}>
-                  Amplifying Voice,<br />
-                  <span style={{ color: 'var(--burn)' }}>Burning Supply</span>
+                  Rent Voting Power<br />
+                  <span style={{ color: 'var(--burn)' }}>with Proof of Burn</span>
                 </p>
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, maxWidth: 480 }}>
-                  Signal conviction on key NNS proposals. Your burned ICP directly steers governance decisions while permanently shrinking the circulating supply to benefit every holder.
+                  Burn ICP to temporarily borrow the community leader neuron's voting power and steer the NNS proposals you care about. The more you commit, the more weight your side carries — your conviction decides which way the neuron votes.
                 </p>
                 <button
                   onClick={() => setIsDetailsOpen(true)}
@@ -1427,9 +1516,9 @@ export default function App() {
                                 <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                                   <Chip tone="muted" style={{ height: 20, fontSize: 11 }}>{p.category}</Chip>
                                   <a href={nnsProposalLink(p)} target="_blank" rel="noreferrer" className="mono" style={{
-                                    fontSize: 11, color: 'var(--burn)', whiteSpace: 'nowrap', textDecoration: 'none'
+                                    fontSize: 11, color: 'var(--burn)', whiteSpace: 'nowrap', textDecoration: 'underline'
                                   }} title="View full proposal on the NNS">
-                                    #{proposalIdStr} <Icon name="external" size={9} stroke="var(--burn)" />
+                                    #{proposalIdStr}
                                   </a>
                                 </div>
                                 <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 600, textWrap: 'pretty', overflowWrap: 'anywhere' }}>
@@ -1453,12 +1542,18 @@ export default function App() {
                               </div>
                             </div>
 
-                            {/* Burn progress (gated for anonymous) */}
+                            {/* Balance of power + burn progress (gated for anonymous) */}
                             {showBurn ? (
-                              <HeatBar pct={pct} committed={committedLabel} req={reqLabel} met={met} />
+                              <div className="col" style={{ gap: 10 }}>
+                                <BalanceOfPowerBar adopt={p.adopt_pot_e8s} reject={p.reject_pot_e8s} />
+                                <HeatBar pct={pct} committed={committedLabel} req={reqLabel} met={met} />
+                              </div>
                             ) : (
-                              <Gate hint="Sign in to unlock" height={44} gating={gating}>
-                                <HeatBar pct={48} committed="●●● ICP committed" req="●● of ●●● ICP" />
+                              <Gate hint="Sign in to unlock" height={70} gating={gating}>
+                                <div className="col" style={{ gap: 10 }}>
+                                  <BalanceOfPowerBar adopt={48n} reject={52n} />
+                                  <HeatBar pct={48} committed="●●● ICP committed" req="●● of ●●● ICP" />
+                                </div>
                               </Gate>
                             )}
 
@@ -1580,6 +1675,7 @@ export default function App() {
                                   : <Chip tone="muted"><LiveDot on={motion !== 'off'} /> Open</Chip>}
                               </div>
                             </div>
+                            <BalanceOfPowerBar adopt={p.adopt_pot_e8s} reject={p.reject_pot_e8s} />
                             <HeatBar pct={pct} committed={`${fmtICP(p.total_committed_e8s)} ICP`} req={met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`} met={met} />
                             <div style={{ borderTop: '1px solid var(--border)' }} />
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
@@ -1905,6 +2001,62 @@ export default function App() {
         </div>
       )}
 
+      {/* ── Treasury Wallet Modal (admin only) ── */}
+      {isTreasuryOpen && isAdmin && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }}>
+          <div className="card col" style={{
+            maxWidth: 460, width: '100%', gap: 16, background: 'var(--surface)',
+            border: '1px solid var(--burn)', boxShadow: 'var(--elev-3)', maxHeight: '90vh', overflowY: 'auto'
+          }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="wallet" size={18} stroke="var(--burn)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Treasury Wallet</h4>
+              </span>
+              <button onClick={() => setIsTreasuryOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', padding: '10px 12px', borderRadius: 6, background: 'var(--burn-950)', border: '1px solid var(--burn)' }}>
+              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>Treasury balance</span>
+              <span className="mono" style={{ fontSize: 18, fontWeight: 600, color: 'var(--fg)' }}>
+                {treasuryBalance !== null ? `${fmtICP(treasuryBalance)} ICP` : "…"}
+              </span>
+            </div>
+
+            <p style={{ fontSize: 12, color: 'var(--fg-3)', margin: 0, lineHeight: 1.5 }}>
+              Accumulates the 0.005 ICP protocol fee per commit plus 50% of every settled proposal's proceeds. Withdraw to any principal.
+            </p>
+
+            {treasurySuccess && (
+              <div style={{ padding: 10, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout)', fontSize: 12.5 }}>Withdrawal sent.</div>
+            )}
+            {treasuryError && (
+              <div style={{ padding: 10, borderRadius: 6, background: 'var(--ember-dim)', border: '1px solid var(--ember)', color: 'var(--ember)', fontSize: 12.5, lineHeight: 1.4 }}>{treasuryError}</div>
+            )}
+
+            <input type="text" placeholder="Destination principal" className="burn-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}
+              value={treasuryWithdrawTo} onChange={(e) => { setTreasuryWithdrawTo(e.target.value); setTreasuryError(null); setTreasurySuccess(false); }} />
+            <div className="row" style={{ gap: 8 }}>
+              <div style={{ flex: 1, position: 'relative' }}>
+                <input type="number" min="0" step="0.1" placeholder="Amount" className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
+                  value={treasuryWithdrawAmount} onChange={(e) => { setTreasuryWithdrawAmount(e.target.value); setTreasuryError(null); setTreasurySuccess(false); }} />
+                <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
+              </div>
+              <Btn variant="primary" sm onClick={handleTreasuryWithdraw} disabled={isTreasuryWithdrawing || !treasuryWithdrawTo || !treasuryWithdrawAmount}>
+                {isTreasuryWithdrawing ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="arrowUp" size={13} stroke="var(--char-950)" />}
+                {isTreasuryWithdrawing ? " Sending…" : " Withdraw"}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Wallet Modal (deposit / withdraw) ── */}
       {isWalletOpen && principal && !principal.isAnonymous() && (
         <div style={{
@@ -2108,7 +2260,7 @@ export default function App() {
                 {/* Live fee breakdown */}
                 <div className="col" style={{ gap: 8, fontSize: 13, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
                   <div className="row" style={{ justifyContent: 'space-between' }}>
-                    <span style={{ color: 'var(--fg-2)' }}>Target (→ Cycles)</span>
+                    <span style={{ color: 'var(--fg-2)' }}>Committed weight</span>
                     <span className="mono">{confirmAmount ? parseFloat(confirmAmount).toFixed(4) : "—"} ICP</span>
                   </div>
                   <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -2117,13 +2269,13 @@ export default function App() {
                   </div>
                   <div className="row" style={{ justifyContent: 'space-between' }}>
                     <span style={{ color: 'var(--fg-2)' }}>Ledger fees</span>
-                    <span className="mono">0.0003 ICP</span>
+                    <span className="mono">0.0005 ICP</span>
                   </div>
                   <hr />
                   <div className="row" style={{ justifyContent: 'space-between', fontWeight: 600 }}>
                     <span style={{ color: 'var(--fg)' }}>Total debit</span>
                     <span className="mono" style={{ color: confirmAmount ? 'var(--burn)' : 'var(--fg-3)' }}>
-                      {confirmAmount ? (parseFloat(confirmAmount) + 0.0053).toFixed(4) : "—"} ICP
+                      {confirmAmount ? (parseFloat(confirmAmount) + 0.0055).toFixed(4) : "—"} ICP
                     </span>
                   </div>
                 </div>

@@ -109,11 +109,16 @@ pub struct Commitment {
     pub stance: Stance,
     pub subaccount: [u8; 32],
     pub settled_at: Option<u64>,
-    /// Block index of the CMC ledger transfer performed in Phase A of
-    /// `burn_to_cycles`. Stored so a retry after a failed `notify_top_up`
-    /// skips the transfer and goes straight to notifying the CMC.
-    /// `None` until Phase A has succeeded.
+    /// PB-125 settlement-split block indices (idempotent retry). Each is set once
+    /// its ledger transfer succeeds, so a retry skips the transfer:
+    /// - `treasury_block`: 50% → treasury subaccount
+    /// - `cmc_block_index`: 25% → CMC (backend cycles)
+    /// - `frontend_cmc_block`: 25% → CMC (frontend cycles)
     pub cmc_block_index: Option<u64>,
+    #[serde(default)]
+    pub treasury_block: Option<u64>,
+    #[serde(default)]
+    pub frontend_cmc_block: Option<u64>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -138,6 +143,11 @@ pub struct Config {
     /// Gating the NNS mock fallback on this flag — not re-deriving environment
     /// per call — is what prevents the F-101/F-102 mainnet bypass.
     pub is_local: bool,
+    /// Frontend canister id, topped up with cycles from settled proceeds (PB-125).
+    /// Defaulted on decode; resolved via `frontend_canister_id()` with an is_local
+    /// fallback so it works without re-init after an upgrade.
+    #[serde(default)]
+    pub frontend_canister_id: Option<Principal>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -158,6 +168,10 @@ pub struct Proposal {
     pub reject_pot_e8s: u64,
     pub vote_executed_at: Option<u64>,
     pub total_burned_e8s: Option<u64>,
+    /// Stance of the first commit on this proposal — the tie-breaker if the
+    /// adopt/reject pots end exactly equal. Defaulted on decode for upgrades.
+    #[serde(default)]
+    pub first_stance: Option<Stance>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -276,6 +290,7 @@ thread_local! {
             ai_price_e8s: 5_000_000,
             ledger_canister_id: Principal::anonymous(),
             is_local: false,
+            frontend_canister_id: None,
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -372,6 +387,7 @@ fn init(payload: InitPayload) {
         ai_price_e8s: payload.ai_price_e8s,
         ledger_canister_id: ledger_id,
         is_local,
+        frontend_canister_id: None, // resolved lazily via frontend_canister_id()
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
@@ -520,6 +536,20 @@ fn admin_set_default_threshold(new_threshold_e8s: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Admin: set the frontend canister id that receives the 25% cycles share (PB-125).
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_frontend_canister(canister_id: Principal) -> Result<(), String> {
+    if canister_id == Principal::anonymous() {
+        return Err("INVALID_CANISTER_ID".to_string());
+    }
+    CONFIG.with(|cell| {
+        let mut cfg = cell.borrow().get().clone();
+        cfg.frontend_canister_id = Some(canister_id);
+        cell.borrow_mut().set(cfg);
+    });
+    Ok(())
+}
+
 fn proposals_at_quota() -> bool {
     PROPOSALS.with(|map| map.borrow().len() as usize >= MAX_PROPOSALS)
 }
@@ -586,6 +616,7 @@ fn seed_mock_proposals() {
                 reject_pot_e8s: 0,
                 vote_executed_at: None,
                 total_burned_e8s: None,
+                first_stance: None,
             });
 
             m.insert(138388, Proposal {
@@ -602,6 +633,7 @@ fn seed_mock_proposals() {
                 reject_pot_e8s: 0,
                 vote_executed_at: None,
                 total_burned_e8s: None,
+                first_stance: None,
             });
 
             m.insert(138376, Proposal {
@@ -618,6 +650,7 @@ fn seed_mock_proposals() {
                 reject_pot_e8s: 0,
                 vote_executed_at: None,
                 total_burned_e8s: None,
+                first_stance: None,
             });
         }
     });
@@ -994,75 +1027,76 @@ async fn call_ledger_transfer(
     }
 }
 
-/// Converts committed ICP to canister cycles via the Cycles Minting Canister (CMC).
-/// The ICP is burned by the CMC (removed from ledger supply) and the resulting
-/// cycles are credited to this canister. The net supply effect is identical to
-/// a direct burn — only the value destination changes (cycles fuel vs. destruction).
-///
-/// F-103: the function is split into two idempotent phases. The `cmc_block_index`
-/// on the `Commitment` records Phase A's result; on a retry, Phase A is skipped
-/// and only Phase B (`notify_top_up`) is called. Phase B's `AlreadyNotified` /
-/// `Refunded` results are treated as terminal success.
-async fn burn_to_cycles(
+/// The frontend canister to top up with cycles (PB-125). Config override, else an
+/// is_local fallback so it works after an upgrade without re-init.
+fn frontend_canister_id() -> Principal {
+    let cfg = CONFIG.with(|c| c.borrow().get().clone());
+    if let Some(fid) = cfg.frontend_canister_id {
+        return fid;
+    }
+    if cfg.is_local {
+        Principal::from_text("a2cb4-hh777-77775-aaaba-cai").unwrap()
+    } else {
+        Principal::from_text("kyclk-5qaaa-aaaap-quthq-cai").unwrap()
+    }
+}
+
+/// Notify the CMC to mint cycles for `block_index` to `target`. Idempotent:
+/// `AlreadyNotified` is treated as success; `Refunded` is a hard failure.
+async fn notify_cmc_topup(cmc: Principal, target: Principal, block_index: u64) -> Result<(), String> {
+    let args = NotifyTopUpArgs { canister_id: target, block_index: candid::Nat::from(block_index) };
+    let res: Result<(NotifyTopUpResult,), _> = ic_cdk::call(cmc, "notify_top_up", (args,)).await;
+    match res {
+        Ok((NotifyTopUpResult::Ok(_),)) => Ok(()),
+        Ok((NotifyTopUpResult::Err(NotifyError::AlreadyNotified),)) => Ok(()),
+        Ok((NotifyTopUpResult::Err(NotifyError::Refunded { .. }),)) => Err("CMC_REFUNDED".to_string()),
+        Ok((NotifyTopUpResult::Err(e),)) => Err(format!("CMC notify error: {:?}", e)),
+        Err((code, msg)) => Err(format!("CMC call rejected ({:?}): {}", code, msg)),
+    }
+}
+
+/// PB-125: distribute a settled commitment's proceeds — 50% → treasury,
+/// 25% → backend cycles, 25% → frontend cycles. Idempotent via three per-step
+/// block indices on the Commitment; a retry skips completed transfers and only
+/// re-notifies the CMC (AlreadyNotified = success).
+async fn settle_burn_split(
     ledger_id: Principal,
     from_subaccount: [u8; 32],
     amount_e8s: u64,
     commitment: &mut Commitment,
-) -> Result<u128, String> {
+) -> Result<(), String> {
     let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
     let cmc_dest = LedgerAccount { owner: cmc, subaccount: None };
+    let treasury_dest = LedgerAccount { owner: ic_cdk::id(), subaccount: Some(TREASURY_SUBACCOUNT) };
 
-    // Phase A: transfer escrowed ICP → CMC. Skip if a previous attempt already
-    // produced a block index — repeating this transfer would double-spend from
-    // the user's (now-empty) subaccount and strand the prior funds at the CMC.
-    let block_index = match commitment.cmc_block_index {
-        Some(b) => b,
-        None => {
-            let b = call_ledger_transfer(
-                ledger_id,
-                Some(from_subaccount),
-                cmc_dest,
-                amount_e8s,
-                Some(10_000),
-            )
-            .await
-            .map_err(|e| format!("CMC transfer failed: {}", e))?;
-            commitment.cmc_block_index = Some(b);
-            b
-        }
-    };
+    let treasury_amt = amount_e8s / 2;
+    let backend_amt = amount_e8s / 4;
+    let frontend_amt = amount_e8s - treasury_amt - backend_amt; // remainder ≈ 25%
 
-    // Phase B: notify the CMC to mint cycles for the block index. Idempotent
-    // on the CMC side; if it has already been notified (e.g. a retry after a
-    // transient `notify_top_up` reject), `AlreadyNotified` is success.
-    let notify_args = NotifyTopUpArgs {
-        canister_id: ic_cdk::id(),
-        block_index: candid::Nat::from(block_index),
-    };
-    let result: Result<(NotifyTopUpResult,), _> =
-        ic_cdk::call(cmc, "notify_top_up", (notify_args,)).await;
-
-    match result {
-        Ok((NotifyTopUpResult::Ok(cycles_nat),)) => {
-            let cycles: u128 = cycles_nat.0.try_into().unwrap_or(0);
-            Ok(cycles)
-        }
-        Ok((NotifyTopUpResult::Err(NotifyError::AlreadyNotified),)) => {
-            // Phase B is idempotent; treat a previous successful notify as success.
-            // The cycles are already credited to this canister — return 0 to indicate
-            // "no new cycles minted" rather than failing the settlement.
-            Ok(0)
-        }
-        Ok((NotifyTopUpResult::Err(NotifyError::Refunded { .. }),)) => {
-            // The CMC refunded the transfer (e.g. invalid recipient). The
-            // funds are back at the user's subaccount; surface as a burn
-            // failure so the commitment is marked FailedBurn and a future
-            // retry / sweep can attempt a fresh burn once the cause is fixed.
-            Err("CMC_REFUNDED".to_string())
-        }
-        Ok((NotifyTopUpResult::Err(e),)) => Err(format!("CMC notify_top_up error: {:?}", e)),
-        Err((code, msg)) => Err(format!("CMC call rejected ({:?}): {}", code, msg)),
+    // 50% → treasury (held as ICP, admin-withdrawable)
+    if commitment.treasury_block.is_none() {
+        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), treasury_dest, treasury_amt, Some(10_000))
+            .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
+        commitment.treasury_block = Some(b);
     }
+
+    // 25% → backend cycles
+    if commitment.cmc_block_index.is_none() {
+        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), cmc_dest.clone(), backend_amt, Some(10_000))
+            .await.map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
+        commitment.cmc_block_index = Some(b);
+    }
+    notify_cmc_topup(cmc, ic_cdk::id(), commitment.cmc_block_index.unwrap()).await?;
+
+    // 25% → frontend cycles
+    if commitment.frontend_cmc_block.is_none() {
+        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), cmc_dest, frontend_amt, Some(10_000))
+            .await.map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
+        commitment.frontend_cmc_block = Some(b);
+    }
+    notify_cmc_topup(cmc, frontend_canister_id(), commitment.frontend_cmc_block.unwrap()).await?;
+
+    Ok(())
 }
 
 #[ic_cdk::query]
@@ -1154,7 +1188,9 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
     };
 
     let balance = call_ledger_balance(ledger_id, escrow_account).await?;
-    let required_deposit = target_e8s + 520_000;
+    // target + 500_000 protocol fee + 4×10_000 ledger fees (commit fee transfer +
+    // the three settlement-split transfers: treasury, backend CMC, frontend CMC).
+    let required_deposit = target_e8s + 540_000;
 
     if balance < required_deposit {
         return Err("INSUFFICIENT_DEPOSIT".to_string());
@@ -1176,6 +1212,11 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
     // F-105: compute pot updates with checked arithmetic BEFORE writing any state,
     // so an (effectively impossible) overflow returns an error without orphaning a
     // Pending commitment. The fee transfer above is the saga point-of-no-return.
+    // Record the first stance on this proposal — the tie-breaker at settlement.
+    if proposal.first_stance.is_none() {
+        proposal.first_stance = Some(stance.clone());
+    }
+
     if stance == Stance::Adopt {
         proposal.adopt_pot_e8s = proposal.adopt_pot_e8s
             .checked_add(target_e8s)
@@ -1203,6 +1244,8 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         subaccount,
         settled_at: None,
         cmc_block_index: None,
+        treasury_block: None,
+        frontend_cmc_block: None,
     };
 
     COMMITMENTS.with(|map| {
@@ -1270,6 +1313,23 @@ async fn get_treasury_balance() -> BalanceResult {
         Ok(bal) => BalanceResult::Ok(bal),
         Err(e) => BalanceResult::Err(e),
     }
+}
+
+/// Admin: withdraw ICP from the treasury subaccount to a destination principal.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_withdraw_treasury(to: Principal, amount_e8s: u64) -> Result<(), String> {
+    if to == Principal::anonymous() {
+        return Err("INVALID_DESTINATION".to_string());
+    }
+    if amount_e8s == 0 {
+        return Err("INVALID_AMOUNT".to_string());
+    }
+    let ledger_id = CONFIG.with(|cell| cell.borrow().get().ledger_canister_id);
+    let dest = LedgerAccount { owner: to, subaccount: None };
+    call_ledger_transfer(ledger_id, Some(TREASURY_SUBACCOUNT), dest, amount_e8s, Some(10_000))
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("TREASURY_WITHDRAW_FAILED: {}", e))
 }
 
 #[ic_cdk::query]
@@ -1461,6 +1521,7 @@ async fn fetch_live_proposals() {
             reject_pot_e8s: 0,
             vote_executed_at: None,
             total_burned_e8s: None,
+            first_stance: None,
         };
         PROPOSALS.with(|map| {
             map.borrow_mut().insert(nns_id, proposal);
@@ -1508,6 +1569,22 @@ async fn cast_nns_vote(leader_id: u64, proposal_id: u64, vote_choice: i32) -> Re
     }
 }
 
+/// NNS vote choice (1 = Yes/adopt, 2 = No/reject) from the committed pots.
+/// Majority of committed ICP wins; an exact tie is broken by the first stance
+/// committed (first vote wins); if somehow unset, defaults to No.
+fn decide_vote_choice(adopt_e8s: u64, reject_e8s: u64, first_stance: Option<Stance>) -> i32 {
+    if adopt_e8s > reject_e8s {
+        1
+    } else if reject_e8s > adopt_e8s {
+        2
+    } else {
+        match first_stance {
+            Some(Stance::Adopt) => 1,
+            _ => 2,
+        }
+    }
+}
+
 async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
     let proposal = PROPOSALS.with(|map| map.borrow().get(&pid));
     let mut proposal = match proposal {
@@ -1518,11 +1595,13 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
     let met = proposal.total_committed_e8s >= proposal.threshold_e8s;
     if met {
         let config = CONFIG.with(|cell| cell.borrow().get().clone());
-        let vote_choice = if proposal.adopt_pot_e8s > proposal.reject_pot_e8s {
-            1 // Yes
-        } else {
-            2 // No
-        };
+        // PB-123: majority of committed ICP wins; an exact tie is broken by the
+        // first stance committed on this proposal (first vote wins).
+        let vote_choice = decide_vote_choice(
+            proposal.adopt_pot_e8s,
+            proposal.reject_pot_e8s,
+            proposal.first_stance.clone(),
+        );
 
         // F-108: vote against the real NNS proposal id, never the internal map key.
         // If no NNS id is set this is a misconfiguration — do NOT call the NNS
@@ -1593,10 +1672,10 @@ async fn settle_proposal_commitments(proposal_id: u64) {
         let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key)).unwrap();
 
         if is_voted {
-            // Route committed ICP through the CMC: ICP is burned from supply,
-            // cycles are credited to this canister to fund its operation.
-            match burn_to_cycles(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
-                Ok(cycles_minted) => {
+            // PB-125: split the proceeds — 50% treasury, 25% backend cycles,
+            // 25% frontend cycles (idempotent across retries).
+            match settle_burn_split(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
+                Ok(()) => {
                     commitment.status = CommitmentStatus::Burned;
                     commitment.settled_at = Some(now);
                     // F-105: checked addition — clamp to u64::MAX on overflow
@@ -1638,13 +1717,13 @@ async fn settle_proposal_commitments(proposal_id: u64) {
                     });
 
                     ic_cdk::api::print(&format!(
-                        "Commitment settled: {} e8s ICP → {} cycles for user {}",
-                        commitment.amount_e8s, cycles_minted, user
+                        "Commitment settled (split 50/25/25): {} e8s for user {}",
+                        commitment.amount_e8s, user
                     ));
                 }
                 Err(e) => {
                     commitment.status = CommitmentStatus::FailedBurn;
-                    ic_cdk::api::print(&format!("burn_to_cycles failed for user {}: {}", user, e));
+                    ic_cdk::api::print(&format!("settle_burn_split failed for user {}: {}", user, e));
                 }
             }
         } else if is_abstained {
@@ -1752,11 +1831,9 @@ async fn retry_failed_settlements() {
         let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key)).unwrap();
 
         if commitment.status == CommitmentStatus::FailedBurn {
-            // F-103: idempotent retry — if a previous attempt's `notify_top_up`
-            // failed but the CMC transfer already landed, `cmc_block_index`
-            // is `Some`, so burn_to_cycles skips Phase A and only notifies
-            // the CMC again. No second transfer, no stranded funds.
-            if let Ok(_) = burn_to_cycles(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
+            // Idempotent retry — completed split transfers are skipped (their
+            // block indices are Some); only the unfinished step/notify re-runs.
+            if let Ok(()) = settle_burn_split(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
                 commitment.status = CommitmentStatus::Burned;
                 commitment.settled_at = Some(now);
             }
@@ -1997,6 +2074,8 @@ mod tests {
             subaccount: derive_subaccount(&principal, proposal_id),
             settled_at: None,
             cmc_block_index: None,
+            treasury_block: None,
+            frontend_cmc_block: None,
         }
     }
 
@@ -2015,6 +2094,7 @@ mod tests {
             reject_pot_e8s: 0,
             total_burned_e8s: None,
             vote_executed_at: None,
+            first_stance: Some(Stance::Adopt),
         }
     }
 
@@ -2118,24 +2198,39 @@ mod tests {
 
     #[test]
     fn test_vote_direction_majority_adopt() {
-        let proposal = Proposal {
-            adopt_pot_e8s: 300_000_000_000,
-            reject_pot_e8s: 100_000_000_000,
-            ..sample_proposal(1, "met", 200_000_000_000, 400_000_000_000)
-        };
-        let vote = if proposal.adopt_pot_e8s > proposal.reject_pot_e8s { 1i32 } else { 2i32 };
-        assert_eq!(vote, 1, "adopt majority should cast Yes vote");
+        assert_eq!(decide_vote_choice(300, 100, Some(Stance::Reject)), 1, "adopt majority → Yes");
     }
 
     #[test]
     fn test_vote_direction_majority_reject() {
-        let proposal = Proposal {
-            adopt_pot_e8s: 100_000_000_000,
-            reject_pot_e8s: 300_000_000_000,
-            ..sample_proposal(1, "met", 200_000_000_000, 400_000_000_000)
-        };
-        let vote = if proposal.adopt_pot_e8s > proposal.reject_pot_e8s { 1i32 } else { 2i32 };
-        assert_eq!(vote, 2, "reject majority should cast No vote");
+        assert_eq!(decide_vote_choice(100, 300, Some(Stance::Adopt)), 2, "reject majority → No");
+    }
+
+    #[test]
+    fn test_settlement_split_math() {
+        // PB-125: 50% treasury, 25% backend, 25% frontend; remainder to frontend.
+        for amount in [100_000_000u64, 4_500_000_000, 7, 1_000_000_001] {
+            let treasury = amount / 2;
+            let backend = amount / 4;
+            let frontend = amount - treasury - backend;
+            assert_eq!(treasury + backend + frontend, amount, "split must sum to amount");
+            assert_eq!(treasury, amount / 2);
+            // frontend gets the rounding remainder, so it's >= backend.
+            assert!(frontend >= backend);
+        }
+        // Exact case: 100 ICP → 50 / 25 / 25.
+        let a = 10_000_000_000u64;
+        assert_eq!(a / 2, 5_000_000_000);
+        assert_eq!(a / 4, 2_500_000_000);
+        assert_eq!(a - a / 2 - a / 4, 2_500_000_000);
+    }
+
+    #[test]
+    fn test_vote_tie_break_uses_first_stance() {
+        // Equal pots → the first stance committed wins.
+        assert_eq!(decide_vote_choice(500, 500, Some(Stance::Adopt)), 1, "tie + first Adopt → Yes");
+        assert_eq!(decide_vote_choice(500, 500, Some(Stance::Reject)), 2, "tie + first Reject → No");
+        assert_eq!(decide_vote_choice(0, 0, None), 2, "no commits / unset → No");
     }
 
     #[test]
@@ -2158,6 +2253,7 @@ mod tests {
             ai_price_e8s: 5_000_000,
             ledger_canister_id: p("ryjl3-tyaaa-aaaaa-aaaba-cai"),
             is_local: false,
+            frontend_canister_id: None,
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -2185,6 +2281,7 @@ mod tests {
             reject_pot_e8s: 50_000_000_000,
             total_burned_e8s: None,
             vote_executed_at: Some(1_749_000_000_000_000_000),
+            first_stance: Some(Stance::Adopt),
         };
         let bytes = proposal.to_bytes();
         let decoded = Proposal::from_bytes(bytes);
@@ -2209,6 +2306,8 @@ mod tests {
             subaccount: derive_subaccount(&principal, 9999),
             settled_at: Some(1_700_001_000_000_000_000),
             cmc_block_index: Some(123_456),
+            treasury_block: Some(123_455),
+            frontend_cmc_block: Some(123_457),
         };
         let bytes = commitment.to_bytes();
         let decoded = Commitment::from_bytes(bytes);
@@ -2375,6 +2474,7 @@ mod tests {
                 ai_price_e8s: 0,
                 ledger_canister_id: Principal::anonymous(),
                 is_local: false,
+                frontend_canister_id: None,
             }
         };
         let mainnet = Config {

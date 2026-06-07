@@ -12,6 +12,8 @@ type Commitment = record {
   // skips the transfer and goes straight to notifying the CMC.
   // `None` until Phase A has succeeded.
   cmc_block_index : opt nat64;
+  treasury_block : opt nat64;
+  frontend_cmc_block : opt nat64;
   stance : Stance;
   status : CommitmentStatus;
   "principal" : principal;
@@ -41,6 +43,8 @@ type Config = record {
   ledger_canister_id : principal;
   ai_price_e8s : nat64;
   primary_neuron_id : nat64;
+  // Frontend canister topped up with the 25% cycles share (PB-125).
+  frontend_canister_id : opt principal;
 };
 type EligibilityInfo = record {
   holdings_e8s : nat64;
@@ -95,6 +99,8 @@ type Proposal = record {
   vote_executed_at : opt nat64;
   category : text;
   total_committed_e8s : nat64;
+  // Stance of the first commit — tie-breaker if the pots end equal (PB-123).
+  first_stance : opt Stance;
 };
 type Result = variant { Ok; Err : text };
 type Stance = variant { Reject; Adopt };
@@ -112,8 +118,12 @@ service : (InitPayload) -> {
   // config default for future proposals AND re-applies + recomputes status for
   // all currently open/met proposals. Rejects values below MIN_COMMIT (1 ICP).
   admin_set_default_threshold : (nat64) -> (Result);
+  // Admin: set the frontend canister id that receives the 25% cycles share.
+  admin_set_frontend_canister : (principal) -> (Result);
   admin_set_proposal_deadline : (nat64, nat64) -> (Result);
   admin_trigger_sweep : () -> (Result);
+  // Admin: withdraw ICP from the treasury subaccount to a destination principal.
+  admin_withdraw_treasury : (principal, nat64) -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
   // Local-dev faucet — sends 100 ICP from the canister's own account to the caller.
   // Rejected on mainnet (ledger canister ID check). Never callable by anonymous.
