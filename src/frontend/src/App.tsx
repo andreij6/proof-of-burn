@@ -311,9 +311,14 @@ export default function App() {
     'PUBLIC_CANISTER_ID:ledger': string;
   }>();
 
-  const host = window.location.origin;
-  const isLocal = host.includes("localhost") || host.includes("127.0.0.1");
-  const backendCanisterId = env?.['PUBLIC_CANISTER_ID:backend'] || (isLocal ? "aiewf-lx777-77775-aaaca-cai" : "");
+  const origin = window.location.origin;
+  const isLocal = origin.includes("localhost") || origin.includes("127.0.0.1");
+  // On mainnet the agent must talk to the IC API boundary, not the dapp's own
+  // origin — otherwise every canister call fails. Locally, use the replica origin.
+  const host = isLocal ? origin : "https://icp-api.io";
+  // Hardcoded mainnet fallbacks so the app works even if the injected canister
+  // env is missing (the prior "" fallback broke all backend calls on mainnet).
+  const backendCanisterId = env?.['PUBLIC_CANISTER_ID:backend'] || (isLocal ? "aiewf-lx777-77775-aaaca-cai" : "k7dn6-qiaaa-aaaap-qutha-cai");
   const ledgerCanisterId = env?.['PUBLIC_CANISTER_ID:ledger'] || (isLocal ? "a5dhi-k7777-77775-aaabq-cai" : "ryjl3-tyaaa-aaaaa-aaaba-cai");
   const identityProviderUrl = isLocal
     ? "http://id.ai.localhost:8000"
@@ -648,9 +653,9 @@ export default function App() {
         setHoldings(bal);
       })
       .catch((err: any) => {
-        console.warn("Failed to fetch balance, using simulated balance:", err);
-        // Local Pocket-IC developer mode fallback balance
-        setHoldings(1000_00000000n);
+        // Never fake a balance — show 0 so the user isn't misled.
+        console.error("Failed to fetch ICP balance:", err);
+        setHoldings(0n);
       });
   }, [principal, identity]);
 
@@ -861,48 +866,57 @@ export default function App() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg)' }}>
       {/* ── App Header ── */}
-      <header style={{
-        height: 'var(--nav-h)', borderBottom: '1px solid var(--border)', background: 'var(--bg-alt)',
-        padding: '0 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', zIndex: 10
+      <header className="app-header" style={{
+        borderBottom: '1px solid var(--border)', background: 'var(--bg-alt)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, zIndex: 10
       }}>
-        <div className="row" style={{ gap: 10 }}>
+        <div className="row" style={{ gap: 10, minWidth: 0 }}>
           <span style={{
-            width: 32, height: 32, display: 'grid', placeItems: 'center',
+            width: 32, height: 32, flexShrink: 0, display: 'grid', placeItems: 'center',
             border: '1px solid var(--burn)', borderRadius: 8, background: 'var(--burn-950)'
           }}>
             <Icon name="flame" size={17} stroke="var(--burn)" />
           </span>
-          <b style={{ fontFamily: 'var(--font-display)', fontSize: 18, letterSpacing: '-0.02em', color: 'var(--fg)' }}>
-            Proof of Burn - Alpha
+          <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            Proof of Burn <span className="hide-mobile">- Alpha</span>
           </b>
         </div>
 
-        <div className="row" style={{ gap: 16 }}>
-          <Btn variant="ghost" sm onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
-            <Icon name="spark" size={14} /> Theme: {theme.toUpperCase()}
-          </Btn>
+        <div className="row" style={{ gap: 10, flexShrink: 0 }}>
+          <span className="hide-mobile">
+            <Btn variant="ghost" sm onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
+              <Icon name="spark" size={14} /> Theme: {theme.toUpperCase()}
+            </Btn>
+          </span>
 
           {!principal || principal.isAnonymous() ? (
             <Btn variant="primary" sm onClick={handleLogin} disabled={isSigningIn}>
               {isSigningIn ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="key" size={14} stroke="var(--char-950)" />}
-              {isSigningIn ? " Opening Internet Identity..." : " Sign in"}
+              {isSigningIn ? " Opening II…" : " Sign in"}
             </Btn>
           ) : (
             <span className="row" style={{
               gap: 8, height: 30, padding: '0 10px', borderRadius: 6,
               border: '1px solid var(--border-hi)', background: 'var(--surface)'
             }}>
-              <Icon name="wallet" size={14} stroke="var(--fg-2)" />
-              <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg)' }}>
-                {formatPrincipal(principal)}
-              </span>
-              <span style={{ fontSize: 12, color: 'var(--fg-3)', marginLeft: 4 }}>
+              <button
+                onClick={() => { navigator.clipboard.writeText(principal.toString()); setHotkeyCopied(true); setTimeout(() => setHotkeyCopied(false), 2000); }}
+                title="Click to copy your full principal"
+                className="row"
+                style={{ gap: 6, background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
+              >
+                <Icon name={hotkeyCopied ? "check" : "wallet"} size={14} stroke={hotkeyCopied ? "var(--sprout)" : "var(--fg-2)"} />
+                <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg)' }}>
+                  {formatPrincipal(principal)}
+                </span>
+              </button>
+              <span className="hide-mobile" style={{ fontSize: 12, color: 'var(--fg-3)' }}>
                 ({fmtICP(holdings)} ICP)
               </span>
               <LiveDot color="var(--sprout)" size={6} />
               <button onClick={handleLogout} title="Sign out" style={{
                 background: 'transparent', border: 'none', cursor: 'pointer',
-                color: 'var(--ember)', padding: '0 2px', marginLeft: 4, display: 'flex', alignItems: 'center'
+                color: 'var(--ember)', padding: '0 2px', display: 'flex', alignItems: 'center'
               }}>
                 <Icon name="x" size={13} stroke="var(--ember)" />
               </button>
@@ -1978,7 +1992,7 @@ export default function App() {
                 <Eyebrow accent>How it Works</Eyebrow>
                 <ol style={{ margin: 0, paddingLeft: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <li>
-                    <b>Delegate Power:</b> Register your neuron to follow the DAO's primary voting neuron (ID <code>4821667</code>).
+                    <b>Delegate Power:</b> Register your neuron to follow the DAO's primary voting neuron (ID <code>{formatNeuronId(config?.primary_neuron_id)}</code>).
                   </li>
                   <li>
                     <b>Deposit to Escrow:</b> Fund a deterministic proposal subaccount with the ICP you want to burn to show conviction.

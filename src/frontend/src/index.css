@@ -379,6 +379,18 @@ a:hover {
   gap: var(--sp-2);
 }
 
+/* Header (responsive) */
+.app-header {
+  height: var(--nav-h);
+  padding: 0 24px;
+}
+.app-header-title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+}
+
 /* =============================================================
    Mobile responsiveness — 640px breakpoint
    ============================================================= */
@@ -389,11 +401,12 @@ a:hover {
     gap: var(--sp-4);
   }
 
-  /* Header: stack logo + actions vertically */
-  header .row {
-    flex-wrap: wrap;
-    gap: var(--sp-2);
-  }
+  /* Header: tighter padding + smaller title so actions never collide */
+  .app-header { padding: 0 12px; }
+  .app-header-title { font-size: 15px; }
+
+  /* Hide non-essential header chrome on small screens */
+  .hide-mobile { display: none !important; }
 
   /* Proposal card action rows wrap */
   .card .row {
