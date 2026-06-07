@@ -2639,4 +2639,97 @@ mod tests {
         assert_eq!(stats.votes_cast, 0);
         assert_eq!(stats.followers_count, 0);
     }
+
+    #[test]
+    fn test_nns_topic_label_mapping() {
+        assert_eq!(nns_topic_label(1), "Neuron Management");
+        assert_eq!(nns_topic_label(2), "Exchange Rate");
+        assert_eq!(nns_topic_label(3), "Network Economics");
+        assert_eq!(nns_topic_label(4), "Governance");
+        assert_eq!(nns_topic_label(5), "Node Admin");
+        assert_eq!(nns_topic_label(6), "Participant Management");
+        assert_eq!(nns_topic_label(7), "Subnet Management");
+        assert_eq!(nns_topic_label(8), "Network Canister Management");
+        assert_eq!(nns_topic_label(9), "KYC");
+        assert_eq!(nns_topic_label(10), "Node Provider Rewards");
+        assert_eq!(nns_topic_label(12), "IC OS Version Deployment");
+        assert_eq!(nns_topic_label(13), "IC OS Version Election");
+        assert_eq!(nns_topic_label(14), "SNS & Neurons' Fund");
+        assert_eq!(nns_topic_label(15), "API Boundary Node Management");
+        assert_eq!(nns_topic_label(99), "Governance");
+    }
+
+    #[test]
+    fn test_crc32_expected_values() {
+        assert_eq!(crc32(b"123456789"), 0xCBF43926);
+        assert_eq!(crc32(b""), 0x00000000);
+        assert_eq!(crc32(b"a"), 0xE8B7BE43);
+    }
+
+    #[test]
+    fn test_to_hex_formatting() {
+        assert_eq!(to_hex(&[]), "");
+        assert_eq!(to_hex(&[0x00]), "00");
+        assert_eq!(to_hex(&[0x01, 0x02, 0x0a, 0xff]), "01020aff");
+    }
+
+    #[test]
+    fn test_account_id_hex_formatting() {
+        let owner = Principal::anonymous();
+        let subaccount = [0u8; 32];
+        let addr = account_id_hex(owner, &subaccount);
+        assert_eq!(
+            addr.len(),
+            64,
+            "address must be exactly 64 hex characters"
+        );
+        assert!(
+            addr.chars().all(|c| c.is_ascii_hexdigit()),
+            "address must contain only hex characters"
+        );
+        let addr2 = account_id_hex(owner, &subaccount);
+        assert_eq!(addr, addr2, "account_id_hex must be deterministic");
+    }
+
+    #[test]
+    fn test_frontend_canister_id_resolution() {
+        let original_cfg = CONFIG.with(|c| c.borrow().get().clone());
+
+        CONFIG.with(|c| {
+            let mut cell = c.borrow_mut();
+            let mut cfg = cell.get().clone();
+            cfg.is_local = true;
+            cfg.frontend_canister_id = None;
+            let _ = cell.set(cfg);
+        });
+        assert_eq!(
+            frontend_canister_id(),
+            Principal::from_text("a2cb4-hh777-77775-aaaba-cai").unwrap()
+        );
+
+        CONFIG.with(|c| {
+            let mut cell = c.borrow_mut();
+            let mut cfg = cell.get().clone();
+            cfg.is_local = false;
+            cfg.frontend_canister_id = None;
+            let _ = cell.set(cfg);
+        });
+        assert_eq!(
+            frontend_canister_id(),
+            Principal::from_text("kyclk-5qaaa-aaaap-quthq-cai").unwrap()
+        );
+
+        let override_principal = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        CONFIG.with(|c| {
+            let mut cell = c.borrow_mut();
+            let mut cfg = cell.get().clone();
+            cfg.frontend_canister_id = Some(override_principal);
+            let _ = cell.set(cfg);
+        });
+        assert_eq!(frontend_canister_id(), override_principal);
+
+        CONFIG.with(|c| {
+            let _ = c.borrow_mut().set(original_cfg);
+        });
+    }
 }
