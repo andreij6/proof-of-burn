@@ -128,12 +128,12 @@ fn setup() -> Option<(PocketIc, Principal)> {
 #[test]
 fn anonymous_is_rejected_on_updates() {
     let Some((pic, canister)) = setup() else { return };
-    // register_neuron is an update; anonymous ingress must be rejected by inspect_message.
+    // confirm_follow is an update; anonymous ingress must be rejected by inspect_message.
     let res = pic.update_call(
         canister,
         Principal::anonymous(),
-        "register_neuron",
-        encode_one(4821667u64).unwrap(),
+        "confirm_follow",
+        encode_one(()).unwrap(),
     );
     assert!(res.is_err(), "anonymous update must be rejected at ingress");
 }
@@ -477,13 +477,13 @@ fn do_commit_as(env: &SagaEnv, user: Principal, proposal_id: u64, stance: Stance
     // 0. ensure the user has funds (target + protocol/ledger fees + headroom)
     env.mint(user, target_e8s + 1_000_000);
 
-    // 1. register neuron (is_local mock makes the user a follower with 1000 ICP stake)
+    // 1. self-attested follow (Option C — no on-chain neuron verification)
     let reg = env
         .pic
-        .update_call(env.backend, user, "register_neuron", encode_one(4821667u64).unwrap())
-        .expect("register_neuron call");
+        .update_call(env.backend, user, "confirm_follow", encode_one(()).unwrap())
+        .expect("confirm_follow call");
     let reg: UnitResult = decode_one(&reg).unwrap();
-    assert!(matches!(reg, UnitResult::Ok), "register_neuron should succeed in is_local: {:?}", reg);
+    assert!(matches!(reg, UnitResult::Ok), "confirm_follow should succeed: {:?}", reg);
 
     // 2. fetch escrow deposit address
     let reply = env

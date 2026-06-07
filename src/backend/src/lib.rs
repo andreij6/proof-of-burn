@@ -36,28 +36,9 @@ pub struct NeuronId {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
-pub struct Followees {
-    pub followees: Vec<NeuronId>,
-}
-
-#[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct GovernanceError {
     pub error_message: String,
     pub error_type: i32,
-}
-
-#[derive(CandidType, Deserialize, Clone, Debug)]
-pub struct Neuron {
-    pub id: Option<NeuronId>,
-    pub controller: Option<Principal>,
-    pub followees: Vec<(i32, Followees)>,
-    pub cached_neuron_stake_e8s: u64,
-}
-
-#[derive(CandidType, Deserialize, Clone, Debug)]
-pub enum Result_2 {
-    Ok(Neuron),
-    Err(GovernanceError),
 }
 
 // NNS `get_neuron_info` — a public query (no hotkey needed). Subset-decoded.
@@ -733,83 +714,26 @@ fn get_leader_neuron_info() -> LeaderNeuronInfo {
     })
 }
 
-async fn check_nns_follow(neuron_id: u64, caller: Principal, leader_id: u64) -> Result<(bool, u64), String> {
-    let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
 
-    let response: Result<(Result_2,), _> = ic_cdk::call(nns_gov, "get_full_neuron", (neuron_id,)).await;
-
-    match response {
-        Ok((Result_2::Ok(neuron),)) => {
-            if neuron.controller != Some(caller) {
-                return Err("Neuron controller principal does not match caller principal".to_string());
-            }
-
-            let mut following = false;
-            for (topic, followees_list) in neuron.followees {
-                if topic == 1 || topic == 0 {
-                    for f in followees_list.followees {
-                        if f.id == leader_id {
-                            following = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            Ok((following, neuron.cached_neuron_stake_e8s))
-        }
-        Ok((Result_2::Err(err),)) => {
-            Err(format!("NNS Governance returned error: {}", err.error_message))
-        }
-        Err((code, msg)) => {
-            // F-101: on mainnet, a rejected `get_full_neuron` must NOT grant
-            // follow eligibility or a fake 1000 ICP stake — that would let any
-            // caller bypass the controller check and the stake cap. The local
-            // dev fallback (which pretends the neuron is following with 1000
-            // ICP) is only safe when `is_local` was set at init.
-            let is_local = CONFIG.with(|cell| cell.borrow().get().is_local);
-            if is_local
-                && (code == ic_cdk::api::call::RejectionCode::DestinationInvalid
-                    || code == ic_cdk::api::call::RejectionCode::CanisterError
-                    || code == ic_cdk::api::call::RejectionCode::CanisterReject)
-            {
-                Ok((true, 100_000_000_000u64))
-            } else {
-                Err(format!("NNS call rejected (code {:?}): {}", code, msg))
-            }
-        }
-    }
-}
-
+/// Self-attested follow (Option C). We do NOT verify neuron ownership on-chain:
+/// because Internet Identity gives this app a per-dapp principal that can't equal
+/// the user's NNS principal, and the canister isn't a hotkey on arbitrary neurons,
+/// trustless ownership proof isn't possible without heavy hotkey onboarding. The
+/// real skin-in-the-game is the ICP burn itself, so following the leader neuron is
+/// encouraged but self-attested. The user confirms in the UI; we record it here.
 #[ic_cdk::update]
-async fn register_neuron(neuron_id: u64) -> Result<(), String> {
+fn confirm_follow() -> Result<(), String> {
     require_authenticated()?;
     let caller = ic_cdk::caller();
-
-    // Neuron IDs are arbitrary u64 values (no meaningful upper bound); only 0 is invalid.
-    if neuron_id == 0 {
-        return Err("INVALID_NEURON_ID".to_string());
-    }
-
-    let config = CONFIG.with(|cell| cell.borrow().get().clone());
-    let leader_id = config.primary_neuron_id;
-
-    let (verified, stake) = check_nns_follow(neuron_id, caller, leader_id).await?;
-
-    if !verified {
-        return Err("Neuron is not following the primary neuron".to_string());
-    }
-
     let state = UserNeuronState {
-        neuron_id,
+        neuron_id: 0,
         is_following: true,
         verified_at: ic_cdk::api::time(),
-        cached_stake_e8s: stake,
+        cached_stake_e8s: 0,
     };
-    
     USER_NEURONS.with(|map| {
         map.borrow_mut().insert(caller, state);
     });
-
     Ok(())
 }
 
@@ -844,13 +768,10 @@ fn get_eligibility() -> EligibilityInfo {
         2
     };
 
-    let holdings_e8s = if authenticated {
-        USER_NEURONS.with(|map| {
-            map.borrow().get(&caller).map(|n| n.cached_stake_e8s).unwrap_or(0)
-        })
-    } else {
-        0
-    };
+    // Option C: no neuron stake cap — commits are capped by the user's wallet
+    // balance (enforced by the escrow deposit). holdings_e8s is retained in the
+    // type for compatibility but is no longer a stake cap.
+    let holdings_e8s = 0u64;
 
     EligibilityInfo {
         tier,
@@ -1144,44 +1065,6 @@ async fn burn_to_cycles(
     }
 }
 
-// Endpoints
-#[ic_cdk::update]
-async fn verify_follow() -> Result<(), String> {
-    require_authenticated()?;
-    let caller = ic_cdk::caller();
-
-    let neuron_id = USER_NEURONS.with(|map| {
-        map.borrow().get(&caller).map(|s| s.neuron_id)
-    });
-
-    let neuron_id = match neuron_id {
-        Some(id) => id,
-        None => return Err("No neuron registered for caller".to_string()),
-    };
-
-    let config = CONFIG.with(|cell| cell.borrow().get().clone());
-    let leader_id = config.primary_neuron_id;
-
-    let (verified, stake) = check_nns_follow(neuron_id, caller, leader_id).await?;
-
-    if !verified {
-        return Err("Neuron is not following the primary neuron".to_string());
-    }
-
-    let state = UserNeuronState {
-        neuron_id,
-        is_following: true,
-        verified_at: ic_cdk::api::time(),
-        cached_stake_e8s: stake,
-    };
-    
-    USER_NEURONS.with(|map| {
-        map.borrow_mut().insert(caller, state);
-    });
-
-    Ok(())
-}
-
 #[ic_cdk::query]
 fn get_deposit_address(proposal_id: u64) -> LedgerAccount {
     let caller = ic_cdk::caller();
@@ -1242,9 +1125,8 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         return Err("EXCEEDS_GLOBAL_CAP".to_string());
     }
 
-    if target_e8s > user_neuron.cached_stake_e8s {
-        return Err("EXCEEDS_STAKE_CAP".to_string());
-    }
+    // Option C: no neuron-stake cap. The amount is capped by the user's wallet —
+    // enforced below by requiring the escrow to be funded (INSUFFICIENT_DEPOSIT).
 
     let proposal = PROPOSALS.with(|map| map.borrow().get(&proposal_id));
     let mut proposal = match proposal {

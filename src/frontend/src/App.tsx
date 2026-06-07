@@ -253,6 +253,18 @@ function formatPrincipal(p: Principal | null): string {
   return `${s.slice(0, 4)}…${s.slice(-3)}`;
 }
 
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+export function isValidAccountId(hex: string): boolean {
+  return /^[0-9a-fA-F]{64}$/.test(hex.trim());
+}
+
 // TIER META definition
 const TIER_META = [
   ['Tier 0', 'Anonymous visitor', 'Minimum to understand + start', 'lands on the page'],
@@ -332,7 +344,7 @@ export default function App() {
 
   // Derived / Application state
   const [isFollowing, setIsFollowing] = useState(false);
-  const [neuronIdInput, setNeuronIdInput] = useState("");
+  const [isFollowModalOpen, setIsFollowModalOpen] = useState(false);
   const [hotkeyCopied, setHotkeyCopied] = useState(false);
   const [thresholdInput, setThresholdInput] = useState("");
   const [isSettingThreshold, setIsSettingThreshold] = useState(false);
@@ -490,15 +502,13 @@ export default function App() {
     }
   };
 
-  // Withdraw ICP out of the app account to a destination principal (ICRC-1).
+  // Withdraw ICP out of the app account to a destination Account ID (legacy ledger transfer).
   const handleWithdraw = async () => {
     if (!identity || isWithdrawing) return;
     setWithdrawError(null);
-    let dest: Principal;
-    try {
-      dest = Principal.fromText(withdrawTo.trim());
-    } catch {
-      setWithdrawError("Enter a valid destination principal.");
+    const targetAccountId = withdrawTo.trim();
+    if (!isValidAccountId(targetAccountId)) {
+      setWithdrawError("Enter a valid 64-character hex Account ID.");
       return;
     }
     const amt = parseFloat(withdrawAmount);
@@ -516,13 +526,26 @@ export default function App() {
       const ledgerActor = createLedgerActor(ledgerCanisterId, {
         agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
       });
-      const res = await ledgerActor.icrc1_transfer({
-        to: { owner: dest, subaccount: undefined },
-        amount: amountE8s,
-        fee: undefined, memo: undefined, from_subaccount: undefined, created_at_time: undefined,
-      } as any);
+      const destBytes = hexToBytes(targetAccountId);
+      const res = await ledgerActor.transfer({
+        to: destBytes,
+        amount: { e8s: amountE8s },
+        fee: { e8s: 10_000n },
+        memo: 0n,
+        from_subaccount: undefined,
+        created_at_time: undefined,
+      });
       if (res.__kind__ === "Err") {
-        setWithdrawError(`Transfer failed: ${JSON.stringify(res.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
+        const err = res.Err;
+        const kind = err.__kind__;
+        const detail =
+          kind === "BadFee" ? `expected fee ${fmtICP(err.BadFee.expected_fee.e8s)} ICP` :
+          kind === "InsufficientFunds" ? `balance is ${fmtICP(err.InsufficientFunds.balance.e8s)} ICP` :
+          kind === "TxTooOld" ? "transaction window expired" :
+          kind === "TxCreatedInFuture" ? "clock skew — try again" :
+          kind === "TxDuplicate" ? `duplicate of block ${err.TxDuplicate.duplicate_of.toString()}` :
+          JSON.stringify(err);
+        setWithdrawError(`Transfer failed: ${detail}`);
         return;
       }
       setWithdrawSuccess(true);
@@ -530,7 +553,11 @@ export default function App() {
       setWithdrawTo("");
       await refreshAllData();
     } catch (err: any) {
-      setWithdrawError(err.message || String(err));
+      if (err.message && err.message.includes("does not have method")) {
+        setWithdrawError("Legacy Account ID transfers are not supported on the local dev ledger. Please deploy to mainnet to withdraw.");
+      } else {
+        setWithdrawError(err.message || String(err));
+      }
     } finally {
       setIsWithdrawing(false);
     }
@@ -606,36 +633,23 @@ export default function App() {
     }
   };
 
-  const handleFollowNeuron = async () => {
+  // Option C: self-attested follow. The user confirms they've followed the
+  // leader neuron (or chooses to proceed); we record it without on-chain check.
+  const handleConfirmFollow = async () => {
     if (!actor || isVerifying) return;
-    // Parse the user's OWN neuron id (u64 — keep as BigInt, never Number).
-    let userNeuronId: bigint;
-    try {
-      userNeuronId = BigInt((neuronIdInput || "").trim());
-    } catch {
-      alert("Enter a valid neuron ID (digits only).");
-      return;
-    }
-    if (userNeuronId <= 0n) {
-      alert("Enter a valid neuron ID.");
-      return;
-    }
     setIsVerifying(true);
     try {
-      // register_neuron verifies on-chain that THIS neuron is controlled by the
-      // caller and follows the leader neuron. Requires the user to have added
-      // this app's canister as a hotkey on their neuron first.
-      const res = await actor.register_neuron(userNeuronId);
+      const res = await actor.confirm_follow();
       if (res.__kind__ === "Ok") {
         setIsFollowing(true);
+        setIsFollowModalOpen(false);
         await refreshEligibility();
-        await fetchSystemHealth();
       } else {
-        alert(`Verification failed: ${res.Err}`);
+        alert(`Could not record follow: ${res.Err}`);
       }
     } catch (err: any) {
-      console.error("Failed to verify follow:", err);
-      alert(`Error verifying follow: ${err.message || err}`);
+      console.error("Failed to confirm follow:", err);
+      alert(`Error: ${err.message || err}`);
     } finally {
       setIsVerifying(false);
     }
@@ -798,11 +812,7 @@ export default function App() {
       return;
     }
     const amountE8s = BigInt(Math.floor(amount * 100_000_000));
-    const neuronStakeCap = eligibility?.holdings_e8s ?? 0n;
-    if (neuronStakeCap > 0n && amountE8s > neuronStakeCap) {
-      setTxError(`Exceeds your neuron stake cap of ${fmtICP(neuronStakeCap)} ICP.`);
-      return;
-    }
+    // Option C: capped by wallet balance only (no neuron stake cap).
     const requiredTotal = amountE8s + 530_000n;
     if (requiredTotal > holdings) {
       setTxError(`Insufficient wallet balance — need at least ${fmtICP(requiredTotal)} ICP (amount + fees).`);
@@ -1243,77 +1253,19 @@ export default function App() {
                   {!isFollowing ? (
                     !principal || principal.isAnonymous() ? (
                       <span className="row" style={{ gap: 6, color: 'var(--burn)', fontSize: 12.5, whiteSpace: 'nowrap' }}>
-                        <Icon name="arrowUp" size={13} stroke="var(--burn)" /> Sign in to verify
+                        <Icon name="arrowUp" size={13} stroke="var(--burn)" /> Sign in to follow
                       </span>
                     ) : (
-                      <span className="row" style={{ gap: 6, color: 'var(--fg-3)', fontSize: 12.5, whiteSpace: 'nowrap' }}>
-                        <Icon name="lock" size={13} stroke="var(--fg-3)" /> Not verified
-                      </span>
+                      <Btn variant="primary" sm onClick={() => setIsFollowModalOpen(true)}>
+                        <Icon name="checkCircle" size={13} stroke="var(--char-950)" /> Follow neuron
+                      </Btn>
                     )
                   ) : (
                     <span className="row" style={{ gap: 6, color: 'var(--sprout)', fontSize: 12.5 }}>
-                      <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> Verified on-chain
+                      <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> Following
                     </span>
                   )}
                 </div>
-
-                {/* Guided on-chain verification: prove the user owns a neuron
-                    that follows the leader. Real verification (controller==caller
-                    + follows leader) happens in register_neuron on the backend. */}
-                {principal && !principal.isAnonymous() && !isFollowing && (
-                  <div className="col" style={{
-                    gap: 12, marginTop: 12, paddingTop: 14, borderTop: '1px solid var(--border)'
-                  }}>
-                    <Eyrow>Verify your neuron</Eyrow>
-
-                    <div className="col" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
-                      <span><b style={{ color: 'var(--fg)' }}>1.</b> In the NNS, set your neuron to <b>follow neuron {formatNeuronId(config?.primary_neuron_id)}</b> on Governance.</span>
-                      <span><b style={{ color: 'var(--fg)' }}>2.</b> Add this app as a <b>hotkey</b> on your neuron so it can read it on-chain:</span>
-                    </div>
-
-                    {/* Hotkey = this app's backend canister principal */}
-                    <div className="row" style={{
-                      gap: 8, alignItems: 'center', justifyContent: 'space-between',
-                      padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)'
-                    }}>
-                      <span className="mono" style={{ fontSize: 12, color: 'var(--fg)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {backendCanisterId}
-                      </span>
-                      <button onClick={() => {
-                        navigator.clipboard.writeText(backendCanisterId);
-                        setHotkeyCopied(true);
-                        setTimeout(() => setHotkeyCopied(false), 2000);
-                      }} title="Copy hotkey principal" style={{
-                        display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0,
-                        borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer'
-                      }}>
-                        <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--fg-3)"} />
-                      </button>
-                    </div>
-
-                    <div className="col" style={{ gap: 8 }}>
-                      <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}><b style={{ color: 'var(--fg)' }}>3.</b> Enter your neuron ID and verify:</span>
-                      <div className="row" style={{ gap: 8 }}>
-                        <input
-                          type="text"
-                          inputMode="numeric"
-                          placeholder="Your neuron ID"
-                          className="burn-input"
-                          style={{ flex: 1, fontFamily: 'var(--font-mono)' }}
-                          value={neuronIdInput}
-                          onChange={(e) => setNeuronIdInput(e.target.value.replace(/[^0-9]/g, ''))}
-                        />
-                        <Btn variant="primary" sm onClick={handleFollowNeuron} disabled={isVerifying || !neuronIdInput}>
-                          {isVerifying ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />}
-                          {isVerifying ? " Verifying…" : " Verify"}
-                        </Btn>
-                      </div>
-                      <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                        <Icon name="info" size={12} stroke="var(--fg-3)" /> We check on-chain that this neuron is yours and follows the leader.
-                      </span>
-                    </div>
-                  </div>
-                )}
               </div>
             </Reveal>
 
@@ -1552,12 +1504,6 @@ export default function App() {
                                       <Icon name="coins" size={12} stroke="var(--fg-3)" />
                                       <span>Wallet: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(holdings)}</span></span>
                                     </span>
-                                    {eligibility?.holdings_e8s && eligibility.holdings_e8s > 0n && (
-                                      <span className="row" style={{ gap: 4 }}>
-                                        <span style={{ color: 'var(--fg-3)' }}>·</span>
-                                        <span>Stake cap: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(eligibility.holdings_e8s)}</span></span>
-                                      </span>
-                                    )}
                                   </span>
                                   {mineBadge}
                                 </div>
@@ -1896,6 +1842,66 @@ export default function App() {
 
       </div>
 
+      {/* ── Follow Neuron Modal (self-attested, Option C) ── */}
+      {isFollowModalOpen && principal && !principal.isAnonymous() && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }}>
+          <div className="card col" style={{
+            maxWidth: 440, width: '100%', gap: 16, background: 'var(--surface)',
+            border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)'
+          }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="checkCircle" size={18} stroke="var(--sprout)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Follow the leader neuron</h4>
+              </span>
+              {!isVerifying && (
+                <button onClick={() => setIsFollowModalOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
+                  <Icon name="x" size={16} />
+                </button>
+              )}
+            </div>
+
+            <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
+              Proof of Burn directs the community leader neuron based on what participants burn. We recommend also following it on the NNS so your own neuron votes the same way.
+            </p>
+
+            <div className="col" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, padding: '12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+              <Eyebrow>How to follow (optional)</Eyebrow>
+              <span><b style={{ color: 'var(--fg)' }}>1.</b> Open the NNS dapp → your neuron → <b>Following</b>.</span>
+              <span><b style={{ color: 'var(--fg)' }}>2.</b> Under the <b>Governance</b> topic, add followee neuron:</span>
+              <div className="row" style={{ gap: 8, alignItems: 'center', justifyContent: 'space-between', padding: '6px 8px', borderRadius: 4, background: 'var(--surface)', border: '1px solid var(--border)' }}>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg)', overflowWrap: 'anywhere' }}>{formatNeuronId(config?.primary_neuron_id)}</span>
+                <button onClick={() => { if (config) { navigator.clipboard.writeText(config.primary_neuron_id.toString()); setHotkeyCopied(true); setTimeout(() => setHotkeyCopied(false), 2000); } }}
+                  title="Copy neuron id" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0, borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer' }}>
+                  <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--fg-3)"} />
+                </button>
+              </div>
+              <a href="https://nns.ic0.app" target="_blank" rel="noreferrer" style={{ fontSize: 12, color: 'var(--burn)', textDecoration: 'none' }}>
+                <Icon name="external" size={11} stroke="var(--burn)" /> Open the NNS dapp
+              </a>
+            </div>
+
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
+              Following is encouraged but not enforced — your real conviction is the ICP you burn. Click Done to continue and start voting.
+            </span>
+
+            <div className="row" style={{ gap: 12 }}>
+              <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setIsFollowModalOpen(false)} disabled={isVerifying}>
+                No thanks
+              </Btn>
+              <Btn variant="primary" style={{ flex: 1 }} onClick={handleConfirmFollow} disabled={isVerifying}>
+                {isVerifying ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={14} stroke="var(--char-950)" />}
+                {isVerifying ? " Saving…" : " Done"}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Wallet Modal (deposit / withdraw) ── */}
       {isWalletOpen && principal && !principal.isAnonymous() && (
         <div style={{
@@ -1937,14 +1943,6 @@ export default function App() {
                   <Icon name={addrCopied === "aid" ? "check" : "copy"} size={12} stroke={addrCopied === "aid" ? "var(--sprout)" : "var(--fg-3)"} />
                 </button>
               </div>
-              <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Principal (for ICRC-1 wallets)</label>
-              <div className="row" style={{ gap: 8, padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
-                <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg)', overflowWrap: 'anywhere', flex: 1 }}>{principal.toString()}</span>
-                <button onClick={() => { navigator.clipboard.writeText(principal.toString()); setAddrCopied("principal"); setTimeout(() => setAddrCopied(""), 2000); }}
-                  title="Copy principal" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0, borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer' }}>
-                  <Icon name={addrCopied === "principal" ? "check" : "copy"} size={12} stroke={addrCopied === "principal" ? "var(--sprout)" : "var(--fg-3)"} />
-                </button>
-              </div>
             </div>
 
             <hr />
@@ -1962,7 +1960,7 @@ export default function App() {
                   {withdrawError}
                 </div>
               )}
-              <input type="text" placeholder="Destination principal" className="burn-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}
+              <input type="text" placeholder="Destination Account ID (64-char hex)" className="burn-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}
                 value={withdrawTo} onChange={(e) => { setWithdrawTo(e.target.value); setWithdrawError(null); setWithdrawSuccess(false); }} />
               <div className="row" style={{ gap: 8 }}>
                 <div style={{ flex: 1, position: 'relative' }}>
@@ -1976,7 +1974,7 @@ export default function App() {
                 </Btn>
               </div>
               <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--fg-3)' }}>
-                <Icon name="info" size={11} stroke="var(--fg-3)" /> Withdraws to a principal (ICRC-1). 0.0001 ICP network fee applies.
+                <Icon name="info" size={11} stroke="var(--fg-3)" /> Withdraws to a legacy Account ID (64-char hex). 0.0001 ICP network fee applies.
               </span>
             </div>
           </div>
@@ -2082,9 +2080,6 @@ export default function App() {
                     <div className="row" style={{ gap: 12, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
                       <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>1.0 ICP</span></span>
                       <span>Wallet: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(holdings)} ICP</span></span>
-                      {eligibility?.holdings_e8s && eligibility.holdings_e8s > 0n && (
-                        <span>Stake cap: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(eligibility.holdings_e8s)} ICP</span></span>
-                      )}
                     </div>
                     <button
                       type="button"
