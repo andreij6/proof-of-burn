@@ -348,6 +348,16 @@ export default function App() {
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
 
+  // Wallet (deposit / withdraw) state
+  const [isWalletOpen, setIsWalletOpen] = useState(false);
+  const [accountId, setAccountId] = useState<string>("");
+  const [addrCopied, setAddrCopied] = useState<"" | "aid" | "principal">("");
+  const [withdrawTo, setWithdrawTo] = useState("");
+  const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [isWithdrawing, setIsWithdrawing] = useState(false);
+  const [withdrawError, setWithdrawError] = useState<string | null>(null);
+  const [withdrawSuccess, setWithdrawSuccess] = useState(false);
+
   // Transaction / Modal state
   const [isConfirming, setIsConfirming] = useState(false);
   const [isTransacting, setIsTransacting] = useState(false);
@@ -468,6 +478,61 @@ export default function App() {
       setLeaderInfo(info);
     } catch (err) {
       console.error("Failed to fetch leader neuron info:", err);
+    }
+  };
+
+  const fetchAccountId = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      setAccountId(await currentActor.get_account_id());
+    } catch (err) {
+      console.error("Failed to fetch account id:", err);
+    }
+  };
+
+  // Withdraw ICP out of the app account to a destination principal (ICRC-1).
+  const handleWithdraw = async () => {
+    if (!identity || isWithdrawing) return;
+    setWithdrawError(null);
+    let dest: Principal;
+    try {
+      dest = Principal.fromText(withdrawTo.trim());
+    } catch {
+      setWithdrawError("Enter a valid destination principal.");
+      return;
+    }
+    const amt = parseFloat(withdrawAmount);
+    if (isNaN(amt) || amt <= 0) {
+      setWithdrawError("Enter a valid amount.");
+      return;
+    }
+    const amountE8s = BigInt(Math.floor(amt * 100_000_000));
+    if (amountE8s + 10_000n > holdings) {
+      setWithdrawError(`Insufficient balance (need amount + 0.0001 ICP fee).`);
+      return;
+    }
+    setIsWithdrawing(true);
+    try {
+      const ledgerActor = createLedgerActor(ledgerCanisterId, {
+        agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
+      });
+      const res = await ledgerActor.icrc1_transfer({
+        to: { owner: dest, subaccount: undefined },
+        amount: amountE8s,
+        fee: undefined, memo: undefined, from_subaccount: undefined, created_at_time: undefined,
+      } as any);
+      if (res.__kind__ === "Err") {
+        setWithdrawError(`Transfer failed: ${JSON.stringify(res.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
+        return;
+      }
+      setWithdrawSuccess(true);
+      setWithdrawAmount("");
+      setWithdrawTo("");
+      await refreshAllData();
+    } catch (err: any) {
+      setWithdrawError(err.message || String(err));
+    } finally {
+      setIsWithdrawing(false);
     }
   };
 
@@ -641,6 +706,7 @@ export default function App() {
     fetchGlobalStats(actor);
     fetchConfig(actor);
     fetchLeaderInfo(actor);
+    fetchAccountId(actor);
   }, [actor]);
 
   // Fetch Ledger Balance
@@ -873,6 +939,17 @@ export default function App() {
            (!c && (p.status === 'voted' || p.status === 'settled' || p.status === 'abstained'));
   }).sort(byNewest);
 
+  const nonCommitVotes = tier >= 1 ? voteHistory.filter(r => !historyProposals.find(p => p.id === r.proposal_id)) : [];
+  const pastItems: { id: bigint; proposal?: Proposal; record?: VoteRecord }[] = [];
+  historyProposals.forEach(p => {
+    pastItems.push({ id: BigInt(p.id), proposal: p });
+  });
+  nonCommitVotes.forEach(r => {
+    pastItems.push({ id: BigInt(r.proposal_id), record: r });
+  });
+  pastItems.sort((a, b) => (b.id > a.id ? 1 : b.id < a.id ? -1 : 0));
+  const displayedPastItems = pastItems.slice(0, 100);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg)' }}>
       {/* ── App Header ── */}
@@ -905,6 +982,10 @@ export default function App() {
               {isSigningIn ? " Opening II…" : " Sign in"}
             </Btn>
           ) : (
+            <span className="row" style={{ gap: 8 }}>
+            <Btn variant="primary" sm onClick={() => { setIsWalletOpen(true); setWithdrawError(null); setWithdrawSuccess(false); }}>
+              <Icon name="wallet" size={14} stroke="var(--char-950)" /> Wallet
+            </Btn>
             <span className="row" style={{
               gap: 8, height: 30, padding: '0 10px', borderRadius: 6,
               border: '1px solid var(--border-hi)', background: 'var(--surface)'
@@ -930,6 +1011,7 @@ export default function App() {
               }}>
                 <Icon name="x" size={13} stroke="var(--ember)" />
               </button>
+            </span>
             </span>
           )}
         </div>
@@ -1303,7 +1385,7 @@ export default function App() {
                         transition: 'color var(--dur-fast) var(--ease-out)',
                       }}
                     >
-                      History <span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>({historyProposals.length + (tier >= 1 ? voteHistory.filter(r => !historyProposals.find(p => p.id === r.proposal_id)).length : 0)})</span>
+                      Past Proposals <span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>({displayedPastItems.length})</span>
                       {activeTab === 'history' && (
                         <div style={{
                           position: 'absolute', bottom: -3, left: 0, right: 0,
@@ -1584,8 +1666,8 @@ export default function App() {
                       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
                         <span className="row" style={{ gap: 8 }}>
                           <Icon name="list" size={13} stroke="var(--fg-2)" />
-                          <b style={{ fontSize: 14, color: 'var(--fg)' }}>History</b>
-                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {historyProposals.length + (tier >= 1 ? voteHistory.filter(r => !historyProposals.find(p => p.id === r.proposal_id)).length : 0)}</span>
+                          <b style={{ fontSize: 14, color: 'var(--fg)' }}>Past Proposals</b>
+                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {displayedPastItems.length}</span>
                         </span>
                         <Eyebrow style={{ whiteSpace: 'nowrap' }}>settled · cycles · returned</Eyebrow>
                       </div>
@@ -1595,49 +1677,47 @@ export default function App() {
                       <Gate hint="Sign in to unlock" height={80} gating={gating}>
                         <div style={{ height: 60 }} />
                       </Gate>
-                    ) : historyProposals.length === 0 && voteHistory.length === 0 ? (
+                    ) : displayedPastItems.length === 0 ? (
                       <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No settled proposals yet.</div>
                     ) : (
                       <div className="col" style={{ gap: 0 }}>
-                        {/* Proposals where the user committed and it settled */}
-                        {historyProposals.map(p => {
-                          const myCommitment = myCommitments.find(c => c.proposal_id === p.id);
-                          const voteRec = voteHistory.find(r => r.proposal_id === p.id);
-                          const isBurned = myCommitment?.status === CommitmentStatus.Burned;
-                          return (
-                            <div key={p.id.toString()} className="col" style={{
-                              gap: 8, padding: '12px 0',
-                              borderBottom: '1px solid var(--border)'
-                            }}>
-                              <div className="row" style={{ justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
-                                <span style={{ fontSize: 13, color: 'var(--fg-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={p.title}>
-                                  {p.title}
-                                </span>
-                                <div className="row" style={{ gap: 8, flexShrink: 0 }}>
-                                  {voteRec && (
-                                    <Chip tone={voteRec.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>
-                                      {voteRec.vote === Vote.Yes ? 'voted yes' : voteRec.vote === Vote.No ? 'voted no' : 'abstained'}
-                                    </Chip>
-                                  )}
-                                </div>
-                              </div>
-                              {myCommitment && (
-                                <div className="row" style={{ gap: 10, fontSize: 12, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
-                                  <Chip tone={myCommitment.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 17, fontSize: 10 }}>
-                                    {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
-                                  </Chip>
-                                  <span className="mono" style={{ color: isBurned ? 'var(--burn)' : 'var(--sprout)' }}>
-                                    {fmtICP(myCommitment.amount_e8s)} ICP {isBurned ? '→ cycles' : 'returned'}
+                        {displayedPastItems.map(item => {
+                          if (item.proposal) {
+                            const p = item.proposal;
+                            const myCommitment = myCommitments.find(c => c.proposal_id === p.id);
+                            const voteRec = voteHistory.find(r => r.proposal_id === p.id);
+                            const isBurned = myCommitment?.status === CommitmentStatus.Burned;
+                            return (
+                              <div key={p.id.toString()} className="col" style={{
+                                gap: 8, padding: '12px 0',
+                                borderBottom: '1px solid var(--border)'
+                              }}>
+                                <div className="row" style={{ justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+                                  <span style={{ fontSize: 13, color: 'var(--fg-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={p.title}>
+                                    {p.title}
                                   </span>
+                                  <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                                    {voteRec && (
+                                      <Chip tone={voteRec.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>
+                                        {voteRec.vote === Vote.Yes ? 'voted yes' : voteRec.vote === Vote.No ? 'voted no' : 'abstained'}
+                                      </Chip>
+                                    )}
+                                  </div>
                                 </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                        {/* Canister-level votes where user didn't personally commit */}
-                        {voteHistory
-                          .filter(r => !historyProposals.find(p => p.id === r.proposal_id))
-                          .map(record => {
+                                {myCommitment && (
+                                  <div className="row" style={{ gap: 10, fontSize: 12, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
+                                    <Chip tone={myCommitment.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 17, fontSize: 10 }}>
+                                      {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
+                                    </Chip>
+                                    <span className="mono" style={{ color: isBurned ? 'var(--burn)' : 'var(--sprout)' }}>
+                                      {fmtICP(myCommitment.amount_e8s)} ICP {isBurned ? '→ cycles' : 'returned'}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          } else if (item.record) {
+                            const record = item.record;
                             const title = getProposalTitle(record.proposal_id);
                             const voteStr = record.vote === Vote.Yes ? 'voted yes' : record.vote === Vote.No ? 'voted no' : 'abstained';
                             return (
@@ -1654,7 +1734,9 @@ export default function App() {
                                 </div>
                               </div>
                             );
-                          })}
+                          }
+                          return null;
+                        })}
                       </div>
                     )}
                   </div>
@@ -1813,6 +1895,93 @@ export default function App() {
         </aside>}
 
       </div>
+
+      {/* ── Wallet Modal (deposit / withdraw) ── */}
+      {isWalletOpen && principal && !principal.isAnonymous() && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }}>
+          <div className="card col" style={{
+            maxWidth: 460, width: '100%', gap: 18, background: 'var(--surface)',
+            border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)', maxHeight: '90vh', overflowY: 'auto'
+          }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="wallet" size={18} stroke="var(--burn)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Your app wallet</h4>
+              </span>
+              <button onClick={() => setIsWalletOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+
+            {/* Balance */}
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>Available balance</span>
+              <span className="mono" style={{ fontSize: 18, fontWeight: 600, color: 'var(--fg)' }}>{fmtICP(holdings)} ICP</span>
+            </div>
+
+            {/* Deposit */}
+            <div className="col" style={{ gap: 8 }}>
+              <Eyebrow>Deposit · send ICP to this address</Eyebrow>
+              <p style={{ fontSize: 12, color: 'var(--fg-3)', margin: 0, lineHeight: 1.5 }}>
+                This is <b>your</b> app account. Send ICP here from the NNS dapp or an exchange (use the account identifier), then it's available to commit. It is not your NNS principal — funds elsewhere aren't visible here.
+              </p>
+              <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Account identifier (for NNS / exchanges)</label>
+              <div className="row" style={{ gap: 8, padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+                <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg)', overflowWrap: 'anywhere', flex: 1 }}>{accountId || "…"}</span>
+                <button onClick={() => { navigator.clipboard.writeText(accountId); setAddrCopied("aid"); setTimeout(() => setAddrCopied(""), 2000); }}
+                  title="Copy account identifier" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0, borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer' }}>
+                  <Icon name={addrCopied === "aid" ? "check" : "copy"} size={12} stroke={addrCopied === "aid" ? "var(--sprout)" : "var(--fg-3)"} />
+                </button>
+              </div>
+              <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Principal (for ICRC-1 wallets)</label>
+              <div className="row" style={{ gap: 8, padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+                <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg)', overflowWrap: 'anywhere', flex: 1 }}>{principal.toString()}</span>
+                <button onClick={() => { navigator.clipboard.writeText(principal.toString()); setAddrCopied("principal"); setTimeout(() => setAddrCopied(""), 2000); }}
+                  title="Copy principal" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0, borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer' }}>
+                  <Icon name={addrCopied === "principal" ? "check" : "copy"} size={12} stroke={addrCopied === "principal" ? "var(--sprout)" : "var(--fg-3)"} />
+                </button>
+              </div>
+            </div>
+
+            <hr />
+
+            {/* Withdraw */}
+            <div className="col" style={{ gap: 8 }}>
+              <Eyebrow>Withdraw · send ICP out</Eyebrow>
+              {withdrawSuccess && (
+                <div style={{ padding: 10, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout)', fontSize: 12.5 }}>
+                  Withdrawal sent.
+                </div>
+              )}
+              {withdrawError && (
+                <div style={{ padding: 10, borderRadius: 6, background: 'var(--ember-dim)', border: '1px solid var(--ember)', color: 'var(--ember)', fontSize: 12.5, lineHeight: 1.4 }}>
+                  {withdrawError}
+                </div>
+              )}
+              <input type="text" placeholder="Destination principal" className="burn-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}
+                value={withdrawTo} onChange={(e) => { setWithdrawTo(e.target.value); setWithdrawError(null); setWithdrawSuccess(false); }} />
+              <div className="row" style={{ gap: 8 }}>
+                <div style={{ flex: 1, position: 'relative' }}>
+                  <input type="number" min="0" step="0.1" placeholder="Amount" className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
+                    value={withdrawAmount} onChange={(e) => { setWithdrawAmount(e.target.value); setWithdrawError(null); setWithdrawSuccess(false); }} />
+                  <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
+                </div>
+                <Btn variant="secondary" sm onClick={handleWithdraw} disabled={isWithdrawing || !withdrawTo || !withdrawAmount}>
+                  {isWithdrawing ? <LiveDot size={7} color="var(--fg)" /> : <Icon name="arrowUp" size={13} />}
+                  {isWithdrawing ? " Sending…" : " Withdraw"}
+                </Btn>
+              </div>
+              <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--fg-3)' }}>
+                <Icon name="info" size={11} stroke="var(--fg-3)" /> Withdraws to a principal (ICRC-1). 0.0001 ICP network fee applies.
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Transaction Confirmation Modal ── */}
       {isConfirming && (

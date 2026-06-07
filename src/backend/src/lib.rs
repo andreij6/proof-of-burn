@@ -932,6 +932,51 @@ fn derive_subaccount(user: &Principal, proposal_id: u64) -> [u8; 32] {
     sub
 }
 
+// CRC32 (IEEE) — used to prefix the ICP account identifier.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// ICP account identifier (64-hex) = CRC32(h) ++ h, where
+/// h = SHA224("\x0Aaccount-id" || owner || subaccount). This is the legacy
+/// "address" that exchanges and the NNS dapp use for transfers — distinct from
+/// the principal.
+fn account_id_hex(owner: Principal, subaccount: &[u8; 32]) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha224::new();
+    hasher.update(b"\x0Aaccount-id");
+    hasher.update(owner.as_slice());
+    hasher.update(&subaccount[..]);
+    let hash = hasher.finalize();
+    let crc = crc32(&hash);
+    let mut out = Vec::with_capacity(32);
+    out.extend_from_slice(&crc.to_be_bytes());
+    out.extend_from_slice(&hash);
+    to_hex(&out)
+}
+
+/// The caller's deposit address: the account identifier of their default
+/// (sub-account = 0) ICP account. Fund this to participate.
+#[ic_cdk::query]
+fn get_account_id() -> String {
+    account_id_hex(ic_cdk::caller(), &[0u8; 32])
+}
+
 // Ledger Call Structs
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct TransferArgs {

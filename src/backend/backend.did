@@ -121,6 +121,9 @@ service : (InitPayload) -> {
   // Returns a page of audit log entries. offset + limit are capped at 10,000
   // to prevent a single query from exhausting cycle budgets.
   get_audit_log : (nat64, nat64) -> (vec AuditLogEntry) query;
+  // The caller's ICP deposit address (account identifier, 64-hex) for the
+  // default sub-account. Distinct from the principal; used to fund the account.
+  get_account_id : () -> (text) query;
   get_caller_principal : () -> (principal) query;
   get_config : () -> (Config) query;
   get_cycle_balance : () -> (nat64) query;
