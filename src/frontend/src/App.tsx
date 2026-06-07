@@ -500,6 +500,10 @@ export default function App() {
     }
   };
 
+  // Deep link to the proposal's full description on the NNS dapp.
+  const nnsProposalLink = (p: Proposal) =>
+    `https://nns.ic0.app/proposal/?u=qoctq-giaaa-aaaaa-aaaea-cai&proposal=${(p.nns_proposal_id ?? p.id).toString()}`;
+
   const getProposalTitle = (proposalId: bigint) => {
     const p = proposals.find(x => x.id === proposalId);
     if (p) return p.title;
@@ -1387,17 +1391,20 @@ export default function App() {
                               <div className="col" style={{ gap: 7, minWidth: 0, flex: 1 }}>
                                 <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                                   <Chip tone="muted" style={{ height: 20, fontSize: 11 }}>{p.category}</Chip>
-                                  <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>
-                                    #{proposalIdStr}
-                                  </span>
+                                  <a href={nnsProposalLink(p)} target="_blank" rel="noreferrer" className="mono" style={{
+                                    fontSize: 11, color: 'var(--burn)', whiteSpace: 'nowrap', textDecoration: 'none'
+                                  }} title="View full proposal on the NNS">
+                                    #{proposalIdStr} <Icon name="external" size={9} stroke="var(--burn)" />
+                                  </a>
                                 </div>
-                                <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 600, textWrap: 'pretty' }}>
+                                <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 600, textWrap: 'pretty', overflowWrap: 'anywhere' }}>
                                   {p.title}
                                 </span>
                                 {p.summary && p.summary !== p.title && (
                                   <span style={{
                                     fontSize: 12.5, lineHeight: 1.4, color: 'var(--fg-2)', textWrap: 'pretty',
-                                    display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden'
+                                    overflowWrap: 'anywhere', wordBreak: 'break-word',
+                                    display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden'
                                   }}>
                                     {p.summary}
                                   </span>
@@ -1528,11 +1535,12 @@ export default function App() {
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
                               <div className="col" style={{ gap: 5, minWidth: 0, flex: 1 }}>
                                 <Chip tone="muted" style={{ height: 18, fontSize: 10.5, alignSelf: 'flex-start' }}>{p.category}</Chip>
-                                <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--fg)', textWrap: 'pretty' }}>{p.title}</span>
+                                <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--fg)', textWrap: 'pretty', overflowWrap: 'anywhere' }}>{p.title}</span>
                                 {p.summary && p.summary !== p.title && (
                                   <span style={{
                                     fontSize: 12, lineHeight: 1.4, color: 'var(--fg-2)', textWrap: 'pretty',
-                                    display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden'
+                                    overflowWrap: 'anywhere', wordBreak: 'break-word',
+                                    display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden'
                                   }}>{p.summary}</span>
                                 )}
                               </div>
