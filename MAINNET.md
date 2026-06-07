@@ -13,9 +13,9 @@ Work top to bottom. Nothing here is optional unless marked so.
 | Constant | Value |
 |---|---|
 | **Primary (leader) neuron ID** | `17802688826615984104` |
-| Mainnet owner / admin principal | `__FILL_IN__` (your hardware-wallet principal) |
+| **Mainnet owner / admin principal** | `vx7jq-7hzke-2htid-ghjwp-foj2y-ah3e7-d3wqn-3yfce-7fhcu-bahq2-xqe` |
 | Backup controller principal | `__FILL_IN__` |
-| Default threshold (e8s) | `50000000000` (= 500 ICP) — adjust to taste |
+| Default threshold (e8s) | `200000000` (= 2 ICP) — adjustable at runtime via `admin_set_default_threshold` |
 | AI price (e8s) | `5000000` (= 0.05 ICP) |
 | Backend canister ID | _(filled after first deploy)_ |
 | Frontend canister ID | _(filled after first deploy)_ |
@@ -45,14 +45,16 @@ and the canister points at a local ledger that doesn't exist on mainnet (and the
 NNS mock fallbacks stay enabled). **You must set a real mainnet `owner`:**
 
 ```yaml
-# icp.yaml — backend canister, production init_args
-init_args: '(record {
-  owner = principal "__YOUR_MAINNET_PRINCIPAL__";
-  primary_neuron_id = (17802688826615984104 : nat64);
-  default_threshold_e8s = (50000000000 : nat64);
-  ai_price_e8s = (5000000 : nat64)
-})'
+# icp.yaml — backend canister, production init_args (swap in at deploy time only;
+# do NOT commit this as the local default or local dev breaks — is_local goes false)
+init_args: '(record { owner = principal "vx7jq-7hzke-2htid-ghjwp-foj2y-ah3e7-d3wqn-3yfce-7fhcu-bahq2-xqe"; primary_neuron_id = (17802688826615984104 : nat64); default_threshold_e8s = (200000000 : nat64); ai_price_e8s = (5000000 : nat64) })'
 ```
+
+This owner (`vx7jq-…-xqe`) becomes `admins[0]`, makes `is_local = false`
+(→ mainnet ICP ledger, real NNS, no mock fallbacks), and is the identity that
+sees the in-app admin threshold control. Sign in to the deployed app with **this
+same identity** to manage the threshold. Default threshold starts at 2 ICP and is
+adjustable any time via `admin_set_default_threshold` (no redeploy).
 
 **The leader neuron is pinned in code, not trusted from init_args.** On any
 non-local deploy (`is_local = false`), `init` forces
