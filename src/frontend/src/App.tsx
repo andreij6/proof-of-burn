@@ -329,6 +329,8 @@ export default function App() {
   const [isFollowing, setIsFollowing] = useState(false);
   const [neuronIdInput, setNeuronIdInput] = useState("");
   const [hotkeyCopied, setHotkeyCopied] = useState(false);
+  const [thresholdInput, setThresholdInput] = useState("");
+  const [isSettingThreshold, setIsSettingThreshold] = useState(false);
   const [eligibility, setEligibility] = useState<EligibilityInfo | null>(null);
   const [voteHistory, setVoteHistory] = useState<VoteRecord[]>([]);
   const [holdings, setHoldings] = useState<bigint>(0n);
@@ -370,6 +372,9 @@ export default function App() {
 
   // Active tab selection
   const [activeTab, setActiveTab] = useState<'open' | 'committed' | 'history'>('open');
+
+  // Help modal status
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
 
   // Eligibility & Vote History Helpers
   const refreshEligibility = async (currentActor = actor) => {
@@ -499,6 +504,32 @@ export default function App() {
       "138200": "Fund developer-grant round 7 (40k ICP)"
     };
     return historical[proposalId.toString()] || `Proposal #${proposalId}`;
+  };
+
+  // Admin: set the default voting threshold at runtime (no redeploy).
+  const handleSetThreshold = async () => {
+    if (!actor || isSettingThreshold) return;
+    const icp = parseFloat(thresholdInput);
+    if (isNaN(icp) || icp < 1) {
+      alert("Enter a threshold of at least 1 ICP.");
+      return;
+    }
+    const e8s = BigInt(Math.round(icp * 100_000_000));
+    setIsSettingThreshold(true);
+    try {
+      const res = await actor.admin_set_default_threshold(e8s);
+      if (res.__kind__ === "Ok") {
+        setThresholdInput("");
+        await refreshAllData();
+      } else {
+        alert(`Failed to set threshold: ${res.Err}`);
+      }
+    } catch (err: any) {
+      console.error("Failed to set threshold:", err);
+      alert(`Error: ${err.message || err}`);
+    } finally {
+      setIsSettingThreshold(false);
+    }
   };
 
   const handleFollowNeuron = async () => {
@@ -800,6 +831,12 @@ export default function App() {
 
   const proposalsJoined = new Set(myCommitments.map(c => c.proposal_id.toString())).size;
 
+  // Is the signed-in principal an admin? (drives the admin threshold control)
+  const isAdmin = !!(
+    principal && !principal.isAnonymous() && config &&
+    config.admins.some((a) => a.toString() === principal.toString())
+  );
+
   // Partition proposals into three display buckets
   const ACTIVE_STATUSES = new Set([
     CommitmentStatus.Pending, CommitmentStatus.ThresholdMet,
@@ -881,6 +918,51 @@ export default function App() {
         <main style={{ flex: 1, minWidth: 320 }}>
           <div className="dashboard-container">
 
+            {/* ── Admin: voting threshold control (admins only) ── */}
+            {isAdmin && (
+              <Reveal delay={20} motion={motion}>
+                <div className="col" style={{
+                  gap: 12, border: '1px dashed var(--burn)', borderRadius: 10,
+                  background: 'var(--burn-950)', padding: 14
+                }}>
+                  <div className="row" style={{ gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                    <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+                      <Icon name="key" size={13} stroke="var(--burn)" />
+                      <Eyebrow>Admin · voting threshold</Eyebrow>
+                    </span>
+                    <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
+                      Current: <span style={{ color: 'var(--fg)' }}>{config ? fmtICP(config.default_threshold) : "…"} ICP</span>
+                    </span>
+                  </div>
+                  <div className="row" style={{ gap: 8 }}>
+                    <div style={{ flex: 1, position: 'relative' }}>
+                      <input
+                        type="number"
+                        min="1"
+                        step="0.5"
+                        placeholder="New threshold"
+                        className="burn-input"
+                        style={{ fontFamily: 'var(--font-mono)' }}
+                        value={thresholdInput}
+                        onChange={(e) => setThresholdInput(e.target.value)}
+                      />
+                      <span className="mono" style={{
+                        position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
+                        fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none'
+                      }}>ICP</span>
+                    </div>
+                    <Btn variant="primary" sm onClick={handleSetThreshold} disabled={isSettingThreshold || !thresholdInput}>
+                      {isSettingThreshold ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />}
+                      {isSettingThreshold ? " Updating…" : " Update"}
+                    </Btn>
+                  </div>
+                  <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+                    <Icon name="info" size={12} stroke="var(--fg-3)" /> Applies to new proposals and re-thresholds all open ones. Min 1 ICP. No redeploy.
+                  </span>
+                </div>
+              </Reveal>
+            )}
+
             {/* ── Your activity (Tier 3) — PRIMARY, prominent ──
                 Personal stats matter more than site-wide totals, so when the
                 user has activity this renders first as the bold hero strip. */}
@@ -943,6 +1025,13 @@ export default function App() {
                   border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-alt)',
                   padding: '10px 14px', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap'
                 }}>
+                  <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                    <span>Followers</span>
+                    <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
+                      {globalStats ? globalStats.followers_count.toString() : "…"}
+                    </span>
+                  </span>
+                  <span style={{ color: 'var(--border-hi)' }}>·</span>
                   <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
                     <span>TVL</span>
                     <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
@@ -1659,6 +1748,26 @@ export default function App() {
               </Btn>
             </div>
           )}
+
+          {/* Local dev: grab your principal to grant yourself admin via CLI */}
+          {principal && !principal.isAnonymous() && !isAdmin && (
+            <div className="simulator-panel col">
+              <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>Become admin (dev)</span>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>
+                Copy your principal, then run from the dev1 identity:
+                <span className="mono" style={{ display: 'block', marginTop: 4, color: 'var(--fg-3)', fontSize: 10.5 }}>
+                  icp canister call backend add_admin '(principal "…")' --identity dev1 -e local
+                </span>
+              </span>
+              <Btn variant="secondary" sm onClick={() => {
+                navigator.clipboard.writeText(principal.toString());
+                setHotkeyCopied(true);
+                setTimeout(() => setHotkeyCopied(false), 2000);
+              }}>
+                <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--burn)"} /> Copy my principal
+              </Btn>
+            </div>
+          )}
         </aside>}
 
       </div>
@@ -1758,12 +1867,32 @@ export default function App() {
                     }}>ICP</span>
                   </div>
                   {/* Inline limits */}
-                  <div className="row" style={{ gap: 12, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
-                    <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>1.0 ICP</span></span>
-                    <span>Wallet: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(holdings)} ICP</span></span>
-                    {eligibility?.holdings_e8s && eligibility.holdings_e8s > 0n && (
-                      <span>Stake cap: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(eligibility.holdings_e8s)} ICP</span></span>
-                    )}
+                  <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', width: '100%', flexWrap: 'wrap', gap: 8 }}>
+                    <div className="row" style={{ gap: 12, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
+                      <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>1.0 ICP</span></span>
+                      <span>Wallet: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(holdings)} ICP</span></span>
+                      {eligibility?.holdings_e8s && eligibility.holdings_e8s > 0n && (
+                        <span>Stake cap: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(eligibility.holdings_e8s)} ICP</span></span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsHelpOpen(true)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--burn)',
+                        fontSize: 11.5,
+                        cursor: 'pointer',
+                        padding: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        textDecoration: 'underline'
+                      }}
+                    >
+                      <Icon name="info" size={11} stroke="var(--burn)" /> What is this?
+                    </button>
                   </div>
                 </div>
 
@@ -1894,6 +2023,86 @@ export default function App() {
 
             <Btn variant="primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setIsDetailsOpen(false)}>
               Got it
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {/* ── Help / Definition Dialog ── */}
+      {isHelpOpen && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+          backdropFilter: 'blur(8px)', zIndex: 110, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }}>
+          <div className="card col" style={{
+            maxWidth: 480, width: '100%', gap: 18, background: 'var(--surface)',
+            border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)',
+            maxHeight: '90vh', overflowY: 'auto'
+          }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="info" size={18} stroke="var(--burn)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Understanding Burn Values</h4>
+              </span>
+              <button onClick={() => setIsHelpOpen(false)} style={{
+                background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
+                padding: 4, display: 'grid', placeItems: 'center'
+              }}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+
+            <div className="col" style={{ gap: 14, fontSize: 13, lineHeight: 1.5, color: 'var(--fg-2)' }}>
+              
+              <div className="col" style={{ gap: 4 }}>
+                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Min Burn (1.0 ICP)</span>
+                <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                  The minimum amount of ICP required to commit to any governance proposal. This ensures voting signals represent meaningful economic conviction and prevents spam.
+                </p>
+              </div>
+
+              <div className="col" style={{ gap: 4 }}>
+                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Wallet Balance</span>
+                <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                  The liquid ICP balance of your connected identity. This balance is used to fund your burn commitment and transaction fees.
+                </p>
+              </div>
+
+              <div className="col" style={{ gap: 4 }}>
+                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Stake Cap</span>
+                <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                  The total ICP staked in your verified NNS neuron. Your active burn commitment is capped at this value as a security measure. This ensures participants have real "skin in the game" through locked neuron stakes, aligning governance influence with long-term ecosystem incentives and preventing short-term market speculation.
+                </p>
+              </div>
+
+              <hr />
+
+              <div className="col" style={{ gap: 4 }}>
+                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Protocol Fee (0.005 ICP)</span>
+                <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                  A flat fee charged by the Proof of Burn protocol on each commit transaction. This fee is immediately consumed and is non-refundable, supporting canister compute costs and system operations.
+                </p>
+              </div>
+
+              <div className="col" style={{ gap: 4 }}>
+                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Ledger Fees (0.0003 ICP)</span>
+                <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                  Standard ICP ledger transfer fees. The client pre-allocates 0.0003 ICP to ensure safe coverage of all transaction steps (e.g. transfer to escrow, and subsequent burn or refund). Only actual ledger costs (0.0001 ICP per transfer) will be consumed.
+                </p>
+              </div>
+
+              <div className="col" style={{ gap: 4 }}>
+                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Total Debit</span>
+                <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
+                  The total maximum ICP that will be temporarily debited from your connected wallet. If the proposal fails to meet its threshold, the committed amount is returned to you (minus the 0.0001 ICP refund transfer ledger fee).
+                </p>
+              </div>
+
+            </div>
+
+            <Btn variant="primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setIsHelpOpen(false)}>
+              Close
             </Btn>
           </div>
         </div>
