@@ -296,7 +296,7 @@ export function isValidAccountId(hex: string): boolean {
 const TIER_META = [
   ['Tier 0', 'Anonymous visitor', 'Minimum to understand + start', 'lands on the page'],
   ['Tier 1', 'Authenticated', 'Signed in via Internet Identity', 'signs in'],
-  ['Tier 2', 'Verified follower', 'On-chain follow confirmed', 'follows the neuron'],
+  ['Tier 2', 'Follower', 'Self-attested follow of the leader neuron', 'follows the neuron'],
   ['Tier 3', 'Active participant', 'Has committed to burn', 'commits on ≥1 proposal'],
 ];
 
@@ -1491,7 +1491,7 @@ export default function App() {
                       const mineBadge = myCommitment && (
                         <Chip tone={mineBadgeTone}>
                           {myCommitment.status === CommitmentStatus.Burned ? (
-                            <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP → Cycles</>
+                            <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Spent</>
                           ) : myCommitment.status === CommitmentStatus.Returned ? (
                             <><Icon name="checkCircle" size={11} stroke="var(--sprout)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Returned</>
                           ) : (myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund) ? (
@@ -1693,8 +1693,8 @@ export default function App() {
                             <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
                               <Icon name="info" size={12} stroke="var(--fg-3)" />
                               {met
-                                ? 'Threshold met — ICP will convert to cycles when the canister votes.'
-                                : 'No conversion if threshold misses — committed ICP is returned.'}
+                                ? 'Threshold met — when the neuron votes, your ICP is spent (50% treasury / 50% cycles).'
+                                : 'If the threshold misses, your committed ICP is returned.'}
                             </span>
                           </div>
                         </Reveal>
@@ -1753,7 +1753,7 @@ export default function App() {
                                       {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
                                     </Chip>
                                     <span className="mono" style={{ color: isBurned ? 'var(--burn)' : 'var(--sprout)' }}>
-                                      {fmtICP(myCommitment.amount_e8s)} ICP {isBurned ? '→ cycles' : 'returned'}
+                                      {fmtICP(myCommitment.amount_e8s)} ICP {isBurned ? 'spent' : 'returned'}
                                     </span>
                                   </div>
                                 )}
@@ -1773,7 +1773,7 @@ export default function App() {
                                 </span>
                                 <div className="row" style={{ gap: 8, flexShrink: 0 }}>
                                   <Chip tone={record.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>{voteStr}</Chip>
-                                  <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)' }}>{fmtICP(record.icp_burned_e8s)} → cycles</span>
+                                  <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)' }}>{fmtICP(record.icp_burned_e8s)} spent</span>
                                 </div>
                               </div>
                             );
@@ -2183,7 +2183,7 @@ export default function App() {
                 <div className="col" style={{ gap: 4 }}>
                   <h5 style={{ margin: 0, color: 'var(--fg)' }}>Commitment Registered!</h5>
                   <p style={{ fontSize: 13, color: 'var(--fg-2)' }}>
-                    Your {confirmAmount} ICP is locked in escrow. If the proposal reaches threshold, it will be <b>permanently burned</b> — removed from the ICP supply forever as proof of your conviction.
+                    Your {confirmAmount} ICP is locked in escrow. If the proposal reaches threshold and the neuron votes, it's spent — <b>50% to the treasury, 50% converted to canister cycles</b>. If threshold isn't met, it's returned to your wallet.
                   </p>
                 </div>
                 <Btn variant="primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setIsConfirming(false)}>
@@ -2281,7 +2281,7 @@ export default function App() {
                 </div>
 
                 <div style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
-                  ⚠️ <b>Conviction is Final.</b> By confirming, you authorize a transfer from your wallet to a deterministic escrow subaccount. The 0.005 ICP protocol fee is consumed immediately. If the proposal threshold is met, the target ICP is sent to the Cycles Minting Canister — burned from the ICP supply and converted to cycles that fund this canister's operation. If threshold is not met, your ICP is returned (minus 0.0001 ICP ledger fee).
+                  ⚠️ <b>Commitment is final.</b> By confirming, you authorize a transfer from your wallet into a deterministic per-proposal escrow. The 0.005 ICP protocol fee is consumed immediately. If the proposal reaches threshold and the neuron votes, your committed ICP is spent — 50% to the treasury, 25% to backend-canister cycles, 25% to frontend-canister cycles. If threshold is not met, your ICP is returned (minus the 0.0001 ICP ledger fee).
                 </div>
 
                 {isTransacting ? (
@@ -2339,19 +2339,19 @@ export default function App() {
                 <Eyebrow accent>How it Works</Eyebrow>
                 <ol style={{ margin: 0, paddingLeft: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <li>
-                    <b>Delegate Power:</b> Register your neuron to follow the DAO's primary voting neuron (ID <code>{formatNeuronId(config?.primary_neuron_id)}</code>).
+                    <b>Follow the leader neuron:</b> Set your NNS neuron to follow the community leader neuron (ID <code>{formatNeuronId(config?.primary_neuron_id)}</code>), then confirm in-app to unlock voting. Following is encouraged but self-attested — the burn is the real signal.
                   </li>
                   <li>
-                    <b>Deposit to Escrow:</b> Fund a deterministic proposal subaccount with the ICP you want to burn to show conviction.
+                    <b>Commit ICP to a side:</b> On any open proposal, choose ADOPT or REJECT and commit ICP into a per-proposal escrow. Your committed weight (proportional to ICP) tilts the balance of power.
                   </li>
                   <li>
-                    <b>Threshold Check & Vote:</b> One hour before the NNS voting deadline, if the threshold is met, the DAO neuron automatically casts the vote matching the majority.
+                    <b>Threshold &amp; vote:</b> One hour before the NNS deadline, if total committed ICP meets the threshold, the leader neuron casts the majority side's vote (an exact tie is broken by the first vote placed).
                   </li>
                   <li>
-                    <b>Conviction Settlement:</b>
+                    <b>Settlement:</b>
                     <ul style={{ margin: '4px 0 0 0', paddingLeft: 16, listStyleType: 'disc' }}>
-                      <li>If the proposal is successfully voted, your escrowed ICP is <b>permanently burned</b> (converted to cycles to fuel the DAO).</li>
-                      <li>If threshold fails, your ICP is automatically returned to your wallet (minus 0.0001 ICP transaction fee).</li>
+                      <li>If the vote fires, your committed ICP is spent — <b>50% to the protocol treasury, 25% to backend-canister cycles, 25% to frontend-canister cycles</b> (the cycle portions are burned from ICP supply via the CMC).</li>
+                      <li>If the threshold isn't met, your ICP is returned to your wallet (minus the 0.0001 ICP ledger fee).</li>
                     </ul>
                   </li>
                 </ol>
@@ -2361,10 +2361,10 @@ export default function App() {
                 <Eyebrow accent>How it Benefits You</Eyebrow>
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <li>
-                    <b>Amplified Influence:</b> Combine your conviction weight with the primary neuron to force direction on high-priority governance proposals.
+                    <b>Rented influence:</b> Combine your committed weight with others to direct the leader neuron's voting power on the proposals you care about.
                   </li>
                   <li>
-                    <b>Zero-Risk If Abstained:</b> Your capital is only burned when collective conviction is high enough to trigger the vote. Otherwise, it is returned.
+                    <b>Nothing spent if it doesn't fire:</b> Your ICP is only spent when collective commitment meets the threshold and the vote is cast. Otherwise it's returned.
                   </li>
                 </ul>
               </div>
@@ -2373,10 +2373,13 @@ export default function App() {
                 <Eyebrow accent>How it Benefits the ICP Community</Eyebrow>
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <li>
-                    <b>Supply Deflation:</b> Every burned token is removed from the active circulating supply forever, increasing scarcity for all holders.
+                    <b>Partial deflation:</b> Half of every settled commitment is converted to canister cycles via the CMC, removing that ICP from circulating supply.
                   </li>
                   <li>
-                    <b>Skin in the Game:</b> Aligns voting weight directly with long-term ecosystem conviction, preventing low-effort spam votes.
+                    <b>Self-sustaining:</b> The treasury and cycle top-ups keep the app running without external funding.
+                  </li>
+                  <li>
+                    <b>Skin in the game:</b> Real ICP commitment aligns voting weight with conviction and prevents low-effort spam votes.
                   </li>
                 </ul>
               </div>
