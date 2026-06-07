@@ -345,6 +345,7 @@ export default function App() {
   // Derived / Application state
   const [isFollowing, setIsFollowing] = useState(false);
   const [isFollowModalOpen, setIsFollowModalOpen] = useState(false);
+  const [nnsOpened, setNnsOpened] = useState(false);
   const [hotkeyCopied, setHotkeyCopied] = useState(false);
   const [thresholdInput, setThresholdInput] = useState("");
   const [isSettingThreshold, setIsSettingThreshold] = useState(false);
@@ -1256,7 +1257,7 @@ export default function App() {
                         <Icon name="arrowUp" size={13} stroke="var(--burn)" /> Sign in to follow
                       </span>
                     ) : (
-                      <Btn variant="primary" sm onClick={() => setIsFollowModalOpen(true)}>
+                      <Btn variant="primary" sm onClick={() => { setNnsOpened(false); setIsFollowModalOpen(true); }}>
                         <Icon name="checkCircle" size={13} stroke="var(--char-950)" /> Follow neuron
                       </Btn>
                     )
@@ -1880,20 +1881,22 @@ export default function App() {
                   <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--fg-3)"} />
                 </button>
               </div>
-              <a href="https://nns.ic0.app" target="_blank" rel="noreferrer" style={{ fontSize: 12, color: 'var(--burn)', textDecoration: 'none' }}>
-                <Icon name="external" size={11} stroke="var(--burn)" /> Open the NNS dapp
+              <a href="https://nns.ic0.app" target="_blank" rel="noreferrer" onClick={() => setNnsOpened(true)}
+                style={{ fontSize: 12, color: 'var(--burn)', textDecoration: 'none' }}>
+                <Icon name={nnsOpened ? "check" : "external"} size={11} stroke={nnsOpened ? "var(--sprout)" : "var(--burn)"} /> Open the NNS dapp
               </a>
             </div>
 
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
-              Following is encouraged but not enforced — your real conviction is the ICP you burn. Click Done to continue and start voting.
+              Following is encouraged but not enforced — your real conviction is the ICP you burn.
+              {!nnsOpened && " Open the NNS dapp above to enable Done."}
             </span>
 
             <div className="row" style={{ gap: 12 }}>
               <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setIsFollowModalOpen(false)} disabled={isVerifying}>
                 No thanks
               </Btn>
-              <Btn variant="primary" style={{ flex: 1 }} onClick={handleConfirmFollow} disabled={isVerifying}>
+              <Btn variant="primary" style={{ flex: 1, opacity: nnsOpened ? 1 : 0.45 }} onClick={handleConfirmFollow} disabled={isVerifying || !nnsOpened}>
                 {isVerifying ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={14} stroke="var(--char-950)" />}
                 {isVerifying ? " Saving…" : " Done"}
               </Btn>
