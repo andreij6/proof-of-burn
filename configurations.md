@@ -52,19 +52,30 @@ without touching code.
 ## 2. Threshold (default ICP per proposal)
 
 **Setting:** `Config.default_threshold: u64` (e8s)
-**Default value:** `10_000_000_000` (100 ICP) — set in `icp.yaml` and used as
-the threshold for live NNS proposals ingested by `fetch_live_proposals`. The
-in-code `CONFIG` default mirrors it (100 ICP) but is overwritten by `init()`.
+**Initial value:** `200_000_000` (2 ICP) — set in `icp.yaml`, applied to live NNS
+proposals ingested by `fetch_live_proposals`. The in-code `CONFIG` default mirrors
+it but is overwritten by `init()`.
 **Where it's set:**
 
-- `icp.yaml` → `default_threshold_e8s` (authoritative; flows into `init()`)
-- `lib.rs:265` — in-code `CONFIG` default (mirror; overwritten at init)
+- `icp.yaml` → `default_threshold_e8s` (initial value at install)
+- `lib.rs` — in-code `CONFIG` default (mirror; overwritten at init)
+- **`admin_set_default_threshold(e8s)`** — admin update method to change it at
+  runtime (no redeploy)
 
-**What it controls:** The default ICP threshold a proposal must reach
-before the canister votes. Per-proposal thresholds can override this —
-`admin_set_proposal_threshold` (if it exists) or seed-time values.
+**What it controls:** The default ICP threshold a proposal must reach before the
+canister votes. Applied to all future proposals and (on each admin change)
+re-applied to every currently open/met proposal with their status recomputed.
 
-**How to change it:** Edit `icp.yaml` `default_threshold_e8s` and redeploy.
+**How to change it — no redeploy needed:**
+
+```bash
+# Set the threshold to 2 ICP (owner/admin identity only)
+icp canister call backend admin_set_default_threshold '(200_000_000 : nat64)'
+```
+
+Validations: rejects values below `MIN_COMMIT_E8S` (1 ICP) or above
+`MAX_COMMIT_E8S`. Terminal proposals (voted/settled/abstained/failed) are not
+touched. The initial value still comes from `icp.yaml` at first install.
 
 ---
 

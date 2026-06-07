@@ -237,6 +237,7 @@ pub struct GlobalStats {
     pub tvl_e8s: u64,
     pub total_burned_e8s: u64,
     pub votes_cast: u64,
+    pub followers_count: u64,
 }
 
 // ==========================================
@@ -286,7 +287,7 @@ thread_local! {
         let default_config = Config {
             primary_neuron_id: 4821667,
             admins: vec![],
-            default_threshold: 10_000_000_000, // 100 ICP (overwritten by init from init_args)
+            default_threshold: 200_000_000, // 2 ICP (overwritten by init from init_args)
             ai_price_e8s: 5_000_000,
             ledger_canister_id: Principal::anonymous(),
             is_local: false,
@@ -491,6 +492,49 @@ fn admin_set_proposal_deadline(proposal_id: u64, deadline: u64) -> Result<(), St
     })
 }
 
+/// Admin: change the default voting threshold at any time. Updates the config
+/// default (applied to all future / live-ingested proposals) AND re-applies the
+/// new threshold to every currently open/met proposal, recomputing their
+/// open↔met status. Terminal proposals (voted/settled/abstained/failed) are left
+/// untouched so in-flight settlement is never disturbed.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_default_threshold(new_threshold_e8s: u64) -> Result<(), String> {
+    if new_threshold_e8s < MIN_COMMIT_E8S {
+        return Err("THRESHOLD_BELOW_MIN_COMMIT".to_string());
+    }
+    if new_threshold_e8s > MAX_COMMIT_E8S {
+        return Err("THRESHOLD_ABOVE_MAX".to_string());
+    }
+
+    // 1. Update the config default (used for future / live proposals).
+    CONFIG.with(|cell| {
+        let mut cfg = cell.borrow().get().clone();
+        cfg.default_threshold = new_threshold_e8s;
+        cell.borrow_mut().set(cfg);
+    });
+
+    // 2. Re-apply to all still-active proposals and recompute open/met status.
+    PROPOSALS.with(|map| {
+        let mut map = map.borrow_mut();
+        let ids: Vec<u64> = map.iter().map(|e| *e.key()).collect();
+        for id in ids {
+            if let Some(mut p) = map.get(&id) {
+                if p.status == "open" || p.status == "met" {
+                    p.threshold_e8s = new_threshold_e8s;
+                    p.status = if p.total_committed_e8s >= new_threshold_e8s {
+                        "met".to_string()
+                    } else {
+                        "open".to_string()
+                    };
+                    map.insert(id, p);
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 fn proposals_at_quota() -> bool {
     PROPOSALS.with(|map| map.borrow().len() as usize >= MAX_PROPOSALS)
 }
@@ -550,9 +594,9 @@ fn seed_mock_proposals() {
                 deadline: now + dur_2d_14h,
                 nns_proposal_id: Some(138402),
                 status: "open".to_string(),
-                threshold_e8s: 10_000_000_000,    // 100 ICP
-                total_committed_e8s: 2_000_000_000, // 20 ICP (~20%)
-                adopt_pot_e8s: 2_000_000_000,
+                threshold_e8s: 200_000_000,     // 2 ICP
+                total_committed_e8s: 0,          // fresh (0%)
+                adopt_pot_e8s: 0,
                 reject_pot_e8s: 0,
                 vote_executed_at: None,
                 total_burned_e8s: None,
@@ -565,9 +609,9 @@ fn seed_mock_proposals() {
                 deadline: now + dur_5d_2h,
                 nns_proposal_id: Some(138388),
                 status: "met".to_string(),
-                threshold_e8s: 10_000_000_000,      // 100 ICP
-                total_committed_e8s: 10_000_000_000, // 100 ICP (met)
-                adopt_pot_e8s: 10_000_000_000,
+                threshold_e8s: 200_000_000,      // 2 ICP
+                total_committed_e8s: 200_000_000, // 2 ICP (met)
+                adopt_pot_e8s: 200_000_000,
                 reject_pot_e8s: 0,
                 vote_executed_at: None,
                 total_burned_e8s: None,
@@ -580,9 +624,9 @@ fn seed_mock_proposals() {
                 deadline: now + dur_14h,
                 nns_proposal_id: Some(138376),
                 status: "open".to_string(),
-                threshold_e8s: 10_000_000_000,    // 100 ICP
-                total_committed_e8s: 4_500_000_000, // 45 ICP (~45%)
-                adopt_pot_e8s: 4_500_000_000,
+                threshold_e8s: 200_000_000,    // 2 ICP
+                total_committed_e8s: 80_000_000, // 0.8 ICP (~40%)
+                adopt_pot_e8s: 80_000_000,
                 reject_pot_e8s: 0,
                 vote_executed_at: None,
                 total_burned_e8s: None,
@@ -1960,10 +2004,21 @@ fn get_global_stats() -> GlobalStats {
         }
     });
 
+    let mut followers_count: u64 = 0;
+    USER_NEURONS.with(|map| {
+        for entry in map.borrow().iter() {
+            let u = entry.value();
+            if u.is_following {
+                followers_count = followers_count.checked_add(1).unwrap_or(u64::MAX);
+            }
+        }
+    });
+
     GlobalStats {
         tvl_e8s,
         total_burned_e8s,
         votes_cast,
+        followers_count,
     }
 }
 
@@ -2444,9 +2499,11 @@ mod tests {
             tvl_e8s: 0,
             total_burned_e8s: 0,
             votes_cast: 0,
+            followers_count: 0,
         };
         assert_eq!(stats.tvl_e8s, 0);
         assert_eq!(stats.total_burned_e8s, 0);
         assert_eq!(stats.votes_cast, 0);
+        assert_eq!(stats.followers_count, 0);
     }
 }

@@ -572,7 +572,7 @@ fn saga_commit_happy_path() {
 #[test]
 fn saga_refund_when_threshold_missed() {
     let Some(env) = setup_saga() else { return };
-    let target = 5_000_000_000u64; // 50 ICP — keeps 138402 below its 5000 ICP threshold
+    let target = 100_000_000u64; // 1 ICP — below 138402's 2 ICP threshold (stays unmet → refund)
     let res = do_commit(&env, 138402, Stance::Reject, target);
     assert!(matches!(res, UnitResult::Ok), "commit: {:?}", res);
 
@@ -604,8 +604,8 @@ fn saga_burn_is_idempotent_on_cmc_failure() {
     let Some(env) = setup_saga() else { return };
     // Proposal 138402's seeded threshold is 5000 ICP and the per-user stake cap is
     // 1000 ICP, so meeting it requires several committers. 6 × 1000 ICP = 6000 ICP.
-    // Proposal 138402 is seeded with 20 ICP committed against a 100 ICP threshold;
-    // two committers (× 1000 ICP, the stake cap) comfortably cross it.
+    // Proposal 138402 is seeded open against a 2 ICP threshold; two committers
+    // (× 1000 ICP, the stake cap) comfortably cross it.
     let per_user = 100_000_000_000u64; // 1000 ICP (== stake cap, allowed)
     let n_users = 2u64;
     for i in 0..n_users {
@@ -645,4 +645,59 @@ fn saga_burn_is_idempotent_on_cmc_failure() {
         cmc_after_second, total,
         "PB-111: retry must NOT transfer to the CMC again (no double-spend)"
     );
+}
+
+// ── admin_set_default_threshold (runtime threshold control) ──────────────────
+
+#[test]
+fn admin_can_change_threshold_and_reapply() {
+    let Some((pic, canister)) = setup() else { return };
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+
+    // Seeded config default is 2 ICP; 138388 is seeded "met" (2 ICP committed).
+    // Raise the threshold to 5 ICP → config updates and 138388 (committed 2 < 5)
+    // must flip back to "open".
+    let new_threshold = 500_000_000u64; // 5 ICP
+    let r = pic
+        .update_call(canister, owner, "admin_set_default_threshold", encode_one(new_threshold).unwrap())
+        .expect("admin_set_default_threshold");
+    let r: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(r, UnitResult::Ok), "owner can set threshold: {:?}", r);
+
+    let cfg: Config = decode_one(
+        &pic.query_call(canister, owner, "get_config", encode_one(()).unwrap()).unwrap()
+    ).unwrap();
+    assert_eq!(cfg.default_threshold, new_threshold, "config default updated");
+
+    let proposals: Vec<ProposalLite> = decode_one(
+        &pic.query_call(canister, Principal::anonymous(), "list_active_proposals", encode_args(()).unwrap()).unwrap()
+    ).unwrap();
+    for p in &proposals {
+        assert_eq!(p.threshold_e8s, new_threshold, "open/met proposals re-thresholded");
+    }
+    let p388 = proposals.iter().find(|p| p.id == 138388).expect("138388 present");
+    assert_eq!(p388.status, "open", "previously-met proposal with committed < new threshold flips to open");
+}
+
+#[test]
+fn non_admin_cannot_change_threshold() {
+    let Some((pic, canister)) = setup() else { return };
+    let stranger = Principal::from_slice(&[5, 5, 5, 5]);
+    let res = pic.update_call(canister, stranger, "admin_set_default_threshold", encode_one(500_000_000u64).unwrap());
+    if let Ok(bytes) = res {
+        let r: UnitResult = decode_one(&bytes).unwrap();
+        assert!(matches!(r, UnitResult::Err(_)), "non-admin set threshold must Err");
+    }
+}
+
+#[test]
+fn threshold_below_min_commit_is_rejected() {
+    let Some((pic, canister)) = setup() else { return };
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    // 0.5 ICP < 1 ICP MIN_COMMIT → rejected.
+    let r = pic
+        .update_call(canister, owner, "admin_set_default_threshold", encode_one(50_000_000u64).unwrap())
+        .expect("call");
+    let r: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(r, UnitResult::Err(_)), "sub-min-commit threshold must Err");
 }
