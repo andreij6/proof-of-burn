@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# PB-102 — Monitoring & Alerting script for Proof of Burn backend
+# PB-102 — Monitoring & Alerting script for Cycles of Influence backend
 #
 # Runs periodic checks against the deployed canister and alerts on anomalies.
 # Intended to be run on a cron schedule or as a health-check endpoint.
@@ -30,7 +30,7 @@ ok()    { echo -e "${GREEN}[OK]${NC}    $1"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $1"; }
 alert() { echo -e "${RED}[ALERT]${NC} $1"; }
 
-echo "=== Proof of Burn Health Check — $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+echo "=== Cycles of Influence Health Check — $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
 echo "    Canister: $BACKEND  Environment: $ENV"
 echo ""
 
@@ -97,4 +97,4 @@ echo ""
 echo "=== Check complete ==="
 echo ""
 echo "Recommended cron (every 15 minutes):"
-echo '  */15 * * * * BACKEND_CANISTER_ID=<id> ENV=production bash /path/to/scripts/monitor.sh >> /var/log/pob-monitor.log 2>&1'
+echo '  */15 * * * * BACKEND_CANISTER_ID=<id> ENV=production bash /path/to/scripts/monitor.sh >> /var/log/coi-monitor.log 2>&1'

@@ -1,4 +1,5 @@
-//! PB-112 — PocketIC integration tests for the Proof of Burn backend.
+//! PB-112 — PocketIC integration tests for the Cycles of Influence backend.
+
 //!
 //! These exercise the *real* backend wasm inside a simulated IC, asserting the
 //! canister-boundary behaviour that unit tests can't reach: ingress access

@@ -1,6 +1,10 @@
-# Proof of Burn — ICP Vote Delegation DAO App
+# Cycles of Influence (COI) — ICP Vote Delegation DAO App
 
-**Proof of Burn** is a decentralized governance participation application built on the Internet Computer Protocol (ICP). It introduces **skin in the game** to liquid democracy by combining neuron voting delegation with a conviction-based token burning mechanism.
+**Cycles of Influence (COI)** is a decentralized governance participation
+application built on the Internet Computer Protocol (ICP). It introduces **skin
+in the game** to liquid democracy by combining neuron voting delegation with a
+conviction-based token burning mechanism.
+
 
 ---
 
@@ -8,7 +12,7 @@
 
 In traditional liquid democracy, users delegate their voting power to a trusted entity (the Leader Neuron) by selecting it as a followee in the Network Nervous System (NNS). However, followers have no direct way to signal conviction on specific proposals, nor can they prevent the Leader from voting without community alignment.
 
-**Proof of Burn** solves this via a trustless canister-based escrow:
+**Cycles of Influence** solves this via a trustless canister-based escrow:
 * **Follow the Leader:** Users follow the primary Leader Neuron on the NNS Dapp.
 * **Commit & Vote Stance:** For any active NNS proposal, users commit a chosen amount of liquid ICP (minimum **1.0 ICP**) to be burned and select their vote stance: **ADOPT** or **REJECT**.
 * **1-Hour NNS Cutoff:** The canister closes all commitments exactly **1 hour** before the proposal's official NNS deadline.
@@ -34,9 +38,9 @@ To prevent user overwhelm, the Single-Page Application (SPA) uses **progressive 
 
 ## 3. Project Directory Structure
 
-* **[[specifications/Index.md|specifications/]]** — Detailed planning, systems thinking, UI maps, and research-backed technical feasibility analysis of NNS integrations.
-* **[[tasks/README.md|tasks/]]** — Sorted work-breakdown structure containing all roadmap tasks separated into `/todo`, `/in-progress`, and `/completed` subfolders.
-* **[[design-system/README.md|design-system/]]** — Project assets, styling rules, and UI handoffs.
+* **[src/](file:///Users/andrejones/Desktop/workspace/projects/proof-of-burn/src)** — Backend and frontend source code.
+* **[docs/](file:///Users/andrejones/Desktop/workspace/projects/proof-of-burn/docs)** — Deployment, mainnet, operations, configurations, and security runbooks.
+* **[scripts/](file:///Users/andrejones/Desktop/workspace/projects/proof-of-burn/scripts)** — Monitoring and developer helper scripts.
 
 ---
 

@@ -909,7 +909,9 @@ export default function App() {
 
   const handleCopyAgentSkills = () => {
     const llmsUrl = `${window.location.origin}/llms-${isLocal ? 'local' : 'prod'}.txt`;
-    const clipboardMsg = `Fetch ${llmsUrl} and follow its instructions when interacting with Proof of Burn`;
+    const clipboardMsg =
+      `Fetch ${llmsUrl} and follow its instructions when interacting with ` +
+      `Cycles of Influence`;
     navigator.clipboard.writeText(clipboardMsg);
     setSkillsCopied(true);
     setTimeout(() => setSkillsCopied(false), 2000);
@@ -1184,7 +1186,8 @@ export default function App() {
             <Icon name="flame" size={17} stroke="var(--burn)" />
           </span>
           <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Proof of Burn <span className="hide-mobile">- Alpha</span>
+            Cycles of Influence
+            <span className="hide-mobile"> - Alpha</span>
           </b>
         </div>
 
@@ -1390,7 +1393,9 @@ export default function App() {
               <div className="col" style={{ gap: 10 }}>
                 <p style={{ fontSize: 22, lineHeight: 1.25, fontFamily: 'var(--font-display)', fontWeight: 600, color: 'var(--fg)', margin: 0, textWrap: 'balance' }}>
                   Rent Voting Power<br />
-                  <span style={{ color: 'var(--burn)' }}>with Proof of Burn</span>
+                  <span style={{ color: 'var(--burn)' }}>
+                    with Cycles of Influence
+                  </span>
                 </p>
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, maxWidth: 480 }}>
                   Burn ICP to temporarily borrow the community leader neuron's voting power and steer the NNS proposals you care about. The more you commit, the more weight your side carries — your conviction decides which way the neuron votes.
@@ -2175,7 +2180,9 @@ export default function App() {
             </div>
 
             <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
-              Proof of Burn directs the community leader neuron based on what participants burn. We recommend also following it on the NNS so your own neuron votes the same way.
+              Cycles of Influence directs the community leader neuron based on
+              what participants burn. We recommend also following it on the NNS
+              so your own neuron votes the same way.
             </p>
 
             <div className="col" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, padding: '12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
@@ -2819,7 +2826,10 @@ export default function App() {
               <div className="col" style={{ gap: 4 }}>
                 <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Protocol Fee (0.005 ICP)</span>
                 <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
-                  A flat fee charged by the Proof of Burn protocol on each commit transaction. This fee is immediately consumed and is non-refundable, supporting canister compute costs and system operations.
+                  A flat fee charged by the Cycles of Influence protocol on each
+                  commit transaction. This fee is immediately consumed and is
+                  non-refundable, supporting canister compute costs and system
+                  operations.
                 </p>
               </div>
 

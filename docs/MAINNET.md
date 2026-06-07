@@ -1,7 +1,8 @@
-# Mainnet Go-Live Runbook — Proof of Burn
+# Mainnet Go-Live Runbook — Cycles of Influence
 
-The authoritative, end-to-end checklist for taking Proof of Burn live on the IC.
-Work top to bottom. Nothing here is optional unless marked so.
+The authoritative, end-to-end checklist for taking Cycles of Influence
+live on the IC. Work top to bottom. Nothing here is optional unless marked so.
+
 
 > Companion docs: [`DEPLOY.md`](DEPLOY.md) (generic deploy steps), [`OPS.md`](OPS.md)
 > (ongoing operations), [`SECURITY.md`](SECURITY.md) (security checklist).

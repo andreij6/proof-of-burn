@@ -1,4 +1,5 @@
-# Ops Runbook — Proof of Burn
+# Ops Runbook — Cycles of Influence
+
 
 Operational reference for the deployed backend canister. See `DEPLOY.md` for initial deployment steps and `SECURITY.md` for the security checklist.
 

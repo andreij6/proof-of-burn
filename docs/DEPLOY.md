@@ -1,6 +1,8 @@
-# Deployment Runbook — Proof of Burn
+# Deployment Runbook — Cycles of Influence
 
-Step-by-step guide for deploying the Proof of Burn dapp to ICP mainnet (`-e production`).
+Step-by-step guide for deploying the Cycles of Influence dapp to ICP mainnet
+(`-e production`).
+
 
 ## Prerequisites
 

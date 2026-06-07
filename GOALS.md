@@ -1,6 +1,10 @@
-# Proof of Burn — High-Level Goals
+# Cycles of Influence — High-Level Goals
 
-This document outlines the high-level goals and architectural pillars of the **Proof of Burn** platform. These principles serve as the north star for all future design, development, and governance decisions, remaining stable across minor layout changes and implementation details.
+This document outlines the high-level goals and architectural pillars of the
+**Cycles of Influence** platform. These principles serve as the north star for
+all future design, development, and governance decisions, remaining stable
+across minor layout changes and implementation details.
+
 
 ---
 

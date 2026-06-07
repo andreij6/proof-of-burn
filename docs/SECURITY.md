@@ -1,4 +1,5 @@
-# Security Review — Proof of Burn
+# Security Review — Cycles of Influence
+
 
 This document records the IC canister-security checklist review for the backend canister. Each item is either **Verified ✅**, **Risk-Accepted ⚠️**, or **Remediated 🔧**.
 

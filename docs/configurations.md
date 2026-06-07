@@ -1,6 +1,6 @@
 # Configurations
 
-This document lists every important setting that affects the Proof of Burn
+This document lists every important setting that affects the Cycles of Influence
 canister and frontend — what it does, where it lives, and what changing it
 breaks. Use it as a reference when deploying, debugging, or proposing a
 parameter change.
@@ -352,8 +352,8 @@ production.
 
 | Setting | Value | Where |
 |---|---|---|
-| Page title (browser tab) | `Proof of Burn - Alpha` | `src/frontend/index.html:10` |
-| Header brand text | `Proof of Burn - Alpha` | `src/frontend/src/App.tsx:782` |
+| Page title (browser tab) | `Cycles of Influence - Alpha` | `src/frontend/index.html:10` |
+| Header brand text | `Cycles of Influence - Alpha` | `src/frontend/src/App.tsx:782` |
 
 **How to change them:** Edit both files. The header text is in the JSX;
 the page title is in the HTML head.
