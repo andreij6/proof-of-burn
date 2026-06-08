@@ -2,9 +2,23 @@ import React, { useState, useEffect } from 'react';
 import { AuthClient } from "@icp-sdk/auth/client";
 import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
 import { Principal } from "@icp-sdk/core/principal";
-import { createActor as createBackendActor, Vote, Stance, CommitmentStatus } from "./bindings/backend";
+import {
+  createActor as createBackendActor,
+  Vote,
+  Stance,
+  CommitmentStatus,
+} from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import type { Proposal, EligibilityInfo, VoteRecord, Commitment, GlobalStats, Config, LeaderNeuronInfo } from "./bindings/backend";
+import type {
+  Proposal,
+  EligibilityInfo,
+  VoteRecord,
+  Commitment,
+  GlobalStats,
+  Config,
+  LeaderNeuronInfo,
+  PoolInfo,
+} from "./bindings/backend";
 
 // ==========================================
 // 1. Icon Component (Clean, inline SVG paths)
@@ -405,6 +419,7 @@ export default function App() {
   const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
   const [leaderInfo, setLeaderInfo] = useState<LeaderNeuronInfo | null>(null);
+  const [poolInfo, setPoolInfo] = useState<PoolInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
@@ -559,6 +574,16 @@ export default function App() {
     }
   };
 
+  const fetchPoolInfo = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      const info = await currentActor.get_pool_info();
+      setPoolInfo(info);
+    } catch (err) {
+      console.error("Failed to fetch pool info:", err);
+    }
+  };
+
   const fetchAccountId = async (currentActor = actor) => {
     if (!currentActor) return;
     try {
@@ -641,6 +666,7 @@ export default function App() {
         fetchGlobalStats(actor),
         fetchConfig(actor),
         fetchLeaderInfo(actor),
+        fetchPoolInfo(actor),
         actor.list_active_proposals().then((list: Proposal[]) => setProposals(list)),
       ]);
       // Also fetch balance
@@ -837,6 +863,7 @@ export default function App() {
     fetchConfig(actor);
     fetchLeaderInfo(actor);
     fetchAccountId(actor);
+    fetchPoolInfo(actor);
   }, [actor]);
 
   // Fetch Ledger Balance
@@ -1126,6 +1153,9 @@ export default function App() {
     .reduce((sum, c) => sum + c.amount_e8s, 0n);
 
   const proposalsJoined = new Set(myCommitments.map(c => c.proposal_id.toString())).size;
+  const pooledVotingPower = poolInfo?.total_pool_voting_power ?? 0n;
+  const leaderVotingPower = leaderInfo?.voting_power ?? 0n;
+  const totalSyndicateVP = leaderVotingPower + pooledVotingPower;
 
   // Is the signed-in principal an admin? (drives the admin threshold control)
   const isAdmin = !!(
@@ -1465,9 +1495,9 @@ export default function App() {
                           fontWeight: 'bold',
                         }}
                       >
-                        {leaderInfo && leaderInfo.voting_power > 0n
+                        {leaderInfo && totalSyndicateVP > 0n
                           ? `${fmtVP(
-                              leaderInfo.voting_power
+                              totalSyndicateVP
                             )} VOTING POWER`
                           : '… VOTING POWER'}
                       </span>
@@ -1483,6 +1513,11 @@ export default function App() {
                         <Icon name={copied ? "check" : "copy"} size={12} stroke={copied ? "var(--sprout)" : "var(--fg-3)"} />
                       </button>
                     </div>
+                    {pooledVotingPower > 0n && (
+                      <span className="mono" style={{ fontSize: 12.5, color: 'var(--sprout)', whiteSpace: 'nowrap' }}>
+                        + {fmtVP(pooledVotingPower)} Pooled Voting Power
+                      </span>
+                    )}
                   </div>
                   {isFollowing ? (
                     <Chip tone="ok" style={{ height: 24 }}><Icon name="check" size={12} /> Following</Chip>
