@@ -129,6 +129,7 @@ type Proposal = record {
   total_committed_e8s : nat64;
   // Stance of the first commit — tie-breaker if the pots end equal (PB-123).
   first_stance : opt Stance;
+  pool_distributed : bool;
 };
 type Result = variant { Ok; Err : text };
 type Stance = variant { Reject; Adopt };
@@ -158,6 +159,7 @@ service : (InitPayload) -> {
   cancel_pool_draft : (nat64) -> (Result);
   finalize_pool_registration : (nat64) -> (Result);
   unregister_leader_neuron : (nat64) -> (Result);
+  distribute_pool_rewards : (nat64) -> (Result);
   // Top up an existing commitment with additional ICP. No protocol fee is
   // charged — only the deposit ledger fee (0.0001 ICP). The proposal must
   // still be open/met and >1 hour from deadline.

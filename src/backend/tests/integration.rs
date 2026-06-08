@@ -218,6 +218,7 @@ struct ProposalLite {
     reject_pot_e8s: u64,
     vote_executed_at: Option<u64>,
     total_burned_e8s: Option<u64>,
+    pool_distributed: bool,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1196,6 +1197,106 @@ fn test_pool_queries_integration() {
     assert_eq!(info.active_neurons.len(), 1);
     assert_eq!(info.active_neurons[0].neuron_id, 9999);
     assert_eq!(info.active_neurons[0].rank, 1);
+}
+
+#[test]
+fn test_pool_rewards_distribution_integration() {
+    let Some(env) = setup_saga() else { return };
+
+    // 1. Register a pool neuron
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "create_pool_draft",
+            encode_one(9999u64).unwrap(),
+        )
+        .expect("create_pool_draft");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+
+    // Get registration escrow address
+    let r = env
+        .pic
+        .query_call(
+            env.backend,
+            env.user,
+            "get_registration_address",
+            encode_one(()).unwrap(),
+        )
+        .expect("get_registration_address");
+    let reg_acc: LAccountDe = decode_one(&r).unwrap();
+
+    // Fund it with 125 ICP + fees
+    env.mint(env.user, 150_000_000_000);
+    let xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount {
+            owner: reg_acc.owner,
+            subaccount: reg_acc.subaccount,
+        },
+        amount: candid::Nat::from(125_000_000_000u64),
+        fee: Some(candid::Nat::from(10_000u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let _ = env
+        .pic
+        .update_call(
+            env.ledger,
+            env.user,
+            "icrc1_transfer",
+            encode_one(xfer).unwrap(),
+        )
+        .unwrap();
+
+    // Finalize
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "finalize_pool_registration",
+            encode_one(9999u64).unwrap(),
+        )
+        .unwrap();
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+
+    // 2. Commit 10 ICP to proposal 138388 (threshold is 2 ICP)
+    let commit_amt = 10_000_000_000u64;
+    let committer = Principal::from_slice(&[9, 9, 9, 9, 9, 9]);
+    env.mint(committer, 200_000_000_000);
+
+    let res = do_commit_as(&env, committer, 138388, Stance::Adopt, commit_amt);
+    assert!(matches!(res, UnitResult::Ok));
+
+    // 3. Trigger proposal settlement (sweeps, settles, and pays pool)
+    let bal_before = balance_of(&env, env.user, None);
+    trigger_settlement(&env, 138388);
+
+    // 4. Assert proposal is settled and marked distributed
+    let r = env
+        .pic
+        .query_call(
+            env.backend,
+            env.user,
+            "get_proposal",
+            encode_one(138388u64).unwrap(),
+        )
+        .unwrap();
+    let proposal: Option<ProposalLite> = decode_one(&r).unwrap();
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    assert_eq!(p.status, "settled");
+    assert!(p.pool_distributed);
+
+    // 5. Assert user (the pool neuron owner) received the payout:
+    // pool_share = 25% of 10 ICP = 2.5 ICP = 2_500_000_000
+    // payout = 2_500_000_000 - 10_000 fee = 2_499_990_000
+    let bal_after = balance_of(&env, env.user, None);
+    assert_eq!(bal_after, bal_before + 2_499_990_000);
 }
 
 

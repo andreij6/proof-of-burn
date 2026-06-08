@@ -11,28 +11,11 @@ Instead of steering only a single hardcoded "primary leader neuron", the app wil
 ### Requirements
 * **Follow Requirement**: The powerful neuron must follow the primary leader neuron on the **Governance** topic.
 * **Hotkey Requirement**: The neuron must have the backend canister principal added as a hotkey so the canister can query NNS `get_full_neuron` to verify follow status and read actual voting power.
-* **Initiation Fee**: Registering a neuron in the pool requires a **125 ICP initiation fee**.
+* **Initiation Fee**: Registering a neuron in the pool requires a **125 ICP initiation fee** (configurable by the admin).
 * **Fee Split**: The 125 ICP is split as follows:
   * **50% (62.5 ICP)**: Transferred to the **treasury subaccount** of the backend.
   * **25% (31.25 ICP)**: Converted to cycles to fund the **backend canister** cycles balance.
   * **25% (31.25 ICP)**: Converted to cycles to fund the **frontend canister** cycles balance.
-
--- THE INITIATION FEE SHOULD BE CONFIGURABLE BY THE ADMIN
-### Implementation
-1. **Escrow Address**: Expose a query `get_registration_address() -> LedgerAccount` returning a derived subaccount specific to the user's principal (using a registration seed).
-2. **Registration Endpoint**: `register_leader_neuron(neuron_id: u64) -> Result<(), String>`:
-   * Asserts the user has deposited 125 ICP (plus fees) to their registration escrow.
-   * Calls NNS Governance `get_full_neuron(neuron_id)` (unless `is_local` is true):
-     * Asserts the backend canister principal is in the neuron's `hot_keys` list.
-     * Asserts the caller's principal is the neuron's `controller` or is in the `hot_keys` list.
-     * Asserts the neuron follows the primary leader neuron on the **Governance** topic.
-   * If verification succeeds:
-     * Pulls the 125 ICP from escrow.
-     * Distributes 50% to treasury, 25% to backend cycles, 25% to frontend cycles.
-     * Adds the neuron to `POOL_NEURONS` table.
-   * If verification fails:
-     * Returns the 125 ICP to the caller's wallet (minus a 0.0001 ICP ledger fee).
-     * Returns an error.
 
 ---
 
@@ -45,7 +28,7 @@ Instead of steering only a single hardcoded "primary leader neuron", the app wil
   3. Loop and call NNS `manage_neuron` (RegisterVote) for each.
   4. If at least one succeeds, mark the proposal `"voted"`. If all fail, mark `"failed"`.
 
-### 25-25-25-25 Burn Split
+### 25-25-25-25 Burn Split (PB-138)
 When a proposal is successfully settled, the committed ICP in the Adopt and Reject pots is split:
 1. **25% to Backend Canister**: Converted to cycles.
 2. **25% to Frontend Canister**: Converted to cycles.
@@ -58,22 +41,39 @@ When a proposal is successfully settled, the committed ICP in the Adopt and Reje
 
 ---
 
-## Proposed Changes
+## 3. Findings & Adjustments (PB-138 Fix)
+
+During PocketIC integration testing, `settle_burn_split` fails because the CMC canister is not installed on PocketIC, causing CMC notifications to reject. To resolve this:
+1. **Expose Mock Endpoint**: Add a `notify_top_up` update endpoint to the backend canister that returns dummy success when `is_local = true` (acting as a mock CMC).
+2. **Derivation Updates**: Update `NotifyTopUpArgs`, `NotifyTopUpResult`, and `NotifyError` to derive both `Serialize` and `Deserialize`.
+3. **Mock Deployment in Tests**: In `test_pool_rewards_distribution_integration`, deploy the backend Wasm on the hardcoded CMC canister ID (`rkp4c-7iaaa-aaaaa-aaaca-cai`) right before triggering settlement, allowing the `notify_top_up` call to succeed.
+
+---
+
+## 4. Pool Voting-Power Refresh & Inactivation (PB-139)
+
+* Extend the periodic `fetch_leader_neuron_info` timer to iterate **Active** `POOL_NEURONS` and re-`get_full_neuron` each:
+  * Update cached `voting_power`.
+  * If the canister hotkey was removed, the neuron no longer follows the leader, or stake/VP is 0 → set `status = Inactive`.
+  * Leave Drafts untouched (re-verified at finalize).
+  * `recompute_pool_info()` at the end.
+* To bound cycles, refresh in small batches with a simple rotating cursor if the pool is large (not required at launch volumes; document the cursor).
+* Ensure refresh is resilient to a single `get_full_neuron` failure by logging and continuing.
+
+---
+
+## 5. Proposed Changes
 
 ### Backend Canister
 
 #### [MODIFY] [lib.rs](file:///Users/andrejones/Desktop/workspace/projects/proof-of-burn/src/backend/src/lib.rs)
-* Add `PoolNeuron`, `PoolNeuronInfo`, `PoolInfo` data structures and `impl_storable!(PoolNeuron)`.
-* Add `POOL_NEURONS` stable map at `MemoryId::new(8)` and `CACHED_POOL_INFO` thread-local cell.
-* Expose `get_registration_address() -> LedgerAccount`.
-* Implement NNS Governance `get_full_neuron` call structure.
-* Implement `register_leader_neuron` and `unregister_leader_neuron`.
-* Update `fetch_leader_neuron_info()` to update pool stats.
-* Update `settle_burn_split` to implement the new 25-25-25-25 split and top-25 distribution.
-* Update `process_proposal_cutoff` to loop over all target neurons.
+* Expose `notify_top_up` update endpoint for local environment mocking.
+* Derive `Serialize` and `Deserialize` on all CMC topup structs.
+* Implement PB-139 timer refresh loop.
+* Hook `distribute_pool_rewards` to proposal settlement and sweep.
 
 #### [MODIFY] [backend.did](file:///Users/andrejones/Desktop/workspace/projects/proof-of-burn/src/backend/backend.did)
-* Expose new Candid structures and endpoints: `get_pool_info`, `get_registration_address`, `register_leader_neuron`, `unregister_leader_neuron`.
+* Verify all pooling update and query endpoints are correctly declared.
 
 ---
 
@@ -81,26 +81,27 @@ When a proposal is successfully settled, the committed ICP in the Adopt and Reje
 
 #### [MODIFY] [App.tsx](file:///Users/andrejones/Desktop/workspace/projects/proof-of-burn/src/frontend/src/App.tsx)
 * Update Header and Tagline stats to show the **Total Syndicate Voting Power** (sum of primary leader + pool neurons).
-* Add a **Syndicate Pool Dashboard** list component.
-* Add a **Join Pool Modal** detailing the 125 ICP fee, the hotkey setup, the follow requirement, and the registration submission inputs.
-* Add "Leave Pool" capability.
+* Add a **Syndicate Pool Sidebar** (collapsible on desktop, full-screen drawer on mobile) listing active pool neurons.
+* Add a **Join Pool Wizard Modal** with intro, verify, and pay steps, including draft persistence and resume setup.
+* Update revenue-split copy to reflect both the 50/25/25 and 25/25/25/25 split cases.
 
 ---
 
 ## Verification Plan
 
 ### Automated Tests
-* Add Rust unit tests for:
-  * Registration verification logic (mocking NNS `get_full_neuron` responses).
-  * 25-25-25-25 burn split math and top-25 payouts.
-  * Empty pool fallback redirecting pool shares to treasury.
-  * Multi-cast voting loop resilience.
-* Run: `cargo test -p backend` & `npm --prefix src/frontend run test`
+* Rust unit tests:
+  * `test_pool_rewards_distribution` (math, top-25 limit, empty pool fallback).
+  * `test_pool_refresh_and_inactivation` (happy path, hotkey/follow removal, error resilience).
+* PocketIC Integration tests:
+  * `test_pool_rewards_distribution_integration` (with mock CMC deployed to verify successful payout).
+* Frontend unit tests:
+  * VP sum, top-25 eligibility, and wizard step transitions.
 
 ### Manual Verification
-* Deploy to local network, connect, fund, and test:
-  1. Derive registration address.
-  2. Fund it with 125.0002 ICP.
-  3. Register a neuron. Confirm the 125 ICP splits correctly (treasury + backend cycles + frontend cycles).
-  4. Verify the UI dashboard shows the added neuron.
-  5. Settle a proposal. Verify the 25% pool share is paid out to the registered principal.
+* Deploy to local network and verify:
+  1. Join pool wizard transitions, verification step, and draft creation.
+  2. Finalization and fee-split distribution.
+  3. Leader card "+ X Pooled Voting Power" and total syndicate VP updating.
+  4. Settle proposal and verify payout of pool rewards.
+  5. Cancel draft / unregister neuron.
