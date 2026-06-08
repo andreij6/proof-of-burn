@@ -1022,6 +1022,8 @@ impl Drop for ProposalLock {
     }
 }
 
+const REGISTRATION_SEED: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+
 fn derive_subaccount(user: &Principal, proposal_id: u64) -> [u8; 32] {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
@@ -1255,6 +1257,49 @@ fn get_deposit_address(proposal_id: u64) -> LedgerAccount {
         owner: ic_cdk::id(),
         subaccount: Some(sub),
     }
+}
+
+#[ic_cdk::query]
+fn get_registration_address() -> LedgerAccount {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() {
+        panic!("Anonymous principal is not allowed");
+    }
+    let sub = derive_subaccount(&caller, REGISTRATION_SEED);
+    LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(sub),
+    }
+}
+
+#[ic_cdk::update]
+async fn refund_registration() -> Result<(), String> {
+    require_authenticated()?;
+    let caller = ic_cdk::caller();
+    let sub = derive_subaccount(&caller, REGISTRATION_SEED);
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+    let escrow_acc = LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(sub),
+    };
+    let bal = call_ledger_balance(ledger_id, escrow_acc).await?;
+    if bal <= 10_000 {
+        return Err("NOTHING_TO_REFUND".to_string());
+    }
+    let transfer_amt = bal - 10_000;
+    let dest = LedgerAccount {
+        owner: caller,
+        subaccount: None,
+    };
+    call_ledger_transfer(
+        ledger_id,
+        Some(sub),
+        dest,
+        transfer_amt,
+        Some(10_000)
+    ).await?;
+    Ok(())
 }
 
 #[ic_cdk::update]
@@ -2813,6 +2858,17 @@ mod tests {
         assert_eq!(decoded.cached_neuron_stake_e8s, 100_000_000);
         assert!(neuron_has_hotkey(&decoded, Principal::anonymous()));
         assert!(neuron_follows(&decoded, 4821667, TOPIC_GOVERNANCE));
+    }
+
+    #[test]
+    fn test_registration_address_distinction() {
+        let caller = Principal::anonymous();
+        let proposal_id = 12345u64;
+
+        let commit_sub = derive_subaccount(&caller, proposal_id);
+        let reg_sub = derive_subaccount(&caller, REGISTRATION_SEED);
+
+        assert_ne!(commit_sub, reg_sub, "Registration subaccount must differ");
     }
 
     #[test]

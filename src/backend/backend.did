@@ -144,6 +144,7 @@ service : (InitPayload) -> {
   get_config : () -> (Config) query;
   get_cycle_balance : () -> (nat64) query;
   get_deposit_address : (nat64) -> (LedgerAccount) query;
+  get_registration_address : () -> (LedgerAccount) query;
   get_eligibility : () -> (EligibilityInfo) query;
   // App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
   // cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
@@ -158,6 +159,7 @@ service : (InitPayload) -> {
   get_treasury_balance : () -> (BalanceResult);
   list_active_proposals : () -> (vec Proposal) query;
   list_vote_history : () -> (vec VoteRecord) query;
+  refund_registration : () -> (Result);
   // Self-attested follow (Option C): records the caller as following the leader
   // neuron without on-chain ownership verification. Conviction = the ICP burn.
   confirm_follow : () -> (Result);

@@ -791,3 +791,116 @@ fn admin_set_pool_fee_test() {
     assert_eq!(cfg.pool_initiation_fee_e8s, new_fee);
 }
 
+#[test]
+fn test_registration_refund_integration() {
+    let Some(env) = setup_saga() else { return };
+
+    // 1. Get registration address
+    let r = env
+        .pic
+        .query_call(
+            env.backend,
+            env.user,
+            "get_registration_address",
+            encode_one(()).unwrap()
+        )
+        .expect("get_registration_address");
+    let reg_acc: LAccountDe = decode_one(&r).unwrap();
+
+    // 2. Query empty refund -> expect NOTHING_TO_REFUND
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "refund_registration",
+            encode_one(()).unwrap()
+        )
+        .expect("refund_registration empty");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(
+        matches!(res, UnitResult::Err(ref msg) if msg == "NOTHING_TO_REFUND"),
+        "Empty escrow refund must fail: {:?}",
+        res
+    );
+
+    // 3. Reject anonymous callers
+    let r = env.pic.update_call(
+        env.backend,
+        Principal::anonymous(),
+        "refund_registration",
+        encode_one(()).unwrap()
+    );
+    if let Ok(bytes) = r {
+        let res: UnitResult = decode_one(&bytes).unwrap();
+        assert!(matches!(res, UnitResult::Err(_)), "Anon refund must fail");
+    }
+
+    // 4. Fund the registration address
+    // Mint 150 ICP to user first
+    env.mint(env.user, 150_000_000_000);
+
+    // Transfer 125 ICP + fee from user to reg_acc
+    let deposit_amount = 125_000_000_000u64;
+    let xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount {
+            owner: reg_acc.owner,
+            subaccount: reg_acc.subaccount.clone(),
+        },
+        amount: candid::Nat::from(deposit_amount),
+        fee: Some(candid::Nat::from(10_000u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let res = env
+        .pic
+        .update_call(
+            env.ledger,
+            env.user,
+            "icrc1_transfer",
+            encode_one(xfer).unwrap()
+        )
+        .expect("deposit transfer");
+    let res: TransferResult = decode_one(&res).unwrap();
+    assert!(matches!(res, TransferResult::Ok(_)));
+
+    // Verify registration escrow has the funds
+    let reg_sub_vec = reg_acc.subaccount.clone();
+    assert_eq!(
+        balance_of(&env, env.backend, reg_sub_vec.clone()),
+        deposit_amount
+    );
+
+    // 5. Call refund_registration as user
+    let user_bal_before = balance_of(&env, env.user, None);
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "refund_registration",
+            encode_one(()).unwrap()
+        )
+        .expect("refund_registration funded");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(
+        matches!(res, UnitResult::Ok),
+        "Refund must succeed: {:?}",
+        res
+    );
+
+    // Escrow must be drained
+    assert_eq!(
+        balance_of(&env, env.backend, reg_sub_vec),
+        0
+    );
+
+    // User gets back deposit minus 10_000 fee
+    let user_bal_after = balance_of(&env, env.user, None);
+    assert_eq!(
+        user_bal_after,
+        user_bal_before + deposit_amount - 10_000
+    );
+}
+
