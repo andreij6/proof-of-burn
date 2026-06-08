@@ -1654,8 +1654,13 @@ export default function App() {
 
                       const flipInfo = getFlipCalculation(p.adopt_pot_e8s, p.reject_pot_e8s);
                       const flipLabel = flipInfo.toStance === 'either' ? (
-                        <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          Tied: +0.00000001 ICP to lead
+                        <span style={{
+                          fontSize: 11,
+                          color: 'var(--fg-3)',
+                          textAlign: 'right',
+                          whiteSpace: 'nowrap'
+                        }}>
+                          Tied
                         </span>
                       ) : (
                         <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
@@ -1843,8 +1848,13 @@ export default function App() {
                       const isRetrying = myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund;
                       const flipInfo = getFlipCalculation(p.adopt_pot_e8s, p.reject_pot_e8s);
                       const flipLabel = flipInfo.toStance === 'either' ? (
-                        <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          Tied: +0.00000001 ICP to lead
+                        <span style={{
+                          fontSize: 11,
+                          color: 'var(--fg-3)',
+                          textAlign: 'right',
+                          whiteSpace: 'nowrap'
+                        }}>
+                          Tied
                         </span>
                       ) : (
                         <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
