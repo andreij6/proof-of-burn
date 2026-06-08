@@ -1599,6 +1599,17 @@ fn frontend_canister_id() -> Principal {
     }
 }
 
+/// Encode a Principal as a 32-byte CMC subaccount: 1-byte length + principal
+/// bytes + zero padding. Required by the CMC `notify_top_up` protocol — the
+/// transfer to the CMC must target `{ owner: CMC, subaccount: Some(this) }`.
+fn principal_to_subaccount(p: &Principal) -> [u8; 32] {
+    let bytes = p.as_slice();
+    let mut sub = [0u8; 32];
+    sub[0] = bytes.len() as u8;
+    sub[1..1 + bytes.len()].copy_from_slice(bytes);
+    sub
+}
+
 /// Notify the CMC to mint cycles for `block_index` to `target`. Idempotent:
 /// `AlreadyNotified` is treated as success; `Refunded` is a hard failure.
 #[cfg(target_arch = "wasm32")]
@@ -1658,7 +1669,14 @@ async fn settle_burn_split(
     commitment: &mut Commitment,
 ) -> Result<(), String> {
     let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
-    let cmc_dest = LedgerAccount { owner: cmc, subaccount: None };
+    let backend_cmc_dest = LedgerAccount {
+        owner: cmc,
+        subaccount: Some(principal_to_subaccount(&ic_cdk::id())),
+    };
+    let frontend_cmc_dest = LedgerAccount {
+        owner: cmc,
+        subaccount: Some(principal_to_subaccount(&frontend_canister_id())),
+    };
     let treasury_dest = LedgerAccount { owner: ic_cdk::id(), subaccount: Some(TREASURY_SUBACCOUNT) };
 
     let treasury_amt = amount_e8s / 2;
@@ -1674,7 +1692,7 @@ async fn settle_burn_split(
 
     // 25% → backend cycles
     if commitment.cmc_block_index.is_none() {
-        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), cmc_dest.clone(), backend_amt, Some(10_000))
+        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), backend_cmc_dest, backend_amt, Some(10_000))
             .await.map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
         commitment.cmc_block_index = Some(b);
     }
@@ -1691,7 +1709,7 @@ async fn settle_burn_split(
         let b = call_ledger_transfer(
             ledger_id,
             Some(from_subaccount),
-            cmc_dest,
+            frontend_cmc_dest,
             frontend_amt,
             Some(10_000),
         )
@@ -1900,7 +1918,14 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
 
     // 4. Fee-split saga (idempotent, block index guarded)
     let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
-    let cmc_dest = LedgerAccount { owner: cmc, subaccount: None };
+    let backend_cmc_dest = LedgerAccount {
+        owner: cmc,
+        subaccount: Some(principal_to_subaccount(&get_canister_id())),
+    };
+    let frontend_cmc_dest_pool = LedgerAccount {
+        owner: cmc,
+        subaccount: Some(principal_to_subaccount(&frontend_canister_id())),
+    };
     let treasury_dest = LedgerAccount {
         owner: get_canister_id(),
         subaccount: Some(TREASURY_SUBACCOUNT),
@@ -1932,7 +1957,7 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
         let b = call_ledger_transfer(
             ledger_id,
             Some(sub),
-            cmc_dest.clone(),
+            backend_cmc_dest,
             backend_amt,
             Some(10_000),
         )
@@ -1956,7 +1981,7 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
         let b = call_ledger_transfer(
             ledger_id,
             Some(sub),
-            cmc_dest,
+            frontend_cmc_dest_pool,
             frontend_amt,
             Some(10_000),
         )
@@ -2959,7 +2984,7 @@ async fn cycle_topup_check() {
         let cmc_principal = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
         let cmc_dest = LedgerAccount {
             owner: cmc_principal,
-            subaccount: None,
+            subaccount: Some(principal_to_subaccount(&ic_cdk::id())),
         };
 
         // F-103: Phase A — transfer treasury → CMC. Skip if a previous attempt
