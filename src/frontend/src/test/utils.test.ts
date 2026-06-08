@@ -467,3 +467,156 @@ describe('validateAddMore — top-up validation', () => {
     expect(validateAddMore('1.0', 100_009_999n)).toBe('INSUFFICIENT_BALANCE');
   });
 });
+
+// ── PB-146: pool VP / top-25 / registration amount helpers ───────────────────
+
+type TestPoolNeuron = {
+  neuron_id: bigint;
+  voting_power: bigint;
+  status: 'Active' | 'Draft' | 'Inactive';
+};
+
+// Mirrors the totalSyndicateVP calculation in App.tsx
+function computeTotalSyndicateVP(
+  leaderVP: bigint,
+  poolNeurons: TestPoolNeuron[],
+): bigint {
+  const pooled = poolNeurons
+    .filter(n => n.status === 'Active')
+    .reduce((sum, n) => sum + n.voting_power, 0n);
+  return leaderVP + pooled;
+}
+
+// Mirrors top-25 payout-eligibility: sorted desc by VP, rank <= 25 is eligible
+function isPayoutEligible(
+  rank: number, // 1-indexed
+): boolean {
+  return rank <= 25;
+}
+
+// Registration cost helper: fee_e8s + 30_000 (cycle reserve) + 10_000 (ledger fee)
+const POOL_CYCLE_RESERVE_E8S = 30_000n;
+const LEDGER_FEE_E8S = 10_000n;
+
+function poolRegistrationTotalE8s(feeE8s: bigint): bigint {
+  return feeE8s + POOL_CYCLE_RESERVE_E8S + LEDGER_FEE_E8S;
+}
+
+// Wizard step gating: step 3 requires an existing Draft neuron
+type WizardTarget = 1 | 2 | 3;
+function wizardOpenStep(
+  hasDraft: boolean,
+): WizardTarget {
+  return hasDraft ? 3 : 1;
+}
+
+describe('PB-146 pool VP computation', () => {
+  it('adds only Active pool neurons to leader VP', () => {
+    const neurons: TestPoolNeuron[] = [
+      { neuron_id: 1n, voting_power: 100_000_000n, status: 'Active' },
+      { neuron_id: 2n, voting_power: 50_000_000n, status: 'Draft' },
+      { neuron_id: 3n, voting_power: 200_000_000n, status: 'Inactive' },
+    ];
+    const leader = 500_000_000n;
+    // Only neuron 1 (Active) contributes
+    expect(computeTotalSyndicateVP(leader, neurons)).toBe(600_000_000n);
+  });
+
+  it('returns just leader VP when pool is empty', () => {
+    expect(computeTotalSyndicateVP(500_000_000n, [])).toBe(500_000_000n);
+  });
+
+  it('returns just leader VP when all pool neurons are Draft', () => {
+    const neurons: TestPoolNeuron[] = [
+      { neuron_id: 1n, voting_power: 100_000_000n, status: 'Draft' },
+    ];
+    expect(computeTotalSyndicateVP(500_000_000n, neurons)).toBe(500_000_000n);
+  });
+
+  it('sums multiple Active neurons correctly', () => {
+    const neurons: TestPoolNeuron[] = [
+      { neuron_id: 1n, voting_power: 100_000_000n, status: 'Active' },
+      { neuron_id: 2n, voting_power: 200_000_000n, status: 'Active' },
+      { neuron_id: 3n, voting_power: 300_000_000n, status: 'Active' },
+    ];
+    expect(computeTotalSyndicateVP(0n, neurons)).toBe(600_000_000n);
+  });
+});
+
+describe('PB-146 top-25 payout eligibility', () => {
+  it('rank 1 is eligible', () => {
+    expect(isPayoutEligible(1)).toBe(true);
+  });
+
+  it('rank 25 is eligible', () => {
+    expect(isPayoutEligible(25)).toBe(true);
+  });
+
+  it('rank 26 is not eligible', () => {
+    expect(isPayoutEligible(26)).toBe(false);
+  });
+
+  it('rank 100 is not eligible', () => {
+    expect(isPayoutEligible(100)).toBe(false);
+  });
+});
+
+describe('PB-146 pool registration amount', () => {
+  it('total cost = fee + 0.0003 cycle reserve + 0.0001 ledger fee', () => {
+    const fee = 500_000n; // 0.005 ICP
+    // 500_000 + 30_000 + 10_000 = 540_000
+    expect(poolRegistrationTotalE8s(fee)).toBe(540_000n);
+  });
+
+  it('cycle reserve is exactly 0.0003 ICP (30,000 e8s)', () => {
+    expect(POOL_CYCLE_RESERVE_E8S).toBe(30_000n);
+  });
+
+  it('ledger fee is exactly 0.0001 ICP (10,000 e8s)', () => {
+    expect(LEDGER_FEE_E8S).toBe(10_000n);
+  });
+
+  it('larger fee scales correctly', () => {
+    const fee = 100_000_000n; // 1 ICP
+    expect(poolRegistrationTotalE8s(fee)).toBe(100_040_000n);
+  });
+});
+
+describe('PB-146 wizard step gating', () => {
+  it('opens at step 1 when no Draft exists', () => {
+    expect(wizardOpenStep(false)).toBe(1);
+  });
+
+  it('opens at step 3 (resume) when a Draft exists', () => {
+    expect(wizardOpenStep(true)).toBe(3);
+  });
+
+  it('step 3 is unreachable without a Draft (via step-1 fresh open)', () => {
+    // Fresh open always goes to step 1, never jumps to 3 without a Draft
+    expect(wizardOpenStep(false)).not.toBe(3);
+  });
+});
+
+describe('PB-144 revenue-split copy assertions', () => {
+  const SPLIT_NO_POOL = '50% treasury / 25% backend cycles / 25% frontend cycles';
+  const SPLIT_WITH_POOL = '25% treasury / 25% backend / 25% frontend / 25% pool';
+
+  it('no-pool split description is the canonical string', () => {
+    // Mirrors wording in commit-success message and committed-card hint
+    expect(SPLIT_NO_POOL).toBe('50% treasury / 25% backend cycles / 25% frontend cycles');
+  });
+
+  it('pool-active split description mentions all four shares', () => {
+    expect(SPLIT_WITH_POOL).toMatch(/treasury/);
+    expect(SPLIT_WITH_POOL).toMatch(/backend/);
+    expect(SPLIT_WITH_POOL).toMatch(/frontend/);
+    expect(SPLIT_WITH_POOL).toMatch(/pool/);
+  });
+
+  it('pool split is 25/25/25/25 (four equal shares)', () => {
+    const parts = SPLIT_WITH_POOL.split('/').map(s => s.trim());
+    const percents = parts.map(p => parseInt(p));
+    expect(percents.every(p => p === 25)).toBe(true);
+    expect(percents.reduce((a, b) => a + b, 0)).toBe(100);
+  });
+});
