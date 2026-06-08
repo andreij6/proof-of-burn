@@ -1,3 +1,20 @@
+type NotifyTopUpArgs = record {
+  canister_id : principal;
+  block_index : nat;
+};
+type NotifyError = variant {
+  Refunded : record { refund_block_index : opt nat; reason : text };
+  InvalidTokenLedger;
+  TransactionNotFound;
+  TransactionTooOld;
+  AlreadyNotified;
+  Other : record { error_code : nat64; error_message : text };
+};
+type NotifyTopUpResult = variant {
+  Ok : nat;
+  Err : NotifyError;
+};
+
 type AuditLogEntry = record {
   user : principal;
   amount_e8s : nat64;
@@ -198,6 +215,7 @@ service : (InitPayload) -> {
   // Self-attested follow (Option C): records the caller as following the leader
   // neuron without on-chain ownership verification. Conviction = the ICP burn.
   confirm_follow : () -> (Result);
+  notify_top_up : (NotifyTopUpArgs) -> (NotifyTopUpResult);
   remove_admin : (principal) -> (Result);
   wallet_receive : () -> (Result);
 }
