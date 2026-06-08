@@ -934,4 +934,112 @@ fn test_create_pool_draft_integration() {
     }
 }
 
+#[test]
+fn test_cancel_and_unregister_integration() {
+    let Some(env) = setup_saga() else { return };
+
+    // 1. Create a draft
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "create_pool_draft",
+            encode_one(9999u64).unwrap(),
+        )
+        .expect("create_pool_draft");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+
+    // 2. Cancel the draft
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "cancel_pool_draft",
+            encode_one(9999u64).unwrap(),
+        )
+        .expect("cancel_pool_draft");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+
+    // 3. Create again and finalize it
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "create_pool_draft",
+            encode_one(9999u64).unwrap(),
+        )
+        .expect("create_pool_draft");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+
+    // Get registration escrow address
+    let r = env
+        .pic
+        .query_call(
+            env.backend,
+            env.user,
+            "get_registration_address",
+            encode_one(()).unwrap(),
+        )
+        .expect("get_registration_address");
+    let reg_acc: LAccountDe = decode_one(&r).unwrap();
+
+    // Fund it with 125 ICP + fees
+    env.mint(env.user, 150_000_000_000);
+    let xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount {
+            owner: reg_acc.owner,
+            subaccount: reg_acc.subaccount,
+        },
+        amount: candid::Nat::from(125_000_000_000u64),
+        fee: Some(candid::Nat::from(10_000u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let r = env
+        .pic
+        .update_call(
+            env.ledger,
+            env.user,
+            "icrc1_transfer",
+            encode_one(xfer).unwrap(),
+        )
+        .expect("ledger transfer");
+    let xfer_res: TransferResult = decode_one(&r).unwrap();
+    assert!(matches!(xfer_res, TransferResult::Ok(_)));
+
+    // Finalize
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "finalize_pool_registration",
+            encode_one(9999u64).unwrap(),
+        )
+        .expect("finalize_pool_registration");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+
+    // 4. Unregister active leader neuron
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "unregister_leader_neuron",
+            encode_one(9999u64).unwrap(),
+        )
+        .expect("unregister_leader_neuron");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+}
+
+
 

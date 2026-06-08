@@ -1313,15 +1313,35 @@ fn frontend_canister_id() -> Principal {
 /// Notify the CMC to mint cycles for `block_index` to `target`. Idempotent:
 /// `AlreadyNotified` is treated as success; `Refunded` is a hard failure.
 #[cfg(target_arch = "wasm32")]
-async fn notify_cmc_topup(cmc: Principal, target: Principal, block_index: u64) -> Result<(), String> {
-    let args = NotifyTopUpArgs { canister_id: target, block_index: candid::Nat::from(block_index) };
-    let res: Result<(NotifyTopUpResult,), _> = ic_cdk::call(cmc, "notify_top_up", (args,)).await;
+async fn notify_cmc_topup(
+    cmc: Principal,
+    target: Principal,
+    block_index: u64,
+    fail_on_missing_cmc: bool,
+) -> Result<(), String> {
+    let args = NotifyTopUpArgs {
+        canister_id: target,
+        block_index: candid::Nat::from(block_index),
+    };
+    let res: Result<(NotifyTopUpResult,), _> =
+        ic_cdk::call(cmc, "notify_top_up", (args,)).await;
     match res {
         Ok((NotifyTopUpResult::Ok(_),)) => Ok(()),
         Ok((NotifyTopUpResult::Err(NotifyError::AlreadyNotified),)) => Ok(()),
-        Ok((NotifyTopUpResult::Err(NotifyError::Refunded { .. }),)) => Err("CMC_REFUNDED".to_string()),
-        Ok((NotifyTopUpResult::Err(e),)) => Err(format!("CMC notify error: {:?}", e)),
-        Err((code, msg)) => Err(format!("CMC call rejected ({:?}): {}", code, msg)),
+        Ok((NotifyTopUpResult::Err(NotifyError::Refunded { .. }),)) => {
+            Err("CMC_REFUNDED".to_string())
+        }
+        Ok((NotifyTopUpResult::Err(e),)) => {
+            Err(format!("CMC notify error: {:?}", e))
+        }
+        Err((code, msg)) => {
+            let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+            if is_local && !fail_on_missing_cmc {
+                Ok(())
+            } else {
+                Err(format!("CMC call rejected ({:?}): {}", code, msg))
+            }
+        }
     }
 }
 
@@ -1329,7 +1349,12 @@ async fn notify_cmc_topup(cmc: Principal, target: Principal, block_index: u64) -
 // no-op success. Saga idempotency/transfer logic is exercised via the mocked
 // ledger; the real notify path is covered by PocketIC integration tests.
 #[cfg(not(target_arch = "wasm32"))]
-async fn notify_cmc_topup(_cmc: Principal, _target: Principal, _block_index: u64) -> Result<(), String> {
+async fn notify_cmc_topup(
+    _cmc: Principal,
+    _target: Principal,
+    _block_index: u64,
+    _fail_on_missing_cmc: bool,
+) -> Result<(), String> {
     Ok(())
 }
 
@@ -1364,15 +1389,34 @@ async fn settle_burn_split(
             .await.map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
         commitment.cmc_block_index = Some(b);
     }
-    notify_cmc_topup(cmc, ic_cdk::id(), commitment.cmc_block_index.unwrap()).await?;
+    notify_cmc_topup(
+        cmc,
+        ic_cdk::id(),
+        commitment.cmc_block_index.unwrap(),
+        true,
+    )
+    .await?;
 
     // 25% → frontend cycles
     if commitment.frontend_cmc_block.is_none() {
-        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), cmc_dest, frontend_amt, Some(10_000))
-            .await.map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
+        let b = call_ledger_transfer(
+            ledger_id,
+            Some(from_subaccount),
+            cmc_dest,
+            frontend_amt,
+            Some(10_000),
+        )
+        .await
+        .map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
         commitment.frontend_cmc_block = Some(b);
     }
-    notify_cmc_topup(cmc, frontend_canister_id(), commitment.frontend_cmc_block.unwrap()).await?;
+    notify_cmc_topup(
+        cmc,
+        frontend_canister_id(),
+        commitment.frontend_cmc_block.unwrap(),
+        true,
+    )
+    .await?;
 
     Ok(())
 }
@@ -1614,6 +1658,7 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
         cmc,
         get_canister_id(),
         neuron_state.backend_cmc_block.unwrap(),
+        false,
     )
     .await?;
 
@@ -1637,6 +1682,7 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
         cmc,
         frontend_canister_id(),
         neuron_state.frontend_cmc_block.unwrap(),
+        false,
     )
     .await?;
 
@@ -1658,6 +1704,78 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
         proposal_id: neuron_id,
         user: caller,
         amount_e8s: fee_needed,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&log_entry);
+    });
+
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn cancel_pool_draft(neuron_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let existing = POOL_NEURONS.with(|map| map.borrow().get(&neuron_id));
+    let pn = match existing {
+        Some(pn) => pn,
+        None => return Err("NO_DRAFT".to_string()),
+    };
+
+    if pn.registered_by != caller {
+        return Err("UNAUTHORIZED".to_string());
+    }
+
+    if pn.status != PoolStatus::Draft {
+        return Err("INVALID_STATE".to_string());
+    }
+
+    POOL_NEURONS.with(|map| {
+        map.borrow_mut().remove(&neuron_id);
+    });
+
+    recompute_pool_info();
+
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn unregister_leader_neuron(neuron_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let existing = POOL_NEURONS.with(|map| map.borrow().get(&neuron_id));
+    let mut pn = match existing {
+        Some(pn) => pn,
+        None => return Err("NO_ACTIVE_NEURON".to_string()),
+    };
+
+    if pn.registered_by != caller {
+        return Err("UNAUTHORIZED".to_string());
+    }
+
+    if pn.status != PoolStatus::Active {
+        return Err("INVALID_STATE".to_string());
+    }
+
+    pn.status = PoolStatus::Inactive;
+
+    POOL_NEURONS.with(|map| {
+        map.borrow_mut().insert(neuron_id, pn);
+    });
+
+    recompute_pool_info();
+
+    let now = current_time();
+    let log_entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "pool_leave".to_string(),
+        proposal_id: neuron_id,
+        user: caller,
+        amount_e8s: 0,
     };
     AUDIT_LOG.with(|log| {
         let _ = log.borrow_mut().append(&log_entry);
@@ -3664,6 +3782,92 @@ mod tests {
         let pn = POOL_NEURONS.with(|map| map.borrow().get(&9999).unwrap());
         assert_eq!(pn.status, PoolStatus::Active);
         set_mock_ledger_transfer(Ok(1)); // restore default
+
+        // Restore config
+        CONFIG.with(|c| {
+            let _ = c.borrow_mut().set(original_cfg);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_cancel_and_unregister_flow() {
+        let original_cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let caller = Principal::from_slice(&[1; 29]);
+        let other_caller = Principal::from_slice(&[2; 29]);
+        set_mock_caller(caller);
+
+        // Clear existing map
+        POOL_NEURONS.with(|map| {
+            let keys: Vec<u64> = map
+                .borrow()
+                .iter()
+                .map(|e| *e.key())
+                .collect();
+            let mut m = map.borrow_mut();
+            for k in keys {
+                m.remove(&k);
+            }
+        });
+
+        // 1. Setup local config & draft
+        CONFIG.with(|c| {
+            let mut cfg = c.borrow().get().clone();
+            cfg.is_local = true;
+            cfg.pool_initiation_fee_e8s = 10_000_000_000;
+            let _ = c.borrow_mut().set(cfg);
+        });
+
+        let res = create_pool_draft(9999).await;
+        assert!(res.is_ok());
+
+        // 2. Reject cancel by unauthorized caller
+        set_mock_caller(other_caller);
+        let res = cancel_pool_draft(9999);
+        assert_eq!(res.unwrap_err(), "UNAUTHORIZED");
+
+        // Restore owner caller
+        set_mock_caller(caller);
+
+        // 3. Successfully cancel draft
+        let res = cancel_pool_draft(9999);
+        assert!(res.is_ok());
+        // Verify it was removed
+        assert!(POOL_NEURONS.with(|map| map.borrow().get(&9999)).is_none());
+
+        // 4. Create again and finalize to active
+        let res = create_pool_draft(9999).await;
+        assert!(res.is_ok());
+
+        set_mock_ledger_balance(10_000_030_000);
+        let res = finalize_pool_registration(9999).await;
+        assert!(res.is_ok());
+
+        // Status should be Active
+        let pn = POOL_NEURONS.with(|map| map.borrow().get(&9999).unwrap());
+        assert_eq!(pn.status, PoolStatus::Active);
+
+        // Try to cancel active draft -> invalid state
+        let res = cancel_pool_draft(9999);
+        assert_eq!(res.unwrap_err(), "INVALID_STATE");
+
+        // 5. Reject unregister by unauthorized caller
+        set_mock_caller(other_caller);
+        let res = unregister_leader_neuron(9999);
+        assert_eq!(res.unwrap_err(), "UNAUTHORIZED");
+
+        // Restore owner caller
+        set_mock_caller(caller);
+
+        // 6. Successfully unregister Active neuron -> Inactive
+        let res = unregister_leader_neuron(9999);
+        assert!(res.is_ok());
+
+        let pn = POOL_NEURONS.with(|map| map.borrow().get(&9999).unwrap());
+        assert_eq!(pn.status, PoolStatus::Inactive);
+
+        // Try to unregister again -> invalid state
+        let res = unregister_leader_neuron(9999);
+        assert_eq!(res.unwrap_err(), "INVALID_STATE");
 
         // Restore config
         CONFIG.with(|c| {
