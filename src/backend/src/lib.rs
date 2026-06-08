@@ -114,6 +114,64 @@ pub struct LeaderNeuronInfo {
     pub updated_at: u64,           // 0 until first successful fetch
 }
 
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum PoolStatus {
+    Draft,
+    Active,
+    Inactive,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PoolNeuron {
+    pub neuron_id: u64,
+    pub registered_by: Principal,
+    pub voting_power: u64,
+    pub status: PoolStatus,
+    pub created_at: u64,
+    pub activated_at: Option<u64>,
+    pub treasury_block: Option<u64>,
+    pub backend_cmc_block: Option<u64>,
+    pub frontend_cmc_block: Option<u64>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CachedPoolInfo {
+    pub total_pool_voting_power: u64,
+    pub active_count: u64,
+    pub updated_at: u64,
+}
+
+fn current_time() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ic_cdk::api::time()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        1_700_000_000_000_000_000
+    }
+}
+
+fn recompute_pool_info() {
+    let mut total_vp: u64 = 0;
+    let mut active_count = 0;
+    POOL_NEURONS.with(|map| {
+        for entry in map.borrow().iter() {
+            let n = entry.value();
+            if n.status == PoolStatus::Active {
+                total_vp = total_vp.saturating_add(n.voting_power);
+                active_count += 1;
+            }
+        }
+    });
+    CACHED_POOL_INFO.with(|cell| {
+        let mut info = cell.borrow_mut();
+        info.total_pool_voting_power = total_vp;
+        info.active_count = active_count;
+        info.updated_at = current_time();
+    });
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct UserNeuronState {
     pub neuron_id: u64,
@@ -328,6 +386,7 @@ impl_storable!(VoteRecord);
 impl_storable!(UserAggregates);
 impl_storable!(AuditLogEntry);
 impl_storable!(UserNeuronState);
+impl_storable!(PoolNeuron);
 
 // ==========================================
 // 3. Persistent Memory Layout
@@ -375,9 +434,27 @@ thread_local! {
         ))
     });
 
-    static USER_NEURONS: RefCell<StableBTreeMap<Principal, UserNeuronState, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(7))))
-    });
+    static USER_NEURONS: RefCell<StableBTreeMap<Principal, UserNeuronState, Memory>> =
+        MEMORY_MANAGER.with(|mm| {
+            RefCell::new(StableBTreeMap::init(
+                mm.borrow().get(MemoryId::new(7))
+            ))
+        });
+
+    static POOL_NEURONS: RefCell<StableBTreeMap<u64, PoolNeuron, Memory>> =
+        MEMORY_MANAGER.with(|mm| {
+            RefCell::new(StableBTreeMap::init(
+                mm.borrow().get(MemoryId::new(8))
+            ))
+        });
+
+    static CACHED_POOL_INFO: RefCell<CachedPoolInfo> = const {
+        RefCell::new(CachedPoolInfo {
+            total_pool_voting_power: 0,
+            active_count: 0,
+            updated_at: 0,
+        })
+    };
 
     // Transient cache of the leader neuron's public stats (refreshed on the timer).
     static LEADER_INFO: RefCell<Option<LeaderNeuronInfo>> = const { RefCell::new(None) };
@@ -2736,6 +2813,97 @@ mod tests {
         assert_eq!(decoded.cached_neuron_stake_e8s, 100_000_000);
         assert!(neuron_has_hotkey(&decoded, Principal::anonymous()));
         assert!(neuron_follows(&decoded, 4821667, TOPIC_GOVERNANCE));
+    }
+
+    #[test]
+    fn test_pool_neuron_storable_roundtrip() {
+        let neuron = PoolNeuron {
+            neuron_id: 12345,
+            registered_by: Principal::anonymous(),
+            voting_power: 500_000_000,
+            status: PoolStatus::Active,
+            created_at: 1000,
+            activated_at: Some(1010),
+            treasury_block: None,
+            backend_cmc_block: None,
+            frontend_cmc_block: None,
+        };
+        let bytes = neuron.to_bytes();
+        let decoded = PoolNeuron::from_bytes(bytes);
+        assert_eq!(decoded.neuron_id, neuron.neuron_id);
+        assert_eq!(decoded.voting_power, neuron.voting_power);
+        assert_eq!(decoded.status, neuron.status);
+    }
+
+    #[test]
+    fn test_recompute_pool_info() {
+        POOL_NEURONS.with(|map| {
+            let keys: Vec<u64> = map.borrow().iter().map(|e| *e.key()).collect();
+            let mut m = map.borrow_mut();
+            for k in keys {
+                m.remove(&k);
+            }
+        });
+
+        // Insert a mix of Active, Draft, and Inactive neurons
+        POOL_NEURONS.with(|map| {
+            let mut m = map.borrow_mut();
+            m.insert(1, PoolNeuron {
+                neuron_id: 1,
+                registered_by: Principal::anonymous(),
+                voting_power: 1000,
+                status: PoolStatus::Active,
+                created_at: 0,
+                activated_at: None,
+                treasury_block: None,
+                backend_cmc_block: None,
+                frontend_cmc_block: None,
+            });
+            m.insert(2, PoolNeuron {
+                neuron_id: 2,
+                registered_by: Principal::anonymous(),
+                voting_power: 5000,
+                status: PoolStatus::Draft,
+                created_at: 0,
+                activated_at: None,
+                treasury_block: None,
+                backend_cmc_block: None,
+                frontend_cmc_block: None,
+            });
+            m.insert(3, PoolNeuron {
+                neuron_id: 3,
+                registered_by: Principal::anonymous(),
+                voting_power: 2000,
+                status: PoolStatus::Active,
+                created_at: 0,
+                activated_at: None,
+                treasury_block: None,
+                backend_cmc_block: None,
+                frontend_cmc_block: None,
+            });
+            m.insert(4, PoolNeuron {
+                neuron_id: 4,
+                registered_by: Principal::anonymous(),
+                voting_power: 10000,
+                status: PoolStatus::Inactive,
+                created_at: 0,
+                activated_at: None,
+                treasury_block: None,
+                backend_cmc_block: None,
+                frontend_cmc_block: None,
+            });
+        });
+
+        // Run recompute
+        recompute_pool_info();
+
+        // Check values in CACHED_POOL_INFO
+        CACHED_POOL_INFO.with(|cell| {
+            let info = cell.borrow();
+            assert_eq!(info.active_count, 2, "Only Active count");
+            assert_eq!(info.total_pool_voting_power, 3000, "Only Active VP");
+            assert!(info.updated_at > 0);
+        });
     }
 
     // ── PB-115: Global stats type & overflow posture ─────────────────────────
