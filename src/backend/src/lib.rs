@@ -91,6 +91,9 @@ async fn get_full_neuron(neuron_id: u64) -> Result<Neuron, String> {
 thread_local! {
     static TEST_MOCK_NEURON: RefCell<Option<Result<Neuron, String>>> =
         const { RefCell::new(None) };
+    static TEST_MOCK_NEURON_MAP: RefCell<
+        std::collections::HashMap<u64, Result<Neuron, String>>
+    > = RefCell::new(std::collections::HashMap::new());
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -101,7 +104,20 @@ fn set_mock_neuron(res: Result<Neuron, String>) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn get_full_neuron(_neuron_id: u64) -> Result<Neuron, String> {
+fn set_mock_neuron_for_id(id: u64, res: Result<Neuron, String>) {
+    TEST_MOCK_NEURON_MAP.with(|cell| {
+        cell.borrow_mut().insert(id, res);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn get_full_neuron(neuron_id: u64) -> Result<Neuron, String> {
+    let map_val = TEST_MOCK_NEURON_MAP.with(|cell| {
+        cell.borrow().get(&neuron_id).cloned()
+    });
+    if let Some(res) = map_val {
+        return res;
+    }
     TEST_MOCK_NEURON.with(|cell| {
         if let Some(ref res) = *cell.borrow() {
             res.clone()
@@ -558,6 +574,17 @@ fn get_canister_id() -> Principal {
     }
 }
 
+fn canister_print(msg: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ic_cdk::api::print(msg);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        println!("{}", msg);
+    }
+}
+
 fn require_authenticated() -> Result<(), String> {
     if get_caller() == Principal::anonymous() {
         return Err("Anonymous principal is not allowed".to_string());
@@ -804,7 +831,7 @@ async fn distribute_pool_rewards(proposal_id: u64) -> Result<(), String> {
                 });
             }
             Err(e) => {
-                ic_cdk::api::print(&format!(
+                canister_print(&format!(
                     "Failed to transfer pool reward to {}: {}",
                     recipient, e
                 ));
@@ -1098,6 +1125,62 @@ fn seed_mock_proposals() {
 // 9. Eligibility & Verification Endpoints
 // ==========================================
 
+async fn refresh_pool_neurons() {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let mut active_neurons = Vec::new();
+    POOL_NEURONS.with(|map| {
+        for entry in map.borrow().iter() {
+            let n = entry.value();
+            if n.status == PoolStatus::Active {
+                active_neurons.push(n.clone());
+            }
+        }
+    });
+
+    for mut neuron_state in active_neurons {
+        let neuron_id = neuron_state.neuron_id;
+        let skip_fetch = config.is_local && cfg!(target_arch = "wasm32");
+        if skip_fetch {
+            continue;
+        }
+
+        match get_full_neuron(neuron_id).await {
+            Ok(neuron) => {
+                let has_hotkey = neuron_has_hotkey(
+                    &neuron,
+                    get_canister_id(),
+                );
+                let follows = neuron_follows(
+                    &neuron,
+                    config.primary_neuron_id,
+                    TOPIC_GOVERNANCE,
+                );
+
+                if !has_hotkey || !follows || neuron.voting_power == 0 {
+                    neuron_state.status = PoolStatus::Inactive;
+                    canister_print(&format!(
+                        "Pool neuron {} inactivated (hotkey={}, follow={})",
+                        neuron_id, has_hotkey, follows
+                    ));
+                } else {
+                    neuron_state.voting_power = neuron.voting_power;
+                }
+
+                POOL_NEURONS.with(|map| {
+                    map.borrow_mut().insert(neuron_id, neuron_state);
+                });
+            }
+            Err(e) => {
+                canister_print(&format!(
+                    "Failed to refresh pool neuron {}: {}",
+                    neuron_id, e
+                ));
+            }
+        }
+    }
+    recompute_pool_info();
+}
+
 /// Refresh the cached leader-neuron stats from the NNS (`get_neuron_info` is a
 /// public query — no hotkey required). On local, where there is no NNS canister,
 /// the call rejects and we cache a representative mock so the UI shows a value.
@@ -1144,6 +1227,7 @@ async fn fetch_leader_neuron_info() {
             ic_cdk::api::print(&format!("get_neuron_info call failed (code {:?}): {}", code, msg));
         }
     }
+    refresh_pool_neurons().await;
 }
 
 /// Cached public stats for the community leader neuron (voting power, dissolve
@@ -4310,6 +4394,153 @@ mod tests {
 
         // Restore mock ledger transfer
         set_mock_ledger_transfer(Ok(1));
+
+        // Restore config
+        CONFIG.with(|c| {
+            let _ = c.borrow_mut().set(original_cfg);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_pool_refresh_and_inactivation() {
+        let original_cfg = CONFIG.with(|c| c.borrow().get().clone());
+
+        // Clear pool neurons
+        POOL_NEURONS.with(|map| {
+            let keys: Vec<u64> = map.borrow().iter().map(|e| *e.key()).collect();
+            let mut m = map.borrow_mut();
+            for k in keys {
+                m.remove(&k);
+            }
+        });
+
+        // 1. Seed draft and active neurons
+        let draft = PoolNeuron {
+            neuron_id: 1111,
+            registered_by: Principal::from_slice(&[11; 29]),
+            voting_power: 10_000_000_000,
+            status: PoolStatus::Draft,
+            created_at: 0,
+            activated_at: None,
+            treasury_block: None,
+            backend_cmc_block: None,
+            frontend_cmc_block: None,
+        };
+        let active1 = PoolNeuron {
+            neuron_id: 2222,
+            registered_by: Principal::from_slice(&[22; 29]),
+            voting_power: 20_000_000_000,
+            status: PoolStatus::Active,
+            created_at: 0,
+            activated_at: Some(0),
+            treasury_block: None,
+            backend_cmc_block: None,
+            frontend_cmc_block: None,
+        };
+        let active2 = PoolNeuron {
+            neuron_id: 3333,
+            registered_by: Principal::from_slice(&[33; 29]),
+            voting_power: 30_000_000_000,
+            status: PoolStatus::Active,
+            created_at: 0,
+            activated_at: Some(0),
+            treasury_block: None,
+            backend_cmc_block: None,
+            frontend_cmc_block: None,
+        };
+        POOL_NEURONS.with(|map| {
+            map.borrow_mut().insert(1111, draft);
+            map.borrow_mut().insert(2222, active1);
+            map.borrow_mut().insert(3333, active2);
+        });
+
+        recompute_pool_info();
+
+        // Check starting state
+        let info = get_pool_info();
+        assert_eq!(info.active_count, 2);
+        assert_eq!(info.total_pool_voting_power, 50_000_000_000);
+
+        // 2. Setup mock neuron responses
+        // 2222: active, updated voting power
+        let n2222 = Neuron {
+            id: Some(NeuronId { id: 2222 }),
+            controller: Some(Principal::from_slice(&[22; 29])),
+            cached_neuron_stake_e8s: 25_000_000_000,
+            voting_power: 25_000_000_000,
+            hot_keys: vec![get_canister_id()],
+            followees: vec![(
+                TOPIC_GOVERNANCE,
+                Followees {
+                    followees: vec![NeuronId {
+                        id: original_cfg.primary_neuron_id,
+                    }],
+                },
+            )],
+        };
+        set_mock_neuron_for_id(2222, Ok(n2222));
+
+        // 3333: active, but follow broken
+        let n3333 = Neuron {
+            id: Some(NeuronId { id: 3333 }),
+            controller: Some(Principal::from_slice(&[33; 29])),
+            cached_neuron_stake_e8s: 30_000_000_000,
+            voting_power: 30_000_000_000,
+            hot_keys: vec![get_canister_id()],
+            followees: vec![], // no follow
+        };
+        set_mock_neuron_for_id(3333, Ok(n3333));
+
+        // Run refresh
+        refresh_pool_neurons().await;
+
+        // Verify updates
+        let info = get_pool_info();
+        assert_eq!(info.active_count, 1);
+        assert_eq!(info.total_pool_voting_power, 25_000_000_000);
+
+        // Verify draft was untouched
+        let d = POOL_NEURONS.with(|map| map.borrow().get(&1111).unwrap());
+        assert_eq!(d.status, PoolStatus::Draft);
+
+        // Verify 3333 is Inactive
+        let a2 = POOL_NEURONS.with(|map| map.borrow().get(&3333).unwrap());
+        assert_eq!(a2.status, PoolStatus::Inactive);
+
+        // 3. Test resilience to single get_full_neuron failure
+        // 2222: NNS failure
+        set_mock_neuron_for_id(2222, Err("NNS offline".to_string()));
+
+        // Reactivate 3333
+        let mut a2_act = a2.clone();
+        a2_act.status = PoolStatus::Active;
+        POOL_NEURONS.with(|map| map.borrow_mut().insert(3333, a2_act));
+
+        // Mock 3333 to be active and valid
+        let n3333_valid = Neuron {
+            id: Some(NeuronId { id: 3333 }),
+            controller: Some(Principal::from_slice(&[33; 29])),
+            cached_neuron_stake_e8s: 30_000_000_000,
+            voting_power: 30_000_000_000,
+            hot_keys: vec![get_canister_id()],
+            followees: vec![(
+                TOPIC_GOVERNANCE,
+                Followees {
+                    followees: vec![NeuronId {
+                        id: original_cfg.primary_neuron_id,
+                    }],
+                },
+            )],
+        };
+        set_mock_neuron_for_id(3333, Ok(n3333_valid));
+
+        // Run refresh
+        refresh_pool_neurons().await;
+
+        // 2222 failed to refresh but should stay Active
+        // 3333 successfully refreshed and stays Active
+        let info = get_pool_info();
+        assert_eq!(info.active_count, 2);
 
         // Restore config
         CONFIG.with(|c| {
