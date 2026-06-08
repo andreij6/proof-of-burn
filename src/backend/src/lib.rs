@@ -72,6 +72,7 @@ fn neuron_follows(neuron: &Neuron, leader_id: u64, topic: i32) -> bool {
     false
 }
 
+#[cfg(target_arch = "wasm32")]
 async fn get_full_neuron(neuron_id: u64) -> Result<Neuron, String> {
     let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
     let response: Result<(GetFullNeuronResult,), _> =
@@ -80,8 +81,34 @@ async fn get_full_neuron(neuron_id: u64) -> Result<Neuron, String> {
     match response {
         Ok((GetFullNeuronResult::Ok(neuron),)) => Ok(neuron),
         Ok((GetFullNeuronResult::Err(err),)) => Err(err.error_message),
-        Err((code, msg)) => Err(format!("Call failed (code {:?}): {}", code, msg)),
+        Err((code, msg)) => {
+            Err(format!("Call failed (code {:?}): {}", code, msg))
+        }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static TEST_MOCK_NEURON: RefCell<Option<Result<Neuron, String>>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_neuron(res: Result<Neuron, String>) {
+    TEST_MOCK_NEURON.with(|cell| {
+        *cell.borrow_mut() = Some(res);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn get_full_neuron(_neuron_id: u64) -> Result<Neuron, String> {
+    TEST_MOCK_NEURON.with(|cell| {
+        if let Some(ref res) = *cell.borrow() {
+            res.clone()
+        } else {
+            Err("Mock neuron not set".to_string())
+        }
+    })
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -479,8 +506,43 @@ fn inspect_message() {
     ic_cdk::api::call::accept_message();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static TEST_MOCK_CALLER: RefCell<Principal> =
+        RefCell::new(Principal::anonymous());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_caller(caller: Principal) {
+    TEST_MOCK_CALLER.with(|cell| {
+        *cell.borrow_mut() = caller;
+    });
+}
+
+fn get_caller() -> Principal {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ic_cdk::caller()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        TEST_MOCK_CALLER.with(|cell| *cell.borrow())
+    }
+}
+
+fn get_canister_id() -> Principal {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ic_cdk::api::id()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Principal::management_canister()
+    }
+}
+
 fn require_authenticated() -> Result<(), String> {
-    if ic_cdk::caller() == Principal::anonymous() {
+    if get_caller() == Principal::anonymous() {
         return Err("Anonymous principal is not allowed".to_string());
     }
     Ok(())
@@ -1299,6 +1361,81 @@ async fn refund_registration() -> Result<(), String> {
         transfer_amt,
         Some(10_000)
     ).await?;
+    Ok(())
+}
+
+#[ic_cdk::update]
+async fn create_pool_draft(neuron_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    // First-come binding: if neuron_id exists with a different
+    // registered_by, reject ALREADY_REGISTERED
+    let existing = POOL_NEURONS.with(|map| map.borrow().get(&neuron_id));
+    if let Some(ref pn) = existing {
+        if pn.registered_by != caller {
+            return Err("ALREADY_REGISTERED".to_string());
+        }
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    
+    let voting_power = if config.is_local {
+        // Enforce 10_000_000_000 (100 ICP) as local mock voting power
+        10_000_000_000
+    } else {
+        let neuron = get_full_neuron(neuron_id)
+            .await
+            .map_err(|e| format!("Failed to fetch neuron: {}", e))?;
+        
+        // Assert our canister principal is in hot_keys
+        if !neuron_has_hotkey(&neuron, get_canister_id()) {
+            return Err("HOTKEY_MISSING".to_string());
+        }
+
+        // Assert the neuron follows the primary leader on TOPIC_GOVERNANCE
+        let follows = neuron_follows(
+            &neuron,
+            config.primary_neuron_id,
+            TOPIC_GOVERNANCE,
+        );
+        if !follows {
+            return Err("NOT_FOLLOWING".to_string());
+        }
+
+        neuron.voting_power
+    };
+
+    let now = current_time();
+    let draft = PoolNeuron {
+        neuron_id,
+        registered_by: caller,
+        voting_power,
+        status: PoolStatus::Draft,
+        created_at: now,
+        activated_at: None,
+        treasury_block: None,
+        backend_cmc_block: None,
+        frontend_cmc_block: None,
+    };
+
+    POOL_NEURONS.with(|map| {
+        map.borrow_mut().insert(neuron_id, draft);
+    });
+
+    // Audit-log `pool_draft`
+    let log_entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "pool_draft".to_string(),
+        proposal_id: neuron_id,
+        user: caller,
+        amount_e8s: 0,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&log_entry);
+    });
+
     Ok(())
 }
 
@@ -3109,6 +3246,125 @@ mod tests {
         });
         assert_eq!(frontend_canister_id(), override_principal);
 
+        CONFIG.with(|c| {
+            let _ = c.borrow_mut().set(original_cfg);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_draft_flow() {
+        let original_cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let caller = Principal::from_slice(&[1; 29]);
+        set_mock_caller(caller);
+
+        // 1. is_local = true path
+        CONFIG.with(|c| {
+            let mut cfg = c.borrow().get().clone();
+            cfg.is_local = true;
+            cfg.primary_neuron_id = 123;
+            let _ = c.borrow_mut().set(cfg);
+        });
+
+        // Clear existing map
+        POOL_NEURONS.with(|map| {
+            let keys: Vec<u64> = map
+                .borrow()
+                .iter()
+                .map(|e| *e.key())
+                .collect();
+            let mut m = map.borrow_mut();
+            for k in keys {
+                m.remove(&k);
+            }
+        });
+
+        let res = create_pool_draft(12345).await;
+        assert!(res.is_ok());
+
+        // Verify draft created
+        let pn = POOL_NEURONS.with(|map| map.borrow().get(&12345).unwrap());
+        assert_eq!(pn.neuron_id, 12345);
+        assert_eq!(pn.status, PoolStatus::Draft);
+        assert_eq!(pn.voting_power, 10_000_000_000);
+
+        // 2. is_local = false path
+        CONFIG.with(|c| {
+            let mut cfg = c.borrow().get().clone();
+            cfg.is_local = false;
+            let _ = c.borrow_mut().set(cfg);
+        });
+
+        // Set mock neuron: fails
+        set_mock_neuron(Err("Some NNS error".to_string()));
+        let res = create_pool_draft(54321).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Some NNS error"));
+
+        // Set mock neuron: succeeds but missing hotkey
+        let mut mock_n = Neuron {
+            id: None,
+            controller: None,
+            hot_keys: vec![],
+            cached_neuron_stake_e8s: 0,
+            voting_power: 50_000_000_000,
+            followees: vec![],
+        };
+        set_mock_neuron(Ok(mock_n.clone()));
+        let res = create_pool_draft(54321).await;
+        assert_eq!(res.unwrap_err(), "HOTKEY_MISSING");
+
+        // Set mock neuron: has hotkey but not following leader
+        mock_n.hot_keys.push(get_canister_id());
+        set_mock_neuron(Ok(mock_n.clone()));
+        let res = create_pool_draft(54321).await;
+        assert_eq!(res.unwrap_err(), "NOT_FOLLOWING");
+
+        // Set mock neuron: has hotkey and follows leader
+        let leader_id = CONFIG.with(|c| c.borrow().get().primary_neuron_id);
+        mock_n.followees.push((
+            TOPIC_GOVERNANCE,
+            Followees {
+                followees: vec![NeuronId {
+                    id: leader_id,
+                }],
+            },
+        ));
+        set_mock_neuron(Ok(mock_n.clone()));
+        let res = create_pool_draft(54321).await;
+        assert!(res.is_ok());
+
+        // Verify draft created with live voting power
+        let pn = POOL_NEURONS.with(|map| map.borrow().get(&54321).unwrap());
+        assert_eq!(pn.neuron_id, 54321);
+        assert_eq!(pn.status, PoolStatus::Draft);
+        assert_eq!(pn.voting_power, 50_000_000_000);
+
+        // Re-call overwrite
+        mock_n.voting_power = 60_000_000_000;
+        set_mock_neuron(Ok(mock_n.clone()));
+        let res = create_pool_draft(54321).await;
+        assert!(res.is_ok());
+        let pn = POOL_NEURONS.with(|map| map.borrow().get(&54321).unwrap());
+        assert_eq!(pn.voting_power, 60_000_000_000);
+
+        // Test ALREADY_REGISTERED
+        // Try to register under a different caller principal
+        // Wait, since caller principal is anonymous by default in native tests,
+        // it registers 54321 as registered_by = Principal::anonymous().
+        // To test ALREADY_REGISTERED, we can mock it directly in the map or
+        // we can just check if registering works when same caller, and doesn't when different.
+        // Let's manually insert a draft with a different principal to simulate it:
+        POOL_NEURONS.with(|map| {
+            let mut m = map.borrow_mut();
+            if let Some(mut pn) = m.get(&54321) {
+                pn.registered_by = Principal::management_canister();
+                m.insert(54321, pn);
+            }
+        });
+        let res = create_pool_draft(54321).await;
+        assert_eq!(res.unwrap_err(), "ALREADY_REGISTERED");
+
+        // Restore config
         CONFIG.with(|c| {
             let _ = c.borrow_mut().set(original_cfg);
         });

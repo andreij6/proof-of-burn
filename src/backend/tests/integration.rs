@@ -904,3 +904,34 @@ fn test_registration_refund_integration() {
     );
 }
 
+#[test]
+fn test_create_pool_draft_integration() {
+    let Some(env) = setup_saga() else { return };
+
+    // 1. Success on valid caller
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "create_pool_draft",
+            encode_one(12345u64).unwrap()
+        )
+        .expect("create_pool_draft success");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+
+    // 2. Reject anonymous callers
+    let r = env.pic.update_call(
+        env.backend,
+        Principal::anonymous(),
+        "create_pool_draft",
+        encode_one(12345u64).unwrap()
+    );
+    if let Ok(bytes) = r {
+        let res: UnitResult = decode_one(&bytes).unwrap();
+        assert!(matches!(res, UnitResult::Err(_)));
+    }
+}
+
+
