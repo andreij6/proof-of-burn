@@ -45,6 +45,7 @@ type Config = record {
   primary_neuron_id : nat64;
   // Frontend canister topped up with the 25% cycles share (PB-125).
   frontend_canister_id : opt principal;
+  pool_initiation_fee_e8s : nat64;
 };
 type EligibilityInfo = record {
   holdings_e8s : nat64;
@@ -120,6 +121,7 @@ service : (InitPayload) -> {
   admin_set_default_threshold : (nat64) -> (Result);
   // Admin: set the frontend canister id that receives the 25% cycles share.
   admin_set_frontend_canister : (principal) -> (Result);
+  admin_set_pool_fee : (nat64) -> (Result);
   admin_set_proposal_deadline : (nat64, nat64) -> (Result);
   admin_trigger_sweep : () -> (Result);
   // Admin: withdraw ICP from the treasury subaccount to a destination principal.

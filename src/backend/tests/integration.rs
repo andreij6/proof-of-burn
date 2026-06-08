@@ -52,6 +52,8 @@ struct Config {
     ai_price_e8s: u64,
     ledger_canister_id: Principal,
     is_local: bool,
+    frontend_canister_id: Option<Principal>,
+    pool_initiation_fee_e8s: u64,
 }
 
 #[derive(CandidType, Deserialize, Debug)]
@@ -714,3 +716,78 @@ fn threshold_below_min_commit_is_rejected() {
     let r: UnitResult = decode_one(&r).unwrap();
     assert!(matches!(r, UnitResult::Err(_)), "sub-min-commit threshold must Err");
 }
+
+#[test]
+fn admin_set_pool_fee_test() {
+    let Some((pic, canister)) = setup() else { return };
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    let stranger = Principal::from_slice(&[5, 5, 5, 5]);
+
+    // 1. Verify default initiation fee on fresh deploy
+    let query_res = pic.query_call(
+        canister,
+        owner,
+        "get_config",
+        encode_one(()).unwrap()
+    ).unwrap();
+    let cfg: Config = decode_one(&query_res).unwrap();
+    assert_eq!(cfg.pool_initiation_fee_e8s, 12_500_000_000);
+
+    // 2. Reject 0 fee
+    let r = pic
+        .update_call(
+            canister,
+            owner,
+            "admin_set_pool_fee",
+            encode_one(0u64).unwrap()
+        )
+        .expect("call");
+    let r: UnitResult = decode_one(&r).unwrap();
+    assert!(
+        matches!(r, UnitResult::Err(_)),
+        "setting pool fee to 0 must Err"
+    );
+
+    // 3. Reject non-admin calls
+    let r = pic.update_call(
+        canister,
+        stranger,
+        "admin_set_pool_fee",
+        encode_one(10_000_000_000u64).unwrap()
+    );
+    if let Ok(bytes) = r {
+        let r: UnitResult = decode_one(&bytes).unwrap();
+        assert!(
+            matches!(r, UnitResult::Err(_)),
+            "non-admin set pool fee must Err"
+        );
+    }
+
+    // 4. Owner sets new fee successfully
+    let new_fee = 10_000_000_000u64; // 100 ICP
+    let r = pic
+        .update_call(
+            canister,
+            owner,
+            "admin_set_pool_fee",
+            encode_one(new_fee).unwrap()
+        )
+        .expect("call");
+    let r: UnitResult = decode_one(&r).unwrap();
+    assert!(
+        matches!(r, UnitResult::Ok),
+        "owner can set pool fee: {:?}",
+        r
+    );
+
+    // 5. Verify value updated in config
+    let query_res = pic.query_call(
+        canister,
+        owner,
+        "get_config",
+        encode_one(()).unwrap()
+    ).unwrap();
+    let cfg: Config = decode_one(&query_res).unwrap();
+    assert_eq!(cfg.pool_initiation_fee_e8s, new_fee);
+}
+

@@ -131,6 +131,10 @@ pub struct LedgerAccount {
 // 1. Data Models
 // ==========================================
 
+fn default_pool_initiation_fee_e8s() -> u64 {
+    12_500_000_000
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     pub primary_neuron_id: u64,
@@ -148,6 +152,8 @@ pub struct Config {
     /// fallback so it works without re-init after an upgrade.
     #[serde(default)]
     pub frontend_canister_id: Option<Principal>,
+    #[serde(default = "default_pool_initiation_fee_e8s")]
+    pub pool_initiation_fee_e8s: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -291,6 +297,7 @@ thread_local! {
             ledger_canister_id: Principal::anonymous(),
             is_local: false,
             frontend_canister_id: None,
+            pool_initiation_fee_e8s: 12_500_000_000, // 125 ICP
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -388,6 +395,7 @@ fn init(payload: InitPayload) {
         ledger_canister_id: ledger_id,
         is_local,
         frontend_canister_id: None, // resolved lazily via frontend_canister_id()
+        pool_initiation_fee_e8s: 12_500_000_000, // 125 ICP
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
@@ -545,6 +553,20 @@ fn admin_set_frontend_canister(canister_id: Principal) -> Result<(), String> {
     CONFIG.with(|cell| {
         let mut cfg = cell.borrow().get().clone();
         cfg.frontend_canister_id = Some(canister_id);
+        cell.borrow_mut().set(cfg);
+    });
+    Ok(())
+}
+
+/// Admin: set the initiation fee for joining the neuron pool (PB-130).
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_pool_fee(new_fee_e8s: u64) -> Result<(), String> {
+    if new_fee_e8s == 0 {
+        return Err("Fee cannot be zero".to_string());
+    }
+    CONFIG.with(|cell| {
+        let mut cfg = cell.borrow().get().clone();
+        cfg.pool_initiation_fee_e8s = new_fee_e8s;
         cell.borrow_mut().set(cfg);
     });
     Ok(())
@@ -2350,6 +2372,7 @@ mod tests {
             ledger_canister_id: p("ryjl3-tyaaa-aaaaa-aaaba-cai"),
             is_local: false,
             frontend_canister_id: None,
+            pool_initiation_fee_e8s: 12_500_000_000,
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -2571,6 +2594,7 @@ mod tests {
                 ledger_canister_id: Principal::anonymous(),
                 is_local: false,
                 frontend_canister_id: None,
+                pool_initiation_fee_e8s: 0,
             }
         };
         let mainnet = Config {
@@ -2579,6 +2603,42 @@ mod tests {
         };
         assert_eq!(Config::from_bytes(local.to_bytes()).is_local, true);
         assert_eq!(Config::from_bytes(mainnet.to_bytes()).is_local, false);
+    }
+
+    #[test]
+    fn test_pool_initiation_fee_config() {
+        // Assert default initiation fee (125 ICP = 12_500_000_000 e8s)
+        assert_eq!(default_pool_initiation_fee_e8s(), 12_500_000_000);
+
+        // Simulate an old Config structure by serializing a struct
+        // without the new field.
+        #[derive(serde::Serialize)]
+        struct OldConfig {
+            primary_neuron_id: u64,
+            admins: Vec<Principal>,
+            default_threshold: u64,
+            ai_price_e8s: u64,
+            ledger_canister_id: Principal,
+            is_local: bool,
+            frontend_canister_id: Option<Principal>,
+        }
+
+        let old = OldConfig {
+            primary_neuron_id: 12345,
+            admins: vec![Principal::anonymous()],
+            default_threshold: 500_000_000_000,
+            ai_price_e8s: 5_000_000,
+            ledger_canister_id: Principal::anonymous(),
+            is_local: false,
+            frontend_canister_id: None,
+        };
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&old, &mut buf).unwrap();
+        let decoded: Config = ciborium::from_reader(buf.as_slice()).unwrap();
+
+        // Assert that the decoded Config gets the default initiation fee
+        assert_eq!(decoded.pool_initiation_fee_e8s, 12_500_000_000);
     }
 
     // ── PB-115: Global stats type & overflow posture ─────────────────────────
