@@ -1200,18 +1200,57 @@ pub enum BalanceResult {
     Err(String),
 }
 
-async fn call_ledger_balance(ledger_id: Principal, account: LedgerAccount) -> Result<u64, String> {
-    let response: Result<(candid::Nat,), _> = ic_cdk::call(ledger_id, "icrc1_balance_of", (account,)).await;
+#[cfg(target_arch = "wasm32")]
+async fn call_ledger_balance(
+    ledger_id: Principal,
+    account: LedgerAccount,
+) -> Result<u64, String> {
+    let response: Result<(candid::Nat,), _> =
+        ic_cdk::call(ledger_id, "icrc1_balance_of", (account,)).await;
     match response {
         Ok((balance,)) => {
             let bal_str = balance.to_string().replace('_', "");
-            let bal_u64 = bal_str.parse::<u64>().map_err(|e| format!("Failed to parse balance: {}", e))?;
+            let bal_u64 = bal_str
+                .parse::<u64>()
+                .map_err(|e| format!("Failed to parse balance: {}", e))?;
             Ok(bal_u64)
         }
-        Err((code, msg)) => Err(format!("Ledger call failed (code {:?}): {}", code, msg)),
+        Err((code, msg)) => {
+            Err(format!("Ledger call failed (code {:?}): {}", code, msg))
+        }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static TEST_MOCK_LEDGER_BALANCE: RefCell<u64> = RefCell::new(0);
+    static TEST_MOCK_LEDGER_TRANSFER: RefCell<Result<u64, String>> =
+        RefCell::new(Ok(1));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_ledger_balance(bal: u64) {
+    TEST_MOCK_LEDGER_BALANCE.with(|cell| {
+        *cell.borrow_mut() = bal;
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_ledger_transfer(res: Result<u64, String>) {
+    TEST_MOCK_LEDGER_TRANSFER.with(|cell| {
+        *cell.borrow_mut() = res;
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn call_ledger_balance(
+    _ledger_id: Principal,
+    _account: LedgerAccount,
+) -> Result<u64, String> {
+    Ok(TEST_MOCK_LEDGER_BALANCE.with(|cell| *cell.borrow()))
+}
+
+#[cfg(target_arch = "wasm32")]
 async fn call_ledger_transfer(
     ledger_id: Principal,
     from_sub: Option<[u8; 32]>,
@@ -1227,16 +1266,34 @@ async fn call_ledger_transfer(
         memo: None,
         created_at_time: None,
     };
-    let response: Result<(TransferResult,), _> = ic_cdk::call(ledger_id, "icrc1_transfer", (args,)).await;
+    let response: Result<(TransferResult,), _> =
+        ic_cdk::call(ledger_id, "icrc1_transfer", (args,)).await;
     match response {
         Ok((TransferResult::Ok(block_index),)) => {
             let block_str = block_index.to_string().replace('_', "");
-            let block_u64 = block_str.parse::<u64>().map_err(|e| format!("Failed to parse block index: {}", e))?;
+            let block_u64 = block_str
+                .parse::<u64>()
+                .map_err(|e| format!("Failed to parse block index: {}", e))?;
             Ok(block_u64)
         }
-        Ok((TransferResult::Err(err),)) => Err(format!("Ledger transfer returned error: {:?}", err)),
-        Err((code, msg)) => Err(format!("Ledger transfer call failed (code {:?}): {}", code, msg)),
+        Ok((TransferResult::Err(err),)) => {
+            Err(format!("Ledger transfer returned error: {:?}", err))
+        }
+        Err((code, msg)) => {
+            Err(format!("Ledger transfer failed (code {:?}): {}", code, msg))
+        }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn call_ledger_transfer(
+    _ledger_id: Principal,
+    _from_sub: Option<[u8; 32]>,
+    _to: LedgerAccount,
+    _amount_e8s: u64,
+    _fee_e8s: Option<u64>,
+) -> Result<u64, String> {
+    TEST_MOCK_LEDGER_TRANSFER.with(|cell| cell.borrow().clone())
 }
 
 /// The frontend canister to top up with cycles (PB-125). Config override, else an
@@ -1255,6 +1312,7 @@ fn frontend_canister_id() -> Principal {
 
 /// Notify the CMC to mint cycles for `block_index` to `target`. Idempotent:
 /// `AlreadyNotified` is treated as success; `Refunded` is a hard failure.
+#[cfg(target_arch = "wasm32")]
 async fn notify_cmc_topup(cmc: Principal, target: Principal, block_index: u64) -> Result<(), String> {
     let args = NotifyTopUpArgs { canister_id: target, block_index: candid::Nat::from(block_index) };
     let res: Result<(NotifyTopUpResult,), _> = ic_cdk::call(cmc, "notify_top_up", (args,)).await;
@@ -1265,6 +1323,14 @@ async fn notify_cmc_topup(cmc: Principal, target: Principal, block_index: u64) -
         Ok((NotifyTopUpResult::Err(e),)) => Err(format!("CMC notify error: {:?}", e)),
         Err((code, msg)) => Err(format!("CMC call rejected ({:?}): {}", code, msg)),
     }
+}
+
+// Host-test mock: the CMC is unreachable off-canister, so treat the notify as a
+// no-op success. Saga idempotency/transfer logic is exercised via the mocked
+// ledger; the real notify path is covered by PocketIC integration tests.
+#[cfg(not(target_arch = "wasm32"))]
+async fn notify_cmc_topup(_cmc: Principal, _target: Principal, _block_index: u64) -> Result<(), String> {
+    Ok(())
 }
 
 /// PB-125: distribute a settled commitment's proceeds — 50% → treasury,
@@ -1431,6 +1497,167 @@ async fn create_pool_draft(neuron_id: u64) -> Result<(), String> {
         proposal_id: neuron_id,
         user: caller,
         amount_e8s: 0,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&log_entry);
+    });
+
+    Ok(())
+}
+
+#[ic_cdk::update]
+async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    // 1. Assert caller owns a Draft (or Inactive) PoolNeuron for neuron_id
+    let mut neuron_state = POOL_NEURONS
+        .with(|map| map.borrow().get(&neuron_id))
+        .ok_or_else(|| "NO_DRAFT".to_string())?;
+
+    if neuron_state.registered_by != caller {
+        return Err("NO_DRAFT".to_string());
+    }
+
+    if neuron_state.status != PoolStatus::Draft
+        && neuron_state.status != PoolStatus::Inactive
+    {
+        return Err("NO_DRAFT".to_string());
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+
+    // 2. Re-verify hotkey + follow via get_full_neuron (skipped when is_local)
+    let voting_power = if config.is_local {
+        neuron_state.voting_power
+    } else {
+        let neuron = get_full_neuron(neuron_id)
+            .await
+            .map_err(|e| format!("Failed to fetch neuron: {}", e))?;
+
+        if !neuron_has_hotkey(&neuron, get_canister_id()) {
+            return Err("HOTKEY_MISSING".to_string());
+        }
+
+        let follows = neuron_follows(
+            &neuron,
+            config.primary_neuron_id,
+            TOPIC_GOVERNANCE,
+        );
+        if !follows {
+            return Err("NOT_FOLLOWING".to_string());
+        }
+
+        neuron.voting_power
+    };
+
+    // 3. Assert registration escrow balance >= pool_initiation_fee_e8s + 30_000
+    let sub = derive_subaccount(&caller, REGISTRATION_SEED);
+    let escrow_acc = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let ledger_id = config.ledger_canister_id;
+    let bal = call_ledger_balance(ledger_id, escrow_acc).await?;
+    let fee_needed = config.pool_initiation_fee_e8s;
+    if bal < fee_needed + 30_000 {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+
+    // 4. Fee-split saga (idempotent, block index guarded)
+    let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+    let cmc_dest = LedgerAccount { owner: cmc, subaccount: None };
+    let treasury_dest = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+
+    let treasury_amt = fee_needed / 2;
+    let backend_amt = fee_needed / 4;
+    let frontend_amt = fee_needed - treasury_amt - backend_amt;
+
+    // Step A: 50% -> treasury
+    if neuron_state.treasury_block.is_none() {
+        let b = call_ledger_transfer(
+            ledger_id,
+            Some(sub),
+            treasury_dest,
+            treasury_amt,
+            Some(10_000),
+        )
+        .await
+        .map_err(|e| format!("TREASURY_XFER: {}", e))?;
+        neuron_state.treasury_block = Some(b);
+        POOL_NEURONS.with(|map| {
+            map.borrow_mut().insert(neuron_id, neuron_state.clone());
+        });
+    }
+
+    // Step B: 25% -> backend cycles
+    if neuron_state.backend_cmc_block.is_none() {
+        let b = call_ledger_transfer(
+            ledger_id,
+            Some(sub),
+            cmc_dest.clone(),
+            backend_amt,
+            Some(10_000),
+        )
+        .await
+        .map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
+        neuron_state.backend_cmc_block = Some(b);
+        POOL_NEURONS.with(|map| {
+            map.borrow_mut().insert(neuron_id, neuron_state.clone());
+        });
+    }
+    notify_cmc_topup(
+        cmc,
+        get_canister_id(),
+        neuron_state.backend_cmc_block.unwrap(),
+    )
+    .await?;
+
+    // Step C: 25% -> frontend cycles
+    if neuron_state.frontend_cmc_block.is_none() {
+        let b = call_ledger_transfer(
+            ledger_id,
+            Some(sub),
+            cmc_dest,
+            frontend_amt,
+            Some(10_000),
+        )
+        .await
+        .map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
+        neuron_state.frontend_cmc_block = Some(b);
+        POOL_NEURONS.with(|map| {
+            map.borrow_mut().insert(neuron_id, neuron_state.clone());
+        });
+    }
+    notify_cmc_topup(
+        cmc,
+        frontend_canister_id(),
+        neuron_state.frontend_cmc_block.unwrap(),
+    )
+    .await?;
+
+    // 5. Flip status to Active, set activated_at, recompute pool stats
+    let now = current_time();
+    neuron_state.status = PoolStatus::Active;
+    neuron_state.activated_at = Some(now);
+    neuron_state.voting_power = voting_power;
+
+    POOL_NEURONS.with(|map| {
+        map.borrow_mut().insert(neuron_id, neuron_state);
+    });
+
+    recompute_pool_info();
+
+    let log_entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "pool_register".to_string(),
+        proposal_id: neuron_id,
+        user: caller,
+        amount_e8s: fee_needed,
     };
     AUDIT_LOG.with(|log| {
         let _ = log.borrow_mut().append(&log_entry);
@@ -3363,6 +3590,80 @@ mod tests {
         });
         let res = create_pool_draft(54321).await;
         assert_eq!(res.unwrap_err(), "ALREADY_REGISTERED");
+
+        // Restore config
+        CONFIG.with(|c| {
+            let _ = c.borrow_mut().set(original_cfg);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_finalize_pool_registration_flow() {
+        let original_cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let caller = Principal::from_slice(&[1; 29]);
+        set_mock_caller(caller);
+
+        // Clear existing map
+        POOL_NEURONS.with(|map| {
+            let keys: Vec<u64> = map
+                .borrow()
+                .iter()
+                .map(|e| *e.key())
+                .collect();
+            let mut m = map.borrow_mut();
+            for k in keys {
+                m.remove(&k);
+            }
+        });
+
+        // 1. Err NO_DRAFT when no draft exists
+        let res = finalize_pool_registration(9999).await;
+        assert_eq!(res.unwrap_err(), "NO_DRAFT");
+
+        // Create a draft first
+        CONFIG.with(|c| {
+            let mut cfg = c.borrow().get().clone();
+            cfg.is_local = true;
+            cfg.pool_initiation_fee_e8s = 10_000_000_000; // 100 ICP
+            let _ = c.borrow_mut().set(cfg);
+        });
+
+        let res = create_pool_draft(9999).await;
+        assert!(res.is_ok());
+
+        // 2. Err INSUFFICIENT_DEPOSIT when balance is low
+        set_mock_ledger_balance(10_000_000_000);
+        let res = finalize_pool_registration(9999).await;
+        assert_eq!(res.unwrap_err(), "INSUFFICIENT_DEPOSIT");
+
+        // 3. Success when balance is sufficient (on local)
+        set_mock_ledger_balance(10_000_030_000);
+        let res = finalize_pool_registration(9999).await;
+        assert!(res.is_ok());
+
+        // Verify neuron status is Active
+        let pn = POOL_NEURONS.with(|map| map.borrow().get(&9999).unwrap());
+        assert_eq!(pn.status, PoolStatus::Active);
+        assert_eq!(pn.activated_at.is_some(), true);
+        // All three split transfers recorded their block indices.
+        assert!(pn.treasury_block.is_some());
+        assert!(pn.backend_cmc_block.is_some());
+        assert!(pn.frontend_cmc_block.is_some());
+
+        // 4. Saga idempotency: simulate a trap after the transfers completed but
+        // before the status flip (reset to Draft, keep the block indices). A retry
+        // must SKIP every transfer — prove it by making any transfer attempt error.
+        POOL_NEURONS.with(|map| {
+            let mut p = map.borrow().get(&9999).unwrap();
+            p.status = PoolStatus::Draft;
+            map.borrow_mut().insert(9999, p);
+        });
+        set_mock_ledger_transfer(Err("transfer must not be called on retry".to_string()));
+        let res = finalize_pool_registration(9999).await;
+        assert!(res.is_ok(), "retry should skip completed transfers, not double-spend");
+        let pn = POOL_NEURONS.with(|map| map.borrow().get(&9999).unwrap());
+        assert_eq!(pn.status, PoolStatus::Active);
+        set_mock_ledger_transfer(Ok(1)); // restore default
 
         // Restore config
         CONFIG.with(|c| {

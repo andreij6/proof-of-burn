@@ -128,6 +128,7 @@ service : (InitPayload) -> {
   admin_withdraw_treasury : (principal, nat64) -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
   create_pool_draft : (nat64) -> (Result);
+  finalize_pool_registration : (nat64) -> (Result);
   // Top up an existing commitment with additional ICP. No protocol fee is
   // charged — only the deposit ledger fee (0.0001 ICP). The proposal must
   // still be open/met and >1 hour from deadline.
