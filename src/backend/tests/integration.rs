@@ -348,6 +348,41 @@ struct Commitment {
     frontend_cmc_block: Option<u64>,
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+enum PoolStatus {
+    Draft,
+    Active,
+    Inactive,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct PoolNeuron {
+    neuron_id: u64,
+    registered_by: Principal,
+    voting_power: u64,
+    status: PoolStatus,
+    created_at: u64,
+    activated_at: Option<u64>,
+    treasury_block: Option<u64>,
+    backend_cmc_block: Option<u64>,
+    frontend_cmc_block: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct ActivePoolNeuron {
+    neuron_id: u64,
+    voting_power: u64,
+    registered_by: Principal,
+    rank: u32,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct PoolInfo {
+    total_pool_voting_power: u64,
+    active_count: u64,
+    active_neurons: Vec<ActivePoolNeuron>,
+}
+
 fn ledger_wasm() -> Option<Vec<u8>> {
     let candidates = [
         "ledger.wasm.gz",
@@ -1039,6 +1074,128 @@ fn test_cancel_and_unregister_integration() {
         .expect("unregister_leader_neuron");
     let res: UnitResult = decode_one(&r).unwrap();
     assert!(matches!(res, UnitResult::Ok));
+}
+
+#[test]
+fn test_pool_queries_integration() {
+    let Some(env) = setup_saga() else { return };
+
+    // 1. Initially empty
+    let r = env
+        .pic
+        .query_call(
+            env.backend,
+            env.user,
+            "get_my_pool_neuron",
+            encode_one(()).unwrap(),
+        )
+        .expect("get_my_pool_neuron");
+    let my_n: Option<PoolNeuron> = decode_one(&r).unwrap();
+    assert!(my_n.is_none());
+
+    let r = env
+        .pic
+        .query_call(
+            env.backend,
+            env.user,
+            "get_pool_info",
+            encode_one(()).unwrap(),
+        )
+        .expect("get_pool_info");
+    let info: PoolInfo = decode_one(&r).unwrap();
+    assert_eq!(info.total_pool_voting_power, 0);
+    assert_eq!(info.active_count, 0);
+    assert_eq!(info.active_neurons.len(), 0);
+
+    // 2. Create a draft
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "create_pool_draft",
+            encode_one(9999u64).unwrap(),
+        )
+        .expect("create_pool_draft");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+
+    // get_my_pool_neuron -> returns Draft
+    let r = env
+        .pic
+        .query_call(
+            env.backend,
+            env.user,
+            "get_my_pool_neuron",
+            encode_one(()).unwrap(),
+        )
+        .expect("get_my_pool_neuron");
+    let my_n: Option<PoolNeuron> = decode_one(&r).unwrap();
+    assert!(my_n.is_some());
+    assert_eq!(my_n.unwrap().neuron_id, 9999);
+
+    // 3. Finalize registration
+    env.mint(env.user, 150_000_000_000);
+    let reg_acc: LAccountDe = decode_one(
+        &env.pic
+            .query_call(
+                env.backend,
+                env.user,
+                "get_registration_address",
+                encode_one(()).unwrap(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount {
+            owner: reg_acc.owner,
+            subaccount: reg_acc.subaccount,
+        },
+        amount: candid::Nat::from(125_000_000_000u64),
+        fee: Some(candid::Nat::from(10_000u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let _ = env
+        .pic
+        .update_call(
+            env.ledger,
+            env.user,
+            "icrc1_transfer",
+            encode_one(xfer).unwrap(),
+        )
+        .unwrap();
+
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "finalize_pool_registration",
+            encode_one(9999u64).unwrap(),
+        )
+        .expect("finalize_pool_registration");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok));
+
+    // 4. get_pool_info -> total 100 ICP mock VP, active_count 1
+    let r = env
+        .pic
+        .query_call(
+            env.backend,
+            env.user,
+            "get_pool_info",
+            encode_one(()).unwrap(),
+        )
+        .expect("get_pool_info");
+    let info: PoolInfo = decode_one(&r).unwrap();
+    assert_eq!(info.total_pool_voting_power, 10_000_000_000);
+    assert_eq!(info.active_count, 1);
+    assert_eq!(info.active_neurons.len(), 1);
+    assert_eq!(info.active_neurons[0].neuron_id, 9999);
+    assert_eq!(info.active_neurons[0].rank, 1);
 }
 
 

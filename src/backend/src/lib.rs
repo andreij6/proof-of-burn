@@ -168,6 +168,21 @@ pub struct CachedPoolInfo {
     pub updated_at: u64,
 }
 
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ActivePoolNeuron {
+    pub neuron_id: u64,
+    pub voting_power: u64,
+    pub registered_by: Principal,
+    pub rank: u32,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PoolInfo {
+    pub total_pool_voting_power: u64,
+    pub active_count: u64,
+    pub active_neurons: Vec<ActivePoolNeuron>,
+}
+
 fn current_time() -> u64 {
     #[cfg(target_arch = "wasm32")]
     {
@@ -598,6 +613,7 @@ fn init(payload: InitPayload) {
     }
     // Populate the leader-neuron stats (real on mainnet, mock on local).
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
+    recompute_pool_info();
     setup_timers();
 }
 
@@ -612,6 +628,7 @@ fn post_upgrade() {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
     }
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
+    recompute_pool_info();
     setup_timers();
 }
 
@@ -627,6 +644,65 @@ fn get_config() -> Config {
 #[ic_cdk::query]
 fn get_caller_principal() -> Principal {
     ic_cdk::caller()
+}
+
+#[ic_cdk::query]
+fn get_pool_info() -> PoolInfo {
+    let totals = CACHED_POOL_INFO.with(|c| c.borrow().clone());
+
+    let mut active_neurons = Vec::new();
+    POOL_NEURONS.with(|map| {
+        for entry in map.borrow().iter() {
+            let n = entry.value();
+            if n.status == PoolStatus::Active {
+                active_neurons.push(n.clone());
+            }
+        }
+    });
+
+    // Sort by voting power descending
+    active_neurons.sort_by(|a, b| b.voting_power.cmp(&a.voting_power));
+
+    let mut ranked = Vec::new();
+    for (i, n) in active_neurons.into_iter().enumerate() {
+        ranked.push(ActivePoolNeuron {
+            neuron_id: n.neuron_id,
+            voting_power: n.voting_power,
+            registered_by: n.registered_by,
+            rank: (i + 1) as u32,
+        });
+    }
+
+    PoolInfo {
+        total_pool_voting_power: totals.total_pool_voting_power,
+        active_count: totals.active_count,
+        active_neurons: ranked,
+    }
+}
+
+#[ic_cdk::query]
+fn get_my_pool_neuron() -> Option<PoolNeuron> {
+    let caller = get_caller();
+    if caller == Principal::anonymous() {
+        return None;
+    }
+    POOL_NEURONS.with(|map| {
+        let mut best: Option<PoolNeuron> = None;
+        for entry in map.borrow().iter() {
+            let n = entry.value();
+            if n.registered_by == caller {
+                match &best {
+                    None => best = Some(n.clone()),
+                    Some(b) => {
+                        if n.created_at > b.created_at {
+                            best = Some(n.clone());
+                        }
+                    }
+                }
+            }
+        }
+        best
+    })
 }
 
 #[ic_cdk::update(guard = "require_admin")]
@@ -3868,6 +3944,113 @@ mod tests {
         // Try to unregister again -> invalid state
         let res = unregister_leader_neuron(9999);
         assert_eq!(res.unwrap_err(), "INVALID_STATE");
+
+        // Restore config
+        CONFIG.with(|c| {
+            let _ = c.borrow_mut().set(original_cfg);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_pool_queries() {
+        let original_cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let caller = Principal::from_slice(&[1; 29]);
+        let other_caller = Principal::from_slice(&[2; 29]);
+        set_mock_caller(caller);
+
+        // Clear existing map
+        POOL_NEURONS.with(|map| {
+            let keys: Vec<u64> = map
+                .borrow()
+                .iter()
+                .map(|e| *e.key())
+                .collect();
+            let mut m = map.borrow_mut();
+            for k in keys {
+                m.remove(&k);
+            }
+        });
+
+        // 1. get_my_pool_neuron on empty -> None
+        assert!(get_my_pool_neuron().is_none());
+
+        // 2. get_my_pool_neuron for anonymous -> None
+        set_mock_caller(Principal::anonymous());
+        assert!(get_my_pool_neuron().is_none());
+        set_mock_caller(caller);
+
+        // 3. Create draft
+        CONFIG.with(|c| {
+            let mut cfg = c.borrow().get().clone();
+            cfg.is_local = true;
+            cfg.pool_initiation_fee_e8s = 10_000_000_000;
+            let _ = c.borrow_mut().set(cfg);
+        });
+
+        let res = create_pool_draft(9999).await;
+        assert!(res.is_ok());
+
+        // get_my_pool_neuron -> Draft
+        let my_n = get_my_pool_neuron().unwrap();
+        assert_eq!(my_n.neuron_id, 9999);
+        assert_eq!(my_n.status, PoolStatus::Draft);
+
+        // 4. get_pool_info -> totals should be 0 because Draft is not Active
+        let info = get_pool_info();
+        assert_eq!(info.total_pool_voting_power, 0);
+        assert_eq!(info.active_count, 0);
+        assert_eq!(info.active_neurons.len(), 0);
+
+        // 5. Finalize registration -> Active
+        set_mock_ledger_balance(10_000_030_000);
+        let res = finalize_pool_registration(9999).await;
+        assert!(res.is_ok());
+
+        // get_my_pool_neuron -> Active
+        let my_n = get_my_pool_neuron().unwrap();
+        assert_eq!(my_n.status, PoolStatus::Active);
+
+        // 6. get_pool_info -> total VP and active count should be updated
+        let info = get_pool_info();
+        assert_eq!(info.total_pool_voting_power, 10_000_000_000);
+        assert_eq!(info.active_count, 1);
+        assert_eq!(info.active_neurons.len(), 1);
+        assert_eq!(info.active_neurons[0].neuron_id, 9999);
+        assert_eq!(info.active_neurons[0].rank, 1);
+
+        // 7. Add another active neuron with more VP to test sorting & ranking
+        // Create draft as other caller
+        set_mock_caller(other_caller);
+        let res = create_pool_draft(8888).await;
+        assert!(res.is_ok());
+
+        // Update its VP to be higher (200 ICP)
+        POOL_NEURONS.with(|map| {
+            let mut pn = map.borrow().get(&8888).unwrap();
+            pn.voting_power = 20_000_000_000;
+            map.borrow_mut().insert(8888, pn);
+        });
+
+        // Finalize other caller's neuron
+        set_mock_ledger_balance(10_000_030_000);
+        let res = finalize_pool_registration(8888).await;
+        assert!(res.is_ok());
+
+        // get_pool_info -> total VP: 300 ICP, active count: 2, sorted by VP desc
+        let info = get_pool_info();
+        assert_eq!(info.total_pool_voting_power, 30_000_000_000);
+        assert_eq!(info.active_count, 2);
+        assert_eq!(info.active_neurons.len(), 2);
+
+        // First should be 8888 (higher VP) with rank 1
+        assert_eq!(info.active_neurons[0].neuron_id, 8888);
+        assert_eq!(info.active_neurons[0].voting_power, 20_000_000_000);
+        assert_eq!(info.active_neurons[0].rank, 1);
+
+        // Second should be 9999 (lower VP) with rank 2
+        assert_eq!(info.active_neurons[1].neuron_id, 9999);
+        assert_eq!(info.active_neurons[1].voting_power, 10_000_000_000);
+        assert_eq!(info.active_neurons[1].rank, 2);
 
         // Restore config
         CONFIG.with(|c| {

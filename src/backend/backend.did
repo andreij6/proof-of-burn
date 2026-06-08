@@ -76,6 +76,33 @@ type GlobalStats = record {
   total_burned_e8s : nat64;
   followers_count : nat64;
 };
+type PoolStatus = variant {
+  Draft;
+  Active;
+  Inactive;
+};
+type PoolNeuron = record {
+  neuron_id : nat64;
+  registered_by : principal;
+  voting_power : nat64;
+  status : PoolStatus;
+  created_at : nat64;
+  activated_at : opt nat64;
+  treasury_block : opt nat64;
+  backend_cmc_block : opt nat64;
+  frontend_cmc_block : opt nat64;
+};
+type ActivePoolNeuron = record {
+  neuron_id : nat64;
+  voting_power : nat64;
+  registered_by : principal;
+  rank : nat32;
+};
+type PoolInfo = record {
+  total_pool_voting_power : nat64;
+  active_count : nat64;
+  active_neurons : vec ActivePoolNeuron;
+};
 type InitPayload = record {
   default_threshold_e8s : nat64;
   owner : principal;
@@ -158,6 +185,8 @@ service : (InitPayload) -> {
   // reasonable n; documented in the task.
   get_global_stats : () -> (GlobalStats) query;
   get_leader_neuron_info : () -> (LeaderNeuronInfo) query;
+  get_my_pool_neuron : () -> (opt PoolNeuron) query;
+  get_pool_info : () -> (PoolInfo) query;
   get_my_commitments : () -> (vec Commitment) query;
   get_proposal : (nat64) -> (opt Proposal) query;
   get_treasury_balance : () -> (BalanceResult);
