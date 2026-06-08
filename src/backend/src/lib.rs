@@ -35,6 +35,55 @@ pub struct NeuronId {
     pub id: u64,
 }
 
+/// NNS Governance Topic 4: Governance (verified topic ID for auto-voting).
+pub const TOPIC_GOVERNANCE: i32 = 4;
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Followees {
+    pub followees: Vec<NeuronId>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Neuron {
+    pub id: Option<NeuronId>,
+    pub controller: Option<Principal>,
+    pub hot_keys: Vec<Principal>,
+    pub cached_neuron_stake_e8s: u64,
+    pub voting_power: u64,
+    pub followees: Vec<(i32, Followees)>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum GetFullNeuronResult {
+    Ok(Neuron),
+    Err(GovernanceError),
+}
+
+fn neuron_has_hotkey(neuron: &Neuron, principal: Principal) -> bool {
+    neuron.hot_keys.contains(&principal)
+}
+
+fn neuron_follows(neuron: &Neuron, leader_id: u64, topic: i32) -> bool {
+    for &(t, ref followees) in &neuron.followees {
+        if t == topic {
+            return followees.followees.iter().any(|f| f.id == leader_id);
+        }
+    }
+    false
+}
+
+async fn get_full_neuron(neuron_id: u64) -> Result<Neuron, String> {
+    let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+    let response: Result<(GetFullNeuronResult,), _> =
+        ic_cdk::call(nns_gov, "get_full_neuron", (neuron_id,)).await;
+
+    match response {
+        Ok((GetFullNeuronResult::Ok(neuron),)) => Ok(neuron),
+        Ok((GetFullNeuronResult::Err(err),)) => Err(err.error_message),
+        Err((code, msg)) => Err(format!("Call failed (code {:?}): {}", code, msg)),
+    }
+}
+
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct GovernanceError {
     pub error_message: String,
@@ -2639,6 +2688,54 @@ mod tests {
 
         // Assert that the decoded Config gets the default initiation fee
         assert_eq!(decoded.pool_initiation_fee_e8s, 12_500_000_000);
+    }
+
+    #[test]
+    fn test_neuron_helpers() {
+        let n = Neuron {
+            id: Some(NeuronId { id: 12345 }),
+            controller: Some(Principal::anonymous()),
+            hot_keys: vec![Principal::management_canister()],
+            cached_neuron_stake_e8s: 100_000_000,
+            voting_power: 100_000_000,
+            followees: vec![(
+                TOPIC_GOVERNANCE,
+                Followees {
+                    followees: vec![NeuronId { id: 4821667 }],
+                },
+            )],
+        };
+
+        // Test hotkey checks
+        assert!(neuron_has_hotkey(&n, Principal::management_canister()));
+        assert!(!neuron_has_hotkey(&n, Principal::anonymous()));
+
+        // Test follow checks
+        assert!(neuron_follows(&n, 4821667, TOPIC_GOVERNANCE));
+        assert!(!neuron_follows(&n, 99999, TOPIC_GOVERNANCE));
+        assert!(!neuron_follows(&n, 4821667, 3)); // different topic
+    }
+
+    #[test]
+    fn test_neuron_candid_compatibility() {
+        let n = Neuron {
+            id: Some(NeuronId { id: 12345 }),
+            controller: Some(Principal::anonymous()),
+            hot_keys: vec![Principal::anonymous()],
+            cached_neuron_stake_e8s: 100_000_000,
+            voting_power: 100_000_000,
+            followees: vec![(
+                TOPIC_GOVERNANCE,
+                Followees {
+                    followees: vec![NeuronId { id: 4821667 }],
+                },
+            )],
+        };
+        let bytes = candid::encode_one(&n).unwrap();
+        let decoded: Neuron = candid::decode_one(&bytes).unwrap();
+        assert_eq!(decoded.cached_neuron_stake_e8s, 100_000_000);
+        assert!(neuron_has_hotkey(&decoded, Principal::anonymous()));
+        assert!(neuron_follows(&decoded, 4821667, TOPIC_GOVERNANCE));
     }
 
     // ── PB-115: Global stats type & overflow posture ─────────────────────────
