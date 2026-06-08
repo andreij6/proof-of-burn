@@ -429,3 +429,40 @@ a:hover {
     display: none;
   }
 }
+
+/* Pool sidebar */
+.pool-sidebar-desktop {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.pool-mobile-fab {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .pool-sidebar-desktop {
+    display: none;
+  }
+  .pool-mobile-fab {
+    display: flex;
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 50;
+    align-items: center;
+    gap: 6px;
+    height: 40px;
+    padding: 0 14px;
+    border-radius: 20px;
+    background: var(--burn);
+    color: var(--char-950);
+    border: none;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--burn) 40%, transparent);
+  }
+}
