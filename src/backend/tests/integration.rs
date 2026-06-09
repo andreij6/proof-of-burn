@@ -1390,5 +1390,256 @@ fn test_pool_rewards_distribution_integration() {
     assert_eq!(bal_after, bal_before + 2_499_990_000);
 }
 
+// ── Treasury withdrawal: admin-gated movement of real ICP out of the treasury ──
+#[test]
+fn test_admin_withdraw_treasury_integration() {
+    let Some(env) = setup_saga() else { return };
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    let treasury_sub = vec![1u8; 32]; // TREASURY_SUBACCOUNT
+    let recipient = Principal::from_slice(&[0x42; 6]);
+
+    // Fund the treasury subaccount directly (minter → {backend, treasury_sub}).
+    let xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount { owner: env.backend, subaccount: Some(treasury_sub.clone()) },
+        amount: candid::Nat::from(10_000_000_000u64), // 100 ICP
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+    let r = env.pic.update_call(env.ledger, env.minter, "icrc1_transfer", encode_one(xfer).unwrap()).expect("fund treasury");
+    assert!(matches!(decode_one::<TransferResult>(&r).unwrap(), TransferResult::Ok(_)));
+
+    // A non-admin must NOT be able to withdraw.
+    let stranger = Principal::from_slice(&[9, 9, 9, 9]);
+    let res = env.pic.update_call(env.backend, stranger, "admin_withdraw_treasury", encode_args((recipient, 1_000_000_000u64)).unwrap());
+    if let Ok(bytes) = res {
+        assert!(matches!(decode_one::<UnitResult>(&bytes).unwrap(), UnitResult::Err(_)), "non-admin withdraw must Err");
+    }
+    assert_eq!(balance_of(&env, recipient, None), 0, "no funds moved on a rejected withdraw");
+
+    // Admin happy path: withdraw 50 ICP.
+    let amount = 5_000_000_000u64;
+    let r = env.pic.update_call(env.backend, owner, "admin_withdraw_treasury", encode_args((recipient, amount)).unwrap()).expect("withdraw");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok), "admin withdraw should succeed: {:?}", res);
+    assert_eq!(balance_of(&env, recipient, None), amount, "recipient received exactly the amount");
+    assert_eq!(balance_of(&env, env.backend, Some(treasury_sub)), 10_000_000_000 - amount - 10_000, "treasury debited amount + ledger fee");
+
+    // Edge: zero amount is rejected even for an admin.
+    let r = env.pic.update_call(env.backend, owner, "admin_withdraw_treasury", encode_args((recipient, 0u64)).unwrap()).expect("zero");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Err(_)), "zero-amount withdraw must Err");
+}
+
+// ── Top up an existing commitment (money movement + state guards) ──
+#[test]
+fn test_add_to_commitment_integration() {
+    let Some(env) = setup_saga() else { return };
+    let pid = 138402u64;
+
+    // Initial commit of 5 ICP → Pending.
+    let res = do_commit(&env, pid, Stance::Adopt, 500_000_000);
+    assert!(matches!(res, UnitResult::Ok), "commit: {:?}", res);
+
+    // Deposit the additional amount (+ buffer) into the same escrow.
+    let escrow: LAccountDe = decode_one(
+        &env.pic.query_call(env.backend, env.user, "get_deposit_address", encode_one(pid).unwrap()).unwrap(),
+    ).unwrap();
+    let add = 300_000_000u64; // +3 ICP
+    let xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount { owner: escrow.owner, subaccount: escrow.subaccount },
+        amount: candid::Nat::from(add + 1_000_000),
+        fee: Some(candid::Nat::from(10_000u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let r = env.pic.update_call(env.ledger, env.user, "icrc1_transfer", encode_one(xfer).unwrap()).expect("top-up deposit");
+    assert!(matches!(decode_one::<TransferResult>(&r).unwrap(), TransferResult::Ok(_)));
+
+    // add_to_commitment → commitment grows by exactly `add`.
+    let r = env.pic.update_call(env.backend, env.user, "add_to_commitment", encode_args((pid, add)).unwrap()).expect("add_to_commitment");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok), "add_to_commitment should succeed: {:?}", res);
+
+    let commits = my_commitments(&env);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].amount_e8s, 800_000_000, "commitment grew by the top-up amount");
+    assert_eq!(commits[0].status, CommitmentStatus::Pending);
+
+    // Guard: a below-minimum top-up is rejected.
+    let r = env.pic.update_call(env.backend, env.user, "add_to_commitment", encode_args((pid, 1u64)).unwrap()).expect("tiny add");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Err(_)), "below-minimum top-up must Err");
+
+    // Guard: no existing commitment for an unrelated proposal.
+    let r = env.pic.update_call(env.backend, env.user, "add_to_commitment", encode_args((999_999u64, 200_000_000u64)).unwrap()).expect("add to none");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Err(_)), "top-up with no existing commitment must Err");
+}
+
+// ── remove_admin: governance/auth, including the last-admin safeguard ──
+#[test]
+fn test_remove_admin_integration() {
+    let Some(env) = setup_saga() else { return };
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    let second = Principal::from_slice(&[0x55; 6]);
+
+    // Cannot remove the last (sole) admin.
+    let r = env.pic.update_call(env.backend, owner, "remove_admin", encode_one(owner).unwrap()).expect("remove last");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Err(_)), "removing the last admin must Err: {:?}", res);
+
+    // Add a second admin.
+    let r = env.pic.update_call(env.backend, owner, "add_admin", encode_one(second).unwrap()).expect("add_admin");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Ok));
+
+    // A non-admin cannot remove anyone.
+    let stranger = Principal::from_slice(&[9, 9, 9, 9]);
+    let res = env.pic.update_call(env.backend, stranger, "remove_admin", encode_one(second).unwrap());
+    if let Ok(bytes) = res {
+        assert!(matches!(decode_one::<UnitResult>(&bytes).unwrap(), UnitResult::Err(_)), "non-admin remove must Err");
+    }
+
+    // Owner removes the second admin → only the owner remains.
+    let r = env.pic.update_call(env.backend, owner, "remove_admin", encode_one(second).unwrap()).expect("remove second");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Ok), "owner can remove a non-last admin");
+    let cfg: Config = decode_one(&env.pic.query_call(env.backend, owner, "get_config", encode_one(()).unwrap()).unwrap()).unwrap();
+    assert_eq!(cfg.admins, vec![owner], "only the owner remains an admin");
+}
+
+// ── create_pool_draft first-come binding: B cannot register A's neuron id ──
+#[test]
+fn test_create_pool_draft_already_registered_integration() {
+    let Some(env) = setup_saga() else { return };
+    let nid = 5555u64;
+    let user_a = env.user;
+    let user_b = Principal::from_slice(&[0xBB; 6]);
+
+    let r = env.pic.update_call(env.backend, user_a, "create_pool_draft", encode_one(nid).unwrap()).expect("draft A");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Ok));
+
+    let r = env.pic.update_call(env.backend, user_b, "create_pool_draft", encode_one(nid).unwrap()).expect("draft B");
+    let res: UnitResult = decode_one(&r).unwrap();
+    match res {
+        UnitResult::Err(e) => assert!(e.contains("ALREADY_REGISTERED"), "expected ALREADY_REGISTERED, got: {e}"),
+        UnitResult::Ok => panic!("B must not be able to register A's neuron id"),
+    }
+
+    // B owns nothing; A still holds the draft.
+    let b_n: Option<PoolNeuron> = decode_one(&env.pic.query_call(env.backend, user_b, "get_my_pool_neuron", encode_one(()).unwrap()).unwrap()).unwrap();
+    assert!(b_n.is_none(), "B has no pool neuron");
+    let a_n: Option<PoolNeuron> = decode_one(&env.pic.query_call(env.backend, user_a, "get_my_pool_neuron", encode_one(()).unwrap()).unwrap()).unwrap();
+    assert_eq!(a_n.unwrap().neuron_id, nid, "A still owns the draft");
+}
+
+// ── finalize_pool_registration requires the fee to actually be deposited ──
+#[test]
+fn test_finalize_insufficient_deposit_integration() {
+    let Some(env) = setup_saga() else { return };
+    let nid = 6666u64;
+    let r = env.pic.update_call(env.backend, env.user, "create_pool_draft", encode_one(nid).unwrap()).expect("draft");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Ok));
+
+    // Finalize with NOTHING in escrow → INSUFFICIENT_DEPOSIT.
+    let r = env.pic.update_call(env.backend, env.user, "finalize_pool_registration", encode_one(nid).unwrap()).expect("finalize empty");
+    let res: UnitResult = decode_one(&r).unwrap();
+    match res {
+        UnitResult::Err(e) => assert!(e.contains("INSUFFICIENT_DEPOSIT"), "expected INSUFFICIENT_DEPOSIT, got: {e}"),
+        UnitResult::Ok => panic!("finalize must fail with an empty escrow"),
+    }
+    let info: PoolInfo = decode_one(&env.pic.query_call(env.backend, env.user, "get_pool_info", encode_one(()).unwrap()).unwrap()).unwrap();
+    assert_eq!(info.active_count, 0, "no activation without payment");
+
+    // Underfunded (one e8 short of fee + reserve) is also rejected.
+    let cfg: Config = decode_one(&env.pic.query_call(env.backend, env.user, "get_config", encode_one(()).unwrap()).unwrap()).unwrap();
+    let short = cfg.pool_initiation_fee_e8s + 30_000 - 1;
+    let reg: LAccountDe = decode_one(&env.pic.query_call(env.backend, env.user, "get_registration_address", encode_one(()).unwrap()).unwrap()).unwrap();
+    let xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount { owner: reg.owner, subaccount: reg.subaccount },
+        amount: candid::Nat::from(short),
+        fee: Some(candid::Nat::from(10_000u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let r = env.pic.update_call(env.ledger, env.user, "icrc1_transfer", encode_one(xfer).unwrap()).expect("short deposit");
+    assert!(matches!(decode_one::<TransferResult>(&r).unwrap(), TransferResult::Ok(_)));
+    let r = env.pic.update_call(env.backend, env.user, "finalize_pool_registration", encode_one(nid).unwrap()).expect("finalize short");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Err(_)), "underfunded finalize must Err: {:?}", res);
+}
+
+// ── cancel_pool_draft is owner-scoped: B cannot clear A's neuron ──
+#[test]
+fn test_cancel_pool_draft_unauthorized_integration() {
+    let Some(env) = setup_saga() else { return };
+    let nid = 7007u64;
+    let user_a = env.user;
+    let user_b = Principal::from_slice(&[0xCC; 6]);
+
+    let r = env.pic.update_call(env.backend, user_a, "create_pool_draft", encode_one(nid).unwrap()).expect("draft A");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Ok));
+
+    let r = env.pic.update_call(env.backend, user_b, "cancel_pool_draft", encode_one(nid).unwrap()).expect("cancel B");
+    let res: UnitResult = decode_one(&r).unwrap();
+    match res {
+        UnitResult::Err(e) => assert!(e.contains("UNAUTHORIZED"), "expected UNAUTHORIZED, got: {e}"),
+        UnitResult::Ok => panic!("B must not cancel A's draft"),
+    }
+
+    // A's draft survives untouched.
+    let a_n: Option<PoolNeuron> = decode_one(&env.pic.query_call(env.backend, user_a, "get_my_pool_neuron", encode_one(()).unwrap()).unwrap()).unwrap();
+    assert_eq!(a_n.unwrap().neuron_id, nid, "A's draft is intact");
+}
+
+// ── distribute_pool_rewards guards: no double-spend / premature distribution ──
+#[test]
+fn test_distribute_pool_rewards_guards_integration() {
+    let Some(env) = setup_saga() else { return };
+
+    // Unknown proposal → PROPOSAL_NOT_FOUND.
+    let r = env.pic.update_call(env.backend, env.user, "distribute_pool_rewards", encode_one(424_242u64).unwrap()).expect("distribute unknown");
+    let res: UnitResult = decode_one(&r).unwrap();
+    match res {
+        UnitResult::Err(e) => assert!(e.contains("PROPOSAL_NOT_FOUND"), "expected PROPOSAL_NOT_FOUND, got: {e}"),
+        UnitResult::Ok => panic!("distribute on an unknown proposal must Err"),
+    }
+
+    // Seeded, still-open proposal (not settled) → PROPOSAL_NOT_SETTLED.
+    let r = env.pic.update_call(env.backend, env.user, "distribute_pool_rewards", encode_one(138402u64).unwrap()).expect("distribute open");
+    let res: UnitResult = decode_one(&r).unwrap();
+    match res {
+        UnitResult::Err(e) => assert!(e.contains("PROPOSAL_NOT_SETTLED"), "expected PROPOSAL_NOT_SETTLED, got: {e}"),
+        UnitResult::Ok => panic!("distribute on an unsettled proposal must Err"),
+    }
+}
+
+// ── Admin config setters reject non-admins; admin path updates config ──
+#[test]
+fn test_admin_setters_reject_non_admin_integration() {
+    let Some(env) = setup_saga() else { return };
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    let stranger = Principal::from_slice(&[9, 9, 9, 9]);
+    let some_canister = Principal::from_slice(&[0xDD; 6]);
+
+    // Non-admin admin_set_frontend_canister rejected.
+    let res = env.pic.update_call(env.backend, stranger, "admin_set_frontend_canister", encode_one(some_canister).unwrap());
+    if let Ok(bytes) = res {
+        assert!(matches!(decode_one::<UnitResult>(&bytes).unwrap(), UnitResult::Err(_)), "non-admin set_frontend must Err");
+    }
+
+    // Non-admin admin_set_proposal_deadline rejected.
+    let future = env.pic.get_time().as_nanos_since_unix_epoch() + 7_200_000_000_000;
+    let res = env.pic.update_call(env.backend, stranger, "admin_set_proposal_deadline", encode_args((138402u64, future)).unwrap());
+    if let Ok(bytes) = res {
+        assert!(matches!(decode_one::<UnitResult>(&bytes).unwrap(), UnitResult::Err(_)), "non-admin set_deadline must Err");
+    }
+
+    // Admin (owner) can set the frontend canister; config reflects it.
+    let r = env.pic.update_call(env.backend, owner, "admin_set_frontend_canister", encode_one(some_canister).unwrap()).expect("owner set_frontend");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Ok), "admin can set the frontend canister");
+    let cfg: Config = decode_one(&env.pic.query_call(env.backend, owner, "get_config", encode_one(()).unwrap()).unwrap()).unwrap();
+    assert_eq!(cfg.frontend_canister_id, Some(some_canister), "frontend canister id was updated");
+}
+
 
 
