@@ -1839,7 +1839,7 @@ export default function App() {
                     }}
                   >
                     <Icon name={skillsCopied ? "check" : "copy"} size={13} stroke="var(--char-950)" />
-                    {skillsCopied ? "Copied!" : 'AI Proposal Voting Skill'}
+                    {skillsCopied ? "Copied!" : 'Proposal Voting Skill'}
                   </button>
 
                   <button
