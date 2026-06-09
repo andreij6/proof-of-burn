@@ -2740,7 +2740,7 @@ export default function App() {
       {isFollowModalOpen && principal && !principal.isAnonymous() && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}>
           <div className="card col" style={{
@@ -2804,7 +2804,7 @@ export default function App() {
       {isTreasuryOpen && isAdmin && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}>
           <div className="card col" style={{
@@ -2860,7 +2860,7 @@ export default function App() {
       {isWalletOpen && principal && !principal.isAnonymous() && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}>
           <div className="card col" style={{
@@ -2939,7 +2939,7 @@ export default function App() {
       {poolDetailsOpen && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}
           onClick={() => setPoolDetailsOpen(false)}>
@@ -3004,7 +3004,7 @@ export default function App() {
       {confirmLeaveId !== null && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 110, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1100, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}
           onClick={() => { if (!isLeavingPool) setConfirmLeaveId(null); }}>
@@ -3036,7 +3036,7 @@ export default function App() {
       {isPoolWizardOpen && principal && !principal.isAnonymous() && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}>
           <div className="card col" style={{
@@ -3272,7 +3272,7 @@ export default function App() {
       {isConfirming && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}>
           <div className="card col" style={{
@@ -3449,7 +3449,7 @@ export default function App() {
         return (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}>
           <div className="card col" style={{
@@ -3607,7 +3607,7 @@ export default function App() {
       {isDetailsOpen && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}>
           <div className="card col" style={{
@@ -3690,7 +3690,7 @@ export default function App() {
       {isHelpOpen && (
         <div style={{
           position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
-          backdropFilter: 'blur(8px)', zIndex: 110, display: 'flex',
+          backdropFilter: 'blur(8px)', zIndex: 1100, display: 'flex',
           alignItems: 'center', justifyContent: 'center', padding: 16
         }}>
           <div className="card col" style={{
