@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100%" height="100%">
+  <!-- Solid accent color (#FF6A1F) matching the app's brand accent -->
+  <g fill="#FF6A1F" stroke="#FF6A1F" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round">
+    
+    <!-- SOMA (Cell Body) - star-like shape with organic branching -->
+    <!-- Masked/Cutout center for the nucleus -->
+    <path d="
+      M 32 30 
+      C 28 26, 24 25, 20 23 
+      C 22 26, 22 30, 24 33 
+      C 21 34, 17 35, 13 36 
+      C 18 38, 21 40, 23 41 
+      C 21 45, 19 50, 16 54 
+      C 20 52, 24 49, 27 46 
+      C 30 50, 32 54, 34 58 
+      C 34 53, 33 48, 32 44 
+      C 36 43, 40 42, 44 42 
+      C 40 39, 36 37, 34 35 
+      C 36 32, 38 28, 41 24 
+      C 37 27, 34 29, 32 30 Z
+      M 28 37 
+      A 3 3 0 1 0 28 37.01 Z
+    " fill-rule="evenodd" />
+
+    <!-- DENDRITES - finer branching extensions from the cell body tips -->
+    <!-- Top-left dendrite branch -->
+    <path d="M 20 23 Q 15 22, 12 17 Q 13 15, 10 14" fill="none" stroke="#FF6A1F" stroke-width="1.2" />
+    <path d="M 15 22 Q 13 24, 8 23" fill="none" stroke="#FF6A1F" stroke-width="1" />
+    
+    <!-- Left dendrite branch -->
+    <path d="M 13 36 Q 8 36, 5 33 Q 4 34, 2 33" fill="none" stroke="#FF6A1F" stroke-width="1.2" />
+    <path d="M 8 36 Q 6 39, 4 41" fill="none" stroke="#FF6A1F" stroke-width="1" />
+    
+    <!-- Bottom-left dendrite branch -->
+    <path d="M 16 54 Q 12 58, 10 63 Q 11 65, 8 68" fill="none" stroke="#FF6A1F" stroke-width="1.2" />
+    <path d="M 12 58 Q 9 58, 6 57" fill="none" stroke="#FF6A1F" stroke-width="1" />
+    
+    <!-- Top-right dendrite branch -->
+    <path d="M 41 24 Q 45 20, 48 15 Q 47 13, 50 9" fill="none" stroke="#FF6A1F" stroke-width="1.2" />
+    <path d="M 45 20 Q 48 22, 52 21" fill="none" stroke="#FF6A1F" stroke-width="1" />
+
+    <!-- AXON - long main nerve fiber propagating from the soma down to the bottom right -->
+    <path d="M 34 58 Q 42 66, 50 72 Q 58 78, 66 82 Q 72 85, 78 87" fill="none" stroke="#FF6A1F" stroke-width="2" />
+
+    <!-- MYELIN SHEATHS - protective segmented covers along the axon -->
+    <!-- Segment 1 -->
+    <rect x="36" y="58" width="10" height="6" rx="3" transform="rotate(38, 41, 61)" />
+    <!-- Segment 2 -->
+    <rect x="47" y="67" width="11" height="6" rx="3" transform="rotate(33, 52, 70)" />
+    <!-- Segment 3 -->
+    <rect x="58" y="74" width="11" height="6" rx="3" transform="rotate(27, 63, 77)" />
+    <!-- Segment 4 -->
+    <rect x="69" y="80" width="10" height="6" rx="3" transform="rotate(20, 74, 83)" />
+
+    <!-- NODES OF RANVIER (gaps between myelin sheaths) are naturally formed by the gaps -->
+
+    <!-- AXON TERMINALS - branching end structures of the neuron -->
+    <path d="M 78 87 Q 84 89, 89 89" fill="none" stroke="#FF6A1F" stroke-width="1.5" />
+    <path d="M 89 89 Q 93 88, 95 86" fill="none" stroke="#FF6A1F" stroke-width="1.2" />
+    <path d="M 89 89 Q 91 92, 94 94" fill="none" stroke="#FF6A1F" stroke-width="1.2" />
+
+    <path d="M 78 87 Q 82 91, 84 95" fill="none" stroke="#FF6A1F" stroke-width="1.5" />
+    <path d="M 84 95 Q 86 97, 88 98" fill="none" stroke="#FF6A1F" stroke-width="1.2" />
+    <path d="M 84 95 Q 82 98, 80 99" fill="none" stroke="#FF6A1F" stroke-width="1.2" />
+
+    <!-- Synaptic buttons/knobs at the very ends of the terminals -->
+    <circle cx="95" cy="86" r="1.2" />
+    <circle cx="94" cy="94" r="1.2" />
+    <circle cx="88" cy="98" r="1.2" />
+    <circle cx="80" cy="99" r="1.2" />
+  </g>
+</svg>

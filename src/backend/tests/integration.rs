@@ -683,7 +683,17 @@ fn saga_burn_is_idempotent_on_cmc_failure() {
 
     // 50% reached the treasury; 25% reached the CMC (backend share).
     let treasury_after_first = balance_of(&env, env.backend, treasury_sub.clone());
-    let cmc_after_first = balance_of(&env, cmc, None);
+    
+    let principal_to_subaccount = |p: &Principal| {
+        let bytes = p.as_slice();
+        let mut sub = vec![0u8; 32];
+        sub[0] = bytes.len() as u8;
+        sub[1..1 + bytes.len()].copy_from_slice(bytes);
+        sub
+    };
+    let backend_sub = Some(principal_to_subaccount(&env.backend));
+
+    let cmc_after_first = balance_of(&env, cmc, backend_sub.clone());
     assert_eq!(cmc_after_first, total / 4, "25% backend share reached the CMC once");
     // treasury = 50% of proceeds + the per-commit protocol fee (500_000 each).
     assert_eq!(treasury_after_first, total / 2 + n_users * 500_000, "50% + protocol fees in treasury");
@@ -694,7 +704,7 @@ fn saga_burn_is_idempotent_on_cmc_failure() {
     let r = env.pic.update_call(env.backend, owner, "admin_trigger_sweep", encode_one(()).unwrap()).expect("sweep2");
     let _: UnitResult = decode_one(&r).unwrap();
 
-    assert_eq!(balance_of(&env, cmc, None), cmc_after_first, "PB-111: no double CMC transfer on retry");
+    assert_eq!(balance_of(&env, cmc, backend_sub), cmc_after_first, "PB-111: no double CMC transfer on retry");
     assert_eq!(balance_of(&env, env.backend, treasury_sub), treasury_after_first, "no double treasury transfer on retry");
 }
 
@@ -1063,7 +1073,7 @@ fn test_cancel_and_unregister_integration() {
     let res: UnitResult = decode_one(&r).unwrap();
     assert!(matches!(res, UnitResult::Ok));
 
-    // 4. Unregister active leader neuron
+    // 4. Unregister active leader neuron -> Inactive
     let r = env
         .pic
         .update_call(
@@ -1075,6 +1085,87 @@ fn test_cancel_and_unregister_integration() {
         .expect("unregister_leader_neuron");
     let res: UnitResult = decode_one(&r).unwrap();
     assert!(matches!(res, UnitResult::Ok));
+
+    // 5. The neuron is now Inactive — `cancel_pool_draft` must allow clearing it
+    //    (Draft OR Inactive are removable; Active is not). This backs the
+    //    "Clear neuron" action on the Inactive card.
+    let r = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "cancel_pool_draft",
+            encode_one(9999u64).unwrap(),
+        )
+        .expect("cancel_pool_draft on inactive");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok), "clearing an Inactive neuron should succeed: {:?}", res);
+
+    // 6. It is gone entirely.
+    let r = env
+        .pic
+        .query_call(
+            env.backend,
+            env.user,
+            "get_my_pool_neuron",
+            encode_one(()).unwrap(),
+        )
+        .expect("get_my_pool_neuron");
+    let my_n: Option<PoolNeuron> = decode_one(&r).unwrap();
+    assert!(my_n.is_none(), "cleared Inactive neuron should no longer exist");
+}
+
+// Reactivation: an Inactive neuron (left the pool) can be re-activated by paying
+// the fee again — `finalize_pool_registration` accepts Draft OR Inactive. Backs
+// the "Finish activation" button on the Inactive card.
+#[test]
+fn test_reactivate_inactive_neuron_integration() {
+    let Some(env) = setup_saga() else { return };
+    let nid = 4242u64;
+
+    // Helper: fund the registration escrow with one fee and finalize.
+    let fund_and_finalize = |env: &SagaEnv| {
+        let reg_acc: LAccountDe = decode_one(
+            &env.pic
+                .query_call(env.backend, env.user, "get_registration_address", encode_one(()).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        let xfer = TransferArg {
+            from_subaccount: None,
+            to: LAccount { owner: reg_acc.owner, subaccount: reg_acc.subaccount },
+            amount: candid::Nat::from(125_000_000_000u64),
+            fee: Some(candid::Nat::from(10_000u64)),
+            memo: None,
+            created_at_time: None,
+        };
+        let r = env.pic.update_call(env.ledger, env.user, "icrc1_transfer", encode_one(xfer).unwrap()).expect("ledger transfer");
+        let xfer_res: TransferResult = decode_one(&r).unwrap();
+        assert!(matches!(xfer_res, TransferResult::Ok(_)));
+        let r = env.pic.update_call(env.backend, env.user, "finalize_pool_registration", encode_one(nid).unwrap()).expect("finalize_pool_registration");
+        let res: UnitResult = decode_one(&r).unwrap();
+        assert!(matches!(res, UnitResult::Ok), "finalize should succeed: {:?}", res);
+    };
+
+    // Mint enough for two activations (2 * 125 ICP + fees).
+    env.mint(env.user, 300_000_000_000);
+
+    // 1. create -> finalize -> Active
+    let r = env.pic.update_call(env.backend, env.user, "create_pool_draft", encode_one(nid).unwrap()).expect("create_pool_draft");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Ok));
+    fund_and_finalize(&env);
+
+    // 2. unregister -> Inactive
+    let r = env.pic.update_call(env.backend, env.user, "unregister_leader_neuron", encode_one(nid).unwrap()).expect("unregister");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Ok));
+    let info: PoolInfo = decode_one(&env.pic.query_call(env.backend, env.user, "get_pool_info", encode_one(()).unwrap()).unwrap()).unwrap();
+    assert_eq!(info.active_count, 0, "neuron should be Inactive after leaving");
+
+    // 3. re-fund the escrow + finalize again -> Active (reactivation)
+    fund_and_finalize(&env);
+    let info: PoolInfo = decode_one(&env.pic.query_call(env.backend, env.user, "get_pool_info", encode_one(()).unwrap()).unwrap()).unwrap();
+    assert_eq!(info.active_count, 1, "neuron should be Active again after reactivation");
+    assert_eq!(info.active_neurons[0].neuron_id, nid);
 }
 
 #[test]
@@ -1179,7 +1270,7 @@ fn test_pool_queries_integration() {
         )
         .expect("finalize_pool_registration");
     let res: UnitResult = decode_one(&r).unwrap();
-    assert!(matches!(res, UnitResult::Ok));
+    assert!(matches!(res, UnitResult::Ok), "finalize failed: {:?}", res);
 
     // 4. get_pool_info -> total 100 ICP mock VP, active_count 1
     let r = env

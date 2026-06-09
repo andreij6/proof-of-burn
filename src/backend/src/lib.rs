@@ -1455,6 +1455,42 @@ pub enum TransferResult {
     Err(TransferError),
 }
 
+// Legacy Ledger Call Structs (required by cycles-minting canister)
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct SendArgs {
+    pub memo: u64,
+    pub amount: TokensAmount,
+    pub fee: TokensAmount,
+    pub from_subaccount: Option<[u8; 32]>,
+    pub to: [u8; 32],
+    pub created_at_time: Option<TimeStampNanos>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct TokensAmount {
+    pub e8s: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct TimeStampNanos {
+    pub timestamp_nanos: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub enum SendError {
+    BadFee { expected_fee: TokensAmount },
+    InsufficientFunds { balance: TokensAmount },
+    TxTooOld { allowed_window_nanos: u64 },
+    TxCreatedInFuture,
+    TxDuplicate { duplicate_of: u64 },
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+pub enum SendResult {
+    Ok(u64),
+    Err(SendError),
+}
+
 #[derive(CandidType, Serialize, Deserialize, Debug)]
 pub struct NotifyTopUpArgs {
     pub canister_id: Principal,
@@ -1585,6 +1621,116 @@ async fn call_ledger_transfer(
     TEST_MOCK_LEDGER_TRANSFER.with(|cell| cell.borrow().clone())
 }
 
+fn account_id_bytes(owner: Principal, subaccount: &[u8; 32]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha224::new();
+    hasher.update(b"\x0Aaccount-id");
+    hasher.update(owner.as_slice());
+    hasher.update(&subaccount[..]);
+    let hash = hasher.finalize();
+    let crc = crc32(&hash);
+    let mut out = [0u8; 32];
+    out[0..4].copy_from_slice(&crc.to_be_bytes());
+    out[4..32].copy_from_slice(&hash);
+    out
+}
+
+fn cmc_account_id(target_canister: &Principal) -> [u8; 32] {
+    let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+    let sub = principal_to_subaccount(target_canister);
+    account_id_bytes(cmc, &sub)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn call_ledger_legacy_transfer(
+    ledger_id: Principal,
+    from_sub: Option<[u8; 32]>,
+    to_account_id: [u8; 32],
+    amount_e8s: u64,
+    fee_e8s: u64,
+) -> Result<u64, String> {
+    let args = SendArgs {
+        memo: 0,
+        amount: TokensAmount { e8s: amount_e8s },
+        fee: TokensAmount { e8s: fee_e8s },
+        from_subaccount: from_sub,
+        to: to_account_id,
+        created_at_time: None,
+    };
+    let response: Result<(SendResult,), _> =
+        ic_cdk::call(ledger_id, "transfer", (args,)).await;
+    match response {
+        Ok((SendResult::Ok(block_index),)) => Ok(block_index),
+        Ok((SendResult::Err(err),)) => {
+            Err(format!("Ledger legacy transfer returned error: {:?}", err))
+        }
+        Err((code, msg)) => {
+            Err(format!("Ledger legacy transfer failed (code {:?}): {}", code, msg))
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn call_ledger_legacy_transfer(
+    _ledger_id: Principal,
+    _from_sub: Option<[u8; 32]>,
+    _to_account_id: [u8; 32],
+    _amount_e8s: u64,
+    _fee_e8s: u64,
+) -> Result<u64, String> {
+    TEST_MOCK_LEDGER_TRANSFER.with(|cell| cell.borrow().clone())
+}
+
+/// Move `amount_e8s` to the CMC ahead of a `notify_top_up` for `target_canister`.
+///
+/// PB-148: on mainnet the ICP ledger's legacy `transfer` (AccountIdentifier
+/// destination) is required so the produced block is the type CMC's
+/// `notify_top_up` accepts. The local/test ledger is the ICRC-1 ledger wasm,
+/// which has no legacy `transfer` method at all — there we `icrc1_transfer` to
+/// the CMC's ICRC-1 subaccount instead (notify is a no-op locally, so the block
+/// type is irrelevant). Without this split, finalize/settle trap locally with
+/// "Canister has no update method 'transfer'".
+#[cfg(target_arch = "wasm32")]
+async fn call_cmc_topup_transfer(
+    ledger_id: Principal,
+    from_sub: Option<[u8; 32]>,
+    target_canister: Principal,
+    amount_e8s: u64,
+    fee_e8s: u64,
+) -> Result<u64, String> {
+    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+    if is_local {
+        let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+        let dest = LedgerAccount {
+            owner: cmc,
+            subaccount: Some(principal_to_subaccount(&target_canister)),
+        };
+        call_ledger_transfer(ledger_id, from_sub, dest, amount_e8s, Some(fee_e8s)).await
+    } else {
+        call_ledger_legacy_transfer(
+            ledger_id,
+            from_sub,
+            cmc_account_id(&target_canister),
+            amount_e8s,
+            fee_e8s,
+        )
+        .await
+    }
+}
+
+// Host-test: mirror the legacy-transfer mock exactly, so the existing unit tests
+// (which set TEST_MOCK_LEDGER_TRANSFER) are unaffected by the is_local split.
+#[cfg(not(target_arch = "wasm32"))]
+async fn call_cmc_topup_transfer(
+    _ledger_id: Principal,
+    _from_sub: Option<[u8; 32]>,
+    _target_canister: Principal,
+    _amount_e8s: u64,
+    _fee_e8s: u64,
+) -> Result<u64, String> {
+    TEST_MOCK_LEDGER_TRANSFER.with(|cell| cell.borrow().clone())
+}
+
 /// The frontend canister to top up with cycles (PB-125). Config override, else an
 /// is_local fallback so it works after an upgrade without re-init.
 fn frontend_canister_id() -> Principal {
@@ -1669,14 +1815,6 @@ async fn settle_burn_split(
     commitment: &mut Commitment,
 ) -> Result<(), String> {
     let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
-    let backend_cmc_dest = LedgerAccount {
-        owner: cmc,
-        subaccount: Some(principal_to_subaccount(&ic_cdk::id())),
-    };
-    let frontend_cmc_dest = LedgerAccount {
-        owner: cmc,
-        subaccount: Some(principal_to_subaccount(&frontend_canister_id())),
-    };
     let treasury_dest = LedgerAccount { owner: ic_cdk::id(), subaccount: Some(TREASURY_SUBACCOUNT) };
 
     let treasury_amt = amount_e8s / 2;
@@ -1692,8 +1830,15 @@ async fn settle_burn_split(
 
     // 25% → backend cycles
     if commitment.cmc_block_index.is_none() {
-        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), backend_cmc_dest, backend_amt, Some(10_000))
-            .await.map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
+        let b = call_cmc_topup_transfer(
+            ledger_id,
+            Some(from_subaccount),
+            ic_cdk::id(),
+            backend_amt,
+            10_000,
+        )
+        .await
+        .map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
         commitment.cmc_block_index = Some(b);
     }
     notify_cmc_topup(
@@ -1706,12 +1851,12 @@ async fn settle_burn_split(
 
     // 25% → frontend cycles
     if commitment.frontend_cmc_block.is_none() {
-        let b = call_ledger_transfer(
+        let b = call_cmc_topup_transfer(
             ledger_id,
             Some(from_subaccount),
-            frontend_cmc_dest,
+            frontend_canister_id(),
             frontend_amt,
-            Some(10_000),
+            10_000,
         )
         .await
         .map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
@@ -1918,14 +2063,6 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
 
     // 4. Fee-split saga (idempotent, block index guarded)
     let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
-    let backend_cmc_dest = LedgerAccount {
-        owner: cmc,
-        subaccount: Some(principal_to_subaccount(&get_canister_id())),
-    };
-    let frontend_cmc_dest_pool = LedgerAccount {
-        owner: cmc,
-        subaccount: Some(principal_to_subaccount(&frontend_canister_id())),
-    };
     let treasury_dest = LedgerAccount {
         owner: get_canister_id(),
         subaccount: Some(TREASURY_SUBACCOUNT),
@@ -1954,12 +2091,12 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
 
     // Step B: 25% -> backend cycles
     if neuron_state.backend_cmc_block.is_none() {
-        let b = call_ledger_transfer(
+        let b = call_cmc_topup_transfer(
             ledger_id,
             Some(sub),
-            backend_cmc_dest,
+            get_canister_id(),
             backend_amt,
-            Some(10_000),
+            10_000,
         )
         .await
         .map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
@@ -1978,12 +2115,12 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
 
     // Step C: 25% -> frontend cycles
     if neuron_state.frontend_cmc_block.is_none() {
-        let b = call_ledger_transfer(
+        let b = call_cmc_topup_transfer(
             ledger_id,
             Some(sub),
-            frontend_cmc_dest_pool,
+            frontend_canister_id(),
             frontend_amt,
-            Some(10_000),
+            10_000,
         )
         .await
         .map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
@@ -2042,7 +2179,11 @@ fn cancel_pool_draft(neuron_id: u64) -> Result<(), String> {
         return Err("UNAUTHORIZED".to_string());
     }
 
-    if pn.status != PoolStatus::Draft {
+    // Removable states: a Draft that was never paid, or an Inactive neuron the
+    // user has left the pool with. An Active neuron must `unregister_leader_neuron`
+    // first (which flips it to Inactive). Its fee was already split on activation,
+    // so there is nothing to refund here.
+    if pn.status != PoolStatus::Draft && pn.status != PoolStatus::Inactive {
         return Err("INVALID_STATE".to_string());
     }
 
@@ -2982,10 +3123,6 @@ async fn cycle_topup_check() {
         };
 
         let cmc_principal = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
-        let cmc_dest = LedgerAccount {
-            owner: cmc_principal,
-            subaccount: Some(principal_to_subaccount(&ic_cdk::id())),
-        };
 
         // F-103: Phase A — transfer treasury → CMC. Skip if a previous attempt
         // already produced a block index (and so the funds are already at the
@@ -2998,12 +3135,12 @@ async fn cycle_topup_check() {
                     Ok(b) if b > 1_000_000_000 => b,
                     _ => return,
                 };
-                let transfer_res = call_ledger_transfer(
+                let transfer_res = call_cmc_topup_transfer(
                     ledger_id,
                     Some(TREASURY_SUBACCOUNT),
-                    cmc_dest,
+                    ic_cdk::id(),
                     balance - 10_000,
-                    Some(10_000),
+                    10_000,
                 )
                 .await;
                 match transfer_res {
@@ -3071,6 +3208,37 @@ async fn dev_faucet() -> Result<(), String> {
         .await
         .map(|_| ())
         .map_err(|e| format!("Faucet transfer failed: {}", e))
+}
+
+/// Local-dev: insert an Active pool neuron with an explicit voting power, so we
+/// can seed mock pool members (with varied VP) for UI testing. Rejected on
+/// mainnet (ledger canister ID check). Never callable by anonymous.
+#[ic_cdk::update]
+fn dev_seed_pool_neuron(neuron_id: u64, voting_power: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+
+    if config.ledger_canister_id == Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap() {
+        return Err("dev_seed_pool_neuron is only available on the local network".to_string());
+    }
+
+    let now = current_time();
+    let pn = PoolNeuron {
+        neuron_id,
+        registered_by: get_caller(),
+        voting_power,
+        status: PoolStatus::Active,
+        created_at: now,
+        activated_at: Some(now),
+        treasury_block: None,
+        backend_cmc_block: None,
+        frontend_cmc_block: None,
+    };
+    POOL_NEURONS.with(|map| {
+        map.borrow_mut().insert(neuron_id, pn);
+    });
+    recompute_pool_info();
+    Ok(())
 }
 
 #[ic_cdk::query]

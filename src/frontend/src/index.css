@@ -158,10 +158,27 @@ html, body {
   min-height: 100%;
   display: flex;
   flex-direction: column;
+  position: relative;
   background-image: 
     radial-gradient(at 10% 10%, rgba(255, 106, 31, 0.04) 0px, transparent 50%),
     radial-gradient(at 90% 80%, rgba(76, 181, 128, 0.02) 0px, transparent 50%);
   background-attachment: fixed;
+}
+
+#root::before {
+  content: "";
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: url("./assets/neuron_background.png");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 0.035; /* Subtle watermark */
+  pointer-events: none;
+  z-index: -1;
 }
 
 .row {

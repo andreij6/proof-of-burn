@@ -184,6 +184,9 @@ service : (InitPayload) -> {
   // Local-dev faucet — sends 100 ICP from the canister's own account to the caller.
   // Rejected on mainnet (ledger canister ID check). Never callable by anonymous.
   dev_faucet : () -> (Result);
+  // Local-dev: insert an Active pool neuron with an explicit voting power, used
+  // to seed mock pool members for UI testing. Rejected on mainnet.
+  dev_seed_pool_neuron : (nat64, nat64) -> (Result);
   // Returns a page of audit log entries. offset + limit are capped at 10,000
   // to prevent a single query from exhausting cycle budgets.
   get_audit_log : (nat64, nat64) -> (vec AuditLogEntry) query;

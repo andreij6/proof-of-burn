@@ -68,6 +68,43 @@ function Icon({ name, size = 16, stroke = 'currentColor', sw = 1.5, style }: Ico
   );
 }
 
+// Inline neuron glyph (from src/assets/neuron.svg). Rendered as inline SVG rather
+// than an <img>, because Vite inlines small SVGs as data URIs and the `#` in the
+// `#FF6A1F` fills breaks data-URI parsing (shows a broken image).
+function NeuronGlyph({ size = 15, color = 'var(--burn)', style }: { size?: number; color?: string; style?: React.CSSProperties }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true"
+      style={{ flexShrink: 0, display: 'block', ...style }}>
+      <g fill={color} stroke={color} strokeWidth="0.5" strokeLinejoin="round" strokeLinecap="round">
+        <path fillRule="evenodd" d="M 32 30 C 28 26, 24 25, 20 23 C 22 26, 22 30, 24 33 C 21 34, 17 35, 13 36 C 18 38, 21 40, 23 41 C 21 45, 19 50, 16 54 C 20 52, 24 49, 27 46 C 30 50, 32 54, 34 58 C 34 53, 33 48, 32 44 C 36 43, 40 42, 44 42 C 40 39, 36 37, 34 35 C 36 32, 38 28, 41 24 C 37 27, 34 29, 32 30 Z M 28 37 A 3 3 0 1 0 28 37.01 Z" />
+        <path d="M 20 23 Q 15 22, 12 17 Q 13 15, 10 14" fill="none" strokeWidth="1.2" />
+        <path d="M 15 22 Q 13 24, 8 23" fill="none" strokeWidth="1" />
+        <path d="M 13 36 Q 8 36, 5 33 Q 4 34, 2 33" fill="none" strokeWidth="1.2" />
+        <path d="M 8 36 Q 6 39, 4 41" fill="none" strokeWidth="1" />
+        <path d="M 16 54 Q 12 58, 10 63 Q 11 65, 8 68" fill="none" strokeWidth="1.2" />
+        <path d="M 12 58 Q 9 58, 6 57" fill="none" strokeWidth="1" />
+        <path d="M 41 24 Q 45 20, 48 15 Q 47 13, 50 9" fill="none" strokeWidth="1.2" />
+        <path d="M 45 20 Q 48 22, 52 21" fill="none" strokeWidth="1" />
+        <path d="M 34 58 Q 42 66, 50 72 Q 58 78, 66 82 Q 72 85, 78 87" fill="none" strokeWidth="2" />
+        <rect x="36" y="58" width="10" height="6" rx="3" transform="rotate(38, 41, 61)" />
+        <rect x="47" y="67" width="11" height="6" rx="3" transform="rotate(33, 52, 70)" />
+        <rect x="58" y="74" width="11" height="6" rx="3" transform="rotate(27, 63, 77)" />
+        <rect x="69" y="80" width="10" height="6" rx="3" transform="rotate(20, 74, 83)" />
+        <path d="M 78 87 Q 84 89, 89 89" fill="none" strokeWidth="1.5" />
+        <path d="M 89 89 Q 93 88, 95 86" fill="none" strokeWidth="1.2" />
+        <path d="M 89 89 Q 91 92, 94 94" fill="none" strokeWidth="1.2" />
+        <path d="M 78 87 Q 82 91, 84 95" fill="none" strokeWidth="1.5" />
+        <path d="M 84 95 Q 86 97, 88 98" fill="none" strokeWidth="1.2" />
+        <path d="M 84 95 Q 82 98, 80 99" fill="none" strokeWidth="1.2" />
+        <circle cx="95" cy="86" r="1.2" />
+        <circle cx="94" cy="94" r="1.2" />
+        <circle cx="88" cy="98" r="1.2" />
+        <circle cx="80" cy="99" r="1.2" />
+      </g>
+    </svg>
+  );
+}
+
 // ==========================================
 // 2. Base Helpers and UI components
 // ==========================================
@@ -310,6 +347,21 @@ function fmtVP(vp: bigint): string {
   return whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
+function getMinVotingPowerForTop25(poolInfo: PoolInfo | null): bigint {
+  if (!poolInfo || poolInfo.active_neurons.length === 0) {
+    return 0n;
+  }
+  const sorted = [...poolInfo.active_neurons].sort((a, b) => {
+    if (a.voting_power > b.voting_power) return -1;
+    if (a.voting_power < b.voting_power) return 1;
+    return 0;
+  });
+  if (sorted.length <= 25) {
+    return sorted[sorted.length - 1].voting_power;
+  }
+  return sorted[24].voting_power;
+}
+
 function formatPrincipal(p: Principal | null): string {
   if (!p) return "anon";
   const s = p.toString();
@@ -331,7 +383,11 @@ export function isValidAccountId(hex: string): boolean {
 
 // Candid variant check — avoids 'in' operator on union type (TypeScript strict mode TS2322)
 function poolIs(status: PoolNeuron['status'], variant: 'Active' | 'Draft' | 'Inactive'): boolean {
-  return (status as unknown as Record<string, null>)[variant] !== undefined;
+  // The typed binding converts the candid variant to a string enum
+  // (PoolStatus.Inactive === "Inactive"), so `status` is a plain string — not a
+  // `{ Inactive: null }` object. Compare directly; key-indexing always returned
+  // undefined, which made every poolIs() check false (no chips/buttons rendered).
+  return (status as unknown as string) === variant;
 }
 
 // TIER META definition
@@ -432,6 +488,10 @@ export default function App() {
     try { return localStorage.getItem('pool-sidebar-collapsed') === 'true'; } catch { return false; }
   });
   const [poolMobileOpen, setPoolMobileOpen] = useState(false);
+  const [poolDetailsOpen, setPoolDetailsOpen] = useState(false);
+  const [dashControlsOpen, setDashControlsOpen] = useState(true);
+  const [confirmLeaveId, setConfirmLeaveId] = useState<bigint | null>(null);
+  const [isLeavingPool, setIsLeavingPool] = useState(false);
   const [isPoolWizardOpen, setIsPoolWizardOpen] = useState(false);
   const [poolWizardStep, setPoolWizardStep] = useState<1 | 2 | 3>(1);
   const [poolNeuronInput, setPoolNeuronInput] = useState('');
@@ -612,7 +672,11 @@ export default function App() {
     }
     try {
       const result = await currentActor.get_my_pool_neuron();
-      setMyPoolNeuron(result.length > 0 ? result[0] : null);
+      // Binding already converts candid `opt` → `PoolNeuron | null`; it is NOT
+      // a candid array here. Treating it as one (`.length`/`[0]`) always yielded
+      // null, which left myPoolNeuron null at wizard step 3 and dead-locked the
+      // Discard / Pay & Activate buttons (both guard on `!myPoolNeuron`).
+      setMyPoolNeuron(result ?? null);
     } catch (err) {
       console.error("Failed to fetch my pool neuron:", err);
     }
@@ -929,6 +993,7 @@ export default function App() {
     await authClient.login({
       identityProvider: identityProviderUrl,
       maxTimeToLive: BigInt(8 * 60 * 60 * 1_000_000_000), // 8h
+      allowPinAuthentication: isLocal,
       onSuccess: async () => {
         const id = authClient.getIdentity();
         const pri = id.getPrincipal();
@@ -1184,7 +1249,10 @@ export default function App() {
   }, [poolSidebarCollapsed]);
 
   const openPoolWizard = () => {
-    if (myPoolNeuron && poolIs(myPoolNeuron.status, 'Draft')) {
+    // Draft and Inactive neurons both resume at the finalize/pay step — the
+    // backend `finalize_pool_registration` accepts either status. A brand-new
+    // (or absent) neuron starts at step 1.
+    if (myPoolNeuron && (poolIs(myPoolNeuron.status, 'Draft') || poolIs(myPoolNeuron.status, 'Inactive'))) {
       setPoolWizardStep(3);
     } else {
       setPoolWizardStep(1);
@@ -1195,6 +1263,13 @@ export default function App() {
     setPoolFinalizeSuccess(false);
     setIsPoolWizardOpen(true);
   };
+
+  // The user's own card is a PoolNeuron (no rank). Rank lives in the pool's
+  // ranked active list — look it up by neuron_id so we can show "Active - Paid"
+  // (top 25) vs plain "Active" consistently with the other member cards.
+  const myPoolRank = myPoolNeuron
+    ? poolInfo?.active_neurons.find(n => n.neuron_id === myPoolNeuron.neuron_id)?.rank
+    : undefined;
 
   const handlePoolVerify = async () => {
     if (!actor || isPoolVerifying) return;
@@ -1291,15 +1366,19 @@ export default function App() {
     }
   };
 
+  // Confirmed via the in-app modal (confirmLeaveId). Flips the neuron to Inactive.
   const handleUnregisterPool = async (neuronId: bigint) => {
     if (!actor) return;
-    if (!confirm("Leave the pool? Your neuron becomes Inactive. Committed payouts stop.")) return;
+    setIsLeavingPool(true);
     try {
       await actor.unregister_leader_neuron(neuronId);
       await fetchMyPoolNeuron(actor);
       await fetchPoolInfo(actor);
+      setConfirmLeaveId(null);
     } catch (err: any) {
       alert(`Failed to leave pool: ${err.message || err}`);
+    } finally {
+      setIsLeavingPool(false);
     }
   };
 
@@ -1362,11 +1441,11 @@ export default function App() {
   const displayedPastItems = pastItems.slice(0, 100);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden', background: 'var(--bg)' }}>
       {/* ── App Header ── */}
       <header className="app-header" style={{
         borderBottom: '1px solid var(--border)', background: 'var(--bg-alt)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, zIndex: 10
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, zIndex: 10, flexShrink: 0
       }}>
         <div className="row" style={{ gap: 10, minWidth: 0 }}>
           <span style={{
@@ -1448,10 +1527,13 @@ export default function App() {
             justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px',
             borderBottom: '1px solid var(--border)', background: 'var(--bg-alt)',
           }}>
-            <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--fg)' }}>
-              Pool Neurons
-              <span className="mono" style={{ fontSize: 12, color: 'var(--fg-3)', marginLeft: 8 }}>
-                {poolInfo?.active_count.toString() ?? '0'} active
+            <span className="row" style={{ gap: 8, alignItems: 'center', minWidth: 0 }}>
+              <NeuronGlyph size={18} />
+              <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--fg)' }}>
+                Pool Neurons
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-3)', marginLeft: 8 }}>
+                  {poolInfo?.active_count.toString() ?? '0'} active
+                </span>
               </span>
             </span>
             <button onClick={() => setPoolMobileOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
@@ -1459,7 +1541,10 @@ export default function App() {
             </button>
           </div>
           <div className="col" style={{ flex: 1, overflowY: 'auto', padding: 16, gap: 12 }}>
-            {(!myPoolNeuron || poolIs(myPoolNeuron.status, 'Inactive')) && (
+            <Btn variant="secondary" sm style={{ width: '100%' }} onClick={() => setPoolDetailsOpen(true)}>
+              <Icon name="info" size={13} /> More details
+            </Btn>
+            {!myPoolNeuron && (
               <Btn variant="primary" style={{ width: '100%' }}
                 onClick={() => { openPoolWizard(); setPoolMobileOpen(false); }}
                 disabled={!principal || principal.isAnonymous()}>
@@ -1470,13 +1555,14 @@ export default function App() {
             {myPoolNeuron && (
               <div className="col" style={{
                 gap: 8, padding: '10px 12px', borderRadius: 8,
-                border: `1px solid ${poolIs(myPoolNeuron.status, 'Active') ? 'var(--sprout)' : poolIs(myPoolNeuron.status, 'Draft') ? 'var(--haze)' : 'var(--border)'}`,
-                background: poolIs(myPoolNeuron.status, 'Active') ? 'var(--sprout-dim)' : poolIs(myPoolNeuron.status, 'Draft') ? 'var(--haze-dim)' : 'transparent',
+                border: '1px solid var(--border)', background: 'transparent',
               }}>
                 <div className="row" style={{ justifyContent: 'space-between' }}>
                   <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Your neuron</span>
                   {poolIs(myPoolNeuron.status, 'Active')
-                    ? <Chip tone="ok"><Icon name="check" size={11} /> Active</Chip>
+                    ? (myPoolRank != null && myPoolRank <= 25
+                        ? <Chip tone="ok"><Icon name="check" size={11} /> Active - Paid</Chip>
+                        : <Chip tone="muted">Active</Chip>)
                     : poolIs(myPoolNeuron.status, 'Draft')
                     ? <Chip tone="pending">Draft</Chip>
                     : <Chip tone="muted">Inactive</Chip>}
@@ -1489,14 +1575,21 @@ export default function App() {
                     {fmtVP(myPoolNeuron.voting_power)} VP
                   </span>
                 )}
-                {poolIs(myPoolNeuron.status, 'Draft') && (
+                {(poolIs(myPoolNeuron.status, 'Draft') || poolIs(myPoolNeuron.status, 'Inactive')) && (
                   <Btn variant="primary" sm style={{ width: '100%' }}
                     onClick={() => { openPoolWizard(); setPoolMobileOpen(false); }}>
-                    <Icon name="arrowUp" size={13} stroke="var(--char-950)" /> Resume setup
+                    <Icon name="arrowUp" size={13} stroke="var(--char-950)" />
+                    {poolIs(myPoolNeuron.status, 'Draft') ? ' Resume setup' : ' Finish activation'}
                   </Btn>
                 )}
+                {poolIs(myPoolNeuron.status, 'Inactive') && (
+                  <button onClick={handleCancelPoolDraft} disabled={isCancellingDraft}
+                    style={{ background: 'none', border: 'none', cursor: isCancellingDraft ? 'default' : 'pointer', color: 'var(--ember)', fontSize: 12, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4, opacity: isCancellingDraft ? 0.5 : 1 }}>
+                    <Icon name="x" size={12} stroke="var(--ember)" /> {isCancellingDraft ? 'Clearing…' : 'Clear neuron'}
+                  </button>
+                )}
                 {poolIs(myPoolNeuron.status, 'Active') && (
-                  <button onClick={() => handleUnregisterPool(myPoolNeuron.neuron_id)}
+                  <button onClick={() => setConfirmLeaveId(myPoolNeuron.neuron_id)}
                     style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ember)', fontSize: 12, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4 }}>
                     <Icon name="x" size={12} stroke="var(--ember)" /> Leave pool
                   </button>
@@ -1508,12 +1601,13 @@ export default function App() {
               .map(n => (
                 <div key={n.neuron_id.toString()} className="col" style={{
                   gap: 6, padding: '10px 12px', borderRadius: 8,
-                  border: `1px solid ${n.rank <= 25 ? 'var(--burn)' : 'var(--border)'}`,
-                  background: n.rank <= 25 ? 'var(--burn-950)' : 'transparent',
+                  border: '1px solid var(--border)', background: 'transparent',
                 }}>
                   <div className="row" style={{ justifyContent: 'space-between' }}>
                     <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>#{n.neuron_id.toString()}</span>
-                    {n.rank <= 25 && <Chip tone="burn" style={{ height: 18, fontSize: 10 }}>Top {n.rank}</Chip>}
+                    {n.rank <= 25
+                      ? <Chip tone="ok" style={{ height: 18, fontSize: 10 }}><Icon name="check" size={10} /> Active - Paid</Chip>
+                      : <Chip tone="muted" style={{ height: 18, fontSize: 10 }}>Active</Chip>}
                   </div>
                   <span className="mono" style={{ fontSize: 13, color: 'var(--sprout)' }}>{fmtVP(n.voting_power)} VP</span>
                 </div>
@@ -1529,7 +1623,7 @@ export default function App() {
       )}
 
       {/* ── Main Layout (Dashboard + Pool Sidebar + Tweak Panel) ── */}
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
 
         {/* Left Column: Dashboard content */}
         <main style={{ flex: 1, minWidth: 320, overflowY: 'auto' }}>
@@ -1642,37 +1736,61 @@ export default function App() {
             <Reveal delay={40} motion={motion}>
               <div className="col" style={{ gap: 6 }}>
                 <Eyebrow style={{ color: 'var(--fg-3)' }}>Protocol totals · all participants</Eyebrow>
-                <div className="row" data-testid="global-stats-strip" style={{
+                <div className="col" data-testid="global-stats-strip" style={{
                   border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-alt)',
-                  padding: '10px 14px', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap'
+                  padding: '12px 14px', gap: 10
                 }}>
-                  <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                    <span>Followers</span>
-                    <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
-                      {globalStats ? globalStats.followers_count.toString() : "…"}
+                  {/* Row 1: General Stats */}
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', width: '100%' }}>
+
+                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                      <span>TVL</span>
+                      <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
+                        {globalStats ? `${fmtICP(globalStats.tvl_e8s)} ICP` : "…"}
+                      </span>
                     </span>
-                  </span>
-                  <span style={{ color: 'var(--border-hi)' }}>·</span>
-                  <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                    <span>TVL</span>
-                    <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
-                      {globalStats ? `${fmtICP(globalStats.tvl_e8s)} ICP` : "…"}
+                    <span style={{ color: 'var(--border-hi)' }}>·</span>
+                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                      <span>Burned</span>
+                      <span className="mono" style={{ fontSize: 14, color: 'var(--burn-300)' }}>
+                        {globalStats ? `${fmtICP(globalStats.total_burned_e8s)} ICP` : "…"}
+                      </span>
                     </span>
-                  </span>
-                  <span style={{ color: 'var(--border-hi)' }}>·</span>
-                  <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                    <span>Burned</span>
-                    <span className="mono" style={{ fontSize: 14, color: 'var(--burn-300)' }}>
-                      {globalStats ? `${fmtICP(globalStats.total_burned_e8s)} ICP` : "…"}
+                    <span style={{ color: 'var(--border-hi)' }}>·</span>
+                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                      <span>Votes cast</span>
+                      <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
+                        {globalStats ? globalStats.votes_cast.toString() : "…"}
+                      </span>
                     </span>
-                  </span>
-                  <span style={{ color: 'var(--border-hi)' }}>·</span>
-                  <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                    <span>Votes cast</span>
-                    <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
-                      {globalStats ? globalStats.votes_cast.toString() : "…"}
+                  </div>
+
+                  {/* Horizontal Divider */}
+                  <div style={{ height: 1, background: 'var(--border)', width: '100%' }} />
+
+                  {/* Row 2: Pooled Neuron Stats */}
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', width: '100%' }}>
+                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                      <span>Neurons</span>
+                      <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
+                        {poolInfo ? poolInfo.active_count.toString() : "…"}
+                      </span>
                     </span>
-                  </span>
+                    <span style={{ color: 'var(--border-hi)' }}>·</span>
+                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                      <span>TVP</span>
+                      <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
+                        {poolInfo || leaderInfo ? `${fmtVP(totalSyndicateVP)} VP` : "…"}
+                      </span>
+                    </span>
+                    <span style={{ color: 'var(--border-hi)' }}>·</span>
+                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                      <span>Top 25 Cutoff</span>
+                      <span className="mono" style={{ fontSize: 14, color: 'var(--sprout)' }}>
+                        {poolInfo ? `${fmtVP(getMinVotingPowerForTop25(poolInfo))} VP` : "…"}
+                      </span>
+                    </span>
+                  </div>
                 </div>
               </div>
             </Reveal>
@@ -1772,11 +1890,7 @@ export default function App() {
                         <Icon name={copied ? "check" : "copy"} size={12} stroke={copied ? "var(--sprout)" : "var(--fg-3)"} />
                       </button>
                     </div>
-                    {pooledVotingPower > 0n && (
-                      <span className="mono" style={{ fontSize: 12.5, color: 'var(--sprout)', whiteSpace: 'nowrap' }}>
-                        + {fmtVP(pooledVotingPower)} Pooled Voting Power
-                      </span>
-                    )}
+
                   </div>
                   {isFollowing ? (
                     <Chip tone="ok" style={{ height: 24 }}><Icon name="check" size={12} /> Following</Chip>
@@ -2339,8 +2453,11 @@ export default function App() {
           >
             {!poolSidebarCollapsed && (
               <>
-                <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--fg)', textTransform: 'uppercase', letterSpacing: '0.09em', whiteSpace: 'nowrap' }}>
-                  Pool Neurons
+                <span className="row" style={{ gap: 6, alignItems: 'center', minWidth: 0 }}>
+                  <NeuronGlyph size={15} />
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--fg)', textTransform: 'uppercase', letterSpacing: '0.09em', whiteSpace: 'nowrap' }}>
+                    Pool Neurons
+                  </span>
                 </span>
                 <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>
                   {poolInfo?.active_count.toString() ?? '0'} active
@@ -2353,8 +2470,12 @@ export default function App() {
           {/* Sidebar body */}
           {!poolSidebarCollapsed && (
             <div className="col" style={{ flex: 1, padding: 12, gap: 10 }}>
-              {/* Primary CTA: always first */}
-              {(!myPoolNeuron || poolIs(myPoolNeuron.status, 'Inactive')) && (
+              {/* Explainer: always the first item in the list */}
+              <Btn variant="secondary" sm style={{ width: '100%' }} onClick={() => setPoolDetailsOpen(true)}>
+                <Icon name="info" size={12} /> More details
+              </Btn>
+              {/* Primary CTA */}
+              {!myPoolNeuron && (
                 <Btn
                   variant="primary"
                   sm
@@ -2371,13 +2492,14 @@ export default function App() {
               {myPoolNeuron && (
                 <div className="col" style={{
                   gap: 7, padding: '9px 10px', borderRadius: 7,
-                  border: `1px solid ${poolIs(myPoolNeuron.status, 'Active') ? 'var(--sprout)' : poolIs(myPoolNeuron.status, 'Draft') ? 'var(--haze)' : 'var(--border)'}`,
-                  background: poolIs(myPoolNeuron.status, 'Active') ? 'var(--sprout-dim)' : poolIs(myPoolNeuron.status, 'Draft') ? 'var(--haze-dim)' : 'transparent',
+                  border: '1px solid var(--border)', background: 'transparent',
                 }}>
                   <div className="row" style={{ justifyContent: 'space-between', gap: 6 }}>
                     <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Your neuron</span>
                     {poolIs(myPoolNeuron.status, 'Active')
-                      ? <Chip tone="ok" style={{ height: 18, fontSize: 10 }}><Icon name="check" size={10} /> Active</Chip>
+                      ? (myPoolRank != null && myPoolRank <= 25
+                          ? <Chip tone="ok" style={{ height: 18, fontSize: 10 }}><Icon name="check" size={10} /> Active - Paid</Chip>
+                          : <Chip tone="muted" style={{ height: 18, fontSize: 10 }}>Active</Chip>)
                       : poolIs(myPoolNeuron.status, 'Draft')
                       ? <Chip tone="pending" style={{ height: 18, fontSize: 10 }}>Draft</Chip>
                       : <Chip tone="muted" style={{ height: 18, fontSize: 10 }}>Inactive</Chip>}
@@ -2390,14 +2512,23 @@ export default function App() {
                       {fmtVP(myPoolNeuron.voting_power)} VP
                     </span>
                   )}
-                  {poolIs(myPoolNeuron.status, 'Draft') && (
+                  {(poolIs(myPoolNeuron.status, 'Draft') || poolIs(myPoolNeuron.status, 'Inactive')) && (
                     <Btn variant="primary" sm style={{ width: '100%', marginTop: 2 }} onClick={() => openPoolWizard()}>
-                      <Icon name="arrowUp" size={12} stroke="var(--char-950)" /> Resume setup
+                      <Icon name="arrowUp" size={12} stroke="var(--char-950)" />
+                      {poolIs(myPoolNeuron.status, 'Draft') ? ' Resume setup' : ' Finish activation'}
                     </Btn>
+                  )}
+                  {poolIs(myPoolNeuron.status, 'Inactive') && (
+                    <button
+                      onClick={handleCancelPoolDraft} disabled={isCancellingDraft}
+                      style={{ background: 'none', border: 'none', cursor: isCancellingDraft ? 'default' : 'pointer', color: 'var(--ember)', fontSize: 11.5, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4, opacity: isCancellingDraft ? 0.5 : 1 }}
+                    >
+                      <Icon name="x" size={11} stroke="var(--ember)" /> {isCancellingDraft ? 'Clearing…' : 'Clear neuron'}
+                    </button>
                   )}
                   {poolIs(myPoolNeuron.status, 'Active') && (
                     <button
-                      onClick={() => handleUnregisterPool(myPoolNeuron.neuron_id)}
+                      onClick={() => setConfirmLeaveId(myPoolNeuron.neuron_id)}
                       style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ember)', fontSize: 11.5, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4 }}
                     >
                       <Icon name="x" size={11} stroke="var(--ember)" /> Leave pool
@@ -2412,14 +2543,15 @@ export default function App() {
                 .map(n => (
                   <div key={n.neuron_id.toString()} className="col" style={{
                     gap: 4, padding: '8px 10px', borderRadius: 6,
-                    border: `1px solid ${n.rank <= 25 ? 'var(--burn)' : 'var(--border)'}`,
-                    background: n.rank <= 25 ? 'var(--burn-950)' : 'transparent',
+                    border: '1px solid var(--border)', background: 'transparent',
                   }}>
                     <div className="row" style={{ justifyContent: 'space-between', gap: 6 }}>
                       <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         #{n.neuron_id.toString()}
                       </span>
-                      {n.rank <= 25 && <Chip tone="burn" style={{ height: 17, fontSize: 10 }}>Top {n.rank}</Chip>}
+                      {n.rank <= 25
+                        ? <Chip tone="ok" style={{ height: 17, fontSize: 10 }}><Icon name="check" size={9} /> Active - Paid</Chip>
+                        : <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>Active</Chip>}
                     </div>
                     <span className="mono" style={{ fontSize: 11.5, color: 'var(--sprout)' }}>{fmtVP(n.voting_power)} VP</span>
                   </div>
@@ -2436,16 +2568,22 @@ export default function App() {
         </aside>
 
         {/* Right Column: Tweak panel & Progression Ladder — local dev only */}
-        {isLocal && <aside style={{
+        {isLocal && dashControlsOpen && <aside style={{
           width: 320, padding: 24, borderLeft: '1px solid var(--border)', background: 'var(--bg-alt)',
-          display: 'flex', flexDirection: 'column', gap: 24, flexShrink: 0
+          display: 'flex', flexDirection: 'column', gap: 24, flexShrink: 0, overflowY: 'auto'
         }}>
           {/* Tweak Panel Header */}
-          <div className="col" style={{ gap: 4 }}>
-            <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: 'var(--burn)', letterSpacing: '0.1em' }}>
-              Simulator & Tweaks
-            </span>
-            <h4 style={{ margin: 0, fontFamily: 'var(--font-display)', color: 'var(--fg)' }}>Dashboard Controls</h4>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+            <div className="col" style={{ gap: 4 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: 'var(--burn)', letterSpacing: '0.1em' }}>
+                Simulator & Tweaks
+              </span>
+              <h4 style={{ margin: 0, fontFamily: 'var(--font-display)', color: 'var(--fg)' }}>Dashboard Controls</h4>
+            </div>
+            <button onClick={() => setDashControlsOpen(false)} title="Close controls"
+              style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)', padding: 2, flexShrink: 0 }}>
+              <Icon name="x" size={16} />
+            </button>
           </div>
 
           {/* Gating Mode selector */}
@@ -2582,6 +2720,19 @@ export default function App() {
             </div>
           )}
         </aside>}
+
+        {/* Reopen tab — shown when the controls panel is closed */}
+        {isLocal && !dashControlsOpen && (
+          <button onClick={() => setDashControlsOpen(true)} title="Open Dashboard Controls"
+            style={{
+              position: 'fixed', top: 84, right: 0, zIndex: 50,
+              background: 'var(--bg-alt)', border: '1px solid var(--border)', borderRight: 'none',
+              borderRadius: '6px 0 0 6px', padding: '8px 10px', cursor: 'pointer', color: 'var(--burn)',
+              display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600,
+            }}>
+            <Icon name="zap" size={14} stroke="var(--burn)" /> Controls
+          </button>
+        )}
 
       </div>
 
@@ -2784,6 +2935,103 @@ export default function App() {
         </div>
       )}
 
+      {/* ── Pool "More details" explainer ── */}
+      {poolDetailsOpen && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+          backdropFilter: 'blur(8px)', zIndex: 100, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }}
+          onClick={() => setPoolDetailsOpen(false)}>
+          <div className="card col" onClick={(e) => e.stopPropagation()} style={{
+            maxWidth: 460, width: '100%', gap: 16, background: 'var(--surface)',
+            border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)',
+            maxHeight: '90vh', overflowY: 'auto',
+          }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="info" size={18} stroke="var(--burn)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>About the Neuron Pool</h4>
+              </span>
+              <button onClick={() => setPoolDetailsOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+
+            <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+              <Eyebrow>What is the pool?</Eyebrow>
+              <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
+                Members pool their neurons' voting power behind the syndicate's leader neuron. Each pooled neuron automatically votes the way the leader votes, and the combined voting power gives the syndicate more influence over NNS proposals.
+              </p>
+            </div>
+
+            <div className="col" style={{ gap: 8, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+              <Eyebrow>Status badges</Eyebrow>
+              <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
+                <Chip tone="ok" style={{ height: 20, fontSize: 10, flexShrink: 0 }}><Icon name="check" size={10} /> Active - Paid</Chip>
+                <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                  Ranked in the <strong style={{ color: 'var(--fg)' }}>top 25</strong> by voting power — earns a share of every settled proposal's payout.
+                </span>
+              </div>
+              <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
+                <Chip tone="muted" style={{ height: 20, fontSize: 10, flexShrink: 0 }}>Active</Chip>
+                <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                  Voting with the pool, but outside the top 25 — not currently receiving payouts. Grow your voting power to move up the ranks.
+                </span>
+              </div>
+            </div>
+
+            <div className="col" style={{ gap: 8, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+              <Eyebrow>Voting power (VP)</Eyebrow>
+              <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
+                Each neuron contributes its NNS voting power to the pool. Neurons are ranked by VP — the higher your VP, the higher your rank, and the top 25 are the paid tier. The pool's total VP is the sum across all active neurons.
+              </p>
+            </div>
+
+            <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+              <Eyebrow>How to join</Eyebrow>
+              <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
+                Register your neuron, then pay the one-time initiation fee{config ? ` (${fmtICP(config.pool_initiation_fee_e8s + 30_000n)} ICP)` : ''} to activate it. The fee is split 50% to the treasury and 25% / 25% to backend and frontend cycle reserves. Once active, your neuron votes with the pool and is eligible for payouts if it reaches the top 25.
+              </p>
+            </div>
+
+            <Btn variant="primary" style={{ width: '100%' }} onClick={() => setPoolDetailsOpen(false)}>Got it</Btn>
+          </div>
+        </div>
+      )}
+
+      {/* ── Leave-pool confirmation ── */}
+      {confirmLeaveId !== null && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+          backdropFilter: 'blur(8px)', zIndex: 110, display: 'flex',
+          alignItems: 'center', justifyContent: 'center', padding: 16
+        }}
+          onClick={() => { if (!isLeavingPool) setConfirmLeaveId(null); }}>
+          <div className="card col" onClick={(e) => e.stopPropagation()} style={{
+            maxWidth: 400, width: '100%', gap: 16, background: 'var(--surface)',
+            border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)',
+          }}>
+            <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <Icon name="x" size={18} stroke="var(--ember)" />
+              <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Leave the pool?</h4>
+            </div>
+            <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
+              Your neuron <span className="mono" style={{ color: 'var(--fg)' }}>#{confirmLeaveId.toString()}</span> will become <strong style={{ color: 'var(--fg)' }}>Inactive</strong> and stop earning pool payouts. You can reactivate it later from the pool sidebar — the initiation fee is not refunded.
+            </p>
+            <div className="row" style={{ gap: 12 }}>
+              <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setConfirmLeaveId(null)} disabled={isLeavingPool}>
+                Cancel
+              </Btn>
+              <Btn variant="danger" style={{ flex: 1 }} onClick={() => handleUnregisterPool(confirmLeaveId)} disabled={isLeavingPool}>
+                {isLeavingPool ? <LiveDot size={7} color="var(--ember)" /> : <Icon name="x" size={13} stroke="var(--ember)" />}
+                {isLeavingPool ? ' Leaving…' : ' Leave pool'}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Pool Setup Wizard ── */}
       {isPoolWizardOpen && principal && !principal.isAnonymous() && (
         <div style={{
@@ -2955,7 +3203,9 @@ export default function App() {
                   <>
                     <div className="col" style={{ gap: 8 }}>
                       <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
-                        Your neuron draft is saved. Pay the initiation fee to activate it and start earning pool payouts.
+                        {myPoolNeuron && poolIs(myPoolNeuron.status, 'Inactive')
+                          ? 'Your neuron is inactive. Pay the initiation fee to reactivate it and start earning pool payouts again.'
+                          : 'Your neuron draft is saved. Pay the initiation fee to activate it and start earning pool payouts.'}
                       </span>
                       <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
                         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -2989,12 +3239,17 @@ export default function App() {
                     )}
 
                     <div className="row" style={{ gap: 12 }}>
-                      <Btn variant="danger" sm style={{ flexShrink: 0 }}
-                        onClick={handleCancelPoolDraft}
-                        disabled={isPoolFinalizing || isCancellingDraft}>
-                        {isCancellingDraft ? <LiveDot size={7} color="var(--ember)" /> : <Icon name="x" size={12} stroke="var(--ember)" />}
-                        {isCancellingDraft ? ' Cancelling…' : ' Discard'}
-                      </Btn>
+                      {/* Discard only applies to a Draft — `cancel_pool_draft`
+                          rejects Inactive (INVALID_STATE). Reactivating an
+                          Inactive neuron, the user closes via the header X. */}
+                      {(!myPoolNeuron || poolIs(myPoolNeuron.status, 'Draft')) && (
+                        <Btn variant="danger" sm style={{ flexShrink: 0 }}
+                          onClick={handleCancelPoolDraft}
+                          disabled={isPoolFinalizing || isCancellingDraft}>
+                          {isCancellingDraft ? <LiveDot size={7} color="var(--ember)" /> : <Icon name="x" size={12} stroke="var(--ember)" />}
+                          {isCancellingDraft ? ' Cancelling…' : ' Discard'}
+                        </Btn>
+                      )}
                       <Btn variant="primary" style={{ flex: 1 }}
                         onClick={handlePoolPayAndFinalize}
                         disabled={isPoolFinalizing || isCancellingDraft || (config ? holdings < config.pool_initiation_fee_e8s + 40_000n : false)}>
