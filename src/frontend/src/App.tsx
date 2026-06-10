@@ -2400,8 +2400,15 @@ export default function App() {
                             borderRadius: 8, background: 'var(--surface)', padding: 14
                           }}>
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                              <div className="col" style={{ gap: 5, minWidth: 0, flex: 1 }}>
-                                <Chip tone="muted" style={{ height: 18, fontSize: 10.5, alignSelf: 'flex-start' }}>{p.category}</Chip>
+                              <div className="col" style={{ gap: 7, minWidth: 0, flex: 1 }}>
+                                <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{p.category}</Chip>
+                                  <a href={nnsProposalLink(p)} target="_blank" rel="noreferrer" className="mono" style={{
+                                    fontSize: 11, color: 'var(--burn)', whiteSpace: 'nowrap', textDecoration: 'underline'
+                                  }} title="View full proposal on the NNS">
+                                    #{p.id.toString()}
+                                  </a>
+                                </div>
                                 <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--fg)', textWrap: 'pretty', overflowWrap: 'anywhere' }}>{p.title}</span>
                                 {p.summary && p.summary !== p.title && (
                                   <span style={{
