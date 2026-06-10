@@ -105,6 +105,9 @@ Tier dissolve delays are FIXED in code; `admin_set_staking_config` only tunes
 
 - The 6-month minimum tier matches the NNS minimum dissolve delay for voting
   eligibility — **no Mission 70 dependency** (the old 2-week pool is gone).
+- Bootstrap makes each neuron **public on the NNS** (`SetVisibility = 2`,
+  part of the DelaySet→Ready step, sweep-retried) — auditability is part of
+  the product promise; the UI links each tier to its dashboard page.
 - Kill switch: `admin_set_feature_flag '("lossless_voting", false)'`.
 - The backend canister is each neuron's **sole controller** — losing the
   canister loses the neurons. Controller hygiene (above) is critical.

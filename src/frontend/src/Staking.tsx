@@ -344,41 +344,6 @@ export default function Staking({
           )}
         </div>
 
-        {/* ── Tier pools ── */}
-        <div className="col" style={{ ...card, gap: 10, flex: '1 1 300px', minWidth: 280 }}>
-          <Eyebrow>Term pools · one neuron each</Eyebrow>
-          <div className="col" style={{ gap: 8 }}>
-            {TIER_ORDER.map(t => {
-              const tp = tierPool(t);
-              return (
-                <div key={t} className="col" style={{
-                  gap: 5, padding: '8px 10px', borderRadius: 8,
-                  border: `1px solid ${t === tier ? 'var(--border-hi)' : 'var(--border)'}`,
-                }}>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                    <span className="row" style={{ gap: 7, fontSize: 12.5, fontWeight: 600 }}>
-                      {TIER_META[t].label}
-                      <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>
-                        {TIER_META[t].mult}× power · {TIER_META[t].tickets} tickets/day
-                      </Chip>
-                    </span>
-                    {tp && bootstrapChip(tp.bootstrap)}
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between', fontSize: 11.5, color: 'var(--fg-3)' }}>
-                    <span className="mono">{tp ? fmtICP(tp.total_staked_e8s) : '…'} ICP staked · {tp ? tp.staker_count.toString() : '…'} stakers</span>
-                    <span className="mono" style={{ fontSize: 10.5 }}>{tp?.neuron_id != null ? `#${tp.neuron_id}` : 'no neuron'}</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-            <Icon name="info" size={12} stroke="var(--fg-3)" />
-            Each canister-controlled neuron follows the community leader on every topic so no
-            voting reward is missed.
-          </span>
-        </div>
-
         {/* ── Yield ── */}
         <div className="col" style={{ ...card, gap: 10, flex: '1 1 260px', minWidth: 250 }}>
           <Eyebrow>Yield · 50% lottery / 50% treasury</Eyebrow>
@@ -418,6 +383,82 @@ export default function Staking({
             funds the treasury. Maturity harvests at ~1.05 ICP; the NNS mints it ~7 days later.
           </span>
         </div>
+      </div>
+
+      {/* ── Term pools — one public NNS neuron per term ── */}
+      <div className="col" style={{ ...card, gap: 12 }}>
+        <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <Eyebrow>Term pools · one neuron each</Eyebrow>
+          <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+            every pool neuron is public on the NNS
+          </span>
+        </span>
+        <div className="row" style={{ gap: 12, alignItems: 'stretch', flexWrap: 'wrap' }}>
+          {TIER_ORDER.map(t => {
+            const tp = tierPool(t);
+            const ready = tp?.bootstrap === StakingBootstrap.Ready;
+            return (
+              <div key={t} className="col" style={{
+                gap: 10, padding: '14px 16px', borderRadius: 10,
+                flex: '1 1 240px', minWidth: 0,
+                border: `1px solid ${t === tier ? 'var(--border-hi)' : 'var(--border)'}`,
+                background: t === tier ? 'color-mix(in srgb, var(--burn-950) 40%, transparent)' : 'transparent',
+              }}>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                  <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>{TIER_META[t].label}</b>
+                  {tp ? bootstrapChip(tp.bootstrap) : <Chip tone="muted">…</Chip>}
+                </div>
+                <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].mult}× power</Chip>
+                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].tickets} tickets/day</Chip>
+                </div>
+                <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Staked</span>
+                    <span className="mono">{tp ? fmtICP(tp.total_staked_e8s) : '…'} ICP</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Stakers</span>
+                    <span className="mono">{tp ? tp.staker_count.toString() : '…'}</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
+                    <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
+                    {tp?.neuron_id != null ? (
+                      isLocal ? (
+                        <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
+                          #{tp.neuron_id.toString()}
+                        </span>
+                      ) : (
+                        <a
+                          className="mono"
+                          href={`https://dashboard.internetcomputer.org/neuron/${tp.neuron_id.toString()}`}
+                          target="_blank" rel="noreferrer"
+                          style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                          title="View this neuron on the NNS dashboard"
+                        >
+                          #{tp.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                        </a>
+                      )
+                    ) : (
+                      <span style={{ color: 'var(--fg-3)' }}>created on first stake</span>
+                    )}
+                  </div>
+                </div>
+                {ready && (
+                  <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout)' }}>
+                    <Icon name="eye" size={12} stroke="var(--sprout)" />
+                    Public on the NNS — audit it any time.
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+          <Icon name="info" size={12} stroke="var(--fg-3)" />
+          Each canister-controlled neuron is made public the moment it's configured and follows
+          the community leader on every topic, so no voting reward is missed.
+        </span>
       </div>
 
       {/* ── Pending unstakes ── */}

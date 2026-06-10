@@ -2760,6 +2760,13 @@ pub struct IncreaseDissolveDelay {
 pub enum Operation {
     StartDissolving(EmptyRecord),
     IncreaseDissolveDelay(IncreaseDissolveDelay),
+    SetVisibility(SetVisibilityOp),
+}
+
+/// governance.did: `SetVisibility = record { visibility : opt int32 }`.
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct SetVisibilityOp {
+    pub visibility: Option<i32>,
 }
 
 #[derive(CandidType, Serialize, Clone, Debug)]
@@ -4981,6 +4988,9 @@ const MOCK_STAKE_SUBACCOUNT: [u8; 32] = [4u8; 32];
 const TOPIC_CATCH_ALL: i32 = 0;
 const TOPIC_SNS_AND_NEURONS_FUND: i32 = 14;
 const NNS_GOVERNANCE_ID: &str = "rrkah-fqaaa-aaaaa-aaaaq-cai";
+/// NNS neuron visibility (governance.did): 2 = public. Every pool neuron is
+/// made public at bootstrap so the community can audit it on the dashboard.
+const NEURON_VISIBILITY_PUBLIC: i32 = 2;
 /// Don't run a yield distribution below this (must dwarf the transfer fee).
 const YIELD_MIN_DISTRIBUTION_E8S: u64 = 1_000_000;
 /// DisburseMaturity mints ICP ~7 days later.
@@ -5233,6 +5243,8 @@ struct MockNeuronState {
     dissolving: bool,
     dissolve_eta: u64,
     maturity_e8s: u64,
+    /// Mock mirror of the NNS visibility flag (set by SetVisibility).
+    public: bool,
 }
 
 struct MockGovernance {
@@ -5506,6 +5518,29 @@ async fn gov_increase_dissolve_delay(neuron_id: u64, additional_secs: u32) -> Re
             MOCK_GOV.with(|g| {
                 if let Some(n) = g.borrow_mut().neurons.get_mut(&neuron_id) {
                     n.delay_secs = n.delay_secs.saturating_add(additional_secs as u64);
+                }
+            });
+            Ok(())
+        }
+    }
+}
+
+/// Make the neuron public on the NNS (visibility = 2). Auditability is part
+/// of the staking promise: anyone can verify the pool neurons on the
+/// dashboard. Idempotent — safe to re-run on every bootstrap retry.
+async fn gov_set_visibility(neuron_id: u64) -> Result<(), String> {
+    let cmd = Command::Configure(ConfigureCmd {
+        operation: Some(Operation::SetVisibility(SetVisibilityOp {
+            visibility: Some(NEURON_VISIBILITY_PUBLIC),
+        })),
+    });
+    match call_manage_neuron(Some(neuron_id), cmd).await? {
+        GovOutcome::Response(CommandResponse::Configure(_)) => Ok(()),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => {
+            MOCK_GOV.with(|g| {
+                if let Some(n) = g.borrow_mut().neurons.get_mut(&neuron_id) {
+                    n.public = true;
                 }
             });
             Ok(())
@@ -5901,6 +5936,9 @@ async fn advance_tier_bootstrap(tier: StakeTier) -> Result<(), String> {
         set_tier_pool(tier, pool.clone());
     }
     if pool.bootstrap == StakingBootstrap::DelaySet {
+        // Public on the NNS the moment it exists — the sweep retries this
+        // step (with the follows) until both land.
+        gov_set_visibility(neuron_id).await?;
         gov_follow_all_topics(neuron_id, config.primary_neuron_id).await?;
         pool.bootstrap = StakingBootstrap::Ready;
         set_tier_pool(tier, pool.clone());
@@ -9633,6 +9671,11 @@ mod tests {
         assert_eq!(
             MOCK_GOV.with(|g| g.borrow().neurons.get(&neuron_id).unwrap().delay_secs),
             StakeTier::SixMonths.dissolve_delay_secs()
+        );
+        // Bootstrap published the neuron on the (mock) NNS.
+        assert!(
+            MOCK_GOV.with(|g| g.borrow().neurons.get(&neuron_id).unwrap().public),
+            "pool neurons are public the moment they're configured"
         );
 
         // Second stake from another user: min is now 0.1 ICP and tops up the
