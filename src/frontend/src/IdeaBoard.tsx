@@ -190,6 +190,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   const [detailIdea, setDetailIdea] = useState<Idea | null>(null);
   const [detailProject, setDetailProject] = useState<Project | null>(null);
   const [isRemovingProject, setIsRemovingProject] = useState(false);
+  const [isRemovingIdea, setIsRemovingIdea] = useState(false);
 
   // Pay modal (upvote an idea / fund a project)
   const [payTarget, setPayTarget] = useState<PayTarget | null>(null);
@@ -520,6 +521,24 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
       alert(`Error: ${err.message || err}`);
     } finally {
       setIsRemovingProject(false);
+    }
+  };
+
+  const handleRemoveIdea = async (ideaId: bigint) => {
+    if (!actor || isRemovingIdea) return;
+    if (!confirm("Are you sure you want to remove this idea?")) return;
+    setIsRemovingIdea(true);
+    try {
+      const res = await actor.admin_remove_idea(ideaId);
+      if (res.__kind__ === "Err") {
+        alert(`Remove failed: ${res.Err}`);
+      }
+      setDetailIdea(null);
+      await refreshAll();
+    } catch (err: any) {
+      alert(`Error: ${err.message || err}`);
+    } finally {
+      setIsRemovingIdea(false);
     }
   };
 
@@ -1116,6 +1135,36 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
               <Icon name="arrowUp" size={14} stroke="var(--char-950)" />
               {signedIn ? 'Upvote with funds' : 'Sign in to upvote'}
             </Btn>
+            {isAdmin && (
+              <div
+                className="row"
+                style={{
+                  gap: 16,
+                  justifyContent: 'center',
+                  alignSelf: 'center',
+                  marginTop: 8,
+                }}
+              >
+                <button
+                  onClick={() => handleRemoveIdea(detailIdea.id)}
+                  disabled={isRemovingIdea}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: isRemovingIdea ? 'default' : 'pointer',
+                    color: 'var(--ember)',
+                    fontSize: 12,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    opacity: isRemovingIdea ? 0.5 : 1,
+                  }}
+                >
+                  <Icon name="x" size={12} stroke="var(--ember)" />
+                  {isRemovingIdea ? 'Removing…' : 'Remove idea (admin)'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

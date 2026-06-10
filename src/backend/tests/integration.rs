@@ -1676,5 +1676,89 @@ fn test_admin_setters_reject_non_admin_integration() {
     assert_eq!(cfg.frontend_canister_id, Some(some_canister), "frontend canister id was updated");
 }
 
+#[derive(CandidType, Deserialize, Debug)]
+struct Idea {
+    id: u64,
+    poster: Principal,
+    title: String,
+    description: String,
+    detail: String,
+    created_at: u64,
+    last_upvote_at: u64,
+    upvote_count: u64,
+    views: u64,
+    total_icp_e8s: u64,
+    total_ckbtc_e8s: u64,
+    total_cketh_wei: u64,
+}
+
+// ── admin_remove_idea: admin can remove ideas at any time, non-admins rejected ──
+#[test]
+fn test_admin_remove_idea_integration() {
+    let Some(env) = setup_saga() else { return };
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    let stranger = Principal::from_slice(&[9, 9, 9, 9]);
+
+    // Enable the idea board feature flag so posting isn't rejected as disabled
+    // (default is enabled, but let's make sure or toggle config)
+    let r = env.pic.update_call(env.backend, owner, "admin_set_feature_flag", encode_args(("idea_board".to_string(), true)).unwrap()).expect("enable idea board");
+    assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Ok));
+
+    // 1. Post an idea (we need to fund the post fee address first)
+    // Query deposit address
+    let r = env.pic.query_call(env.backend, env.user, "get_idea_post_deposit_address", encode_one(()).unwrap()).expect("deposit address");
+    let dep_acc: LAccountDe = decode_one(&r).unwrap();
+
+    // Mint ICP to user
+    env.mint(env.user, 10_000_000_000); // 100 ICP
+
+    // Transfer post fee + ledger fee from user to dep_acc
+    let fee_xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount { owner: dep_acc.owner, subaccount: dep_acc.subaccount },
+        amount: candid::Nat::from(100_000_000u64 + 10_000u64), // 1 ICP + ledger fee
+        fee: Some(candid::Nat::from(10_000u64)),
+        memo: None,
+        created_at_time: None,
+    };
+    let r = env.pic.update_call(env.ledger, env.user, "icrc1_transfer", encode_one(fee_xfer).unwrap()).expect("transfer post fee");
+    assert!(matches!(decode_one::<TransferResult>(&r).unwrap(), TransferResult::Ok(_)));
+
+    // Call post_idea
+    let r = env.pic.update_call(
+        env.backend,
+        env.user,
+        "post_idea",
+        encode_args(("IntegrTitle".to_string(), "IntegrDesc".to_string(), "".to_string())).unwrap()
+    ).expect("post idea");
+    let idea_id: u64 = match decode_one::<Result<u64, String>>(&r).unwrap() {
+        Ok(id) => id,
+        Err(e) => panic!("failed to post idea: {}", e),
+    };
+
+    // Verify it is in list_ideas
+    let r = env.pic.query_call(env.backend, env.user, "list_ideas", encode_one(()).unwrap()).expect("list ideas");
+    let ideas: Vec<Idea> = decode_one(&r).unwrap();
+    assert!(ideas.iter().any(|i| i.id == idea_id));
+
+    // 2. Stranger tries to remove idea -> Err / rejected by guard
+    let r = env.pic.update_call(env.backend, stranger, "admin_remove_idea", encode_one(idea_id).unwrap());
+    assert!(r.is_err(), "Stranger remove must be rejected by guard");
+    if let Err(e) = r {
+        assert!(e.to_string().contains("Caller is not an admin"), "Expected 'Caller is not an admin', got: {:?}", e);
+    }
+
+    // 3. Admin (owner) removes idea -> Ok
+    let r = env.pic.update_call(env.backend, owner, "admin_remove_idea", encode_one(idea_id).unwrap()).expect("admin remove");
+    let res: UnitResult = decode_one(&r).unwrap();
+    assert!(matches!(res, UnitResult::Ok), "Admin remove must succeed: {:?}", res);
+
+    // Verify it is gone from list_ideas
+    let r = env.pic.query_call(env.backend, env.user, "list_ideas", encode_one(()).unwrap()).expect("list ideas 2");
+    let ideas: Vec<Idea> = decode_one(&r).unwrap();
+    assert!(!ideas.iter().any(|i| i.id == idea_id));
+}
+
+
 
 

@@ -330,6 +330,8 @@ service : (InitPayload) -> {
   admin_update_project : (nat64, text, text, text, nat64, nat64, nat64, bool, bool, bool) -> (Result);
   // Admin: remove a project from the board.
   admin_remove_project : (nat64) -> (Result);
+  // Admin: remove an idea from the board.
+  admin_remove_idea : (nat64) -> (Result);
   // The caller's deposit subaccount for funding a project. Fund it on the
   // chosen token's ledger with amount + fee, then call fund_project.
   get_project_deposit_address : (nat64) -> (LedgerAccount) query;

@@ -3752,6 +3752,18 @@ fn admin_set_min_upvote(token: IdeaToken, min: u64) -> Result<(), String> {
     })
 }
 
+/// Admin: remove an idea from the board at any time. Settled upvotes stay in the
+/// treasury/poster; any in-flight upvote saga refunds via the orphan path.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_remove_idea(idea_id: u64) -> Result<(), String> {
+    IDEAS.with(|m| {
+        if m.borrow_mut().remove(&idea_id).is_none() {
+            return Err("IDEA_NOT_FOUND".to_string());
+        }
+        Ok(())
+    })
+}
+
 /// 75% → treasury, 25% (plus rounding remainder) → idea poster.
 fn split_upvote(amount: u64) -> (u64, u64) {
     let treasury = amount / 4 * 3;
@@ -6661,4 +6673,26 @@ mod tests {
         delete_expired_ideas();
         assert!(IDEAS.with(|m| m.borrow().get(&idea_id)).is_none());
     }
+
+    #[tokio::test]
+    async fn test_admin_remove_idea() {
+        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(poster);
+        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
+        set_mock_ledger_transfer(Ok(1));
+        let idea_id = post_idea("Idea to remove".into(), "Desc".into(), "".into()).await.unwrap();
+        assert!(IDEAS.with(|m| m.borrow().get(&idea_id)).is_some());
+
+        // Remove the idea (guard isn't executed in unit tests, so we test core logic)
+        assert!(admin_remove_idea(idea_id).is_ok());
+        assert!(IDEAS.with(|m| m.borrow().get(&idea_id)).is_none());
+        assert!(list_ideas().into_iter().all(|i| i.id != idea_id));
+
+        // Removing non-existent idea -> Err
+        assert_eq!(
+            admin_remove_idea(999_999u64).unwrap_err(),
+            "IDEA_NOT_FOUND"
+        );
+    }
 }
+
