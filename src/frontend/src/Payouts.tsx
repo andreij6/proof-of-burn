@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
-import { PayoutType, IdeaToken } from "./bindings/backend";
-import type { Payout } from "./bindings/backend";
+import { TxDirection, IdeaToken } from "./bindings/backend";
+import type { TransactionRecord } from "./bindings/backend";
 import { fmtTokenAmount } from "./IdeaBoard";
 import { Icon, Eyebrow, Chip, Btn, formatPrincipal } from "./ui";
 
@@ -19,27 +19,21 @@ interface PayoutsProps {
   onSignIn: () => void;
 }
 
-const PAYOUT_META: Record<PayoutType, { label: string; icon: string; blurb: string }> = {
-  [PayoutType.LotteryWin]: {
-    label: 'Lottery jackpot', icon: 'target',
-    blurb: '80% of the prize pool',
-  },
-  [PayoutType.UnstakeDisbursement]: {
-    label: 'Unstake disbursement', icon: 'zap',
-    blurb: 'Dissolved stake returned to your wallet',
-  },
-  [PayoutType.IdeaUpvoteShare]: {
-    label: 'Idea upvote share', icon: 'bulb',
-    blurb: '25% poster share of an upvote',
-  },
-  [PayoutType.CommitmentRefund]: {
-    label: 'Commitment refund', icon: 'undo',
-    blurb: 'Escrow returned — threshold unmet',
-  },
-  [PayoutType.PoolReward]: {
-    label: 'Pool reward', icon: 'arrowUp',
-    blurb: '25% of a settled burn, shared by top pool neurons',
-  },
+const TX_META: Record<string, { label: string; icon: string; blurb: string }> = {
+  // In — payouts the site made to you.
+  LotteryWin: { label: 'Lottery jackpot', icon: 'target', blurb: '80% of the prize pool' },
+  UnstakeDisbursement: { label: 'Unstake disbursement', icon: 'zap', blurb: 'Dissolved stake returned to your wallet' },
+  IdeaUpvoteShare: { label: 'Idea upvote share', icon: 'bulb', blurb: '25% poster share of an upvote' },
+  CommitmentRefund: { label: 'Commitment refund', icon: 'undo', blurb: 'Escrow returned — threshold unmet' },
+  PoolReward: { label: 'Pool reward', icon: 'arrowUp', blurb: '25% of a settled burn, shared by top pool neurons' },
+  // Out — what you put in.
+  deposit: { label: 'Burn commitment', icon: 'flame', blurb: 'Escrowed behind a proposal stance' },
+  add_commitment: { label: 'Commitment top-up', icon: 'flame', blurb: 'Added to an open commitment' },
+  idea_post: { label: 'Idea post fee', icon: 'bulb', blurb: '1 ICP anti-spam fee to the treasury' },
+  idea_upvote: { label: 'Idea upvote', icon: 'bulb', blurb: '75% treasury · 25% to the poster' },
+  project_fund: { label: 'Project funding', icon: 'coins', blurb: '100% to the treasury build fund' },
+  pool_register: { label: 'Pool initiation fee', icon: 'target', blurb: 'One-time neuron pool entry' },
+  stake: { label: 'Stake lockup', icon: 'zap', blurb: 'Locked, not spent — returns in full on unstake' },
 };
 
 const TOKEN_DECIMALS: Record<IdeaToken, { label: string; decimals: number }> = {
@@ -56,24 +50,24 @@ function payoutDate(atNs: bigint): string {
 
 export default function Payouts({ actor, principal, isLocal, onSignIn }: PayoutsProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
-  const [payouts, setPayouts] = useState<Payout[]>([]);
+  const [txs, setTxs] = useState<TransactionRecord[]>([]);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     (async () => {
-      if (!actor || !signedIn) { setPayouts([]); setLoaded(false); return; }
+      if (!actor || !signedIn) { setTxs([]); setLoaded(false); return; }
       try {
-        let mine = await actor.get_my_payouts();
+        let mine = await actor.get_my_transactions();
         // Local dev: seed a varied mock history on first visit so the page
         // is never empty while testing (no-op on mainnet and once seeded).
         if (isLocal && mine.length === 0) {
           const res = await actor.dev_seed_payouts();
-          if (res.__kind__ === "Ok") mine = await actor.get_my_payouts();
+          if (res.__kind__ === "Ok") mine = await actor.get_my_transactions();
         }
-        setPayouts(mine);
+        setTxs(mine);
         setLoaded(true);
       } catch (err) {
-        console.error("Failed to fetch payouts:", err);
+        console.error("Failed to fetch transactions:", err);
       }
     })();
   }, [actor, principal, signedIn, isLocal]);
@@ -91,11 +85,11 @@ export default function Payouts({ actor, principal, isLocal, onSignIn }: Payouts
           <Icon name="wallet" size={16} stroke="var(--burn)" />
           <Eyebrow accent>Profile</Eyebrow>
         </span>
-        <b style={{ fontSize: 17 }}>Your account. Everything the site has paid you.</b>
+        <b style={{ fontSize: 17 }}>Your account. Every ICP in, every ICP out.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 640 }}>
-          Lottery jackpots, unstake disbursements, idea upvote shares, commitment refunds,
-          pool rewards — every payout lands in your wallet automatically the moment it
-          settles. Nothing to claim; this is the receipt trail, newest first.
+          Commitments, fees, stakes and upvotes on one side — jackpots, disbursements,
+          shares and refunds on the other. Payouts land in your wallet automatically the
+          moment they settle; this is the full receipt trail, newest first.
         </span>
         {signedIn && (
           <span className="row" style={{ gap: 8, marginTop: 4 }}>
@@ -115,43 +109,44 @@ export default function Payouts({ actor, principal, isLocal, onSignIn }: Payouts
       </div>
 
       <div className="col" style={{ ...card, gap: 10 }}>
-        <Eyebrow>Payout history</Eyebrow>
+        <Eyebrow>Transaction history</Eyebrow>
         {!signedIn ? (
           <div className="col" style={{ gap: 10, alignItems: 'flex-start' }}>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-              Sign in to see your profile and payout history.
+              Sign in to see your profile and transaction history.
             </span>
             <Btn variant="primary" sm onClick={onSignIn}>
               <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
             </Btn>
           </div>
-        ) : payouts.length === 0 ? (
+        ) : txs.length === 0 ? (
           <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
             {loaded
-              ? "No payouts yet — stake, post ideas, or hold lottery tickets and they'll land here."
+              ? "Nothing yet — commit to a proposal, stake, or post an idea and every movement shows up here."
               : "Loading…"}
           </span>
         ) : (
           <div className="col" style={{ gap: 0 }}>
-            {payouts.map((po) => {
-              const meta = PAYOUT_META[po.payout_type];
-              const tok = TOKEN_DECIMALS[po.token];
+            {txs.map((tx, i) => {
+              const meta = TX_META[tx.kind] ?? { label: tx.kind, icon: 'coins', blurb: '' };
+              const tok = TOKEN_DECIMALS[tx.token];
+              const incoming = tx.direction === TxDirection.In;
               return (
-                <div key={String(po.id)} className="row" style={{
+                <div key={`${tx.kind}-${String(tx.timestamp)}-${i}`} className="row" style={{
                   gap: 10, padding: '10px 0', fontSize: 12.5, flexWrap: 'wrap',
                   borderTop: '1px solid var(--border)', justifyContent: 'space-between',
                 }}>
                   <span className="row" style={{ gap: 10 }}>
-                    <Icon name={meta.icon} size={14} stroke="var(--burn)" />
+                    <Icon name={meta.icon} size={14} stroke={incoming ? 'var(--sprout)' : 'var(--burn)'} />
                     <span className="col" style={{ gap: 2 }}>
                       <b>{meta.label}</b>
                       <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                        {meta.blurb} · {payoutDate(po.created_at)}
+                        {meta.blurb ? `${meta.blurb} · ` : ''}{payoutDate(tx.timestamp)}
                       </span>
                     </span>
                   </span>
-                  <Chip tone="ok">
-                    +{fmtTokenAmount(po.amount, tok.decimals)} {tok.label}
+                  <Chip tone={incoming ? 'ok' : 'muted'}>
+                    {incoming ? '+' : '−'}{fmtTokenAmount(tx.amount, tok.decimals)} {tok.label}
                   </Chip>
                 </div>
               );

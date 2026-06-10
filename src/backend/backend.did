@@ -369,6 +369,17 @@ type Payout = record {
   ref_id : nat64;
 };
 type ClaimResult = variant { Ok : nat64; Err : text };
+type TxDirection = variant { In; Out };
+// One Profile transaction row — spends (Out: commits, idea posts, pool fees,
+// stake lockups, upvotes, fundings) and payouts (In) unified, newest first.
+type TransactionRecord = record {
+  direction : TxDirection;
+  kind : text;
+  token : IdeaToken;
+  amount : nat64;
+  timestamp : nat64;
+  ref_id : nat64;
+};
 
 type Vote = variant { No; Yes; Abstain };
 type VoteRecord = record {
@@ -527,6 +538,8 @@ service : (InitPayload) -> {
   list_lottery_draws : () -> (vec LotteryDraw) query;
   // The caller's payout history, newest first.
   get_my_payouts : () -> (vec Payout) query;
+  // The caller's unified transaction history (spends + payouts), newest first.
+  get_my_transactions : () -> (vec TransactionRecord) query;
   // Admin: tune how many tickets a daily login credits.
   admin_set_lottery_config : (opt nat64) -> (Result);
   // Local-dev: hold a drawing now; force_win rigs ticket 0 to win.

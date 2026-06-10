@@ -996,7 +996,11 @@ export default function App() {
     if (page === 'lottery' && featureFlags.length > 0 && !lotteryEnabled) {
       setPage('dashboard');
     }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, featureFlags.length]);
+    // Profile is account-scoped: bounce signed-out visitors.
+    if (page === 'payouts' && (!principal || principal.isAnonymous())) {
+      setPage('dashboard');
+    }
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1550,10 +1554,12 @@ export default function App() {
             Community R&D
           </Btn>
         )}
-        <Btn variant={page === 'payouts' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('payouts')}>
-          <Icon name="wallet" size={14} stroke={page === 'payouts' ? 'var(--char-950)' : 'currentColor'} />
-          Profile
-        </Btn>
+        {principal && !principal.isAnonymous() && (
+          <Btn variant={page === 'payouts' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('payouts')}>
+            <Icon name="wallet" size={14} stroke={page === 'payouts' ? 'var(--char-950)' : 'currentColor'} />
+            Profile
+          </Btn>
+        )}
         {isAdmin && (
           <Btn variant={page === 'admin' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin')}>
             <Icon name="key" size={14} stroke={page === 'admin' ? 'var(--char-950)' : 'currentColor'} />

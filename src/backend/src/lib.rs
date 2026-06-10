@@ -7179,6 +7179,122 @@ fn list_lottery_draws() -> Vec<LotteryDraw> {
     })
 }
 
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxDirection {
+    In,
+    Out,
+}
+
+/// One row of the Profile page's transaction history: everything the user
+/// paid the site (escrow deposits, fees, stakes) and everything the site
+/// paid them (the payout records), unified and newest-first.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TransactionRecord {
+    pub direction: TxDirection,
+    /// Machine-readable kind: payout-type names for In ("LotteryWin", …);
+    /// audit event names for Out ("deposit", "idea_post", "stake", …).
+    pub kind: String,
+    pub token: IdeaToken,
+    pub amount: u64,
+    pub timestamp: u64,
+    pub ref_id: u64,
+}
+
+const MAX_TX_RETURNED: usize = 200;
+/// How far back in the audit log a transaction query scans (newest entries).
+const TX_AUDIT_SCAN: u64 = 2_000;
+
+/// The caller's full transaction history — spends AND payouts. Out legs come
+/// from the audit log (ICP flows: commits, idea posts, pool fees, stake
+/// lockups) plus the token-typed upvote/funding journals; In legs are the
+/// payout records. Newest first, capped.
+#[ic_cdk::query]
+fn get_my_transactions() -> Vec<TransactionRecord> {
+    let caller = get_caller();
+    let mut txs: Vec<TransactionRecord> = Vec::new();
+
+    // In: every payout the site made to the caller.
+    PAYOUTS.with(|m| {
+        for e in m.borrow().iter() {
+            let p = e.value();
+            if p.user == caller {
+                txs.push(TransactionRecord {
+                    direction: TxDirection::In,
+                    kind: format!("{:?}", p.payout_type),
+                    token: p.token,
+                    amount: p.amount,
+                    timestamp: p.created_at,
+                    ref_id: p.ref_id,
+                });
+            }
+        }
+    });
+
+    // Out (ICP): from the audit log's recent window. "stake" is a lockup,
+    // not a spend — it's included so the history nets out against the
+    // matching UnstakeDisbursement.
+    AUDIT_LOG.with(|log| {
+        let log = log.borrow();
+        let len = log.len();
+        let start = len.saturating_sub(TX_AUDIT_SCAN);
+        for idx in start..len {
+            let Some(entry) = log.get(idx) else { continue };
+            if entry.user != caller {
+                continue;
+            }
+            if matches!(
+                entry.event_type.as_str(),
+                "deposit" | "add_commitment" | "idea_post" | "pool_register" | "stake"
+            ) {
+                txs.push(TransactionRecord {
+                    direction: TxDirection::Out,
+                    kind: entry.event_type.clone(),
+                    token: IdeaToken::ICP,
+                    amount: entry.amount_e8s,
+                    timestamp: entry.timestamp,
+                    ref_id: entry.proposal_id,
+                });
+            }
+        }
+    });
+
+    // Out (token-typed): upvotes and project fundings carry their own token.
+    IDEA_UPVOTES.with(|m| {
+        for e in m.borrow().iter() {
+            let uv = e.value();
+            if uv.voter == caller {
+                txs.push(TransactionRecord {
+                    direction: TxDirection::Out,
+                    kind: "idea_upvote".to_string(),
+                    token: uv.token,
+                    amount: uv.amount,
+                    timestamp: uv.created_at,
+                    ref_id: uv.idea_id,
+                });
+            }
+        }
+    });
+    PROJECT_FUNDINGS.with(|m| {
+        for e in m.borrow().iter() {
+            let f = e.value();
+            if f.funder == caller {
+                txs.push(TransactionRecord {
+                    direction: TxDirection::Out,
+                    kind: "project_fund".to_string(),
+                    token: f.token,
+                    amount: f.amount,
+                    timestamp: f.created_at,
+                    ref_id: f.project_id,
+                });
+            }
+        }
+    });
+
+    txs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    txs.truncate(MAX_TX_RETURNED);
+    txs
+}
+
 /// The caller's payout history, newest first (capped).
 #[ic_cdk::query]
 fn get_my_payouts() -> Vec<Payout> {
@@ -11178,6 +11294,58 @@ mod tests {
             "the house holds no tickets — promotion voids them"
         );
         assert_eq!(lottery_state().total_tickets, 0);
+    }
+
+
+    #[tokio::test]
+    async fn test_get_my_transactions_merges_spends_and_payouts() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // Out legs: a commitment, an idea post, an upvote (token-typed) and
+        // a stake lockup.
+        let pid = 730_001u64;
+        open_proposal(pid, 10_000_000_000);
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+        let idea = post_idea("Tx history".into(), "d".into(), "".into()).await.unwrap();
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_caller(bob);
+        upvote_idea(idea, IdeaToken::CkBTC, 5_000).await.unwrap();
+        set_mock_caller(alice);
+        stake(150_000_000, StakeTier::SixMonths).await.unwrap();
+
+        // In leg: the commitment refunds when the proposal misses.
+        process_proposal_cutoff(pid).await.unwrap();
+
+        let txs = get_my_transactions();
+        let kind = |k: &str| txs.iter().find(|t| t.kind == k);
+        let dep = kind("deposit").expect("commit escrow recorded");
+        assert_eq!(dep.direction, TxDirection::Out);
+        assert_eq!(dep.amount, 200_000_000);
+        let post = kind("idea_post").expect("idea post fee recorded");
+        assert_eq!(post.amount, IDEA_POST_FEE_E8S);
+        let st = kind("stake").expect("stake lockup recorded");
+        assert_eq!(st.direction, TxDirection::Out);
+        assert_eq!(st.amount, 150_000_000);
+        let refund = kind("CommitmentRefund").expect("refund payout recorded");
+        assert_eq!(refund.direction, TxDirection::In);
+        assert_eq!(refund.amount, 200_000_000);
+        // Newest-first ordering.
+        for w in txs.windows(2) {
+            assert!(w[0].timestamp >= w[1].timestamp);
+        }
+
+        // Bob's view: only his token-typed upvote spend.
+        set_mock_caller(bob);
+        let bobs = get_my_transactions();
+        let uv = bobs.iter().find(|t| t.kind == "idea_upvote").expect("upvote spend");
+        assert_eq!(uv.direction, TxDirection::Out);
+        assert_eq!(uv.token, IdeaToken::CkBTC);
+        assert_eq!(uv.amount, 5_000);
+        assert!(bobs.iter().all(|t| t.kind != "deposit"), "caller-scoped");
     }
 
 }
