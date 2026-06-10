@@ -491,28 +491,76 @@ a:hover {
   display: none;
 }
 
-@media (max-width: 900px) {
-  .pool-sidebar-desktop {
-    display: none;
+  @media (max-width: 900px) {
+    .pool-sidebar-desktop {
+      display: none;
+    }
+    .pool-mobile-fab {
+      display: flex;
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 50;
+      align-items: center;
+      gap: 6px;
+      height: 40px;
+      padding: 0 14px;
+      border-radius: 20px;
+      background: var(--burn);
+      color: var(--char-950);
+      border: none;
+      cursor: pointer;
+      font-family: var(--font-body);
+      font-size: 13px;
+      font-weight: 600;
+      box-shadow: 0 4px 16px color-mix(in srgb, var(--burn) 40%, transparent);
+    }
   }
-  .pool-mobile-fab {
-    display: flex;
+
+  /* Show mobile helper - hidden on desktop, flex-visible on mobile */
+  .show-mobile {
+    display: none !important;
+  }
+
+  @media (max-width: 640px) {
+    .show-mobile {
+      display: flex !important;
+    }
+  }
+
+  /* Mobile menu drawer & overlay */
+  .mobile-drawer-overlay {
     position: fixed;
-    bottom: 20px;
-    right: 20px;
-    z-index: 50;
-    align-items: center;
-    gap: 6px;
-    height: 40px;
-    padding: 0 14px;
-    border-radius: 20px;
-    background: var(--burn);
-    color: var(--char-950);
-    border: none;
-    cursor: pointer;
-    font-family: var(--font-body);
-    font-size: 13px;
-    font-weight: 600;
-    box-shadow: 0 4px 16px color-mix(in srgb, var(--burn) 40%, transparent);
+    inset: 0;
+    background: rgba(12, 10, 9, 0.65);
+    backdrop-filter: blur(4px);
+    z-index: 290;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-base) var(--ease-out);
   }
-}
+  .mobile-drawer-overlay.open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .mobile-drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 280px;
+    max-width: 80%;
+    background: var(--bg-alt);
+    border-right: 1px solid var(--border);
+    box-shadow: var(--elev-3);
+    z-index: 300;
+    display: flex;
+    flex-direction: column;
+    padding: var(--sp-5) var(--sp-4);
+    transform: translateX(-100%);
+    transition: transform var(--dur-slow) var(--ease-out);
+  }
+  .mobile-drawer.open {
+    transform: translateX(0);
+  }

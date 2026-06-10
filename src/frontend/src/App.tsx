@@ -360,6 +360,7 @@ export default function App() {
     try { return localStorage.getItem('pool-sidebar-collapsed') === 'true'; } catch { return false; }
   });
   const [poolMobileOpen, setPoolMobileOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [poolDetailsOpen, setPoolDetailsOpen] = useState(false);
   const [dashControlsOpen, setDashControlsOpen] = useState(true);
   const [confirmLeaveId, setConfirmLeaveId] = useState<bigint | null>(null);
@@ -1472,6 +1473,17 @@ export default function App() {
         display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, zIndex: 10, flexShrink: 0
       }}>
         <div className="row" style={{ gap: 10, minWidth: 0 }}>
+          <button
+            className="show-mobile"
+            onClick={() => setMobileMenuOpen(true)}
+            style={{
+              background: 'transparent', border: 'none', cursor: 'pointer',
+              color: 'var(--fg)', padding: 4, marginRight: 4, display: 'flex', alignItems: 'center'
+            }}
+            aria-label="Open menu"
+          >
+            <Icon name="list" size={20} />
+          </button>
           <span style={{
             width: 32, height: 32, flexShrink: 0, display: 'grid', placeItems: 'center',
             border: '1px solid var(--burn)', borderRadius: 8, background: 'var(--burn-950)'
@@ -1484,7 +1496,7 @@ export default function App() {
           </b>
 
           {/* ── Page nav — the active page is a solid burn pill ── */}
-          <nav className="row" style={{ gap: 4, marginLeft: 8, flexShrink: 0 }}>
+          <nav className="row hide-mobile" style={{ gap: 4, marginLeft: 8, flexShrink: 0 }}>
             <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} sm onClick={() => setPage('dashboard')}>
               <Icon name="flame" size={13} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
               <span className="hide-mobile">Dashboard</span>
@@ -1498,7 +1510,7 @@ export default function App() {
           </nav>
         </div>
 
-        <div className="row" style={{ gap: 10, flexShrink: 0 }}>
+        <div className="row hide-mobile" style={{ gap: 10, flexShrink: 0 }}>
           <span className="hide-mobile">
             <Btn variant="ghost" sm onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>
               <Icon name="spark" size={14} /> Theme: {theme.toUpperCase()}
@@ -3937,6 +3949,134 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ── Mobile Menu Drawer Overlay ── */}
+      <div
+        className={`mobile-drawer-overlay ${mobileMenuOpen ? 'open' : ''}`}
+        onClick={() => setMobileMenuOpen(false)}
+      />
+
+      {/* ── Mobile Menu Drawer ── */}
+      <div className={`mobile-drawer ${mobileMenuOpen ? 'open' : ''}`}>
+        {/* Drawer Header */}
+        <div className="row" style={{ justifyContent: 'space-between', marginBottom: 24, width: '100%' }}>
+          <span className="row" style={{ gap: 8 }}>
+            <span style={{
+              width: 28, height: 28, display: 'grid', placeItems: 'center',
+              border: '1px solid var(--burn)', borderRadius: 6, background: 'var(--burn-950)'
+            }}>
+              <Icon name="flame" size={15} stroke="var(--burn)" />
+            </span>
+            <b style={{ fontSize: 16, color: 'var(--fg)', fontFamily: 'var(--font-display)', letterSpacing: '-0.01em' }}>
+              Cycles of Influence
+            </b>
+          </span>
+          <button
+            onClick={() => setMobileMenuOpen(false)}
+            style={{
+              background: 'transparent', border: 'none', cursor: 'pointer',
+              color: 'var(--fg-2)', padding: 4, display: 'flex', alignItems: 'center'
+            }}
+          >
+            <Icon name="x" size={16} />
+          </button>
+        </div>
+
+        {/* Drawer Navigation Links */}
+        <div className="col" style={{ gap: 8, width: '100%', marginBottom: 32 }}>
+          <Eyebrow style={{ marginBottom: 6 }}>Navigation</Eyebrow>
+          <Btn
+            variant={page === 'dashboard' ? 'primary' : 'ghost'}
+            style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
+            onClick={() => { setPage('dashboard'); setMobileMenuOpen(false); }}
+          >
+            <Icon name="flame" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
+            Dashboard
+          </Btn>
+          {ideaBoardEnabled && (
+            <Btn
+              variant={page === 'ideas' ? 'primary' : 'ghost'}
+              style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
+              onClick={() => { setPage('ideas'); setMobileMenuOpen(false); }}
+            >
+              <Icon name="bulb" size={14} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
+              Community R&D
+            </Btn>
+          )}
+        </div>
+
+        {/* Drawer Identity & Wallet */}
+        <div className="col" style={{ gap: 8, width: '100%', marginTop: 'auto' }}>
+          <Eyebrow style={{ marginBottom: 6 }}>Account</Eyebrow>
+
+          <Btn
+            variant="ghost"
+            style={{ justifyContent: 'flex-start', width: '100%', height: 38, marginBottom: 8 }}
+            onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+          >
+            <Icon name="spark" size={14} />
+            Theme: {theme.toUpperCase()}
+          </Btn>
+
+          {!principal || principal.isAnonymous() ? (
+            <Btn
+              variant="primary"
+              style={{ width: '100%', height: 40 }}
+              onClick={() => { handleLogin(); setMobileMenuOpen(false); }}
+              disabled={isSigningIn}
+            >
+              {isSigningIn ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="key" size={14} stroke="var(--char-950)" />}
+              {isSigningIn ? " Opening II…" : " Sign in with Internet Identity"}
+            </Btn>
+          ) : (
+            <div className="col" style={{ gap: 12, width: '100%' }}>
+              {/* Wallet info */}
+              <div className="col" style={{
+                padding: '12px 14px', borderRadius: 8,
+                border: '1px solid var(--border)', background: 'var(--bg)'
+              }}>
+                <span className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Principal</span>
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(principal.toString()); setHotkeyCopied(true); setTimeout(() => setHotkeyCopied(false), 2000); }}
+                    className="row"
+                    style={{ gap: 4, background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
+                  >
+                    <span className="mono" style={{ fontSize: 12, color: 'var(--fg)' }}>
+                      {formatPrincipal(principal)}
+                    </span>
+                    <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--fg-3)"} />
+                  </button>
+                </span>
+                <span className="row" style={{ justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Holdings</span>
+                  <span className="mono" style={{ fontSize: 13, color: 'var(--sprout)', fontWeight: 600 }}>
+                    {fmtICP(holdings)} ICP
+                  </span>
+                </span>
+              </div>
+
+              {/* Wallet Actions */}
+              <div className="row" style={{ gap: 8, width: '100%' }}>
+                <Btn
+                  variant="primary"
+                  style={{ flex: 1, height: 38 }}
+                  onClick={() => { setIsWalletOpen(true); setWithdrawError(null); setWithdrawSuccess(false); setMobileMenuOpen(false); }}
+                >
+                  <Icon name="wallet" size={14} stroke="var(--char-950)" /> Wallet
+                </Btn>
+                <Btn
+                  variant="danger"
+                  style={{ flex: 1, height: 38 }}
+                  onClick={() => { handleLogout(); setMobileMenuOpen(false); }}
+                >
+                  <Icon name="x" size={14} stroke="var(--ember)" /> Sign out
+                </Btn>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
