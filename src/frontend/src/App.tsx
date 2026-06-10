@@ -7,6 +7,7 @@ import {
   Vote,
   Stance,
   CommitmentStatus,
+  IdeaToken,
 } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import type {
@@ -20,53 +21,12 @@ import type {
   PoolInfo,
   PoolNeuron,
   LedgerAccount,
+  FeatureFlag,
+  IdeaBoardInfo,
 } from "./bindings/backend";
-
-// ==========================================
-// 1. Icon Component (Clean, inline SVG paths)
-// ==========================================
-
-const iconPaths: Record<string, React.ReactNode> = {
-  flame: <path d="M8.5 14.5A2.5 2.5 0 0011 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 11-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 002.5 2.5z" />,
-  copy: <><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></>,
-  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
-  check: <path d="M20 6L9 17l-5-5" />,
-  checkCircle: <><circle cx="12" cy="12" r="9" /><path d="M8.5 12.4l2.5 2.6 4.5-5" /></>,
-  lock: <><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 018 0v4" /></>,
-  list: <path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01" />,
-  external: <><path d="M15 3h6v6" /><path d="M10 14L21 3" /><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" /></>,
-  arrowUp: <path d="M12 19V5M5 12l7-7 7 7" />,
-  share: <><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8" /><path d="M16 6l-4-4-4 4" /><path d="M12 2v13" /></>,
-  key: <><circle cx="7.5" cy="15.5" r="4.5" /><path d="M10.7 12.3L21 2M16 7l3 3M14 9l2 2" /></>,
-  x: <path d="M18 6L6 18M6 6l12 12" />,
-  chevDown: <path d="M6 9l6 6 6-6" />,
-  chevRight: <path d="M9 18l6-6-6-6" />,
-  zap: <path d="M13 2L3 14h8l-1 8 11-13h-8z" />,
-  coins: <><circle cx="8" cy="8" r="6" /><path d="M18.09 10.37A6 6 0 1110.34 18M7 6h1v4M16.71 13.88l.7.71-2.82 2.82" /></>,
-  spark: <path d="M12 3l1.7 5.1a3 3 0 002.2 2.2L21 12l-5.1 1.7a3 3 0 00-2.2 2.2L12 21l-1.7-5.1a3 3 0 00-2.2-2.2L3 12l5.1-1.7a3 3 0 002.2-2.2z" />,
-  wallet: <><path d="M19 7V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-2" /><path d="M14 12h7v-2a2 2 0 00-2-2h-5a2 2 0 00-2 2v2a2 2 0 002 2z" /></>,
-  info: <><circle cx="12" cy="12" r="9" /><path d="M12 16v-4M12 8h.01" /></>,
-  undo: <><path d="M9 14L4 9l5-5" /><path d="M4 9h11a5 5 0 015 5v0a5 5 0 01-5 5H9" /></>,
-  refresh: <><path d="M21 12a9 9 0 11-3-6.7L21 8" /><path d="M21 4v4h-4" /></>
-};
-
-interface IconProps {
-  name: string;
-  size?: number;
-  stroke?: string;
-  sw?: number;
-  style?: React.CSSProperties;
-}
-
-function Icon({ name, size = 16, stroke = 'currentColor', sw = 1.5, style }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke}
-      strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round"
-      style={{ flexShrink: 0, display: 'block', ...style }}>
-      {iconPaths[name]}
-    </svg>
-  );
-}
+import IdeaBoard, { tokenMeta, parseTokenAmount, fmtTokenAmount, TOKEN_ORDER } from "./IdeaBoard";
+// Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
+import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal } from "./ui";
 
 // Inline neuron glyph (from src/assets/neuron.svg). Rendered as inline SVG rather
 // than an <img>, because Vite inlines small SVGs as data URIs and the `#` in the
@@ -108,74 +68,6 @@ function NeuronGlyph({ size = 15, color = 'var(--burn)', style }: { size?: numbe
 // ==========================================
 // 2. Base Helpers and UI components
 // ==========================================
-
-function Eyebrow({ children, accent, style }: { children: React.ReactNode; accent?: boolean; style?: React.CSSProperties }) {
-  return (
-    <span className="mono" style={{
-      fontSize: 10.5, fontWeight: 500, letterSpacing: '0.09em', textTransform: 'uppercase',
-      color: accent ? 'var(--burn)' : 'var(--fg-3)', ...style
-    }}>
-      {children}
-    </span>
-  );
-}
-
-const CHIP_TONES = {
-  muted:   { bg: 'transparent',        bd: 'var(--border)',  fg: 'var(--fg-2)' },
-  burn:    { bg: 'var(--burn-950)',    bd: 'var(--burn)',    fg: 'var(--burn)' },
-  solid:   { bg: 'var(--burn)',        bd: 'var(--burn)',    fg: 'var(--char-950)' },
-  ok:      { bg: 'var(--sprout-dim)',  bd: 'var(--sprout)',  fg: 'var(--sprout)' },
-  danger:  { bg: 'var(--ember-dim)',   bd: 'var(--ember)',   fg: 'var(--ember)' },
-  pending: { bg: 'var(--haze-dim)',    bd: 'var(--haze)',    fg: 'var(--haze)' },
-  dashed:  { bg: 'transparent',        bd: 'var(--border-hi)', fg: 'var(--fg-3)' },
-};
-
-function Chip({ tone = 'muted', children, style }: { tone?: keyof typeof CHIP_TONES; children: React.ReactNode; style?: React.CSSProperties }) {
-  const c = CHIP_TONES[tone] || CHIP_TONES.muted;
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 5, height: 22, padding: '0 8px',
-      borderRadius: 4, border: `1px solid ${c.bd}`, background: c.bg, color: c.fg,
-      fontSize: 11.5, fontWeight: 500, whiteSpace: 'nowrap', lineHeight: 1,
-      borderStyle: tone === 'dashed' ? 'dashed' : 'solid', ...style
-    }}>
-      {children}
-    </span>
-  );
-}
-
-function Btn({ variant = 'secondary', sm, children, disabled, style, onClick }: {
-  variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
-  sm?: boolean;
-  children: React.ReactNode;
-  disabled?: boolean;
-  style?: React.CSSProperties;
-  onClick?: () => void;
-}) {
-  const base = {
-    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-    height: sm ? 30 : 36, padding: sm ? '0 11px' : '0 15px', borderRadius: 6,
-    fontFamily: 'var(--font-body)', fontSize: sm ? 12.5 : 13.5, fontWeight: 500,
-    cursor: disabled ? 'default' : 'pointer', whiteSpace: 'nowrap',
-    transition: 'background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out)',
-    opacity: disabled ? 0.4 : 1, border: 'none', ...style,
-  };
-  const skins = {
-    primary:   { background: 'var(--burn)', color: 'var(--char-950)', border: '1px solid var(--burn)' },
-    secondary: { background: 'transparent', color: 'var(--fg)', border: '1px solid var(--border-hi)' },
-    ghost:     { background: 'transparent', color: 'var(--fg-2)', border: '1px solid transparent' },
-    danger:    { background: 'transparent', color: 'var(--ember)', border: '1px solid var(--ember)' },
-  };
-  return (
-    <button
-      onClick={disabled ? undefined : onClick}
-      style={{ ...base, ...skins[variant] }}
-      disabled={disabled}
-    >
-      {children}
-    </button>
-  );
-}
 
 // PB-123: balance-of-power bar — ADOPT (yes) vs REJECT (no), weighted by ICP.
 function BalanceOfPowerBar({ adopt, reject }: { adopt: bigint; reject: bigint }) {
@@ -240,15 +132,6 @@ function HeatBar({ pct = 0, committed, req, met }: { pct?: number; committed?: s
   );
 }
 
-function LiveDot({ color = 'var(--burn)', size = 6, on = true, style }: { color?: string; size?: number; on?: boolean; style?: React.CSSProperties }) {
-  return (
-    <span style={{
-      width: size, height: size, borderRadius: 999, background: color,
-      flexShrink: 0, animation: on ? 'il-pulse 2s var(--ease-in-out) infinite' : 'none', ...style
-    }} />
-  );
-}
-
 // ── Gate (renders real content, then blurs + locks per state) ─
 function Gate({ children, hint, next, height, gating }: { children: React.ReactNode; hint: string; next?: boolean; height?: number; gating: string }) {
   const lockTone = next ? 'burn' : 'muted';
@@ -307,10 +190,6 @@ function Reveal({ delay = 0, children, style, motion }: { delay?: number; childr
 }
 
 // Formatting helpers
-function fmtICP(n: number | bigint) {
-  return (Number(n) / 100_000_000).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-}
-
 function fmtFlipAmount(e8s: bigint): string {
   if (e8s === 0n) return "0.0";
   const num = Number(e8s) / 100_000_000;
@@ -360,13 +239,6 @@ function getMinVotingPowerForTop25(poolInfo: PoolInfo | null): bigint {
     return sorted[sorted.length - 1].voting_power;
   }
   return sorted[24].voting_power;
-}
-
-function formatPrincipal(p: Principal | null): string {
-  if (!p) return "anon";
-  const s = p.toString();
-  if (s === "2vxsx-fae") return "Anonymous";
-  return `${s.slice(0, 4)}…${s.slice(-3)}`;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -565,6 +437,20 @@ export default function App() {
   // Help modal status
   const [isHelpOpen, setIsHelpOpen] = useState(false);
 
+  // Page routing (dashboard | Community R&D) + feature flags
+  const [page, setPage] = useState<'dashboard' | 'ideas'>('dashboard');
+  const [featureFlags, setFeatureFlags] = useState<FeatureFlag[]>([]);
+  const [togglingFlag, setTogglingFlag] = useState<string | null>(null);
+
+  // Feature flag: the Community R&D page + nav are fully hidden when disabled
+  // (the backend also rejects its update methods, so this is belt + braces).
+  const ideaBoardEnabled = featureFlags.find(f => f.key === 'idea_board')?.enabled ?? false;
+
+  // Token-ledger info (drives the multi-token wallet + R&D board).
+  const [boardInfo, setBoardInfo] = useState<IdeaBoardInfo | null>(null);
+  const [tokenBalances, setTokenBalances] = useState<{ ckbtc: bigint | null; cketh: bigint | null }>({ ckbtc: null, cketh: null });
+  const [walletToken, setWalletToken] = useState<IdeaToken>(IdeaToken.ICP);
+
   // Eligibility & Vote History Helpers
   const refreshEligibility = async (currentActor = actor) => {
     if (!currentActor) return;
@@ -642,6 +528,45 @@ export default function App() {
       setConfig(cfg);
     } catch (err) {
       console.error("Failed to fetch config:", err);
+    }
+  };
+
+  const fetchFeatureFlags = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      // Public query — drives nav visibility for everyone, toggles for admins.
+      setFeatureFlags(await currentActor.list_feature_flags());
+    } catch (err) {
+      console.error("Failed to fetch feature flags:", err);
+    }
+  };
+
+  const fetchBoardInfo = async (currentActor = actor) => {
+    if (!currentActor) return;
+    try {
+      setBoardInfo(await currentActor.get_idea_board_info());
+    } catch (err) {
+      console.error("Failed to fetch board info:", err);
+    }
+  };
+
+  // ckBTC/ckETH balances for the wallet (ICP balance = `holdings`).
+  const fetchTokenBalances = async (info = boardInfo) => {
+    if (!info || !identity || !principal || principal.isAnonymous()) {
+      setTokenBalances({ ckbtc: null, cketh: null });
+      return;
+    }
+    try {
+      const mk = (lid: Principal) => createLedgerActor(lid.toString(), {
+        agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
+      });
+      const [ckbtc, cketh] = await Promise.all([
+        mk(info.ckbtc_ledger).icrc1_balance_of({ owner: principal }),
+        mk(info.cketh_ledger).icrc1_balance_of({ owner: principal }),
+      ]);
+      setTokenBalances({ ckbtc, cketh });
+    } catch (err) {
+      console.error("Failed to fetch token balances:", err);
     }
   };
 
@@ -752,6 +677,49 @@ export default function App() {
     }
   };
 
+  // Withdraw ckBTC/ckETH (ICRC-1) to a destination principal.
+  const handleWithdrawIcrc = async () => {
+    if (!identity || isWithdrawing || !boardInfo) return;
+    setWithdrawError(null);
+    const meta = tokenMeta(walletToken, boardInfo);
+    let dest: Principal;
+    try {
+      dest = Principal.fromText(withdrawTo.trim());
+    } catch {
+      setWithdrawError("Enter a valid destination principal.");
+      return;
+    }
+    const units = parseTokenAmount(withdrawAmount, meta.decimals);
+    if (units === null || units <= 0n) {
+      setWithdrawError("Enter a valid amount.");
+      return;
+    }
+    const bal = walletToken === IdeaToken.CkBTC ? tokenBalances.ckbtc : tokenBalances.cketh;
+    if (bal !== null && units + meta.fee > bal) {
+      setWithdrawError(`Insufficient balance (need amount + ${fmtTokenAmount(meta.fee, meta.decimals)} ${meta.label} fee).`);
+      return;
+    }
+    setIsWithdrawing(true);
+    try {
+      const ledgerActor = createLedgerActor(meta.ledger!.toString(), {
+        agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
+      });
+      const res = await ledgerActor.icrc1_transfer({ to: { owner: dest }, amount: units });
+      if (res.__kind__ === "Err") {
+        setWithdrawError(`Transfer failed: ${JSON.stringify(res.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
+        return;
+      }
+      setWithdrawSuccess(true);
+      setWithdrawAmount("");
+      setWithdrawTo("");
+      await fetchTokenBalances();
+    } catch (err: any) {
+      setWithdrawError(err.message || String(err));
+    } finally {
+      setIsWithdrawing(false);
+    }
+  };
+
   const refreshAllData = async () => {
     if (!actor) return;
     setIsLoading(true);
@@ -766,6 +734,7 @@ export default function App() {
         fetchLeaderInfo(actor),
         fetchPoolInfo(actor),
         fetchMyPoolNeuron(actor),
+        fetchFeatureFlags(actor),
         actor.list_active_proposals().then((list: Proposal[]) => setProposals(list)),
       ]);
       // Also fetch balance
@@ -821,6 +790,40 @@ export default function App() {
       alert(`Error: ${err.message || err}`);
     } finally {
       setIsSettingThreshold(false);
+    }
+  };
+
+  // Local-dev: faucet for any of the three test tokens.
+  const handleFaucet = async (token: IdeaToken) => {
+    if (!actor) return;
+    try {
+      const res = await actor.dev_faucet_token(token);
+      if (res.__kind__ === "Err") {
+        alert(`Faucet error: ${res.Err}`);
+        return;
+      }
+      await refreshAllData();
+      await fetchTokenBalances();
+    } catch (e: any) {
+      alert(`Faucet failed: ${e.message || e}`);
+    }
+  };
+
+  // Admin: flip a feature flag on/off, then re-read the flag list.
+  const handleToggleFlag = async (key: string, currentlyEnabled: boolean) => {
+    if (!actor || togglingFlag) return;
+    setTogglingFlag(key);
+    try {
+      const res = await actor.admin_set_feature_flag(key, !currentlyEnabled);
+      if (res.__kind__ === "Err") {
+        alert(`Failed to update flag: ${res.Err}`);
+      }
+      await fetchFeatureFlags();
+    } catch (err: any) {
+      console.error("Failed to toggle feature flag:", err);
+      alert(`Error: ${err.message || err}`);
+    } finally {
+      setTogglingFlag(null);
     }
   };
 
@@ -912,6 +915,14 @@ export default function App() {
     }
   }, [tier, activeTab]);
 
+  // If an admin kills the idea_board flag while someone is on the page,
+  // bounce them back to the dashboard.
+  useEffect(() => {
+    if (page === 'ideas' && featureFlags.length > 0 && !ideaBoardEnabled) {
+      setPage('dashboard');
+    }
+  }, [page, ideaBoardEnabled, featureFlags.length]);
+
   // Initialize Auth
   useEffect(() => {
     AuthClient.create().then(async (client) => {
@@ -964,7 +975,16 @@ export default function App() {
     fetchAccountId(actor);
     fetchPoolInfo(actor);
     fetchMyPoolNeuron(actor);
+    fetchFeatureFlags(actor);
+    fetchBoardInfo(actor);
   }, [actor]);
+
+  // Refresh ckBTC/ckETH balances whenever the wallet opens.
+  useEffect(() => {
+    if (isWalletOpen) {
+      fetchTokenBalances();
+    }
+  }, [isWalletOpen, boardInfo, identity]);
 
   // Fetch Ledger Balance
   useEffect(() => {
@@ -1458,6 +1478,20 @@ export default function App() {
             Cycles of Influence
             <span className="hide-mobile"> - Alpha</span>
           </b>
+
+          {/* ── Page nav — the active page is a solid burn pill ── */}
+          <nav className="row" style={{ gap: 4, marginLeft: 8, flexShrink: 0 }}>
+            <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} sm onClick={() => setPage('dashboard')}>
+              <Icon name="flame" size={13} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
+              <span className="hide-mobile">Dashboard</span>
+            </Btn>
+            {ideaBoardEnabled && (
+              <Btn variant={page === 'ideas' ? 'primary' : 'ghost'} sm onClick={() => setPage('ideas')}>
+                <Icon name="bulb" size={13} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
+                <span className="hide-mobile">Community R&D</span>
+              </Btn>
+            )}
+          </nav>
         </div>
 
         <div className="row" style={{ gap: 10, flexShrink: 0 }}>
@@ -1508,14 +1542,16 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── Mobile Pool FAB ── */}
-      <button
-        className="pool-mobile-fab"
-        onClick={() => setPoolMobileOpen(true)}
-      >
-        <Icon name="spark" size={14} stroke="var(--char-950)" />
-        Pool {poolInfo && poolInfo.active_count > 0n ? `· ${poolInfo.active_count}` : ''}
-      </button>
+      {/* ── Mobile Pool FAB (dashboard only) ── */}
+      {page === 'dashboard' && (
+        <button
+          className="pool-mobile-fab"
+          onClick={() => setPoolMobileOpen(true)}
+        >
+          <Icon name="spark" size={14} stroke="var(--char-950)" />
+          Pool {poolInfo && poolInfo.active_count > 0n ? `· ${poolInfo.active_count}` : ''}
+        </button>
+      )}
 
       {/* ── Mobile Pool Overlay (full-screen on narrow viewport) ── */}
       {poolMobileOpen && (
@@ -1625,8 +1661,19 @@ export default function App() {
       {/* ── Main Layout (Dashboard + Pool Sidebar + Tweak Panel) ── */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
 
-        {/* Left Column: Dashboard content */}
+        {/* Left Column: Dashboard content (or the Idea Board page) */}
         <main style={{ flex: 1, minWidth: 320, overflowY: 'auto' }}>
+          {page === 'ideas' ? (
+            <IdeaBoard
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              isAdmin={isAdmin}
+              onSignIn={handleLogin}
+            />
+          ) : (
           <div className="dashboard-container">
 
             {/* ── Admin: voting threshold control (admins only) ── */}
@@ -1673,6 +1720,62 @@ export default function App() {
                   <div style={{ borderTop: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)' }} />
                   <Btn variant="secondary" sm onClick={openTreasury} style={{ alignSelf: 'flex-start' }}>
                     <Icon name="wallet" size={13} stroke="var(--burn)" /> Treasury Wallet
+                  </Btn>
+
+                  {/* ── Feature flags (kill switches) ── */}
+                  <div style={{ borderTop: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)' }} />
+                  <div className="col" style={{ gap: 8 }}>
+                    <span className="row" style={{ gap: 8 }}>
+                      <Icon name="zap" size={13} stroke="var(--burn)" />
+                      <Eyebrow>Admin · feature flags</Eyebrow>
+                    </span>
+                    {featureFlags.map(f => (
+                      <div key={f.key} className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                        <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg-1)' }}>{f.key}</span>
+                        <Btn
+                          variant={f.enabled ? 'primary' : 'secondary'} sm
+                          onClick={() => handleToggleFlag(f.key, f.enabled)}
+                          disabled={togglingFlag === f.key}
+                        >
+                          {togglingFlag === f.key
+                            ? <LiveDot size={7} color={f.enabled ? 'var(--char-950)' : 'var(--fg)'} />
+                            : <Icon name={f.enabled ? 'check' : 'x'} size={12} stroke={f.enabled ? 'var(--char-950)' : 'currentColor'} />}
+                          {f.enabled ? ' Enabled' : ' Disabled'}
+                        </Btn>
+                      </div>
+                    ))}
+                    <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+                      <Icon name="info" size={12} stroke="var(--fg-3)" /> Disabling hides the feature everywhere and blocks its canister methods instantly.
+                    </span>
+                  </div>
+                </div>
+              </Reveal>
+            )}
+
+            {/* ── Community R&D promo (links to the page; hidden when the flag is off) ── */}
+            {ideaBoardEnabled && (
+              <Reveal delay={25} motion={motion}>
+                <div className="row" style={{
+                  gap: 12, border: '1px solid var(--border)', borderRadius: 10,
+                  background: 'var(--surface)', padding: '12px 14px',
+                  justifyContent: 'space-between', flexWrap: 'wrap'
+                }}>
+                  <span className="row" style={{ gap: 10, minWidth: 0, flex: 1 }}>
+                    <span style={{
+                      width: 30, height: 30, flexShrink: 0, display: 'grid', placeItems: 'center',
+                      border: '1px solid var(--burn)', borderRadius: 7, background: 'var(--burn-950)'
+                    }}>
+                      <Icon name="bulb" size={15} stroke="var(--burn)" />
+                    </span>
+                    <span className="col" style={{ gap: 2, minWidth: 0 }}>
+                      <b style={{ fontSize: 13.5, color: 'var(--fg)' }}>Community R&D</b>
+                      <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+                        Pitch ways to burn more ICP, back the best ideas, and fund official projects — with ICP, ckBTC, or ckETH.
+                      </span>
+                    </span>
+                  </span>
+                  <Btn variant="secondary" sm onClick={() => setPage('ideas')}>
+                    Open the board <Icon name="chevRight" size={13} />
                   </Btn>
                 </div>
               </Reveal>
@@ -2422,9 +2525,11 @@ export default function App() {
               </div>
             )}
           </div>
+          )}
         </main>
 
         {/* ── Pool Sidebar (desktop — hidden on mobile, use FAB instead) ── */}
+        {page === 'dashboard' && (
         <aside
           className="pool-sidebar-desktop"
           style={{
@@ -2566,9 +2671,10 @@ export default function App() {
             </div>
           )}
         </aside>
+        )}
 
         {/* Right Column: Tweak panel & Progression Ladder — local dev only */}
-        {isLocal && dashControlsOpen && <aside style={{
+        {page === 'dashboard' && isLocal && dashControlsOpen && <aside style={{
           width: 320, padding: 24, borderLeft: '1px solid var(--border)', background: 'var(--bg-alt)',
           display: 'flex', flexDirection: 'column', gap: 24, flexShrink: 0, overflowY: 'auto'
         }}>
@@ -2681,22 +2787,18 @@ export default function App() {
           {principal && !principal.isAnonymous() && (
             <div className="simulator-panel col">
               <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>Dev Faucet</span>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>Send 100 real test ICP to your wallet from the canister.</span>
-              <Btn variant="secondary" sm onClick={async () => {
-                if (!actor) return;
-                try {
-                  const res = await actor.dev_faucet();
-                  if (res.__kind__ === "Err") {
-                    alert(`Faucet error: ${res.Err}`);
-                    return;
-                  }
-                  await refreshAllData();
-                } catch (e: any) {
-                  alert(`Faucet failed: ${e.message || e}`);
-                }
-              }}>
-                <Icon name="zap" size={12} stroke="var(--burn)" /> Get 100 ICP
-              </Btn>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>Send test tokens to your wallet from the canister.</span>
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                <Btn variant="secondary" sm onClick={() => handleFaucet(IdeaToken.ICP)}>
+                  <Icon name="zap" size={12} stroke="var(--burn)" /> 100 ICP
+                </Btn>
+                <Btn variant="secondary" sm onClick={() => handleFaucet(IdeaToken.CkBTC)}>
+                  <Icon name="zap" size={12} stroke="var(--burn)" /> 0.1 ckBTC
+                </Btn>
+                <Btn variant="secondary" sm onClick={() => handleFaucet(IdeaToken.CkETH)}>
+                  <Icon name="zap" size={12} stroke="var(--burn)" /> 1 ckETH
+                </Btn>
+              </div>
             </div>
           )}
 
@@ -2877,24 +2979,46 @@ export default function App() {
               </button>
             </div>
 
-            {/* Balance */}
-            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
-              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>Available balance</span>
-              <span className="mono" style={{ fontSize: 18, fontWeight: 600, color: 'var(--fg)' }}>{fmtICP(holdings)} ICP</span>
+            {/* Balances — one row per token */}
+            <div className="col" style={{ gap: 6, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>ICP</span>
+                <span className="mono" style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg)' }}>{fmtICP(holdings)} ICP</span>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>ckBTC</span>
+                <span className="mono" style={{ fontSize: 14, color: 'var(--fg-1)' }}>
+                  {tokenBalances.ckbtc === null ? '…' : fmtTokenAmount(tokenBalances.ckbtc, tokenMeta(IdeaToken.CkBTC, boardInfo).decimals)} ckBTC
+                </span>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>ckETH</span>
+                <span className="mono" style={{ fontSize: 14, color: 'var(--fg-1)' }}>
+                  {tokenBalances.cketh === null ? '…' : fmtTokenAmount(tokenBalances.cketh, tokenMeta(IdeaToken.CkETH, boardInfo).decimals)} ckETH
+                </span>
+              </div>
             </div>
 
             {/* Deposit */}
             <div className="col" style={{ gap: 8 }}>
-              <Eyebrow>Deposit · send ICP to this address</Eyebrow>
+              <Eyebrow>Deposit · fund your app account</Eyebrow>
               <p style={{ fontSize: 12, color: 'var(--fg-3)', margin: 0, lineHeight: 1.5 }}>
-                This is <b>your</b> app account. Send ICP here from the NNS dapp or an exchange (use the account identifier), then it's available to commit. It is not your NNS principal — funds elsewhere aren't visible here.
+                This is <b>your</b> app account. Send ICP via the legacy account identifier (NNS dapp / exchanges), or send ICP, ckBTC, or ckETH from any ICRC-1 wallet straight to your principal.
               </p>
-              <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Account identifier (for NNS / exchanges)</label>
+              <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>ICP account identifier (for NNS / exchanges)</label>
               <div className="row" style={{ gap: 8, padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
                 <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg)', overflowWrap: 'anywhere', flex: 1 }}>{accountId || "…"}</span>
                 <button onClick={() => { navigator.clipboard.writeText(accountId); setAddrCopied("aid"); setTimeout(() => setAddrCopied(""), 2000); }}
                   title="Copy account identifier" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0, borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer' }}>
                   <Icon name={addrCopied === "aid" ? "check" : "copy"} size={12} stroke={addrCopied === "aid" ? "var(--sprout)" : "var(--fg-3)"} />
+                </button>
+              </div>
+              <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Principal (for ICP / ckBTC / ckETH from ICRC-1 wallets)</label>
+              <div className="row" style={{ gap: 8, padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+                <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg)', overflowWrap: 'anywhere', flex: 1 }}>{principal.toString()}</span>
+                <button onClick={() => { navigator.clipboard.writeText(principal.toString()); setAddrCopied("principal"); setTimeout(() => setAddrCopied(""), 2000); }}
+                  title="Copy principal" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0, borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer' }}>
+                  <Icon name={addrCopied === "principal" ? "check" : "copy"} size={12} stroke={addrCopied === "principal" ? "var(--sprout)" : "var(--fg-3)"} />
                 </button>
               </div>
             </div>
@@ -2903,7 +3027,15 @@ export default function App() {
 
             {/* Withdraw */}
             <div className="col" style={{ gap: 8 }}>
-              <Eyebrow>Withdraw · send ICP out</Eyebrow>
+              <Eyebrow>Withdraw · send tokens out</Eyebrow>
+              <div className="row" style={{ gap: 6 }}>
+                {TOKEN_ORDER.map(t => (
+                  <Btn key={t} variant={walletToken === t ? 'primary' : 'secondary'} sm
+                    onClick={() => { setWalletToken(t); setWithdrawTo(""); setWithdrawAmount(""); setWithdrawError(null); setWithdrawSuccess(false); }}>
+                    <span className="mono">{tokenMeta(t, boardInfo).label}</span>
+                  </Btn>
+                ))}
+              </div>
               {withdrawSuccess && (
                 <div style={{ padding: 10, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout)', fontSize: 12.5 }}>
                   Withdrawal sent.
@@ -2914,21 +3046,30 @@ export default function App() {
                   {withdrawError}
                 </div>
               )}
-              <input type="text" placeholder="Destination Account ID (64-char hex)" className="burn-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}
+              <input type="text"
+                placeholder={walletToken === IdeaToken.ICP ? "Destination Account ID (64-char hex)" : "Destination principal"}
+                className="burn-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}
                 value={withdrawTo} onChange={(e) => { setWithdrawTo(e.target.value); setWithdrawError(null); setWithdrawSuccess(false); }} />
               <div className="row" style={{ gap: 8 }}>
                 <div style={{ flex: 1, position: 'relative' }}>
-                  <input type="number" min="0" step="0.1" placeholder="Amount" className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
+                  <input type="text" inputMode="decimal" placeholder="Amount" className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
                     value={withdrawAmount} onChange={(e) => { setWithdrawAmount(e.target.value); setWithdrawError(null); setWithdrawSuccess(false); }} />
-                  <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
+                  <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>
+                    {tokenMeta(walletToken, boardInfo).label}
+                  </span>
                 </div>
-                <Btn variant="secondary" sm onClick={handleWithdraw} disabled={isWithdrawing || !withdrawTo || !withdrawAmount}>
+                <Btn variant="secondary" sm
+                  onClick={walletToken === IdeaToken.ICP ? handleWithdraw : handleWithdrawIcrc}
+                  disabled={isWithdrawing || !withdrawTo || !withdrawAmount}>
                   {isWithdrawing ? <LiveDot size={7} color="var(--fg)" /> : <Icon name="arrowUp" size={13} />}
                   {isWithdrawing ? " Sending…" : " Withdraw"}
                 </Btn>
               </div>
               <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--fg-3)' }}>
-                <Icon name="info" size={11} stroke="var(--fg-3)" /> Withdraws to a legacy Account ID (64-char hex). 0.0001 ICP network fee applies.
+                <Icon name="info" size={11} stroke="var(--fg-3)" />
+                {walletToken === IdeaToken.ICP
+                  ? 'ICP withdraws to a legacy Account ID (64-char hex). 0.0001 ICP network fee applies.'
+                  : `${tokenMeta(walletToken, boardInfo).label} withdraws to a principal (ICRC-1). ${fmtTokenAmount(tokenMeta(walletToken, boardInfo).fee, tokenMeta(walletToken, boardInfo).decimals)} ${tokenMeta(walletToken, boardInfo).label} network fee applies.`}
               </span>
             </div>
           </div>

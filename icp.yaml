@@ -27,6 +27,26 @@ canisters:
         path: src/backend/ledger.wasm.gz
     init_args: '(variant { Init = record { token_symbol = "ICP"; token_name = "Internet Computer Protocol"; decimals = opt (8 : nat8); transfer_fee = (10_000 : nat); metadata = vec {}; minting_account = record { owner = principal "m4zh5-ybqlr-txnmf-v26f2-2h77i-rlufn-z33hj-wrt5i-yzav5-iab77-wae" }; initial_balances = vec { record { record { owner = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; (100_000_000_000 : nat) }; record { record { owner = principal "p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe" }; (100_000_000_000 : nat) }; record { record { owner = principal "aiewf-lx777-77775-aaaca-cai" }; (100_000_000_000 : nat) } }; archive_options = record { num_blocks_to_archive = (1000 : nat64); trigger_threshold = (2000 : nat64); controller_id = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; feature_flags = opt record { icrc2 = true } } })'
 
+  # Local-only ckBTC test ledger (real symbol/decimals/fee) so the Idea Board
+  # multi-token flow is exercisable end-to-end. After (re)deploy, point the
+  # backend at it: icp canister call backend admin_set_token_ledger
+  # '(variant { CkBTC }, principal "<id>")' -e local --identity dev1
+  - name: ckbtc-ledger
+    recipe:
+      type: "@dfinity/prebuilt@v2.0.0"
+      configuration:
+        candid: src/backend/ledger.did
+        path: src/backend/ledger.wasm.gz
+    init_args: '(variant { Init = record { token_symbol = "ckBTC"; token_name = "Chain-key Bitcoin (local test)"; decimals = opt (8 : nat8); transfer_fee = (10 : nat); metadata = vec {}; minting_account = record { owner = principal "m4zh5-ybqlr-txnmf-v26f2-2h77i-rlufn-z33hj-wrt5i-yzav5-iab77-wae" }; initial_balances = vec { record { record { owner = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; (10_000_000_000 : nat) }; record { record { owner = principal "p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe" }; (10_000_000_000 : nat) }; record { record { owner = principal "aiewf-lx777-77775-aaaca-cai" }; (100_000_000_000 : nat) } }; archive_options = record { num_blocks_to_archive = (1000 : nat64); trigger_threshold = (2000 : nat64); controller_id = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; feature_flags = opt record { icrc2 = true } } })'
+  # Local-only ckETH test ledger (18 decimals, canonical 0.000002 fee).
+  - name: cketh-ledger
+    recipe:
+      type: "@dfinity/prebuilt@v2.0.0"
+      configuration:
+        candid: src/backend/ledger.did
+        path: src/backend/ledger.wasm.gz
+    init_args: '(variant { Init = record { token_symbol = "ckETH"; token_name = "Chain-key Ethereum (local test)"; decimals = opt (18 : nat8); transfer_fee = (2_000_000_000_000 : nat); metadata = vec {}; minting_account = record { owner = principal "m4zh5-ybqlr-txnmf-v26f2-2h77i-rlufn-z33hj-wrt5i-yzav5-iab77-wae" }; initial_balances = vec { record { record { owner = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; (2_000_000_000_000_000_000 : nat) }; record { record { owner = principal "p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe" }; (2_000_000_000_000_000_000 : nat) }; record { record { owner = principal "aiewf-lx777-77775-aaaca-cai" }; (10_000_000_000_000_000_000 : nat) } }; archive_options = record { num_blocks_to_archive = (1000 : nat64); trigger_threshold = (2000 : nat64); controller_id = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; feature_flags = opt record { icrc2 = true } } })'
+
 networks:
   - name: local
     mode: managed
@@ -39,6 +59,8 @@ environments:
       - backend
       - frontend
       - ledger
+      - ckbtc-ledger
+      - cketh-ledger
   - name: staging
     network: ic
     canisters:

@@ -319,6 +319,23 @@ pub struct Config {
     pub frontend_canister_id: Option<Principal>,
     #[serde(default = "default_pool_initiation_fee_e8s")]
     pub pool_initiation_fee_e8s: u64,
+    /// Local-only overrides pointing ckBTC/ckETH at locally deployed ICRC-1
+    /// test ledgers (set via `admin_set_token_ledger` after deploy). On
+    /// mainnet the canonical ledger canisters are hard-pinned and these are
+    /// ignored — same safety posture as the pinned leader neuron.
+    #[serde(default)]
+    pub ckbtc_ledger_canister_id: Option<Principal>,
+    #[serde(default)]
+    pub cketh_ledger_canister_id: Option<Principal>,
+    /// Admin overrides for the per-token minimum upvote (smallest units).
+    /// `None` falls back to the value-aligned defaults; retune via
+    /// `admin_set_min_upvote` as exchange rates drift.
+    #[serde(default)]
+    pub min_upvote_icp_e8s: Option<u64>,
+    #[serde(default)]
+    pub min_upvote_ckbtc_e8s: Option<u64>,
+    #[serde(default)]
+    pub min_upvote_cketh_wei: Option<u64>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -466,6 +483,11 @@ thread_local! {
             is_local: false,
             frontend_canister_id: None,
             pool_initiation_fee_e8s: 12_500_000_000, // 125 ICP
+            ckbtc_ledger_canister_id: None,
+            cketh_ledger_canister_id: None,
+            min_upvote_icp_e8s: None,
+            min_upvote_ckbtc_e8s: None,
+            min_upvote_cketh_wei: None,
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -628,6 +650,11 @@ fn init(payload: InitPayload) {
         is_local,
         frontend_canister_id: None, // resolved lazily via frontend_canister_id()
         pool_initiation_fee_e8s: 12_500_000_000, // 125 ICP
+        ckbtc_ledger_canister_id: None, // local: set via admin_set_token_ledger
+        cketh_ledger_canister_id: None,
+        min_upvote_icp_e8s: None,
+        min_upvote_ckbtc_e8s: None,
+        min_upvote_cketh_wei: None,
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
@@ -637,6 +664,7 @@ fn init(payload: InitPayload) {
     // populated from live NNS data (kicked off immediately + on the sweep timer).
     if is_local {
         seed_mock_proposals();
+        seed_mock_ideas();
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
     }
@@ -653,6 +681,7 @@ fn post_upgrade() {
     let is_local = CONFIG.with(|c| c.borrow().get().is_local);
     if is_local {
         seed_mock_proposals();
+        seed_mock_ideas();
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
     }
@@ -991,6 +1020,9 @@ fn proposals_at_quota() -> bool {
 async fn admin_trigger_sweep() -> Result<(), String> {
     proposal_sync_sweep().await;
     retry_failed_settlements().await;
+    retry_failed_upvotes().await;
+    retry_failed_fundings().await;
+    delete_expired_ideas();
     cycle_topup_check().await;
     Ok(())
 }
@@ -3184,6 +3216,9 @@ fn setup_timers() {
         fetch_leader_neuron_info().await;
         proposal_sync_sweep().await;
         retry_failed_settlements().await;
+        retry_failed_upvotes().await;
+        retry_failed_fundings().await;
+        delete_expired_ideas();
         cycle_topup_check().await;
     });
 }
@@ -3323,6 +3358,1193 @@ fn get_audit_log(offset: u64, limit: u64) -> Vec<AuditLogEntry> {
             .filter_map(|i| borrowed.get(i as u64))
             .collect()
     })
+}
+
+// ==========================================
+// 12. Feature Flags & Idea Board
+// ==========================================
+
+/// Feature-flag key for the Idea Board. Flags default via `feature_default`;
+/// an admin override in FEATURE_FLAGS (1 = on, 0 = off) wins over the default.
+pub const FLAG_IDEA_BOARD: &str = "idea_board";
+const KNOWN_FEATURE_FLAGS: [&str; 1] = [FLAG_IDEA_BOARD];
+
+const MAX_FEATURE_FLAGS: u64 = 64;
+const MAX_FLAG_KEY_LEN: usize = 64;
+
+const MAX_IDEAS: u64 = 500;
+const MAX_ACTIVE_IDEAS_PER_USER: usize = 10;
+const MAX_IDEA_TITLE_LEN: usize = 80;
+const MAX_IDEA_DESCRIPTION_LEN: usize = 280;
+const MAX_IDEA_DETAIL_LEN: usize = 4000;
+/// An idea expires after 30 days without a single upvote (measured from the
+/// later of `created_at` / last upvote).
+const IDEA_EXPIRY_NANOS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
+/// Upper bound on a single upvote, in the token's smallest unit. u64::MAX / 4
+/// keeps the 75% split (`amount * 3 / 4`) overflow-free by construction.
+const MAX_UPVOTE_UNITS: u64 = u64::MAX / 4;
+/// Posting an idea costs 1 ICP (anti-spam; 100% to the treasury).
+const IDEA_POST_FEE_E8S: u64 = 100_000_000;
+/// Subaccount seed for the posting-fee escrow — far above any real idea id.
+const IDEA_POST_SEED: u64 = u64::MAX;
+const MAX_PROJECTS: u64 = 200;
+
+const MAINNET_CKBTC_LEDGER: &str = "mxzaz-hqaaa-aaaar-qaada-cai";
+const MAINNET_CKETH_LEDGER: &str = "ss2fx-dyaaa-aaaar-qacoq-cai";
+
+/// Value-aligned default minimum upvotes — each ≈ $1 at approximate
+/// June-2026 exchange rates (ICP ≈ $5, BTC ≈ $100k, ETH ≈ $3k). Admins
+/// retune at runtime via `admin_set_min_upvote` as rates drift.
+const DEFAULT_MIN_UPVOTE_ICP_E8S: u64 = 20_000_000;            // 0.2 ICP
+const DEFAULT_MIN_UPVOTE_CKBTC_SATS: u64 = 1_000;              // 0.00001 ckBTC
+const DEFAULT_MIN_UPVOTE_CKETH_WEI: u64 = 330_000_000_000_000; // 0.00033 ckETH
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdeaToken {
+    ICP,
+    CkBTC,
+    CkETH,
+}
+
+/// An idea is implicitly Active while stored; the sweep DELETES ideas whose
+/// 30-day no-upvote window has lapsed (no Expired state is kept around).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Idea {
+    pub id: u64,
+    pub poster: Principal,
+    pub title: String,
+    pub description: String,
+    pub detail: String,
+    pub created_at: u64,
+    /// Timestamp of the most recent upvote; equals `created_at` until the
+    /// first upvote. Drives the 30-day expiry window.
+    pub last_upvote_at: u64,
+    pub upvote_count: u64,
+    /// Detail-view opens by signed-in users (drives "most viewed" sorting).
+    #[serde(default)]
+    pub views: u64,
+    pub total_icp_e8s: u64,
+    pub total_ckbtc_e8s: u64,
+    pub total_cketh_wei: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum UpvoteStatus {
+    Settled,
+    FailedPayout,
+}
+
+/// Saga journal for one upvote payout (75% treasury / 25% poster). Block
+/// indices are set per completed transfer so a retry skips finished steps —
+/// same idempotency pattern as `settle_burn_split` / pool registration.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct IdeaUpvote {
+    pub id: u64,
+    pub idea_id: u64,
+    pub voter: Principal,
+    pub token: IdeaToken,
+    pub amount: u64,
+    pub status: UpvoteStatus,
+    pub created_at: u64,
+    pub treasury_block: Option<u64>,
+    pub poster_block: Option<u64>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FeatureFlag {
+    pub key: String,
+    pub enabled: bool,
+}
+
+/// Admin-curated, fundable project (Community R&D "Projects" tab). Funding
+/// goes 100% to the protocol treasury, which pays for the project's
+/// execution. Per-token goals of 0 mean "not seeking that token".
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Project {
+    pub id: u64,
+    pub title: String,
+    pub description: String,
+    pub detail: String,
+    pub created_at: u64,
+    pub goal_icp_e8s: u64,
+    pub goal_ckbtc_e8s: u64,
+    pub goal_cketh_wei: u64,
+    pub raised_icp_e8s: u64,
+    pub raised_ckbtc_e8s: u64,
+    pub raised_cketh_wei: u64,
+    pub funding_count: u64,
+}
+
+/// Saga journal for one project funding (single transfer → treasury), same
+/// idempotency pattern as IdeaUpvote.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ProjectFunding {
+    pub id: u64,
+    pub project_id: u64,
+    pub funder: Principal,
+    pub token: IdeaToken,
+    pub amount: u64,
+    pub status: UpvoteStatus,
+    pub created_at: u64,
+    pub treasury_block: Option<u64>,
+}
+
+/// Everything the Idea Board UI needs in one query: the flag, per-token
+/// ledger canister ids, per-token minimum upvotes (value-aligned across
+/// tokens via exchange rates) and ledger fees, in smallest units.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct IdeaBoardInfo {
+    pub enabled: bool,
+    pub icp_ledger: Principal,
+    pub ckbtc_ledger: Principal,
+    pub cketh_ledger: Principal,
+    pub min_upvote_icp_e8s: u64,
+    pub min_upvote_ckbtc_e8s: u64,
+    pub min_upvote_cketh_wei: u64,
+    pub fee_icp_e8s: u64,
+    pub fee_ckbtc_sats: u64,
+    pub fee_cketh_wei: u64,
+    pub expiry_nanos: u64,
+    /// Flat fee (ICP e8s) to post an idea; 100% to the treasury.
+    pub post_fee_e8s: u64,
+}
+
+impl_storable!(Idea);
+impl_storable!(IdeaUpvote);
+impl_storable!(Project);
+impl_storable!(ProjectFunding);
+
+thread_local! {
+    static IDEAS: RefCell<StableBTreeMap<u64, Idea, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(9))))
+    });
+
+    static NEXT_IDEA_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(10)), 1u64))
+    });
+
+    static IDEA_UPVOTES: RefCell<StableBTreeMap<u64, IdeaUpvote, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(11))))
+    });
+
+    static NEXT_UPVOTE_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(12)), 1u64))
+    });
+
+    // Admin feature-flag overrides: 1 = enabled, 0 = disabled. A key absent
+    // here falls back to `feature_default`.
+    static FEATURE_FLAGS: RefCell<StableBTreeMap<String, u8, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(13))))
+    });
+
+    static PROJECTS: RefCell<StableBTreeMap<u64, Project, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(14))))
+    });
+
+    static NEXT_PROJECT_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(15)), 1u64))
+    });
+
+    static PROJECT_FUNDINGS: RefCell<StableBTreeMap<u64, ProjectFunding, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(16))))
+    });
+
+    static NEXT_FUNDING_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(17)), 1u64))
+    });
+}
+
+fn feature_default(key: &str) -> bool {
+    match key {
+        FLAG_IDEA_BOARD => true,
+        _ => false,
+    }
+}
+
+fn feature_enabled(key: &str) -> bool {
+    FEATURE_FLAGS
+        .with(|m| m.borrow().get(&key.to_string()))
+        .map(|v| v == 1)
+        .unwrap_or_else(|| feature_default(key))
+}
+
+fn require_idea_board_enabled() -> Result<(), String> {
+    if !feature_enabled(FLAG_IDEA_BOARD) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+fn valid_flag_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= MAX_FLAG_KEY_LEN
+        && key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// All flags the canister knows about (known defaults merged with any extra
+/// admin-created keys). Public so anonymous viewers can hide gated UI.
+#[ic_cdk::query]
+fn list_feature_flags() -> Vec<FeatureFlag> {
+    let mut flags: Vec<FeatureFlag> = KNOWN_FEATURE_FLAGS
+        .iter()
+        .map(|k| FeatureFlag { key: k.to_string(), enabled: feature_enabled(k) })
+        .collect();
+    FEATURE_FLAGS.with(|m| {
+        for entry in m.borrow().iter() {
+            let key = entry.key().clone();
+            if !KNOWN_FEATURE_FLAGS.contains(&key.as_str()) {
+                let enabled = entry.value() == 1;
+                flags.push(FeatureFlag { key, enabled });
+            }
+        }
+    });
+    flags
+}
+
+/// Admin: enable/disable a feature completely. Unknown keys are allowed (a
+/// kill-switch can be staged before the feature ships) but validated and
+/// capped so the map can't be spammed.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_feature_flag(key: String, enabled: bool) -> Result<(), String> {
+    let key = key.trim().to_string();
+    if !valid_flag_key(&key) {
+        return Err("INVALID_FLAG_KEY".to_string());
+    }
+    FEATURE_FLAGS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.get(&key).is_none() && m.len() >= MAX_FEATURE_FLAGS {
+            return Err("TOO_MANY_FLAGS".to_string());
+        }
+        m.insert(key, if enabled { 1 } else { 0 });
+        Ok(())
+    })
+}
+
+/// Per-token ledger. Mainnet is hard-pinned to the canonical ckBTC/ckETH
+/// ledgers (overrides ignored — F-101 posture). Locally, ckBTC/ckETH resolve
+/// to the admin-configured local test ledgers, falling back to the ICP test
+/// ledger when none is configured yet.
+fn token_ledger(token: IdeaToken, config: &Config) -> Principal {
+    match token {
+        IdeaToken::ICP => config.ledger_canister_id,
+        IdeaToken::CkBTC => {
+            if config.is_local {
+                config.ckbtc_ledger_canister_id.unwrap_or(config.ledger_canister_id)
+            } else {
+                Principal::from_text(MAINNET_CKBTC_LEDGER).unwrap()
+            }
+        }
+        IdeaToken::CkETH => {
+            if config.is_local {
+                config.cketh_ledger_canister_id.unwrap_or(config.ledger_canister_id)
+            } else {
+                Principal::from_text(MAINNET_CKETH_LEDGER).unwrap()
+            }
+        }
+    }
+}
+
+/// Ledger transfer fee in the token's smallest unit. The fee follows the
+/// resolved ledger: a local ckBTC/ckETH that falls back to the ICP test
+/// ledger pays that ledger's 10_000 fee; a dedicated local token ledger is
+/// deployed with the canonical fee, so the canonical value applies there too.
+fn token_fee(token: IdeaToken, config: &Config) -> u64 {
+    match token {
+        IdeaToken::ICP => 10_000, // 0.0001 ICP
+        IdeaToken::CkBTC => {
+            if config.is_local && config.ckbtc_ledger_canister_id.is_none() {
+                10_000
+            } else {
+                10 // 10 satoshi
+            }
+        }
+        IdeaToken::CkETH => {
+            if config.is_local && config.cketh_ledger_canister_id.is_none() {
+                10_000
+            } else {
+                2_000_000_000_000 // 0.000002 ckETH
+            }
+        }
+    }
+}
+
+/// Minimum upvote per token: admin override, else the value-aligned default
+/// (~$1 equivalent per token — see DEFAULT_MIN_UPVOTE_* rates).
+fn token_min_upvote(token: IdeaToken, config: &Config) -> u64 {
+    match token {
+        IdeaToken::ICP => config.min_upvote_icp_e8s.unwrap_or(DEFAULT_MIN_UPVOTE_ICP_E8S),
+        IdeaToken::CkBTC => config.min_upvote_ckbtc_e8s.unwrap_or(DEFAULT_MIN_UPVOTE_CKBTC_SATS),
+        IdeaToken::CkETH => config.min_upvote_cketh_wei.unwrap_or(DEFAULT_MIN_UPVOTE_CKETH_WEI),
+    }
+}
+
+/// Admin: point ckBTC/ckETH at locally deployed test ledgers. Local-only —
+/// mainnet token ledgers are hard-pinned to the canonical canisters.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_token_ledger(token: IdeaToken, ledger: Principal) -> Result<(), String> {
+    if ledger == Principal::anonymous() {
+        return Err("INVALID_LEDGER".to_string());
+    }
+    CONFIG.with(|cell| {
+        let mut cfg = cell.borrow().get().clone();
+        if !cfg.is_local {
+            return Err("MAINNET_LEDGERS_PINNED".to_string());
+        }
+        match token {
+            IdeaToken::ICP => return Err("ICP_LEDGER_FIXED".to_string()),
+            IdeaToken::CkBTC => cfg.ckbtc_ledger_canister_id = Some(ledger),
+            IdeaToken::CkETH => cfg.cketh_ledger_canister_id = Some(ledger),
+        }
+        cell.borrow_mut().set(cfg);
+        Ok(())
+    })
+}
+
+/// Admin: retune a token's minimum upvote (smallest units) as exchange
+/// rates move, keeping minimums roughly value-aligned across tokens.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_min_upvote(token: IdeaToken, min: u64) -> Result<(), String> {
+    if min == 0 || min > MAX_UPVOTE_UNITS {
+        return Err("INVALID_MINIMUM".to_string());
+    }
+    CONFIG.with(|cell| {
+        let mut cfg = cell.borrow().get().clone();
+        match token {
+            IdeaToken::ICP => cfg.min_upvote_icp_e8s = Some(min),
+            IdeaToken::CkBTC => cfg.min_upvote_ckbtc_e8s = Some(min),
+            IdeaToken::CkETH => cfg.min_upvote_cketh_wei = Some(min),
+        }
+        cell.borrow_mut().set(cfg);
+        Ok(())
+    })
+}
+
+/// 75% → treasury, 25% (plus rounding remainder) → idea poster.
+fn split_upvote(amount: u64) -> (u64, u64) {
+    let treasury = amount / 4 * 3;
+    let poster = amount - treasury;
+    (treasury, poster)
+}
+
+fn idea_is_expired(last_upvote_at: u64, now: u64) -> bool {
+    now > last_upvote_at.saturating_add(IDEA_EXPIRY_NANOS)
+}
+
+/// Principal- and idea-bound deposit subaccount for upvote escrow. Domain-
+/// separated from the proposal escrow (`proof_of_burn_escrow_v1`).
+fn derive_idea_subaccount(user: &Principal, idea_id: u64) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_idea_v1");
+    hasher.update(user.as_slice());
+    hasher.update(&idea_id.to_be_bytes());
+    let result = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&result);
+    sub
+}
+
+fn validate_idea_text(title: &str, description: &str, detail: &str) -> Result<(), String> {
+    if title.is_empty() || title.chars().count() > MAX_IDEA_TITLE_LEN {
+        return Err("INVALID_TITLE".to_string());
+    }
+    if description.is_empty() || description.chars().count() > MAX_IDEA_DESCRIPTION_LEN {
+        return Err("INVALID_DESCRIPTION".to_string());
+    }
+    if detail.chars().count() > MAX_IDEA_DETAIL_LEN {
+        return Err("INVALID_DETAIL".to_string());
+    }
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_idea_board_info() -> IdeaBoardInfo {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    IdeaBoardInfo {
+        enabled: feature_enabled(FLAG_IDEA_BOARD),
+        icp_ledger: token_ledger(IdeaToken::ICP, &config),
+        ckbtc_ledger: token_ledger(IdeaToken::CkBTC, &config),
+        cketh_ledger: token_ledger(IdeaToken::CkETH, &config),
+        min_upvote_icp_e8s: token_min_upvote(IdeaToken::ICP, &config),
+        min_upvote_ckbtc_e8s: token_min_upvote(IdeaToken::CkBTC, &config),
+        min_upvote_cketh_wei: token_min_upvote(IdeaToken::CkETH, &config),
+        fee_icp_e8s: token_fee(IdeaToken::ICP, &config),
+        fee_ckbtc_sats: token_fee(IdeaToken::CkBTC, &config),
+        fee_cketh_wei: token_fee(IdeaToken::CkETH, &config),
+        expiry_nanos: IDEA_EXPIRY_NANOS,
+        post_fee_e8s: IDEA_POST_FEE_E8S,
+    }
+}
+
+/// All live ideas, newest first. Time-expired ideas are omitted even before
+/// the sweep deletes them, so the UI never shows a dead idea.
+#[ic_cdk::query]
+fn list_ideas() -> Vec<Idea> {
+    let now = current_time();
+    let mut ideas: Vec<Idea> = IDEAS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|entry| entry.value())
+            .filter(|idea| !idea_is_expired(idea.last_upvote_at, now))
+            .collect()
+    });
+    ideas.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    ideas
+}
+
+/// Count a detail-view open (signed-in users only — anonymous ingress is
+/// already rejected by inspect_message). Drives "most viewed" sorting.
+#[ic_cdk::update]
+fn record_idea_view(idea_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_idea_board_enabled()?;
+    IDEAS.with(|m| {
+        let mut m = m.borrow_mut();
+        match m.get(&idea_id) {
+            Some(mut idea) => {
+                idea.views = idea.views.saturating_add(1);
+                m.insert(idea_id, idea);
+                Ok(())
+            }
+            None => Err("IDEA_NOT_FOUND".to_string()),
+        }
+    })
+}
+
+/// The caller's deposit account for the 1 ICP idea-posting fee. Fund it with
+/// `post_fee + 0.0001 ICP` on the ICP ledger, then call `post_idea`.
+#[ic_cdk::query]
+fn get_idea_post_deposit_address() -> LedgerAccount {
+    let caller = ic_cdk::caller();
+    LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(derive_idea_subaccount(&caller, IDEA_POST_SEED)),
+    }
+}
+
+#[ic_cdk::update]
+async fn post_idea(title: String, description: String, detail: String) -> Result<u64, String> {
+    require_authenticated()?;
+    require_idea_board_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let title = title.trim().to_string();
+    let description = description.trim().to_string();
+    let detail = detail.trim().to_string();
+    validate_idea_text(&title, &description, &detail)?;
+
+    let now = current_time();
+    let quota_err = IDEAS.with(|m| {
+        let m = m.borrow();
+        if m.len() >= MAX_IDEAS {
+            return Some("IDEA_QUOTA_REACHED");
+        }
+        let active_by_caller = m
+            .iter()
+            .filter(|e| {
+                let i = e.value();
+                i.poster == caller && !idea_is_expired(i.last_upvote_at, now)
+            })
+            .count();
+        if active_by_caller >= MAX_ACTIVE_IDEAS_PER_USER {
+            return Some("TOO_MANY_ACTIVE_IDEAS");
+        }
+        None
+    });
+    if let Some(e) = quota_err {
+        return Err(e.to_string());
+    }
+
+    // 1 ICP posting fee → treasury (anti-spam). Charged before the idea is
+    // created; if the fee transfer fails nothing is stored.
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+    let sub = derive_idea_subaccount(&caller, IDEA_POST_SEED);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    if balance < IDEA_POST_FEE_E8S + 10_000 {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+    let treasury_dest = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, IDEA_POST_FEE_E8S, Some(10_000))
+        .await
+        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
+
+    let id = NEXT_IDEA_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+
+    let idea = Idea {
+        id,
+        poster: caller,
+        title,
+        description,
+        detail,
+        created_at: now,
+        last_upvote_at: now,
+        upvote_count: 0,
+        views: 0,
+        total_icp_e8s: 0,
+        total_ckbtc_e8s: 0,
+        total_cketh_wei: 0,
+    };
+    IDEAS.with(|m| {
+        m.borrow_mut().insert(id, idea);
+    });
+
+    let log_entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "idea_post".to_string(),
+        proposal_id: id,
+        user: caller,
+        amount_e8s: IDEA_POST_FEE_E8S,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&log_entry);
+    });
+
+    Ok(id)
+}
+
+/// The caller's deposit account for upvoting `idea_id`. The same subaccount
+/// is used on every token's ledger — fund it on the ledger of the token you
+/// intend to upvote with, then call `upvote_idea`.
+#[ic_cdk::query]
+fn get_idea_deposit_address(idea_id: u64) -> LedgerAccount {
+    let caller = ic_cdk::caller();
+    LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(derive_idea_subaccount(&caller, idea_id)),
+    }
+}
+
+/// Run (or resume) the two-step payout for an upvote. Each completed transfer
+/// persists its block index so a retry never double-sends.
+async fn run_upvote_payout(
+    ledger_id: Principal,
+    from_sub: [u8; 32],
+    poster: Principal,
+    fee: u64,
+    uv: &mut IdeaUpvote,
+) -> Result<(), String> {
+    let (treasury_amt, poster_amt) = split_upvote(uv.amount);
+
+    if uv.treasury_block.is_none() {
+        let dest = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(TREASURY_SUBACCOUNT),
+        };
+        let b = call_ledger_transfer(ledger_id, Some(from_sub), dest, treasury_amt, Some(fee))
+            .await
+            .map_err(|e| format!("TREASURY_XFER: {}", e))?;
+        uv.treasury_block = Some(b);
+        IDEA_UPVOTES.with(|m| {
+            m.borrow_mut().insert(uv.id, uv.clone());
+        });
+    }
+
+    if uv.poster_block.is_none() {
+        let dest = LedgerAccount { owner: poster, subaccount: None };
+        let b = call_ledger_transfer(ledger_id, Some(from_sub), dest, poster_amt, Some(fee))
+            .await
+            .map_err(|e| format!("POSTER_XFER: {}", e))?;
+        uv.poster_block = Some(b);
+        IDEA_UPVOTES.with(|m| {
+            m.borrow_mut().insert(uv.id, uv.clone());
+        });
+    }
+
+    Ok(())
+}
+
+/// Apply a settled upvote to its idea: bump totals and reset the 30-day
+/// expiry clock. Called exactly once per upvote (at settle).
+fn apply_upvote_to_idea(uv: &IdeaUpvote, now: u64) {
+    IDEAS.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(mut idea) = m.get(&uv.idea_id) {
+            idea.upvote_count = idea.upvote_count.saturating_add(1);
+            idea.last_upvote_at = now;
+            match uv.token {
+                IdeaToken::ICP => {
+                    idea.total_icp_e8s = idea.total_icp_e8s.saturating_add(uv.amount)
+                }
+                IdeaToken::CkBTC => {
+                    idea.total_ckbtc_e8s = idea.total_ckbtc_e8s.saturating_add(uv.amount)
+                }
+                IdeaToken::CkETH => {
+                    idea.total_cketh_wei = idea.total_cketh_wei.saturating_add(uv.amount)
+                }
+            }
+            m.insert(uv.idea_id, idea);
+        }
+    });
+}
+
+/// Upvote an idea with deposited funds. 75% of the amount goes to the
+/// protocol treasury, 25% to the idea poster's wallet. The caller must first
+/// transfer `amount + 2×fee` to their `get_idea_deposit_address` subaccount
+/// on the chosen token's ledger.
+#[ic_cdk::update]
+async fn upvote_idea(idea_id: u64, token: IdeaToken, amount: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_idea_board_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let fee = token_fee(token, &config);
+    if amount < token_min_upvote(token, &config) {
+        return Err("BELOW_MINIMUM".to_string());
+    }
+    if amount > MAX_UPVOTE_UNITS {
+        return Err("EXCEEDS_GLOBAL_CAP".to_string());
+    }
+
+    let idea = IDEAS
+        .with(|m| m.borrow().get(&idea_id))
+        .ok_or_else(|| "IDEA_NOT_FOUND".to_string())?;
+    let now = current_time();
+    if idea_is_expired(idea.last_upvote_at, now) {
+        return Err("IDEA_EXPIRED".to_string());
+    }
+
+    let ledger_id = token_ledger(token, &config);
+    let sub = derive_idea_subaccount(&caller, idea_id);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    let required = amount
+        .checked_add(fee.checked_mul(2).ok_or("OVERFLOW")?)
+        .ok_or("OVERFLOW")?;
+    if balance < required {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+
+    // Journal the upvote BEFORE moving funds so a mid-saga failure is
+    // visible and retryable from the sweep timer.
+    let upvote_id = NEXT_UPVOTE_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    let mut uv = IdeaUpvote {
+        id: upvote_id,
+        idea_id,
+        voter: caller,
+        token,
+        amount,
+        status: UpvoteStatus::FailedPayout,
+        created_at: now,
+        treasury_block: None,
+        poster_block: None,
+    };
+    IDEA_UPVOTES.with(|m| {
+        m.borrow_mut().insert(upvote_id, uv.clone());
+    });
+
+    run_upvote_payout(ledger_id, sub, idea.poster, fee, &mut uv).await?;
+
+    uv.status = UpvoteStatus::Settled;
+    IDEA_UPVOTES.with(|m| {
+        m.borrow_mut().insert(upvote_id, uv.clone());
+    });
+    apply_upvote_to_idea(&uv, now);
+
+    let log_entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "idea_upvote".to_string(),
+        proposal_id: idea_id,
+        user: caller,
+        amount_e8s: amount,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&log_entry);
+    });
+
+    Ok(())
+}
+
+/// Sweep: resume upvote payouts that failed mid-saga. Completed steps are
+/// skipped via their persisted block indices.
+async fn retry_failed_upvotes() {
+    let to_retry: Vec<u64> = IDEA_UPVOTES.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| e.value().status == UpvoteStatus::FailedPayout)
+            .map(|e| *e.key())
+            .collect()
+    });
+    if to_retry.is_empty() {
+        return;
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let now = current_time();
+
+    for id in to_retry {
+        let mut uv = match IDEA_UPVOTES.with(|m| m.borrow().get(&id)) {
+            Some(uv) => uv,
+            None => continue,
+        };
+        let ledger_id = token_ledger(uv.token, &config);
+        let fee = token_fee(uv.token, &config);
+        let sub = derive_idea_subaccount(&uv.voter, uv.idea_id);
+
+        let poster = match IDEAS.with(|m| m.borrow().get(&uv.idea_id)).map(|i| i.poster) {
+            Some(p) => p,
+            None => {
+                // The idea was deleted (expired) before this payout settled.
+                // Return whatever is recoverable from the voter's escrow and
+                // close the journal entry so it stops retrying.
+                let escrow = LedgerAccount {
+                    owner: get_canister_id(),
+                    subaccount: Some(sub),
+                };
+                let bal = match call_ledger_balance(ledger_id, escrow).await {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                if bal > fee {
+                    let dest = LedgerAccount { owner: uv.voter, subaccount: None };
+                    if call_ledger_transfer(ledger_id, Some(sub), dest, bal - fee, Some(fee)).await.is_err() {
+                        continue;
+                    }
+                    let log_entry = AuditLogEntry {
+                        timestamp: now,
+                        event_type: "idea_upvote_refund".to_string(),
+                        proposal_id: uv.idea_id,
+                        user: uv.voter,
+                        amount_e8s: bal - fee,
+                    };
+                    AUDIT_LOG.with(|log| {
+                        let _ = log.borrow_mut().append(&log_entry);
+                    });
+                }
+                uv.status = UpvoteStatus::Settled;
+                IDEA_UPVOTES.with(|m| {
+                    m.borrow_mut().insert(id, uv);
+                });
+                continue;
+            }
+        };
+
+        if run_upvote_payout(ledger_id, sub, poster, fee, &mut uv).await.is_ok() {
+            uv.status = UpvoteStatus::Settled;
+            IDEA_UPVOTES.with(|m| {
+                m.borrow_mut().insert(id, uv.clone());
+            });
+            apply_upvote_to_idea(&uv, now);
+        } else {
+            IDEA_UPVOTES.with(|m| {
+                m.borrow_mut().insert(id, uv);
+            });
+        }
+    }
+}
+
+// ── Projects (Community R&D, admin-curated) ──
+
+fn derive_project_subaccount(user: &Principal, project_id: u64) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_project_v1");
+    hasher.update(user.as_slice());
+    hasher.update(&project_id.to_be_bytes());
+    let result = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&result);
+    sub
+}
+
+/// Admin: add a fundable project. At least one per-token goal must be set.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_add_project(
+    title: String,
+    description: String,
+    detail: String,
+    goal_icp_e8s: u64,
+    goal_ckbtc_e8s: u64,
+    goal_cketh_wei: u64,
+) -> Result<u64, String> {
+    let title = title.trim().to_string();
+    let description = description.trim().to_string();
+    let detail = detail.trim().to_string();
+    validate_idea_text(&title, &description, &detail)?;
+    if goal_icp_e8s == 0 && goal_ckbtc_e8s == 0 && goal_cketh_wei == 0 {
+        return Err("NO_GOAL_SET".to_string());
+    }
+    if PROJECTS.with(|m| m.borrow().len()) >= MAX_PROJECTS {
+        return Err("PROJECT_QUOTA_REACHED".to_string());
+    }
+
+    let id = NEXT_PROJECT_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    let now = current_time();
+    PROJECTS.with(|m| {
+        m.borrow_mut().insert(id, Project {
+            id,
+            title,
+            description,
+            detail,
+            created_at: now,
+            goal_icp_e8s,
+            goal_ckbtc_e8s,
+            goal_cketh_wei,
+            raised_icp_e8s: 0,
+            raised_ckbtc_e8s: 0,
+            raised_cketh_wei: 0,
+            funding_count: 0,
+        });
+    });
+    Ok(id)
+}
+
+/// Admin: remove a project from the board. Settled funding stays in the
+/// treasury; any in-flight funding saga refunds via the orphan path.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_remove_project(project_id: u64) -> Result<(), String> {
+    PROJECTS.with(|m| {
+        if m.borrow_mut().remove(&project_id).is_none() {
+            return Err("PROJECT_NOT_FOUND".to_string());
+        }
+        Ok(())
+    })
+}
+
+/// All projects, newest first.
+#[ic_cdk::query]
+fn list_projects() -> Vec<Project> {
+    let mut projects: Vec<Project> = PROJECTS.with(|m| {
+        m.borrow().iter().map(|entry| entry.value()).collect()
+    });
+    projects.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    projects
+}
+
+/// The caller's deposit account for funding `project_id`. Fund it on the
+/// chosen token's ledger with `amount + fee`, then call `fund_project`.
+#[ic_cdk::query]
+fn get_project_deposit_address(project_id: u64) -> LedgerAccount {
+    let caller = ic_cdk::caller();
+    LedgerAccount {
+        owner: ic_cdk::id(),
+        subaccount: Some(derive_project_subaccount(&caller, project_id)),
+    }
+}
+
+fn apply_funding_to_project(f: &ProjectFunding) {
+    PROJECTS.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(mut project) = m.get(&f.project_id) {
+            project.funding_count = project.funding_count.saturating_add(1);
+            match f.token {
+                IdeaToken::ICP => {
+                    project.raised_icp_e8s = project.raised_icp_e8s.saturating_add(f.amount)
+                }
+                IdeaToken::CkBTC => {
+                    project.raised_ckbtc_e8s = project.raised_ckbtc_e8s.saturating_add(f.amount)
+                }
+                IdeaToken::CkETH => {
+                    project.raised_cketh_wei = project.raised_cketh_wei.saturating_add(f.amount)
+                }
+            }
+            m.insert(f.project_id, project);
+        }
+    });
+}
+
+/// Fund a project with deposited tokens — 100% goes to the protocol
+/// treasury (which pays for the project's execution). Same minimums as
+/// upvotes (value-aligned across tokens).
+#[ic_cdk::update]
+async fn fund_project(project_id: u64, token: IdeaToken, amount: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_idea_board_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let fee = token_fee(token, &config);
+    if amount < token_min_upvote(token, &config) {
+        return Err("BELOW_MINIMUM".to_string());
+    }
+    if amount > MAX_UPVOTE_UNITS {
+        return Err("EXCEEDS_GLOBAL_CAP".to_string());
+    }
+    if PROJECTS.with(|m| m.borrow().get(&project_id)).is_none() {
+        return Err("PROJECT_NOT_FOUND".to_string());
+    }
+
+    let ledger_id = token_ledger(token, &config);
+    let sub = derive_project_subaccount(&caller, project_id);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    let required = amount.checked_add(fee).ok_or("OVERFLOW")?;
+    if balance < required {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+
+    // Journal before moving funds (retryable from the sweep).
+    let funding_id = NEXT_FUNDING_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    let now = current_time();
+    let mut f = ProjectFunding {
+        id: funding_id,
+        project_id,
+        funder: caller,
+        token,
+        amount,
+        status: UpvoteStatus::FailedPayout,
+        created_at: now,
+        treasury_block: None,
+    };
+    PROJECT_FUNDINGS.with(|m| {
+        m.borrow_mut().insert(funding_id, f.clone());
+    });
+
+    let treasury_dest = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    let b = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, amount, Some(fee))
+        .await
+        .map_err(|e| format!("TREASURY_XFER: {}", e))?;
+    f.treasury_block = Some(b);
+    f.status = UpvoteStatus::Settled;
+    PROJECT_FUNDINGS.with(|m| {
+        m.borrow_mut().insert(funding_id, f.clone());
+    });
+    apply_funding_to_project(&f);
+
+    let log_entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "project_fund".to_string(),
+        proposal_id: project_id,
+        user: caller,
+        amount_e8s: amount,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&log_entry);
+    });
+
+    Ok(())
+}
+
+/// Sweep: resume project fundings that failed mid-transfer; if the project
+/// has been removed, refund the funder's escrow instead.
+async fn retry_failed_fundings() {
+    let to_retry: Vec<u64> = PROJECT_FUNDINGS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| e.value().status == UpvoteStatus::FailedPayout)
+            .map(|e| *e.key())
+            .collect()
+    });
+    if to_retry.is_empty() {
+        return;
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let now = current_time();
+
+    for id in to_retry {
+        let mut f = match PROJECT_FUNDINGS.with(|m| m.borrow().get(&id)) {
+            Some(f) => f,
+            None => continue,
+        };
+        let ledger_id = token_ledger(f.token, &config);
+        let fee = token_fee(f.token, &config);
+        let sub = derive_project_subaccount(&f.funder, f.project_id);
+
+        let project_exists = PROJECTS.with(|m| m.borrow().get(&f.project_id)).is_some();
+        if !project_exists {
+            // Project removed mid-saga: return whatever's recoverable.
+            let escrow = LedgerAccount {
+                owner: get_canister_id(),
+                subaccount: Some(sub),
+            };
+            let bal = match call_ledger_balance(ledger_id, escrow).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if bal > fee {
+                let dest = LedgerAccount { owner: f.funder, subaccount: None };
+                if call_ledger_transfer(ledger_id, Some(sub), dest, bal - fee, Some(fee)).await.is_err() {
+                    continue;
+                }
+            }
+            f.status = UpvoteStatus::Settled;
+            PROJECT_FUNDINGS.with(|m| {
+                m.borrow_mut().insert(id, f);
+            });
+            continue;
+        }
+
+        if f.treasury_block.is_none() {
+            let treasury_dest = LedgerAccount {
+                owner: get_canister_id(),
+                subaccount: Some(TREASURY_SUBACCOUNT),
+            };
+            match call_ledger_transfer(ledger_id, Some(sub), treasury_dest, f.amount, Some(fee)).await {
+                Ok(b) => f.treasury_block = Some(b),
+                Err(_) => {
+                    PROJECT_FUNDINGS.with(|m| {
+                        m.borrow_mut().insert(id, f);
+                    });
+                    continue;
+                }
+            }
+        }
+        f.status = UpvoteStatus::Settled;
+        PROJECT_FUNDINGS.with(|m| {
+            m.borrow_mut().insert(id, f.clone());
+        });
+        apply_funding_to_project(&f);
+
+        let log_entry = AuditLogEntry {
+            timestamp: now,
+            event_type: "project_fund".to_string(),
+            proposal_id: f.project_id,
+            user: f.funder,
+            amount_e8s: f.amount,
+        };
+        AUDIT_LOG.with(|log| {
+            let _ = log.borrow_mut().append(&log_entry);
+        });
+    }
+}
+
+/// Sweep: DELETE ideas that have gone 30 days without an upvote. No funds
+/// move on expiry (all upvote funds were split at upvote time); each
+/// deletion is audit-logged.
+fn delete_expired_ideas() {
+    let now = current_time();
+    let stale: Vec<(u64, Principal)> = IDEAS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| idea_is_expired(e.value().last_upvote_at, now))
+            .map(|e| (*e.key(), e.value().poster))
+            .collect()
+    });
+    IDEAS.with(|m| {
+        let mut m = m.borrow_mut();
+        for (id, _) in &stale {
+            m.remove(id);
+        }
+    });
+    for (id, poster) in stale {
+        let log_entry = AuditLogEntry {
+            timestamp: now,
+            event_type: "idea_expire".to_string(),
+            proposal_id: id,
+            user: poster,
+            amount_e8s: 0,
+        };
+        AUDIT_LOG.with(|log| {
+            let _ = log.borrow_mut().append(&log_entry);
+        });
+    }
+}
+
+/// Local-dev faucet for idea-board tokens: 100 ICP, 0.1 ckBTC, or 1 ckETH
+/// from the canister's own account on the token's local ledger. Rejected on
+/// mainnet (ledger canister ID check). Never callable by anonymous.
+#[ic_cdk::update]
+async fn dev_faucet_token(token: IdeaToken) -> Result<(), String> {
+    require_authenticated()?;
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    if !config.is_local
+        || config.ledger_canister_id == Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
+    {
+        return Err("dev_faucet_token is only available on the local network".to_string());
+    }
+
+    let ledger = token_ledger(token, &config);
+    let fee = token_fee(token, &config);
+    let amount: u64 = match token {
+        IdeaToken::ICP => 10_000_000_000,             // 100 ICP
+        IdeaToken::CkBTC => 10_000_000,               // 0.1 ckBTC
+        IdeaToken::CkETH => 1_000_000_000_000_000_000, // 1 ckETH
+    };
+    let dest = LedgerAccount { owner: get_caller(), subaccount: None };
+    call_ledger_transfer(ledger, None, dest, amount, Some(fee))
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Faucet transfer failed: {}", e))
+}
+
+/// Local-dev: seed a few sample ideas so the board renders content on a
+/// fresh network. No-op if any ideas exist.
+fn seed_mock_ideas() {
+    let already_seeded = IDEAS.with(|m| !m.borrow().is_empty());
+    if already_seeded {
+        return;
+    }
+    let owner = CONFIG.with(|c| {
+        c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
+    });
+    let now = current_time();
+    let samples: [(&str, &str, &str); 3] = [
+        (
+            "ICP gas-burn leaderboard",
+            "A public leaderboard ranking dapps by the cycles (burned ICP) they consume, updated on-chain daily.",
+            "Pull cycle-consumption metrics per canister from the management canister and public dashboards, normalise by subnet, and surface a verifiable burn ranking. Sponsors could pay (in ICP, burned) to pin a featured slot.",
+        ),
+        (
+            "Burn-to-mint collectible badges",
+            "Soulbound badges minted only by burning ICP — tiered by cumulative burn, displayed on user profiles.",
+            "Each badge tier requires a verifiable burn via the CMC. Badges are non-transferable ICRC-7 tokens; the burn record is the provenance. Drives recurring deflationary pressure from collectors.",
+        ),
+        (
+            "Cycle-funded compute marketplace",
+            "Let users prepay AI/compute jobs in ICP that is immediately converted to cycles, burning it from supply.",
+            "A job queue canister prices workloads in cycles, accepts ICP, tops itself up via the CMC (burning the ICP), and pays worker canisters in cycles. Every job permanently reduces ICP supply.",
+        ),
+    ];
+    for (title, description, detail) in samples {
+        let id = NEXT_IDEA_ID.with(|c| {
+            let id = *c.borrow().get();
+            c.borrow_mut().set(id + 1);
+            id
+        });
+        IDEAS.with(|m| {
+            m.borrow_mut().insert(id, Idea {
+                id,
+                poster: owner,
+                title: title.to_string(),
+                description: description.to_string(),
+                detail: detail.to_string(),
+                created_at: now,
+                last_upvote_at: now,
+                upvote_count: 0,
+                views: 0,
+                total_icp_e8s: 0,
+                total_ckbtc_e8s: 0,
+                total_cketh_wei: 0,
+            });
+        });
+    }
 }
 
 ic_cdk::export_candid!();
@@ -3529,6 +4751,11 @@ mod tests {
             is_local: false,
             frontend_canister_id: None,
             pool_initiation_fee_e8s: 12_500_000_000,
+            ckbtc_ledger_canister_id: None,
+            cketh_ledger_canister_id: None,
+            min_upvote_icp_e8s: None,
+            min_upvote_ckbtc_e8s: None,
+            min_upvote_cketh_wei: None,
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -3753,6 +4980,11 @@ mod tests {
                 is_local: false,
                 frontend_canister_id: None,
                 pool_initiation_fee_e8s: 0,
+                ckbtc_ledger_canister_id: None,
+                cketh_ledger_canister_id: None,
+                min_upvote_icp_e8s: None,
+                min_upvote_ckbtc_e8s: None,
+                min_upvote_cketh_wei: None,
             }
         };
         let mainnet = Config {
@@ -4739,5 +5971,530 @@ mod tests {
         CONFIG.with(|c| {
             let _ = c.borrow_mut().set(original_cfg);
         });
+    }
+
+    // ── Idea Board & feature flags ─────────────────────────────────────────────
+
+    #[test]
+    fn test_split_upvote_75_25() {
+        for amount in [1_000_000u64, 4_000_000, 7, 1_000_000_001, MAX_UPVOTE_UNITS] {
+            let (treasury, poster) = split_upvote(amount);
+            assert_eq!(treasury + poster, amount, "split must sum to amount");
+            // Treasury never exceeds 75%; poster takes the rounding remainder.
+            assert!(treasury <= amount / 4 * 3 + 3);
+            assert!(poster >= amount - treasury);
+        }
+        // Exact case: 1 ICP → 0.75 / 0.25.
+        assert_eq!(split_upvote(100_000_000), (75_000_000, 25_000_000));
+    }
+
+    #[test]
+    fn test_idea_expiry_window() {
+        let last = 1_700_000_000_000_000_000u64;
+        assert!(!idea_is_expired(last, last));
+        assert!(!idea_is_expired(last, last + IDEA_EXPIRY_NANOS));
+        assert!(idea_is_expired(last, last + IDEA_EXPIRY_NANOS + 1));
+        // saturating: a recent upvote near u64::MAX never wraps into expired
+        assert!(!idea_is_expired(u64::MAX - 1, u64::MAX));
+    }
+
+    #[test]
+    fn test_validate_idea_text_limits() {
+        assert!(validate_idea_text("t", "d", "").is_ok());
+        assert!(validate_idea_text("", "d", "").is_err());
+        assert!(validate_idea_text("t", "", "").is_err());
+        assert!(validate_idea_text(&"x".repeat(MAX_IDEA_TITLE_LEN), "d", "").is_ok());
+        assert!(validate_idea_text(&"x".repeat(MAX_IDEA_TITLE_LEN + 1), "d", "").is_err());
+        assert!(validate_idea_text("t", &"x".repeat(MAX_IDEA_DESCRIPTION_LEN + 1), "").is_err());
+        assert!(validate_idea_text("t", "d", &"x".repeat(MAX_IDEA_DETAIL_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn test_feature_flag_default_and_override() {
+        // idea_board defaults ON; unknown flags default OFF.
+        assert!(feature_enabled(FLAG_IDEA_BOARD));
+        assert!(!feature_enabled("nonexistent_future_feature"));
+
+        // Admin override wins over the default.
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().insert(FLAG_IDEA_BOARD.to_string(), 0u8);
+        });
+        assert!(!feature_enabled(FLAG_IDEA_BOARD));
+        assert!(require_idea_board_enabled().is_err());
+
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().insert(FLAG_IDEA_BOARD.to_string(), 1u8);
+        });
+        assert!(feature_enabled(FLAG_IDEA_BOARD));
+
+        // list merges known defaults with stored overrides, no duplicates.
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().insert("future_thing".to_string(), 1u8);
+        });
+        let flags = list_feature_flags();
+        assert_eq!(flags.iter().filter(|f| f.key == FLAG_IDEA_BOARD).count(), 1);
+        assert!(flags.iter().any(|f| f.key == "future_thing" && f.enabled));
+
+        // cleanup for other tests on this thread
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().remove(&FLAG_IDEA_BOARD.to_string());
+            m.borrow_mut().remove(&"future_thing".to_string());
+        });
+    }
+
+    #[test]
+    fn test_flag_key_validation() {
+        assert!(valid_flag_key("idea_board"));
+        assert!(valid_flag_key("v2_board_3"));
+        assert!(!valid_flag_key(""));
+        assert!(!valid_flag_key("Has-Caps"));
+        assert!(!valid_flag_key("has space"));
+        assert!(!valid_flag_key(&"x".repeat(MAX_FLAG_KEY_LEN + 1)));
+    }
+
+    #[test]
+    fn test_idea_subaccount_domain_separated() {
+        let user = p("2vxsx-fae");
+        let idea_sub = derive_idea_subaccount(&user, 42);
+        let escrow_sub = derive_subaccount(&user, 42);
+        assert_ne!(idea_sub, escrow_sub, "idea escrow must not collide with proposal escrow");
+        assert_eq!(idea_sub, derive_idea_subaccount(&user, 42), "deterministic");
+        assert_ne!(idea_sub, derive_idea_subaccount(&user, 43));
+    }
+
+    #[test]
+    fn test_storable_idea_roundtrip() {
+        let idea = Idea {
+            id: 7,
+            poster: p("2vxsx-fae"),
+            title: "Burn more ICP".to_string(),
+            description: "A thing".to_string(),
+            detail: "Long detail".to_string(),
+            created_at: 1,
+            last_upvote_at: 2,
+            upvote_count: 3,
+            views: 9,
+            total_icp_e8s: 4,
+            total_ckbtc_e8s: 5,
+            total_cketh_wei: 6,
+        };
+        let decoded = Idea::from_bytes(idea.to_bytes());
+        assert_eq!(decoded.id, idea.id);
+        assert_eq!(decoded.poster, idea.poster);
+        assert_eq!(decoded.title, idea.title);
+        assert_eq!(decoded.views, idea.views);
+        assert_eq!(decoded.total_cketh_wei, idea.total_cketh_wei);
+    }
+
+    #[test]
+    fn test_storable_idea_upvote_roundtrip() {
+        let uv = IdeaUpvote {
+            id: 1,
+            idea_id: 7,
+            voter: p("2vxsx-fae"),
+            token: IdeaToken::CkBTC,
+            amount: 123_456,
+            status: UpvoteStatus::FailedPayout,
+            created_at: 9,
+            treasury_block: Some(11),
+            poster_block: None,
+        };
+        let decoded = IdeaUpvote::from_bytes(uv.to_bytes());
+        assert_eq!(decoded.token, uv.token);
+        assert_eq!(decoded.status, uv.status);
+        assert_eq!(decoded.treasury_block, Some(11));
+        assert_eq!(decoded.poster_block, None);
+    }
+
+    fn test_config(is_local: bool) -> Config {
+        Config {
+            primary_neuron_id: 1,
+            admins: vec![],
+            default_threshold: 200_000_000,
+            ai_price_e8s: 5_000_000,
+            ledger_canister_id: p("ryjl3-tyaaa-aaaaa-aaaba-cai"),
+            is_local,
+            frontend_canister_id: None,
+            pool_initiation_fee_e8s: 12_500_000_000,
+            ckbtc_ledger_canister_id: None,
+            cketh_ledger_canister_id: None,
+            min_upvote_icp_e8s: None,
+            min_upvote_ckbtc_e8s: None,
+            min_upvote_cketh_wei: None,
+        }
+    }
+
+    #[test]
+    fn test_token_economics_value_aligned() {
+        let mainnet = test_config(false);
+
+        // Exchange-rate alignment: minimums must NOT be a flat per-token
+        // number — each token's min reflects its unit value.
+        let min_icp = token_min_upvote(IdeaToken::ICP, &mainnet);
+        let min_btc = token_min_upvote(IdeaToken::CkBTC, &mainnet);
+        let min_eth = token_min_upvote(IdeaToken::CkETH, &mainnet);
+        assert!(min_btc < min_icp, "a ckBTC sat is worth far more than an ICP e8");
+        assert_ne!(min_icp, min_eth);
+
+        // The 25% poster share at the minimum must clear the ledger fee on
+        // every real ledger (mainnet, and local with dedicated test ledgers).
+        let mut local_with_ledgers = test_config(true);
+        local_with_ledgers.ckbtc_ledger_canister_id = Some(p("2vxsx-fae"));
+        local_with_ledgers.cketh_ledger_canister_id = Some(p("2vxsx-fae"));
+        for cfg in [&mainnet, &local_with_ledgers] {
+            for token in [IdeaToken::ICP, IdeaToken::CkBTC, IdeaToken::CkETH] {
+                let min = token_min_upvote(token, cfg);
+                let fee = token_fee(token, cfg);
+                let (_, poster) = split_upvote(min);
+                assert!(
+                    poster > fee,
+                    "poster share {} must exceed fee {} ({:?}, local={})",
+                    poster, fee, token, cfg.is_local
+                );
+            }
+        }
+
+        // Admin overrides win over the defaults.
+        let mut tuned = test_config(false);
+        tuned.min_upvote_icp_e8s = Some(40_000_000);
+        tuned.min_upvote_ckbtc_e8s = Some(2_000);
+        tuned.min_upvote_cketh_wei = Some(660_000_000_000_000);
+        assert_eq!(token_min_upvote(IdeaToken::ICP, &tuned), 40_000_000);
+        assert_eq!(token_min_upvote(IdeaToken::CkBTC, &tuned), 2_000);
+        assert_eq!(token_min_upvote(IdeaToken::CkETH, &tuned), 660_000_000_000_000);
+    }
+
+    #[test]
+    fn test_token_ledger_resolution() {
+        // Mainnet: canonical ledgers hard-pinned; overrides ignored.
+        let mut mainnet = test_config(false);
+        mainnet.ckbtc_ledger_canister_id = Some(p("2vxsx-fae"));
+        assert_eq!(
+            token_ledger(IdeaToken::CkBTC, &mainnet),
+            p(MAINNET_CKBTC_LEDGER)
+        );
+        assert_eq!(
+            token_ledger(IdeaToken::CkETH, &mainnet),
+            p(MAINNET_CKETH_LEDGER)
+        );
+        assert_eq!(token_ledger(IdeaToken::ICP, &mainnet), mainnet.ledger_canister_id);
+
+        // Local without overrides: fall back to the ICP test ledger, with
+        // that ledger's 10_000 fee.
+        let local = test_config(true);
+        assert_eq!(token_ledger(IdeaToken::CkBTC, &local), local.ledger_canister_id);
+        assert_eq!(token_fee(IdeaToken::CkBTC, &local), 10_000);
+
+        // Local with dedicated ledgers: overrides apply, canonical fees apply.
+        let mut local_cfg = test_config(true);
+        let ckbtc = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        local_cfg.ckbtc_ledger_canister_id = Some(ckbtc);
+        assert_eq!(token_ledger(IdeaToken::CkBTC, &local_cfg), ckbtc);
+        assert_eq!(token_fee(IdeaToken::CkBTC, &local_cfg), 10);
+    }
+
+    #[tokio::test]
+    async fn test_post_idea_validation_quota_and_fee() {
+        let caller = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(caller);
+        set_mock_ledger_transfer(Ok(5));
+
+        // Posting fee unpaid → rejected, nothing stored.
+        set_mock_ledger_balance(IDEA_POST_FEE_E8S); // missing the ledger fee
+        assert_eq!(
+            post_idea("Unpaid".into(), "Desc".into(), "".into()).await.unwrap_err(),
+            "INSUFFICIENT_DEPOSIT"
+        );
+        assert!(IDEAS.with(|m| m.borrow().is_empty()));
+
+        // happy path (fee escrow funded)
+        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
+        let id = post_idea("Title".into(), "Desc".into(), "Detail".into()).await.unwrap();
+        let idea = IDEAS.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(idea.poster, caller);
+        assert_eq!(idea.views, 0);
+        assert_eq!(idea.last_upvote_at, idea.created_at);
+
+        // invalid title (validated before the fee is touched)
+        assert_eq!(
+            post_idea("   ".into(), "Desc".into(), "".into()).await.unwrap_err(),
+            "INVALID_TITLE"
+        );
+
+        // per-user active quota
+        for i in 0..MAX_ACTIVE_IDEAS_PER_USER {
+            let _ = post_idea(format!("Idea {}", i), "Desc".into(), "".into()).await;
+        }
+        assert_eq!(
+            post_idea("One too many".into(), "Desc".into(), "".into()).await.unwrap_err(),
+            "TOO_MANY_ACTIVE_IDEAS"
+        );
+
+        // anonymous rejected
+        set_mock_caller(anon());
+        assert!(post_idea("T".into(), "D".into(), "".into()).await.is_err());
+
+        // disabled flag rejected
+        set_mock_caller(caller);
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().insert(FLAG_IDEA_BOARD.to_string(), 0u8);
+        });
+        assert_eq!(
+            post_idea("T".into(), "D".into(), "".into()).await.unwrap_err(),
+            "FEATURE_DISABLED"
+        );
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().remove(&FLAG_IDEA_BOARD.to_string());
+        });
+    }
+
+    #[tokio::test]
+    async fn test_projects_fund_flow() {
+        let funder = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+
+        // admin_add_project is guard-gated on-chain; exercise the body's
+        // validation rules through a direct insert + the public flows.
+        assert!(validate_idea_text("Project X", "Build it", "Detail").is_ok());
+        let now = current_time();
+        let project_id = 71u64;
+        PROJECTS.with(|m| {
+            m.borrow_mut().insert(project_id, Project {
+                id: project_id,
+                title: "Project X".into(),
+                description: "Build it".into(),
+                detail: "Detail".into(),
+                created_at: now,
+                goal_icp_e8s: 100_000_000_000,
+                goal_ckbtc_e8s: 0,
+                goal_cketh_wei: 0,
+                raised_icp_e8s: 0,
+                raised_ckbtc_e8s: 0,
+                raised_cketh_wei: 0,
+                funding_count: 0,
+            });
+        });
+        assert!(list_projects().iter().any(|pr| pr.id == project_id));
+
+        set_mock_caller(funder);
+        set_mock_ledger_transfer(Ok(9));
+
+        // Below minimum / unknown project / insufficient deposit
+        set_mock_ledger_balance(10_000_000_000);
+        assert_eq!(
+            fund_project(project_id, IdeaToken::ICP, 1).await.unwrap_err(),
+            "BELOW_MINIMUM"
+        );
+        assert_eq!(
+            fund_project(999_999, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
+            "PROJECT_NOT_FOUND"
+        );
+        set_mock_ledger_balance(100);
+        assert_eq!(
+            fund_project(project_id, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
+            "INSUFFICIENT_DEPOSIT"
+        );
+
+        // Happy path: 100% to treasury, raised totals + count bump.
+        set_mock_ledger_balance(10_000_000_000);
+        fund_project(project_id, IdeaToken::ICP, 100_000_000).await.unwrap();
+        let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
+        assert_eq!(pr.raised_icp_e8s, 100_000_000);
+        assert_eq!(pr.funding_count, 1);
+
+        // Failed transfer journals FailedPayout; sweep retry settles it.
+        set_mock_ledger_transfer(Err("down".into()));
+        assert!(fund_project(project_id, IdeaToken::CkBTC, 1_000_000).await.is_err());
+        set_mock_ledger_transfer(Ok(10));
+        retry_failed_fundings().await;
+        let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
+        assert_eq!(pr.raised_ckbtc_e8s, 1_000_000);
+        assert_eq!(pr.funding_count, 2);
+        assert!(PROJECT_FUNDINGS.with(|m| {
+            m.borrow().iter().all(|e| e.value().status == UpvoteStatus::Settled)
+        }));
+
+        // Orphan path: funding fails, project removed → funder refunded.
+        set_mock_ledger_transfer(Err("down".into()));
+        assert!(fund_project(project_id, IdeaToken::ICP, 100_000_000).await.is_err());
+        PROJECTS.with(|m| { m.borrow_mut().remove(&project_id); });
+        set_mock_ledger_transfer(Ok(11));
+        retry_failed_fundings().await;
+        assert!(PROJECT_FUNDINGS.with(|m| {
+            m.borrow().iter().all(|e| e.value().status == UpvoteStatus::Settled)
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_upvote_idea_flow() {
+        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let voter = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+
+        set_mock_caller(poster);
+        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
+        set_mock_ledger_transfer(Ok(1));
+        let idea_id = post_idea("Upvotable".into(), "Desc".into(), "".into()).await.unwrap();
+
+        set_mock_caller(voter);
+        set_mock_ledger_transfer(Ok(42));
+
+        // Insufficient deposit
+        set_mock_ledger_balance(100);
+        assert_eq!(
+            upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
+            "INSUFFICIENT_DEPOSIT"
+        );
+
+        // Below the value-aligned minimum (default 0.2 ICP)
+        assert_eq!(
+            upvote_idea(idea_id, IdeaToken::ICP, DEFAULT_MIN_UPVOTE_ICP_E8S - 1).await.unwrap_err(),
+            "BELOW_MINIMUM"
+        );
+
+        // Unknown idea
+        set_mock_ledger_balance(10_000_000_000);
+        assert_eq!(
+            upvote_idea(999_999, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
+            "IDEA_NOT_FOUND"
+        );
+
+        // Happy path
+        upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.unwrap();
+        let idea = IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap();
+        assert_eq!(idea.upvote_count, 1);
+        assert_eq!(idea.total_icp_e8s, 100_000_000);
+
+        let settled = IDEA_UPVOTES.with(|m| {
+            m.borrow().iter().map(|e| e.value())
+                .find(|u| u.idea_id == idea_id && u.voter == voter)
+        }).unwrap();
+        assert_eq!(settled.status, UpvoteStatus::Settled);
+        assert_eq!(settled.treasury_block, Some(42));
+        assert_eq!(settled.poster_block, Some(42));
+
+        // ckBTC totals tracked separately (min is 1_000 sats)
+        upvote_idea(idea_id, IdeaToken::CkBTC, 1_000_000).await.unwrap();
+        let idea = IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap();
+        assert_eq!(idea.total_ckbtc_e8s, 1_000_000);
+        assert_eq!(idea.total_icp_e8s, 100_000_000);
+        assert_eq!(idea.upvote_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_record_idea_view() {
+        let caller = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(caller);
+        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
+        set_mock_ledger_transfer(Ok(1));
+        let id = post_idea("Viewable".into(), "Desc".into(), "".into()).await.unwrap();
+
+        record_idea_view(id).unwrap();
+        record_idea_view(id).unwrap();
+        assert_eq!(IDEAS.with(|m| m.borrow().get(&id)).unwrap().views, 2);
+
+        assert_eq!(record_idea_view(999_999).unwrap_err(), "IDEA_NOT_FOUND");
+        set_mock_caller(anon());
+        assert!(record_idea_view(id).is_err());
+        set_mock_caller(caller);
+    }
+
+    #[tokio::test]
+    async fn test_upvote_failed_payout_is_retried() {
+        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let voter = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+
+        set_mock_caller(poster);
+        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
+        set_mock_ledger_transfer(Ok(1));
+        let idea_id = post_idea("Retry me".into(), "Desc".into(), "".into()).await.unwrap();
+
+        set_mock_caller(voter);
+        set_mock_ledger_balance(10_000_000_000);
+        set_mock_ledger_transfer(Err("ledger down".to_string()));
+
+        assert!(upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.is_err());
+
+        // Journaled as FailedPayout, idea untouched.
+        let uv = IDEA_UPVOTES.with(|m| {
+            m.borrow().iter().map(|e| e.value())
+                .find(|u| u.idea_id == idea_id)
+        }).unwrap();
+        assert_eq!(uv.status, UpvoteStatus::FailedPayout);
+        assert!(uv.treasury_block.is_none());
+        let idea = IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap();
+        assert_eq!(idea.upvote_count, 0);
+
+        // Sweep retry settles it once the ledger recovers.
+        set_mock_ledger_transfer(Ok(77));
+        retry_failed_upvotes().await;
+
+        let uv = IDEA_UPVOTES.with(|m| m.borrow().get(&uv.id)).unwrap();
+        assert_eq!(uv.status, UpvoteStatus::Settled);
+        assert_eq!(uv.treasury_block, Some(77));
+        assert_eq!(uv.poster_block, Some(77));
+        let idea = IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap();
+        assert_eq!(idea.upvote_count, 1);
+        assert_eq!(idea.total_icp_e8s, 100_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_orphaned_upvote_refunds_voter() {
+        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let voter = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_caller(poster);
+        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
+        set_mock_ledger_transfer(Ok(1));
+        let idea_id = post_idea("Doomed idea".into(), "Desc".into(), "".into()).await.unwrap();
+
+        // Upvote fails mid-saga, journaled as FailedPayout.
+        set_mock_caller(voter);
+        set_mock_ledger_balance(10_000_000_000);
+        set_mock_ledger_transfer(Err("ledger down".to_string()));
+        assert!(upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.is_err());
+
+        // The idea expires and is deleted before the retry succeeds.
+        IDEAS.with(|m| { m.borrow_mut().remove(&idea_id); });
+
+        // Retry refunds the voter's escrow and closes the journal entry.
+        set_mock_ledger_transfer(Ok(88));
+        retry_failed_upvotes().await;
+
+        let uv = IDEA_UPVOTES.with(|m| {
+            m.borrow().iter().map(|e| e.value())
+                .find(|u| u.idea_id == idea_id && u.voter == voter)
+        }).unwrap();
+        assert_eq!(uv.status, UpvoteStatus::Settled);
+        // No payout blocks: the funds went back to the voter, not the split.
+        assert!(uv.treasury_block.is_none());
+        assert!(uv.poster_block.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_expired_idea_rejected_then_deleted() {
+        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(poster);
+        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
+        set_mock_ledger_transfer(Ok(1));
+        let idea_id = post_idea("Old idea".into(), "Desc".into(), "".into()).await.unwrap();
+
+        // Age the idea past the 30-day window.
+        IDEAS.with(|m| {
+            let mut idea = m.borrow().get(&idea_id).unwrap();
+            idea.last_upvote_at = current_time() - IDEA_EXPIRY_NANOS - 1;
+            idea.created_at = idea.last_upvote_at;
+            m.borrow_mut().insert(idea_id, idea);
+        });
+
+        set_mock_ledger_balance(10_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        assert_eq!(
+            upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
+            "IDEA_EXPIRED"
+        );
+
+        // list_ideas omits it even before the sweep...
+        assert!(list_ideas().into_iter().all(|i| i.id != idea_id));
+        // ...and the sweep DELETES it (expired = gone).
+        delete_expired_ideas();
+        assert!(IDEAS.with(|m| m.borrow().get(&idea_id)).is_none());
     }
 }

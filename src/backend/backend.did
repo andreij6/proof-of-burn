@@ -63,6 +63,14 @@ type Config = record {
   // Frontend canister topped up with the 25% cycles share (PB-125).
   frontend_canister_id : opt principal;
   pool_initiation_fee_e8s : nat64;
+  // Local-only ckBTC/ckETH test-ledger overrides (mainnet ledgers hard-pinned).
+  ckbtc_ledger_canister_id : opt principal;
+  cketh_ledger_canister_id : opt principal;
+  // Admin overrides for per-token minimum upvotes (smallest units); absent
+  // values fall back to value-aligned (~$1) defaults.
+  min_upvote_icp_e8s : opt nat64;
+  min_upvote_ckbtc_e8s : opt nat64;
+  min_upvote_cketh_wei : opt nat64;
 };
 type EligibilityInfo = record {
   holdings_e8s : nat64;
@@ -149,7 +157,63 @@ type Proposal = record {
   pool_distributed : bool;
 };
 type Result = variant { Ok; Err : text };
+type IdeaIdResult = variant { Ok : nat64; Err : text };
 type Stance = variant { Reject; Adopt };
+// Tokens accepted for idea upvotes. On mainnet ckBTC/ckETH use their
+// canonical ledger canisters; locally they use admin-configured test ledgers.
+type IdeaToken = variant { ICP; CkBTC; CkETH };
+// Ideas are implicitly active while stored — the sweep DELETES ideas that go
+// 30 days without an upvote, so no expired state is ever returned.
+type Idea = record {
+  id : nat64;
+  poster : principal;
+  title : text;
+  description : text;
+  detail : text;
+  created_at : nat64;
+  // Timestamp of the most recent upvote (== created_at until the first one).
+  // The idea is deleted 30 days after this with no further upvotes.
+  last_upvote_at : nat64;
+  upvote_count : nat64;
+  // Detail-view opens by signed-in users (drives "most viewed" sorting).
+  views : nat64;
+  total_icp_e8s : nat64;
+  total_ckbtc_e8s : nat64;
+  total_cketh_wei : nat64;
+};
+type FeatureFlag = record { key : text; enabled : bool };
+type IdeaBoardInfo = record {
+  enabled : bool;
+  icp_ledger : principal;
+  ckbtc_ledger : principal;
+  cketh_ledger : principal;
+  // Per-token minimums are value-aligned (~$1 equivalent) via exchange rates.
+  min_upvote_icp_e8s : nat64;
+  min_upvote_ckbtc_e8s : nat64;
+  min_upvote_cketh_wei : nat64;
+  fee_icp_e8s : nat64;
+  fee_ckbtc_sats : nat64;
+  fee_cketh_wei : nat64;
+  expiry_nanos : nat64;
+  // Flat fee (ICP e8s) to post an idea; 100% to the treasury.
+  post_fee_e8s : nat64;
+};
+// Admin-curated, fundable project (Community R&D "Projects" tab). Funding
+// goes 100% to the protocol treasury. A per-token goal of 0 = not seeking it.
+type Project = record {
+  id : nat64;
+  title : text;
+  description : text;
+  detail : text;
+  created_at : nat64;
+  goal_icp_e8s : nat64;
+  goal_ckbtc_e8s : nat64;
+  goal_cketh_wei : nat64;
+  raised_icp_e8s : nat64;
+  raised_ckbtc_e8s : nat64;
+  raised_cketh_wei : nat64;
+  funding_count : nat64;
+};
 type Vote = variant { No; Yes; Abstain };
 type VoteRecord = record {
   vote : Vote;
@@ -221,4 +285,47 @@ service : (InitPayload) -> {
   notify_top_up : (NotifyTopUpArgs) -> (NotifyTopUpResult);
   remove_admin : (principal) -> (Result);
   wallet_receive : () -> (Result);
+  // ── Feature flags ──
+  // All flags (known defaults merged with admin overrides). Public query so
+  // the UI can hide gated features for anonymous viewers.
+  list_feature_flags : () -> (vec FeatureFlag) query;
+  // Admin: enable/disable a feature completely (kill switch).
+  admin_set_feature_flag : (text, bool) -> (Result);
+  // ── Idea Board ──
+  // The flag + per-token ledgers + minimum upvotes, in one query.
+  get_idea_board_info : () -> (IdeaBoardInfo) query;
+  // All live ideas, newest first (time-expired ideas omitted).
+  list_ideas : () -> (vec Idea) query;
+  // Post a new idea (title, description, detail). Costs the 1 ICP post fee:
+  // fund get_idea_post_deposit_address with post_fee + 0.0001 ICP first.
+  post_idea : (text, text, text) -> (IdeaIdResult);
+  // The caller's deposit subaccount for the idea-posting fee.
+  get_idea_post_deposit_address : () -> (LedgerAccount) query;
+  // The caller's deposit subaccount for upvoting an idea. Fund it on the
+  // chosen token's ledger with amount + 2×fee, then call upvote_idea.
+  get_idea_deposit_address : (nat64) -> (LedgerAccount) query;
+  // Spend deposited funds to upvote: 75% → treasury, 25% → idea poster.
+  upvote_idea : (nat64, IdeaToken, nat64) -> (Result);
+  // Count a detail-view open (signed-in users; drives "most viewed" sorting).
+  record_idea_view : (nat64) -> (Result);
+  // Admin: point ckBTC/ckETH at locally deployed test ledgers (local only —
+  // mainnet token ledgers are hard-pinned to the canonical canisters).
+  admin_set_token_ledger : (IdeaToken, principal) -> (Result);
+  // Admin: retune a token's minimum upvote as exchange rates drift.
+  admin_set_min_upvote : (IdeaToken, nat64) -> (Result);
+  // Local-dev faucet: 100 ICP / 0.1 ckBTC / 1 ckETH to the caller.
+  dev_faucet_token : (IdeaToken) -> (Result);
+  // ── Projects (Community R&D, admin-curated) ──
+  // All projects, newest first.
+  list_projects : () -> (vec Project) query;
+  // Admin: add a fundable project (title, description, detail, goal ICP e8s,
+  // goal ckBTC sats, goal ckETH wei). At least one goal must be non-zero.
+  admin_add_project : (text, text, text, nat64, nat64, nat64) -> (IdeaIdResult);
+  // Admin: remove a project from the board.
+  admin_remove_project : (nat64) -> (Result);
+  // The caller's deposit subaccount for funding a project. Fund it on the
+  // chosen token's ledger with amount + fee, then call fund_project.
+  get_project_deposit_address : (nat64) -> (LedgerAccount) query;
+  // Spend deposited funds on a project: 100% → protocol treasury.
+  fund_project : (nat64, IdeaToken, nat64) -> (Result);
 }
