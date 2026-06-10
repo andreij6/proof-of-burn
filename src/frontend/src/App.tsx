@@ -735,7 +735,7 @@ export default function App() {
         fetchPoolInfo(actor),
         fetchMyPoolNeuron(actor),
         fetchFeatureFlags(actor),
-        actor.list_active_proposals().then((list: Proposal[]) => setProposals(list)),
+        actor.list_all_proposals().then((list: Proposal[]) => setProposals(list)),
       ]);
       // Also fetch balance
       if (principal && !principal.isAnonymous() && identity) {
@@ -950,12 +950,12 @@ export default function App() {
   useEffect(() => {
     if (!actor) return;
     setIsLoading(true);
-    actor.list_active_proposals()
+    actor.list_all_proposals()
       .then((list: Proposal[]) => {
         setProposals(list);
       })
       .catch((err: any) => {
-        console.error("Failed to load active proposals:", err);
+        console.error("Failed to load proposals:", err);
       })
       .finally(() => {
         setIsLoading(false);
@@ -1411,6 +1411,10 @@ export default function App() {
     .filter(c => c.status === CommitmentStatus.Burned)
     .reduce((sum, c) => sum + c.amount_e8s, 0n);
 
+  const userPendingBurn = myCommitments
+    .filter(c => c.status === CommitmentStatus.ThresholdMet || c.status === CommitmentStatus.FailedBurn)
+    .reduce((sum, c) => sum + c.amount_e8s, 0n);
+
   const proposalsJoined = new Set(myCommitments.map(c => c.proposal_id.toString())).size;
   const pooledVotingPower = poolInfo?.total_pool_voting_power ?? 0n;
   const leaderVotingPower = leaderInfo?.voting_power ?? 0n;
@@ -1803,6 +1807,11 @@ export default function App() {
                         </span>
                       </span>
                       <Eyrow>Committed</Eyrow>
+                      {userPendingBurn > 0n && (
+                        <span className="mono" style={{ fontSize: 11, color: 'var(--haze)', marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 4 }} title="ICP committed to proposals that reached their threshold and will burn on deadline">
+                          <Icon name="clock" size={11} stroke="var(--haze)" /> {fmtICP(userPendingBurn)} pending
+                        </span>
+                      )}
                     </div>
                     <div className="col" style={{
                       gap: 4, flex: 1, alignItems: 'center', textAlign: 'center',
@@ -1852,13 +1861,23 @@ export default function App() {
                         {globalStats ? `${fmtICP(globalStats.tvl_e8s)} ICP` : "…"}
                       </span>
                     </span>
-                    <span style={{ color: 'var(--border-hi)' }}>·</span>
                     <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
                       <span>Burned</span>
                       <span className="mono" style={{ fontSize: 14, color: 'var(--burn-300)' }}>
                         {globalStats ? `${fmtICP(globalStats.total_burned_e8s)} ICP` : "…"}
                       </span>
                     </span>
+                    {globalStats && globalStats.pending_burn_e8s > 0n && (
+                      <>
+                        <span style={{ color: 'var(--border-hi)' }}>·</span>
+                        <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                          <span>Pending burn</span>
+                          <span className="mono" style={{ fontSize: 14, color: 'var(--haze)' }} title="ICP committed to proposals that reached their threshold and will burn on deadline">
+                            {`${fmtICP(globalStats.pending_burn_e8s)} ICP`}
+                          </span>
+                        </span>
+                      </>
+                    )}
                     <span style={{ color: 'var(--border-hi)' }}>·</span>
                     <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
                       <span>Votes cast</span>
@@ -2157,7 +2176,9 @@ export default function App() {
                       const committedLabel = `${fmtICP(p.total_committed_e8s)} ICP committed`;
                       const reqLabel = pct > 100 ? `${pct}% · oversubscribed` : met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`;
 
-                      const statusChip = met ? (
+                      const statusChip = p.status === 'met' ? (
+                        <Chip tone="pending"><Icon name="clock" size={11} /> Pending burn</Chip>
+                      ) : met ? (
                         <Chip tone="ok"><Icon name="check" size={11} /> Threshold met</Chip>
                       ) : (
                         <Chip tone="muted"><LiveDot on={motion !== 'off'} /> Open</Chip>

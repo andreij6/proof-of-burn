@@ -99,6 +99,7 @@ type GlobalStats = record {
   votes_cast : nat64;
   tvl_e8s : nat64;
   total_burned_e8s : nat64;
+  pending_burn_e8s : nat64;
   followers_count : nat64;
 };
 type PoolStatus = variant {
@@ -277,6 +278,7 @@ service : (InitPayload) -> {
   get_proposal : (nat64) -> (opt Proposal) query;
   get_treasury_balance : () -> (BalanceResult);
   list_active_proposals : () -> (vec Proposal) query;
+  list_all_proposals : () -> (vec Proposal) query;
   list_vote_history : () -> (vec VoteRecord) query;
   refund_registration : () -> (Result);
   // Self-attested follow (Option C): records the caller as following the leader

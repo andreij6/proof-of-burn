@@ -425,6 +425,7 @@ pub struct InitPayload {
 pub struct GlobalStats {
     pub tvl_e8s: u64,
     pub total_burned_e8s: u64,
+    pub pending_burn_e8s: u64,
     pub votes_cast: u64,
     pub followers_count: u64,
 }
@@ -1038,6 +1039,16 @@ fn list_active_proposals() -> Vec<Proposal> {
             .iter()
             .map(|entry| entry.value())
             .filter(|p| p.status == "open" || p.status == "met")
+            .collect()
+    })
+}
+
+#[ic_cdk::query]
+fn list_all_proposals() -> Vec<Proposal> {
+    PROPOSALS.with(|map| {
+        map.borrow()
+            .iter()
+            .map(|entry| entry.value())
             .collect()
     })
 }
@@ -3295,6 +3306,7 @@ fn list_vote_history() -> Vec<VoteRecord> {
 #[ic_cdk::query]
 fn get_global_stats() -> GlobalStats {
     let mut tvl_e8s: u64 = 0;
+    let mut pending_burn_e8s: u64 = 0;
     PROPOSALS.with(|map| {
         for entry in map.borrow().iter() {
             let p = entry.value();
@@ -3304,6 +3316,13 @@ fn get_global_stats() -> GlobalStats {
             if p.status == "open" || p.status == "met" {
                 // F-105: clamp on overflow rather than silently wrapping.
                 tvl_e8s = tvl_e8s
+                    .checked_add(p.total_committed_e8s)
+                    .unwrap_or(u64::MAX);
+            }
+            // Pending burn: ICP committed to proposals that met the threshold
+            // but haven't been settled yet (vote pending at deadline cutoff).
+            if p.status == "met" {
+                pending_burn_e8s = pending_burn_e8s
                     .checked_add(p.total_committed_e8s)
                     .unwrap_or(u64::MAX);
             }
@@ -3337,6 +3356,7 @@ fn get_global_stats() -> GlobalStats {
     GlobalStats {
         tvl_e8s,
         total_burned_e8s,
+        pending_burn_e8s,
         votes_cast,
         followers_count,
     }
@@ -5231,6 +5251,7 @@ mod tests {
         let stats = GlobalStats {
             tvl_e8s: 0,
             total_burned_e8s: 0,
+            pending_burn_e8s: 0,
             votes_cast: 0,
             followers_count: 0,
         };
