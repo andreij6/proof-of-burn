@@ -2499,9 +2499,9 @@ export default function App() {
                             return (
                               <div key={p.id.toString()} className="col" style={{
                                 gap: 8, padding: '12px 0',
-                                borderBottom: '1px solid var(--border)'
+                                borderBottom: '1px solid var(--border)', width: '100%', minWidth: 0
                               }}>
-                                <div className="row" style={{ justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+                                <div className="row" style={{ justifyContent: 'space-between', gap: 12, alignItems: 'center', width: '100%', minWidth: 0, flexWrap: 'nowrap' }}>
                                   <span style={{ fontSize: 13, color: 'var(--fg-1)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={p.title}>
                                     {p.title}
                                   </span>
@@ -2532,7 +2532,7 @@ export default function App() {
                             return (
                               <div key={record.proposal_id.toString()} className="row" style={{
                                 justifyContent: 'space-between', gap: 12, padding: '12px 0',
-                                borderBottom: '1px solid var(--border)'
+                                borderBottom: '1px solid var(--border)', width: '100%', minWidth: 0, flexWrap: 'nowrap'
                               }}>
                                 <span style={{ fontSize: 13, color: 'var(--fg-3)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} title={title}>
                                   {title}
