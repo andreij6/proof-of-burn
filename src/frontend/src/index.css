@@ -441,6 +441,17 @@ a:hover {
   color: var(--fg);
 }
 
+/* Pool sidebar base styles */
+.pool-sidebar-desktop {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.pool-mobile-fab {
+  display: none;
+}
+
 /* =============================================================
    Mobile responsiveness
    ============================================================= */
@@ -519,16 +530,6 @@ a:hover {
     font-size: var(--size-2xl);
     line-height: var(--lh-2xl);
   }
-}
-
-.pool-sidebar-desktop {
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-}
-
-.pool-mobile-fab {
-  display: none;
 }
 
 /* Mobile menu drawer & overlay */
