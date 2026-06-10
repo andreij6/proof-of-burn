@@ -31,6 +31,7 @@ import Staking from "./Staking";
 import Lottery from "./Lottery";
 import Payouts from "./Payouts";
 import Admin from "./Admin";
+import Landing from "./Landing";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
 import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal } from "./ui";
 
@@ -490,7 +491,11 @@ export default function App() {
 
   // Page routing (dashboard | Community R&D | Lossless Voting | Lottery |
   // Payout history) + feature flags
-  const [page, setPage] = useState<'dashboard' | 'ideas' | 'staking' | 'lottery' | 'payouts' | 'admin'>('dashboard');
+  const [page, setPage] = useState<'landing' | 'dashboard' | 'ideas' | 'staking' | 'lottery' | 'payouts' | 'admin'>(
+    // First-time visitors get the landing page; anyone who has entered the
+    // app before goes straight to the dashboard.
+    () => (typeof localStorage !== 'undefined' && localStorage.getItem('coi_entered') === '1') ? 'dashboard' : 'landing'
+  );
   const [featureFlags, setFeatureFlags] = useState<FeatureFlag[]>([]);
 
   // Feature flag: the Community R&D page + nav are fully hidden when disabled
@@ -1596,6 +1601,18 @@ export default function App() {
   });
   pastItems.sort((a, b) => (b.id > a.id ? 1 : b.id < a.id ? -1 : 0));
   const displayedPastItems = pastItems.slice(0, 100);
+
+  // First contact: the landing page renders full-bleed with no app chrome.
+  // "Go to App" drops the visitor on the dashboard and remembers the choice.
+  if (page === 'landing') {
+    return (
+      <Landing onEnter={() => {
+        try { localStorage.setItem('coi_entered', '1'); } catch { /* private mode */ }
+        window.scrollTo(0, 0);
+        setPage('dashboard');
+      }} />
+    );
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden', background: 'var(--bg)' }}>
