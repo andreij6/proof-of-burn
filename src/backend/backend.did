@@ -214,6 +214,9 @@ type Project = record {
   raised_ckbtc_e8s : nat64;
   raised_cketh_wei : nat64;
   funding_count : nat64;
+  accept_icp : bool;
+  accept_ckbtc : bool;
+  accept_cketh : bool;
 };
 type Vote = variant { No; Yes; Abstain };
 type VoteRecord = record {
@@ -321,8 +324,10 @@ service : (InitPayload) -> {
   // All projects, newest first.
   list_projects : () -> (vec Project) query;
   // Admin: add a fundable project (title, description, detail, goal ICP e8s,
-  // goal ckBTC sats, goal ckETH wei). At least one goal must be non-zero.
-  admin_add_project : (text, text, text, nat64, nat64, nat64) -> (IdeaIdResult);
+  // goal ckBTC sats, goal ckETH wei, accept ICP, accept ckBTC, accept ckETH).
+  admin_add_project : (text, text, text, nat64, nat64, nat64, bool, bool, bool) -> (IdeaIdResult);
+  // Admin: update a project's details, funding goals, and cryptocurrency toggles.
+  admin_update_project : (nat64, text, text, text, nat64, nat64, nat64, bool, bool, bool) -> (Result);
   // Admin: remove a project from the board.
   admin_remove_project : (nat64) -> (Result);
   // The caller's deposit subaccount for funding a project. Fund it on the

@@ -18,6 +18,7 @@ export const iconPaths: Record<string, React.ReactNode> = {
   arrowUp: <path d="M12 19V5M5 12l7-7 7 7" />,
   share: <><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8" /><path d="M16 6l-4-4-4 4" /><path d="M12 2v13" /></>,
   key: <><circle cx="7.5" cy="15.5" r="4.5" /><path d="M10.7 12.3L21 2M16 7l3 3M14 9l2 2" /></>,
+  edit: <path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z" />,
   x: <path d="M18 6L6 18M6 6l12 12" />,
   chevDown: <path d="M6 9l6 6 6-6" />,
   chevRight: <path d="M9 18l6-6-6-6" />,

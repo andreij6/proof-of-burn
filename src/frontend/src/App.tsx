@@ -2518,9 +2518,14 @@ export default function App() {
                                     {p.title}
                                   </span>
                                   <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                                    {p.total_committed_e8s < p.threshold_e8s && (
+                                      <Chip tone="muted" style={{ height: 20, fontSize: 11, border: '1px dashed var(--border-hi)' }}>
+                                        Threshold unmet
+                                      </Chip>
+                                    )}
                                     {voteRec && (
                                       <Chip tone={voteRec.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>
-                                        {voteRec.vote === Vote.Yes ? 'voted yes' : voteRec.vote === Vote.No ? 'voted no' : 'abstained'}
+                                        {voteRec.vote === Vote.Yes ? 'Adopt' : voteRec.vote === Vote.No ? 'Reject' : 'abstained'}
                                       </Chip>
                                     )}
                                   </div>
@@ -2540,7 +2545,7 @@ export default function App() {
                           } else if (item.record) {
                             const record = item.record;
                             const title = getProposalTitle(record.proposal_id);
-                            const voteStr = record.vote === Vote.Yes ? 'voted yes' : record.vote === Vote.No ? 'voted no' : 'abstained';
+                            const voteStr = record.vote === Vote.Yes ? 'Adopt' : record.vote === Vote.No ? 'Reject' : 'abstained';
                             return (
                               <div key={record.proposal_id.toString()} className="row" style={{
                                 justifyContent: 'space-between', gap: 12, padding: '12px 0',
@@ -2550,8 +2555,15 @@ export default function App() {
                                   {title}
                                 </span>
                                 <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                                  {record.icp_burned_e8s === 0n && (
+                                    <Chip tone="muted" style={{ height: 20, fontSize: 11, border: '1px dashed var(--border-hi)' }}>
+                                      Threshold unmet
+                                    </Chip>
+                                  )}
                                   <Chip tone={record.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>{voteStr}</Chip>
-                                  <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)' }}>{fmtICP(record.icp_burned_e8s)} spent</span>
+                                  {record.icp_burned_e8s > 0n && (
+                                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)' }}>{fmtICP(record.icp_burned_e8s)} spent</span>
+                                  )}
                                 </div>
                               </div>
                             );

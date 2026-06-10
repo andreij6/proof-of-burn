@@ -334,6 +334,22 @@ enum CommitmentStatus {
     StuckFunds,
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+enum Vote {
+    Yes,
+    No,
+    Abstain,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct VoteRecord {
+    proposal_id: u64,
+    vote: Vote,
+    icp_burned_e8s: u64,
+    decided_at: u64,
+    nns_outcome: Option<String>,
+}
+
 #[derive(CandidType, Deserialize, Debug)]
 struct Commitment {
     proposal_id: u64,
@@ -643,6 +659,25 @@ fn saga_refund_when_threshold_missed() {
     // The refund returns the target; the unused settlement-fee reserve (~20_000)
     // remains as dust in the escrow subaccount (sweepable later).
     assert_eq!(escrow_bal, 20_000, "only the unused fee reserve remains after refund");
+
+    // Verify that the proposal status in backend is "abstained"
+    let reply = env
+        .pic
+        .query_call(env.backend, env.user, "list_all_proposals", encode_one(()).unwrap())
+        .expect("list_all_proposals");
+    let proposals: Vec<ProposalLite> = decode_one(&reply).unwrap();
+    let p = proposals.iter().find(|p| p.id == 138402).expect("proposal found");
+    assert_eq!(p.status, "abstained", "proposal status must be abstained");
+
+    // Verify that the vote history has recorded the vote choice as Vote::No with 0 ICP burned
+    let reply = env
+        .pic
+        .query_call(env.backend, env.user, "list_vote_history", encode_one(()).unwrap())
+        .expect("list_vote_history");
+    let vote_history: Vec<VoteRecord> = decode_one(&reply).unwrap();
+    let vote_rec = vote_history.iter().find(|r| r.proposal_id == 138402).expect("vote record found");
+    assert_eq!(vote_rec.vote, Vote::No, "neuron must vote No as per majority stance Reject");
+    assert_eq!(vote_rec.icp_burned_e8s, 0, "icp burned must be 0 for unmet threshold");
 }
 
 #[test]

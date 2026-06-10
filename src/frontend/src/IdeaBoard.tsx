@@ -181,6 +181,10 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   const [projGoals, setProjGoals] = useState<{ [k: string]: string }>({ ICP: '', CkBTC: '', CkETH: '' });
   const [projError, setProjError] = useState<string | null>(null);
   const [isSavingProject, setIsSavingProject] = useState(false);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+  const [acceptIcp, setAcceptIcp] = useState(true);
+  const [acceptCkbtc, setAcceptCkbtc] = useState(true);
+  const [acceptCketh, setAcceptCketh] = useState(true);
 
   // Detail modals
   const [detailIdea, setDetailIdea] = useState<Idea | null>(null);
@@ -238,7 +242,18 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
 
   const openPay = (target: PayTarget) => {
     setPayTarget(target);
-    setPayToken(IdeaToken.ICP);
+    let initialToken = IdeaToken.ICP;
+    if (target.kind === 'fund') {
+      const pr = target.project;
+      if (pr.accept_icp) {
+        initialToken = IdeaToken.ICP;
+      } else if (pr.accept_ckbtc) {
+        initialToken = IdeaToken.CkBTC;
+      } else if (pr.accept_cketh) {
+        initialToken = IdeaToken.CkETH;
+      }
+    }
+    setPayToken(initialToken);
     setPayAmount('');
     setPayError(null);
     setPaySuccess(false);
@@ -396,8 +411,8 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
     }
   };
 
-  // Admin: create a project with per-token goals.
-  const executeAddProject = async () => {
+  // Admin: create or update a project.
+  const executeSaveProject = async () => {
     if (!actor || isSavingProject) return;
     const title = projTitle.trim();
     const description = projDescription.trim();
@@ -416,28 +431,79 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
       setProjError("Set at least one funding goal.");
       return;
     }
+    if (!acceptIcp && !acceptCkbtc && !acceptCketh) {
+      setProjError("Select at least one accepted cryptocurrency.");
+      return;
+    }
 
     setIsSavingProject(true);
     setProjError(null);
     try {
-      const res = await actor.admin_add_project(
-        title, description, projDetail.trim(),
-        goals[IdeaToken.ICP], goals[IdeaToken.CkBTC], goals[IdeaToken.CkETH],
-      );
-      if (res.__kind__ === "Err") {
-        throw new Error(res.Err);
+      if (editingProject) {
+        const res = await actor.admin_update_project(
+          editingProject.id,
+          title, description, projDetail.trim(),
+          goals[IdeaToken.ICP], goals[IdeaToken.CkBTC], goals[IdeaToken.CkETH],
+          acceptIcp, acceptCkbtc, acceptCketh
+        );
+        if (res.__kind__ === "Err") {
+          throw new Error(res.Err);
+        }
+      } else {
+        const res = await actor.admin_add_project(
+          title, description, projDetail.trim(),
+          goals[IdeaToken.ICP], goals[IdeaToken.CkBTC], goals[IdeaToken.CkETH],
+          acceptIcp, acceptCkbtc, acceptCketh
+        );
+        if (res.__kind__ === "Err") {
+          throw new Error(res.Err);
+        }
       }
       setIsProjectFormOpen(false);
       setProjTitle(''); setProjDescription(''); setProjDetail('');
       setProjGoals({ ICP: '', CkBTC: '', CkETH: '' });
+      setEditingProject(null);
       await refreshAll();
       setTab('projects');
     } catch (err: any) {
-      console.error("Add project error:", err);
+      console.error("Save project error:", err);
       setProjError(err.message || String(err));
     } finally {
       setIsSavingProject(false);
     }
+  };
+
+  const openEditProject = (project: Project) => {
+    setEditingProject(project);
+    setProjTitle(project.title);
+    setProjDescription(project.description);
+    setProjDetail(project.detail);
+
+    const icpMeta = tokenMeta(IdeaToken.ICP, info);
+    const ckbtcMeta = tokenMeta(IdeaToken.CkBTC, info);
+    const ckethMeta = tokenMeta(IdeaToken.CkETH, info);
+
+    setProjGoals({
+      ICP: project.goal_icp_e8s > 0n
+        ? fmtTokenAmount(project.goal_icp_e8s, icpMeta.decimals)
+            .replace(/,/g, '')
+        : '',
+      CkBTC: project.goal_ckbtc_e8s > 0n
+        ? fmtTokenAmount(project.goal_ckbtc_e8s, ckbtcMeta.decimals)
+            .replace(/,/g, '')
+        : '',
+      CkETH: project.goal_cketh_wei > 0n
+        ? fmtTokenAmount(project.goal_cketh_wei, ckethMeta.decimals)
+            .replace(/,/g, '')
+        : '',
+    });
+
+    setAcceptIcp(project.accept_icp);
+    setAcceptCkbtc(project.accept_ckbtc);
+    setAcceptCketh(project.accept_cketh);
+
+    setIsProjectFormOpen(true);
+    setDetailProject(null);
   };
 
   const handleRemoveProject = async (projectId: bigint) => {
@@ -711,7 +777,18 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
               <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· funding goes 100% to the treasury</span>
             </span>
             {isAdmin && (
-              <Btn variant="secondary" sm onClick={() => { setProjError(null); setIsProjectFormOpen(true); }}>
+              <Btn variant="secondary" sm onClick={() => {
+                setProjError(null);
+                setProjTitle('');
+                setProjDescription('');
+                setProjDetail('');
+                setProjGoals({ ICP: '', CkBTC: '', CkETH: '' });
+                setAcceptIcp(true);
+                setAcceptCkbtc(true);
+                setAcceptCketh(true);
+                setEditingProject(null);
+                setIsProjectFormOpen(true);
+              }}>
                 <Icon name="key" size={12} stroke="var(--burn)" /> Add project
               </Btn>
             )}
@@ -754,12 +831,22 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                     <Btn
                       variant="primary" sm
                       style={{ height: 26, padding: '0 10px', fontSize: 11.5 }}
+                      disabled={
+                        !project.accept_icp &&
+                        !project.accept_ckbtc &&
+                        !project.accept_cketh
+                      }
                       onClick={() => {
                         if (!signedIn) { onSignIn(); return; }
                         openPay({ kind: 'fund', project });
                       }}
                     >
-                      <Icon name="coins" size={11} stroke="var(--char-950)" /> Fund
+                      <Icon name="coins" size={11} stroke="var(--char-950)" />
+                      {!project.accept_icp &&
+                      !project.accept_ckbtc &&
+                      !project.accept_cketh
+                        ? 'Disabled'
+                        : 'Fund'}
                     </Btn>
                   </div>
                 </div>
@@ -901,14 +988,16 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
         </div>
       )}
 
-      {/* ── Admin: add project modal ── */}
+      {/* ── Admin: add/edit project modal ── */}
       {isProjectFormOpen && (
         <div style={MODAL_OVERLAY}>
           <div className="card col" style={MODAL_CARD}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
                 <Icon name="target" size={18} stroke="var(--burn)" />
-                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Add project (admin)</h4>
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>
+                  {editingProject ? 'Edit project (admin)' : 'Add project (admin)'}
+                </h4>
               </span>
               <button onClick={() => setIsProjectFormOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
                 <Icon name="x" size={16} />
@@ -957,9 +1046,27 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
               })}
             </div>
 
-            <Btn variant="primary" style={{ width: '100%' }} onClick={executeAddProject} disabled={isSavingProject || !projTitle.trim() || !projDescription.trim()}>
+            <div className="col" style={{ gap: 6 }}>
+              <label style={LABEL_STYLE}>Accepted Cryptocurrencies</label>
+              <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
+                <label className="row" style={{ gap: 6, cursor: 'pointer', fontSize: 13, userSelect: 'none' }}>
+                  <input type="checkbox" checked={acceptIcp} onChange={e => { setAcceptIcp(e.target.checked); setProjError(null); }} />
+                  ICP
+                </label>
+                <label className="row" style={{ gap: 6, cursor: 'pointer', fontSize: 13, userSelect: 'none' }}>
+                  <input type="checkbox" checked={acceptCkbtc} onChange={e => { setAcceptCkbtc(e.target.checked); setProjError(null); }} />
+                  ckBTC
+                </label>
+                <label className="row" style={{ gap: 6, cursor: 'pointer', fontSize: 13, userSelect: 'none' }}>
+                  <input type="checkbox" checked={acceptCketh} onChange={e => { setAcceptCketh(e.target.checked); setProjError(null); }} />
+                  ckETH
+                </label>
+              </div>
+            </div>
+
+            <Btn variant="primary" style={{ width: '100%' }} onClick={executeSaveProject} disabled={isSavingProject || !projTitle.trim() || !projDescription.trim()}>
               {isSavingProject ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="target" size={14} stroke="var(--char-950)" />}
-              {isSavingProject ? ' Saving…' : ' Publish project'}
+              {isSavingProject ? ' Saving…' : (editingProject ? 'Save changes' : 'Publish project')}
             </Btn>
           </div>
         </div>
@@ -1044,6 +1151,11 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
 
             <Btn
               variant="primary" style={{ width: '100%' }}
+              disabled={
+                !detailProject.accept_icp &&
+                !detailProject.accept_ckbtc &&
+                !detailProject.accept_cketh
+              }
               onClick={() => {
                 if (!signedIn) { onSignIn(); return; }
                 const project = detailProject;
@@ -1052,13 +1164,56 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
               }}
             >
               <Icon name="coins" size={14} stroke="var(--char-950)" />
-              {signedIn ? 'Fund this project' : 'Sign in to fund'}
+              {!detailProject.accept_icp &&
+              !detailProject.accept_ckbtc &&
+              !detailProject.accept_cketh
+                ? 'No accepted tokens'
+                : (signedIn ? 'Fund this project' : 'Sign in to fund')}
             </Btn>
             {isAdmin && (
-              <button onClick={() => handleRemoveProject(detailProject.id)} disabled={isRemovingProject}
-                style={{ background: 'none', border: 'none', cursor: isRemovingProject ? 'default' : 'pointer', color: 'var(--ember)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 5, alignSelf: 'center', opacity: isRemovingProject ? 0.5 : 1 }}>
-                <Icon name="x" size={12} stroke="var(--ember)" /> {isRemovingProject ? 'Removing…' : 'Remove project (admin)'}
-              </button>
+              <div
+                className="row"
+                style={{
+                  gap: 16,
+                  justifyContent: 'center',
+                  alignSelf: 'center',
+                }}
+              >
+                <button
+                  onClick={() => openEditProject(detailProject)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: 'var(--burn)',
+                    fontSize: 12,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                  }}
+                >
+                  <Icon name="edit" size={12} stroke="var(--burn)" />
+                  Edit project (admin)
+                </button>
+                <button
+                  onClick={() => handleRemoveProject(detailProject.id)}
+                  disabled={isRemovingProject}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: isRemovingProject ? 'default' : 'pointer',
+                    color: 'var(--ember)',
+                    fontSize: 12,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    opacity: isRemovingProject ? 0.5 : 1,
+                  }}
+                >
+                  <Icon name="x" size={12} stroke="var(--ember)" />
+                  {isRemovingProject ? 'Removing…' : 'Remove project (admin)'}
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -1100,7 +1255,15 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                 <div className="col" style={{ gap: 6 }}>
                   <label style={LABEL_STYLE}>Pay with</label>
                   <div className="row" style={{ gap: 6 }}>
-                    {TOKEN_ORDER.map(t => {
+                    {TOKEN_ORDER.filter(t => {
+                      if (payTarget.kind === 'fund') {
+                        const pr = payTarget.project;
+                        if (t === IdeaToken.ICP) return pr.accept_icp;
+                        if (t === IdeaToken.CkBTC) return pr.accept_ckbtc;
+                        if (t === IdeaToken.CkETH) return pr.accept_cketh;
+                      }
+                      return true;
+                    }).map(t => {
                       const m = tokenMeta(t, info);
                       return (
                         <Btn key={t} variant={payToken === t ? 'primary' : 'secondary'} sm

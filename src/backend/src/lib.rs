@@ -2863,40 +2863,54 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
     };
 
     let met = proposal.total_committed_e8s >= proposal.threshold_e8s;
-    if met {
-        let config = CONFIG.with(|cell| cell.borrow().get().clone());
-        // PB-123: majority of committed ICP wins; an exact tie is broken by the
-        // first stance committed on this proposal (first vote wins).
-        let vote_choice = decide_vote_choice(
-            proposal.adopt_pot_e8s,
-            proposal.reject_pot_e8s,
-            proposal.first_stance.clone(),
-        );
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    // PB-123: majority of committed ICP wins; an exact tie is broken by the
+    // first stance committed on this proposal (first vote wins).
+    let vote_choice = decide_vote_choice(
+        proposal.adopt_pot_e8s,
+        proposal.reject_pot_e8s,
+        proposal.first_stance.clone(),
+    );
 
-        // F-108: vote against the real NNS proposal id, never the internal map key.
-        // If no NNS id is set this is a misconfiguration — do NOT call the NNS
-        // (which could mis-vote); mark failed so commitments are refunded, not burned.
-        match proposal.nns_proposal_id {
-            Some(nns_id) => {
-                let vote_result = cast_nns_vote(config.primary_neuron_id, nns_id, vote_choice).await;
-                match vote_result {
-                    Ok(_) => {
-                        proposal.status = "voted".to_string();
-                        proposal.vote_executed_at = Some(ic_cdk::api::time());
-                    }
-                    Err(e) => {
-                        proposal.status = "failed".to_string();
-                        ic_cdk::api::print(&format!("NNS vote failed for proposal {}: {}", pid, e));
-                    }
+    let mut vote_success = false;
+    match proposal.nns_proposal_id {
+        Some(nns_id) => {
+            let vote_result = cast_nns_vote(config.primary_neuron_id, nns_id, vote_choice).await;
+            match vote_result {
+                Ok(_) => {
+                    vote_success = true;
+                    proposal.vote_executed_at = Some(ic_cdk::api::time());
+                }
+                Err(e) => {
+                    ic_cdk::api::print(&format!("NNS vote failed for proposal {}: {}", pid, e));
                 }
             }
-            None => {
-                proposal.status = "failed".to_string();
-                ic_cdk::api::print(&format!("Proposal {} has no nns_proposal_id; skipping vote", pid));
-            }
         }
+        None => {
+            ic_cdk::api::print(&format!("Proposal {} has no nns_proposal_id; skipping vote", pid));
+        }
+    }
+
+    if vote_success {
+        if met {
+            proposal.status = "voted".to_string();
+        } else {
+            proposal.status = "abstained".to_string();
+        }
+
+        // Insert VoteRecord since the neuron voted
+        let vote_rec = VoteRecord {
+            proposal_id: pid,
+            vote: if vote_choice == 1 { Vote::Yes } else { Vote::No },
+            icp_burned_e8s: if met { proposal.total_committed_e8s } else { 0 },
+            decided_at: ic_cdk::api::time(),
+            nns_outcome: Some(if vote_choice == 1 { "adopted".to_string() } else { "rejected".to_string() }),
+        };
+        VOTES.with(|map| {
+            map.borrow_mut().insert(pid, vote_rec);
+        });
     } else {
-        proposal.status = "abstained".to_string();
+        proposal.status = "failed".to_string();
     }
 
     PROPOSALS.with(|map| {
@@ -2973,17 +2987,6 @@ async fn settle_proposal_commitments(proposal_id: u64) {
                     };
                     AUDIT_LOG.with(|log| {
                         let _ = log.borrow_mut().append(&log_entry);
-                    });
-
-                    let vote_rec = VoteRecord {
-                        proposal_id,
-                        vote: if commitment.stance == Stance::Adopt { Vote::Yes } else { Vote::No },
-                        icp_burned_e8s: commitment.amount_e8s,
-                        decided_at: now,
-                        nns_outcome: Some("adopted".to_string()),
-                    };
-                    VOTES.with(|map| {
-                        map.borrow_mut().insert(proposal_id, vote_rec);
                     });
 
                     ic_cdk::api::print(&format!(
@@ -3477,6 +3480,10 @@ pub struct FeatureFlag {
 }
 
 /// Admin-curated, fundable project (Community R&D "Projects" tab). Funding
+fn default_true() -> bool {
+    true
+}
+
 /// goes 100% to the protocol treasury, which pays for the project's
 /// execution. Per-token goals of 0 mean "not seeking that token".
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -3493,6 +3500,12 @@ pub struct Project {
     pub raised_ckbtc_e8s: u64,
     pub raised_cketh_wei: u64,
     pub funding_count: u64,
+    #[serde(default = "default_true")]
+    pub accept_icp: bool,
+    #[serde(default = "default_true")]
+    pub accept_ckbtc: bool,
+    #[serde(default = "default_true")]
+    pub accept_cketh: bool,
 }
 
 /// Saga journal for one project funding (single transfer → treasury), same
@@ -4197,6 +4210,9 @@ fn admin_add_project(
     goal_icp_e8s: u64,
     goal_ckbtc_e8s: u64,
     goal_cketh_wei: u64,
+    accept_icp: bool,
+    accept_ckbtc: bool,
+    accept_cketh: bool,
 ) -> Result<u64, String> {
     let title = title.trim().to_string();
     let description = description.trim().to_string();
@@ -4204,6 +4220,9 @@ fn admin_add_project(
     validate_idea_text(&title, &description, &detail)?;
     if goal_icp_e8s == 0 && goal_ckbtc_e8s == 0 && goal_cketh_wei == 0 {
         return Err("NO_GOAL_SET".to_string());
+    }
+    if !accept_icp && !accept_ckbtc && !accept_cketh {
+        return Err("NO_CRYPTO_ACCEPTED".to_string());
     }
     if PROJECTS.with(|m| m.borrow().len()) >= MAX_PROJECTS {
         return Err("PROJECT_QUOTA_REACHED".to_string());
@@ -4229,9 +4248,56 @@ fn admin_add_project(
             raised_ckbtc_e8s: 0,
             raised_cketh_wei: 0,
             funding_count: 0,
+            accept_icp,
+            accept_ckbtc,
+            accept_cketh,
         });
     });
     Ok(id)
+}
+
+/// Admin: update a project's details, funding goals, and cryptocurrency toggles.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_update_project(
+    id: u64,
+    title: String,
+    description: String,
+    detail: String,
+    goal_icp_e8s: u64,
+    goal_ckbtc_e8s: u64,
+    goal_cketh_wei: u64,
+    accept_icp: bool,
+    accept_ckbtc: bool,
+    accept_cketh: bool,
+) -> Result<(), String> {
+    let title = title.trim().to_string();
+    let description = description.trim().to_string();
+    let detail = detail.trim().to_string();
+    validate_idea_text(&title, &description, &detail)?;
+    if goal_icp_e8s == 0 && goal_ckbtc_e8s == 0 && goal_cketh_wei == 0 {
+        return Err("NO_GOAL_SET".to_string());
+    }
+    if !accept_icp && !accept_ckbtc && !accept_cketh {
+        return Err("NO_CRYPTO_ACCEPTED".to_string());
+    }
+    PROJECTS.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(mut project) = m.get(&id) {
+            project.title = title;
+            project.description = description;
+            project.detail = detail;
+            project.goal_icp_e8s = goal_icp_e8s;
+            project.goal_ckbtc_e8s = goal_ckbtc_e8s;
+            project.goal_cketh_wei = goal_cketh_wei;
+            project.accept_icp = accept_icp;
+            project.accept_ckbtc = accept_ckbtc;
+            project.accept_cketh = accept_cketh;
+            m.insert(id, project);
+            Ok(())
+        } else {
+            Err("PROJECT_NOT_FOUND".to_string())
+        }
+    })
 }
 
 /// Admin: remove a project from the board. Settled funding stays in the
@@ -4306,8 +4372,16 @@ async fn fund_project(project_id: u64, token: IdeaToken, amount: u64) -> Result<
     if amount > MAX_UPVOTE_UNITS {
         return Err("EXCEEDS_GLOBAL_CAP".to_string());
     }
-    if PROJECTS.with(|m| m.borrow().get(&project_id)).is_none() {
-        return Err("PROJECT_NOT_FOUND".to_string());
+    let project = PROJECTS.with(|m| m.borrow().get(&project_id))
+        .ok_or_else(|| "PROJECT_NOT_FOUND".to_string())?;
+
+    let accepted = match token {
+        IdeaToken::ICP => project.accept_icp,
+        IdeaToken::CkBTC => project.accept_ckbtc,
+        IdeaToken::CkETH => project.accept_cketh,
+    };
+    if !accepted {
+        return Err("TOKEN_NOT_ACCEPTED".to_string());
     }
 
     let ledger_id = token_ledger(token, &config);
@@ -6292,6 +6366,9 @@ mod tests {
                 raised_ckbtc_e8s: 0,
                 raised_cketh_wei: 0,
                 funding_count: 0,
+                accept_icp: true,
+                accept_ckbtc: true,
+                accept_cketh: true,
             });
         });
         assert!(list_projects().iter().any(|pr| pr.id == project_id));
@@ -6343,6 +6420,72 @@ mod tests {
         assert!(PROJECT_FUNDINGS.with(|m| {
             m.borrow().iter().all(|e| e.value().status == UpvoteStatus::Settled)
         }));
+    }
+
+    #[tokio::test]
+    async fn test_admin_update_project_and_crypto_toggles() {
+        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
+        CONFIG.with(|c| {
+            let mut cfg = c.borrow().get().clone();
+            cfg.admins = vec![admin];
+            c.borrow_mut().set(cfg);
+        });
+        set_mock_caller(admin);
+
+        // 1. Add project with all tokens accepted
+        let project_id = admin_add_project(
+            "Project A".into(),
+            "Desc A".into(),
+            "Detail A".into(),
+            100_000,
+            200_000,
+            300_000,
+            true,
+            true,
+            true,
+        ).unwrap();
+
+        let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
+        assert_eq!(pr.title, "Project A");
+        assert!(pr.accept_icp);
+        assert!(pr.accept_ckbtc);
+        assert!(pr.accept_cketh);
+
+        // 2. Update goals and disable CkBTC/CkETH
+        admin_update_project(
+            project_id,
+            "Project A Updated".into(),
+            "Desc A".into(),
+            "Detail A".into(),
+            500_000,
+            0,
+            0,
+            true,
+            false,
+            false,
+        ).unwrap();
+
+        let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
+        assert_eq!(pr.title, "Project A Updated");
+        assert_eq!(pr.goal_icp_e8s, 500_000);
+        assert!(pr.accept_icp);
+        assert!(!pr.accept_ckbtc);
+        assert!(!pr.accept_cketh);
+
+        // 3. Verify funding validation
+        let funder = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_caller(funder);
+        set_mock_ledger_balance(10_000_000_000);
+        set_mock_ledger_transfer(Ok(12));
+
+        // ICP is accepted
+        assert!(fund_project(project_id, IdeaToken::ICP, 100_000_000).await.is_ok());
+
+        // CkBTC is disabled/rejected
+        assert_eq!(
+            fund_project(project_id, IdeaToken::CkBTC, 1_000_000).await.unwrap_err(),
+            "TOKEN_NOT_ACCEPTED"
+        );
     }
 
     #[tokio::test]
