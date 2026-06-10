@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Config, FeatureFlag } from "./bindings/backend";
+import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Btn, LiveDot, fmtICP } from "./ui";
 
 // ==========================================
@@ -12,6 +13,10 @@ interface AdminProps {
   actor: any;
   config: Config | null;
   featureFlags: FeatureFlag[];
+  identity: any;
+  host: string;
+  rootKey?: Uint8Array;
+  ledgerCanisterId: string;
   /** Re-fetch config + flags after a successful change. */
   onChanged: () => void;
   openTreasury: () => void;
@@ -51,13 +56,14 @@ const Li = ({ children }: { children: React.ReactNode }) => (
   </span>
 );
 
-export default function Admin({ actor, config, featureFlags, onChanged, openTreasury }: AdminProps) {
+export default function Admin({ actor, config, featureFlags, identity, host, rootKey, ledgerCanisterId, onChanged, openTreasury }: AdminProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [thresholdInput, setThresholdInput] = useState('');
   const [ticketsInput, setTicketsInput] = useState('');
   const [poolFeeInput, setPoolFeeInput] = useState('');
+  const [sweetenInput, setSweetenInput] = useState('');
 
   const run = async (label: string, fn: () => Promise<string | null>) => {
     if (!actor || busy) return;
@@ -106,6 +112,26 @@ export default function Admin({ actor, config, featureFlags, onChanged, openTrea
     if (res.__kind__ === "Err") { setError(res.Err); return null; }
     setPoolFeeInput('');
     return `Pool initiation fee set to ${icp} ICP.`;
+  });
+
+  const sweetenPot = () => run('sweeten', async () => {
+    const icp = parseFloat(sweetenInput);
+    if (isNaN(icp) || icp <= 0) { setError("Enter an ICP amount above 0."); return null; }
+    const amount = BigInt(Math.round(icp * 100_000_000));
+    const pot = await actor.get_lottery_pot_address();
+    const ledger = createLedgerActor(ledgerCanisterId, {
+      agentOptions: { host, identity, rootKey },
+    });
+    const xfer = await ledger.icrc1_transfer({
+      to: { owner: pot.owner, subaccount: pot.subaccount },
+      amount,
+    });
+    if (xfer.__kind__ === "Err") {
+      setError(`Transfer failed: ${JSON.stringify(xfer.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
+      return null;
+    }
+    setSweetenInput('');
+    return `Pot sweetened with ${icp} ICP from your wallet — it's in the next jackpots.`;
   });
 
   const card: React.CSSProperties = {
@@ -242,6 +268,32 @@ export default function Admin({ actor, config, featureFlags, onChanged, openTrea
         </div>
         <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
           Off = the page disappears for everyone and the canister rejects the feature's methods. Instant, reversible.
+        </span>
+      </div>
+
+      {/* ── Sweeten the lottery pot (admin-only — users never see this) ── */}
+      <div className="col" style={{ ...card, gap: 10 }}>
+        <span className="row" style={{ gap: 8 }}>
+          <Icon name="spark" size={13} stroke="var(--burn)" />
+          <Eyebrow>Sweeten the lottery pot</Eyebrow>
+        </span>
+        <div className="row" style={{ gap: 8 }}>
+          <div style={{ flex: 1, position: 'relative', maxWidth: 240 }}>
+            <input
+              type="number" min="0" step="1" placeholder="Amount to add"
+              className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
+              value={sweetenInput} onChange={(e) => setSweetenInput(e.target.value)}
+            />
+            <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
+          </div>
+          <Btn variant="primary" sm onClick={sweetenPot} disabled={busy !== null || !sweetenInput}>
+            {busy === 'sweeten' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="spark" size={13} stroke="var(--char-950)" />} Add to pot
+          </Btn>
+        </div>
+        <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+          Transfers ICP from YOUR wallet straight into the prize pot. Players just see a bigger
+          jackpot — this control exists only here. (Admins hold no tickets, so you can never win
+          your own deposit back.)
         </span>
       </div>
 

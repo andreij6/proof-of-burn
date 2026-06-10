@@ -1529,6 +1529,50 @@ export default function App() {
     }
   }, [page, isAdmin]);
 
+  // Single source of truth for site navigation — rendered in the persistent
+  // desktop sidebar AND the mobile drawer. Order is deliberate:
+  // NNS Voting → Staked Voting → Lottery → Community R&D → Profile (→ Admin).
+  const renderNavLinks = (onNavigate?: () => void) => {
+    const go = (p: typeof page) => { setPage(p); onNavigate?.(); };
+    const linkStyle: React.CSSProperties = { justifyContent: 'flex-start', width: '100%', height: 38 };
+    return (
+      <>
+        <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('dashboard')}>
+          <Icon name="flame" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
+          NNS Voting
+        </Btn>
+        {losslessEnabled && (
+          <Btn variant={page === 'staking' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('staking')}>
+            <Icon name="zap" size={14} stroke={page === 'staking' ? 'var(--char-950)' : 'currentColor'} />
+            Staked Voting
+          </Btn>
+        )}
+        {lotteryEnabled && (
+          <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
+            <Icon name="target" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
+            Lottery
+          </Btn>
+        )}
+        {ideaBoardEnabled && (
+          <Btn variant={page === 'ideas' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ideas')}>
+            <Icon name="bulb" size={14} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
+            Community R&D
+          </Btn>
+        )}
+        <Btn variant={page === 'payouts' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('payouts')}>
+          <Icon name="wallet" size={14} stroke={page === 'payouts' ? 'var(--char-950)' : 'currentColor'} />
+          Profile
+        </Btn>
+        {isAdmin && (
+          <Btn variant={page === 'admin' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin')}>
+            <Icon name="key" size={14} stroke={page === 'admin' ? 'var(--char-950)' : 'currentColor'} />
+            Admin
+          </Btn>
+        )}
+      </>
+    );
+  };
+
   // Partition proposals into three display buckets
   const ACTIVE_STATUSES = new Set([
     CommitmentStatus.Pending, CommitmentStatus.ThresholdMet,
@@ -1597,41 +1641,6 @@ export default function App() {
             <span className="hide-mobile"> - Alpha</span>
           </b>
 
-          {/* ── Page nav — the active page is a solid burn pill ── */}
-          <nav className="row hide-mobile" style={{ gap: 4, marginLeft: 8, flexShrink: 0 }}>
-            <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} sm onClick={() => setPage('dashboard')}>
-              <Icon name="flame" size={13} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
-              <span className="hide-mobile">Dashboard</span>
-            </Btn>
-            {ideaBoardEnabled && (
-              <Btn variant={page === 'ideas' ? 'primary' : 'ghost'} sm onClick={() => setPage('ideas')}>
-                <Icon name="bulb" size={13} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
-                <span className="hide-mobile">Community R&D</span>
-              </Btn>
-            )}
-            {losslessEnabled && (
-              <Btn variant={page === 'staking' ? 'primary' : 'ghost'} sm onClick={() => setPage('staking')}>
-                <Icon name="zap" size={13} stroke={page === 'staking' ? 'var(--char-950)' : 'currentColor'} />
-                <span className="hide-mobile">Lossless Voting</span>
-              </Btn>
-            )}
-            {lotteryEnabled && (
-              <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} sm onClick={() => setPage('lottery')}>
-                <Icon name="target" size={13} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
-                <span className="hide-mobile">Lottery</span>
-              </Btn>
-            )}
-            <Btn variant={page === 'payouts' ? 'primary' : 'ghost'} sm onClick={() => setPage('payouts')}>
-              <Icon name="coins" size={13} stroke={page === 'payouts' ? 'var(--char-950)' : 'currentColor'} />
-              <span className="hide-mobile">Payouts</span>
-            </Btn>
-            {isAdmin && (
-              <Btn variant={page === 'admin' ? 'primary' : 'ghost'} sm onClick={() => setPage('admin')}>
-                <Icon name="key" size={13} stroke={page === 'admin' ? 'var(--char-950)' : 'currentColor'} />
-                <span className="hide-mobile">Admin</span>
-              </Btn>
-            )}
-          </nav>
         </div>
 
         <div className="row hide-mobile" style={{ gap: 10, flexShrink: 0 }}>
@@ -1798,10 +1807,20 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Main Layout (Dashboard + Pool Sidebar + Tweak Panel) ── */}
+      {/* ── Main Layout (Nav Sidebar + Content + Pool Sidebar + Tweak Panel) ── */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
 
-        {/* Left Column: Dashboard content (or the Idea Board page) */}
+        {/* Persistent navigation drawer — always open on desktop; the mobile
+            drawer (overlay) carries the same links below 900px. */}
+        <aside className="hide-mobile col" style={{
+          width: 200, flexShrink: 0, gap: 6, padding: '14px 10px',
+          borderRight: '1px solid var(--border)', overflowY: 'auto',
+        }}>
+          <Eyebrow style={{ marginBottom: 4, paddingLeft: 8 }}>Navigation</Eyebrow>
+          {renderNavLinks()}
+        </aside>
+
+        {/* Content column */}
         <main style={{ flex: 1, minWidth: 320, overflowY: 'auto' }}>
           {page === 'ideas' ? (
             <IdeaBoard
@@ -1843,6 +1862,10 @@ export default function App() {
               actor={actor}
               config={config}
               featureFlags={featureFlags}
+              identity={identity}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
               onChanged={() => { fetchConfig(); fetchFeatureFlags(); }}
               openTreasury={openTreasury}
             />
@@ -2902,6 +2925,24 @@ export default function App() {
               style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)', padding: 2, flexShrink: 0 }}>
               <Icon name="x" size={16} />
             </button>
+          </div>
+
+          {/* One-click admin (local replica only — dev_become_admin is
+              hard-blocked by require_local_dev, so this can't exist in prod) */}
+          <div className="col" style={{ gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Admin access</span>
+            {isAdmin ? (
+              <Chip tone="ok"><Icon name="check" size={11} /> You are an admin</Chip>
+            ) : (
+              <Btn variant="secondary" sm onClick={async () => {
+                if (!actor) return;
+                const res = await actor.dev_become_admin();
+                if (res.__kind__ === "Err") { alert(`Failed: ${res.Err}`); return; }
+                await fetchConfig();
+              }}>
+                <Icon name="key" size={13} /> Make me admin (local only)
+              </Btn>
+            )}
           </div>
 
           {/* Gating Mode selector */}
@@ -4157,62 +4198,7 @@ export default function App() {
         {/* Drawer Navigation Links */}
         <div className="col" style={{ gap: 8, width: '100%', marginBottom: 32 }}>
           <Eyebrow style={{ marginBottom: 6 }}>Navigation</Eyebrow>
-          <Btn
-            variant={page === 'dashboard' ? 'primary' : 'ghost'}
-            style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
-            onClick={() => { setPage('dashboard'); setMobileMenuOpen(false); }}
-          >
-            <Icon name="flame" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
-            Dashboard
-          </Btn>
-          {ideaBoardEnabled && (
-            <Btn
-              variant={page === 'ideas' ? 'primary' : 'ghost'}
-              style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
-              onClick={() => { setPage('ideas'); setMobileMenuOpen(false); }}
-            >
-              <Icon name="bulb" size={14} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
-              Community R&D
-            </Btn>
-          )}
-          {losslessEnabled && (
-            <Btn
-              variant={page === 'staking' ? 'primary' : 'ghost'}
-              style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
-              onClick={() => { setPage('staking'); setMobileMenuOpen(false); }}
-            >
-              <Icon name="zap" size={14} stroke={page === 'staking' ? 'var(--char-950)' : 'currentColor'} />
-              Lossless Voting
-            </Btn>
-          )}
-          {lotteryEnabled && (
-            <Btn
-              variant={page === 'lottery' ? 'primary' : 'ghost'}
-              style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
-              onClick={() => { setPage('lottery'); setMobileMenuOpen(false); }}
-            >
-              <Icon name="target" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
-              Lottery
-            </Btn>
-          )}
-          <Btn
-            variant={page === 'payouts' ? 'primary' : 'ghost'}
-            style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
-            onClick={() => { setPage('payouts'); setMobileMenuOpen(false); }}
-          >
-            <Icon name="coins" size={14} stroke={page === 'payouts' ? 'var(--char-950)' : 'currentColor'} />
-            Payouts
-          </Btn>
-          {isAdmin && (
-            <Btn
-              variant={page === 'admin' ? 'primary' : 'ghost'}
-              style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
-              onClick={() => { setPage('admin'); setMobileMenuOpen(false); }}
-            >
-              <Icon name="key" size={14} stroke={page === 'admin' ? 'var(--char-950)' : 'currentColor'} />
-              Admin
-            </Btn>
-          )}
+          {renderNavLinks(() => setMobileMenuOpen(false))}
         </div>
 
         {/* Drawer Identity & Wallet */}

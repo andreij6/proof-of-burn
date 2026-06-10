@@ -3,12 +3,13 @@ import { Principal } from "@icp-sdk/core/principal";
 import { PayoutType, IdeaToken } from "./bindings/backend";
 import type { Payout } from "./bindings/backend";
 import { fmtTokenAmount } from "./IdeaBoard";
-import { Icon, Eyebrow, Chip, Btn } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, formatPrincipal } from "./ui";
 
 // ==========================================
-// Payout history — every payment the site has made to the signed-in user,
+// Profile — your identity plus every payment the site has made to you,
 // across all payout types: lottery jackpots, unstake disbursements, idea
-// upvote shares (25% to the poster) and commitment refunds.
+// upvote shares, commitment refunds and pool rewards. Payouts are pushed
+// straight to the wallet — there is never anything to claim.
 // ==========================================
 
 interface PayoutsProps {
@@ -79,21 +80,38 @@ export default function Payouts({ actor, principal, onSignIn }: PayoutsProps) {
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
         <span className="row" style={{ gap: 8 }}>
-          <Icon name="coins" size={16} stroke="var(--burn)" />
-          <Eyebrow accent>Payout history</Eyebrow>
+          <Icon name="wallet" size={16} stroke="var(--burn)" />
+          <Eyebrow accent>Profile</Eyebrow>
         </span>
-        <b style={{ fontSize: 17 }}>Everything the site has paid you.</b>
+        <b style={{ fontSize: 17 }}>Your account. Everything the site has paid you.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 640 }}>
-          Lottery jackpots, unstake disbursements, idea upvote shares and commitment
-          refunds — every transfer back to your wallet, newest first.
+          Lottery jackpots, unstake disbursements, idea upvote shares, commitment refunds,
+          pool rewards — every payout lands in your wallet automatically the moment it
+          settles. Nothing to claim; this is the receipt trail, newest first.
         </span>
+        {signedIn && (
+          <span className="row" style={{ gap: 8, marginTop: 4 }}>
+            <Chip tone="muted"><Icon name="key" size={11} /> {formatPrincipal(principal)}</Chip>
+            <button
+              onClick={() => principal && navigator.clipboard.writeText(principal.toString())}
+              style={{
+                background: 'transparent', border: 'none', color: 'var(--fg-3)',
+                cursor: 'pointer', fontSize: 11.5, padding: 0,
+                display: 'flex', alignItems: 'center', gap: 4,
+              }}
+            >
+              <Icon name="copy" size={11} stroke="var(--fg-3)" /> copy principal
+            </button>
+          </span>
+        )}
       </div>
 
       <div className="col" style={{ ...card, gap: 10 }}>
+        <Eyebrow>Payout history</Eyebrow>
         {!signedIn ? (
           <div className="col" style={{ gap: 10, alignItems: 'flex-start' }}>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-              Sign in to see your payout history.
+              Sign in to see your profile and payout history.
             </span>
             <Btn variant="primary" sm onClick={onSignIn}>
               <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in

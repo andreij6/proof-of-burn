@@ -6620,6 +6620,8 @@ pub struct LotteryInfo {
     pub claimed_today: bool,
     /// Whether the caller holds any stake (the eligibility gate).
     pub eligible: bool,
+    /// True when the caller is an admin — admins never hold tickets.
+    pub admin_excluded: bool,
     /// Base daily grant for a 6-month staker (admin-tunable).
     pub tickets_per_day: u64,
     /// The caller's actual daily grant across their staked tiers (0 = not
@@ -6958,11 +6960,19 @@ async fn settle_lottery_payout(draw: &mut LotteryDraw) -> Result<(), String> {
 
 // ── User endpoints ──
 
+fn is_admin_principal(user: Principal) -> bool {
+    CONFIG.with(|c| c.borrow().get().admins.contains(&user))
+}
+
 /// Tickets the user collects per login day: the base grant × the term
 /// multiplier, summed over every tier they hold a stake in (6mo = 1×,
 /// 1y = 2×, 2y = 4× — i.e. 5/10/20 at the default base of 5). Zero when
-/// not staked: staking is the lottery eligibility gate.
+/// not staked: staking is the lottery eligibility gate. Admins are excluded
+/// outright — the house never holds tickets.
 fn user_daily_tickets(user: Principal) -> u64 {
+    if is_admin_principal(user) {
+        return 0;
+    }
     let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
     StakeTier::all().iter().fold(0u64, |acc, &tier| {
         let staked = STAKES
@@ -6986,6 +6996,9 @@ fn claim_daily_tickets() -> Result<u64, String> {
     require_authenticated()?;
     require_lottery_enabled()?;
     let caller = get_caller();
+    if is_admin_principal(caller) {
+        return Err("ADMINS_EXCLUDED".to_string());
+    }
     let now = current_time();
     let today = now / 1_000_000_000 / SECS_PER_DAY;
     let per_day = user_daily_tickets(caller);
@@ -7057,6 +7070,7 @@ async fn get_lottery_info() -> LotteryInfo {
         my_tickets,
         claimed_today,
         eligible: my_daily_tickets > 0,
+        admin_excluded: is_admin_principal(caller),
         tickets_per_day: config.lottery_tickets_per_day,
         my_daily_tickets,
         pot_e8s,
@@ -7091,6 +7105,30 @@ fn get_my_payouts() -> Vec<Payout> {
     })
 }
 
+/// The last 10 winning drawings, newest first — the public winners board.
+#[ic_cdk::query]
+fn list_recent_winners() -> Vec<LotteryDraw> {
+    LOTTERY_DRAWS.with(|m| {
+        m.borrow()
+            .iter()
+            .rev()
+            .filter(|e| e.value().winner.is_some())
+            .take(10)
+            .map(|e| e.value())
+            .collect()
+    })
+}
+
+/// The lottery prize-pot account. Anyone may top it up (sweeten the pot) by
+/// transferring ICP here — the funds become part of the next jackpots.
+#[ic_cdk::query]
+fn get_lottery_pot_address() -> LedgerAccount {
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(LOTTERY_SUBACCOUNT),
+    }
+}
+
 // ── Admin & dev ──
 
 /// Admin: tune how many tickets a daily login credits.
@@ -7121,6 +7159,24 @@ async fn dev_run_lottery_draw(force_win: bool) -> Result<(), String> {
         return Err("NO_TICKETS".to_string());
     }
     run_lottery_draw(if force_win { Some(0) } else { None }).await;
+    Ok(())
+}
+
+/// Local-dev: promote the caller to admin with one click (drives the admin
+/// console / How-it-works flows in local testing). Hard-blocked off the local
+/// network by `require_local_dev` — this can never run in production.
+#[ic_cdk::update]
+fn dev_become_admin() -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let caller = get_caller();
+    CONFIG.with(|cell| {
+        let mut config = cell.borrow().get().clone();
+        if !config.admins.contains(&caller) {
+            config.admins.push(caller);
+            cell.borrow_mut().set(config);
+        }
+    });
     Ok(())
 }
 
@@ -10784,6 +10840,87 @@ mod tests {
         st.total_tickets = 0;
         set_lottery_state(st);
         assert_eq!(dev_run_lottery_draw(true).await.unwrap_err(), "NO_TICKETS");
+    }
+
+
+    #[tokio::test]
+    async fn test_admins_are_excluded_from_the_lottery() {
+        install_staking_test_config();
+        enable_lottery();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        seed_stake(StakeTier::TwoYears, alice, 100_000_000);
+
+        // Staked and eligible as a normal user…
+        assert_eq!(user_daily_tickets(alice), 20);
+
+        // …but the moment they become an admin, the house holds no tickets.
+        CONFIG.with(|cell| {
+            let mut cfg = cell.borrow().get().clone();
+            cfg.admins.push(alice);
+            cell.borrow_mut().set(cfg);
+        });
+        assert_eq!(user_daily_tickets(alice), 0);
+        assert_eq!(claim_daily_tickets().unwrap_err(), "ADMINS_EXCLUDED");
+        set_mock_ledger_balance(0);
+        let info = get_lottery_info().await;
+        assert!(info.admin_excluded);
+        assert!(!info.eligible);
+        assert_eq!(info.my_daily_tickets, 0);
+    }
+
+    #[test]
+    fn test_list_recent_winners_filters_and_caps() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        // 15 winning draws + interleaved no-win draws.
+        for i in 1..=30u64 {
+            let won = i % 2 == 0;
+            LOTTERY_DRAWS.with(|m| {
+                m.borrow_mut().insert(i, LotteryDraw {
+                    id: i,
+                    round: 1,
+                    drawn_at: i,
+                    total_tickets: 5,
+                    pot_e8s: 100,
+                    winning_ticket: Some(0),
+                    winner: if won { Some(alice) } else { None },
+                    prize_e8s: if won { 80 } else { 0 },
+                    payout_block: None,
+                    status: DrawStatus::Done,
+                });
+            });
+        }
+        let winners = list_recent_winners();
+        assert_eq!(winners.len(), 10, "capped at the last 10 winners");
+        assert!(winners.iter().all(|d| d.winner.is_some()));
+        assert_eq!(winners[0].id, 30, "newest first");
+        assert_eq!(winners[9].id, 12);
+
+        // Pot address is the canonical lottery subaccount.
+        let pot = get_lottery_pot_address();
+        assert_eq!(pot.owner, get_canister_id());
+        assert_eq!(pot.subaccount, Some(LOTTERY_SUBACCOUNT));
+    }
+
+    #[test]
+    fn test_dev_become_admin_local_only() {
+        // Mainnet-shaped config: hard-blocked.
+        CONFIG.with(|cell| { cell.borrow_mut().set(test_config(false)); });
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        assert_eq!(dev_become_admin().unwrap_err(), "DEV_ONLY");
+
+        // Local: one click, idempotent.
+        install_staking_test_config();
+        dev_become_admin().unwrap();
+        assert!(CONFIG.with(|c| c.borrow().get().admins.contains(&alice)));
+        dev_become_admin().unwrap();
+        assert_eq!(
+            CONFIG.with(|c| c.borrow().get().admins.iter().filter(|a| **a == alice).count()),
+            1
+        );
+        assert!(require_admin().is_ok(), "freshly minted admin passes the guard");
     }
 
 }

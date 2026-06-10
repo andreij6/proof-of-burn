@@ -339,6 +339,8 @@ type LotteryInfo = record {
   claimed_today : bool;
   // Whether the caller holds any stake (staking gates lottery eligibility).
   eligible : bool;
+  // True when the caller is an admin — admins never hold tickets.
+  admin_excluded : bool;
   // Base daily grant for a 6-month staker (admin-tunable); tiers scale it
   // 1×/2×/4× (5/10/20 at the default base of 5).
   tickets_per_day : nat64;
@@ -526,4 +528,11 @@ service : (InitPayload) -> {
   admin_set_lottery_config : (opt nat64) -> (Result);
   // Local-dev: hold a drawing now; force_win rigs ticket 0 to win.
   dev_run_lottery_draw : (bool) -> (Result);
+  // The last 10 winning drawings, newest first.
+  list_recent_winners : () -> (vec LotteryDraw) query;
+  // The lottery prize-pot account — transfer ICP here to sweeten the pot.
+  get_lottery_pot_address : () -> (LedgerAccount) query;
+  // Local-dev: promote the caller to admin (require_local_dev — never
+  // available in production).
+  dev_become_admin : () -> (Result);
 }

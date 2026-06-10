@@ -5,7 +5,7 @@ interact with the local Cycles of Influence canisters using the `icp` CLI.
 
 
 ## Canister Identifiers (Local)
-* **Backend Canister:** `aiewf-lx777-77775-aaaca-cai`
+* **Backend Canister:** `a2cb4-hh777-77775-aaaba-cai`
 * **Local ICP Ledger Canister:** `a5dhi-k7777-77775-aaabq-cai`
 * **Primary (Leader) Neuron ID:** `4821667`
 
@@ -93,7 +93,7 @@ To burn ICP to commit voting weight on a proposal:
 3. **Transfer ICP to the Escrow Subaccount:**
    The total debit must equal: `Commitment Amount + 540_000 e8s` (0.005 ICP protocol fee + 0.0004 ICP ledger fees).
    ```bash
-   icp canister call ledger icrc1_transfer '(record { to = record { owner = principal "aiewf-lx777-77775-aaaca-cai"; subaccount = opt blob "<subaccount_bytes_here>" }; amount = <total_debit_in_e8s> })' -e local
+   icp canister call ledger icrc1_transfer '(record { to = record { owner = principal "a2cb4-hh777-77775-aaaba-cai"; subaccount = opt blob "<subaccount_bytes_here>" }; amount = <total_debit_in_e8s> })' -e local
    ```
 
 4. **Register the Conviction Burn / Commitment:**
@@ -118,7 +118,7 @@ To add to your commitment:
    Top-ups are charged **only the 10,000 e8s (0.0001 ICP) ledger transfer fee** (the protocol fee is waived).
    The transfer amount must equal: `Additional Amount + 10_000 e8s`.
    ```bash
-   icp canister call ledger icrc1_transfer '(record { to = record { owner = principal "aiewf-lx777-77775-aaaca-cai"; subaccount = opt blob "<subaccount_bytes_here>" }; amount = <additional_total_debit_in_e8s> })' -e local
+   icp canister call ledger icrc1_transfer '(record { to = record { owner = principal "a2cb4-hh777-77775-aaaba-cai"; subaccount = opt blob "<subaccount_bytes_here>" }; amount = <additional_total_debit_in_e8s> })' -e local
    ```
 3. **Submit the top-up commitment**:
    ```bash

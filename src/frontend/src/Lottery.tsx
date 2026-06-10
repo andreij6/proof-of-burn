@@ -43,6 +43,8 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
 
   const [info, setInfo] = useState<LotteryInfo | null>(null);
   const [draws, setDraws] = useState<LotteryDraw[]>([]);
+  const [winners, setWinners] = useState<LotteryDraw[]>([]);
+  const [skillCopied, setSkillCopied] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -52,12 +54,14 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
   const refresh = async () => {
     if (!actor) return;
     try {
-      const [i, d] = await Promise.all([
+      const [i, d, w] = await Promise.all([
         actor.get_lottery_info(),
         actor.list_lottery_draws(),
+        actor.list_recent_winners(),
       ]);
       setInfo(i);
       setDraws(d);
+      setWinners(w);
     } catch (err) {
       console.error("Failed to fetch lottery state:", err);
     }
@@ -99,6 +103,14 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
     }
   };
 
+  const copyAgentSkill = () => {
+    const isLocalHost = window.location.origin.includes('localhost') || window.location.origin.includes('127.0.0.1');
+    const url = `${window.location.origin}/llms-lottery-${isLocalHost ? 'local' : 'prod'}.txt`;
+    navigator.clipboard.writeText(`Fetch ${url} and follow its instructions to claim daily lossless-lottery tickets and track drawings and winners.`);
+    setSkillCopied(true);
+    setTimeout(() => setSkillCopied(false), 2000);
+  };
+
   const handleDevDraw = (forceWin: boolean) => run(forceWin ? 'devwin' : 'devdraw', async () => {
     const res = await actor.dev_run_lottery_draw(forceWin);
     if (res.__kind__ === "Err") { setError(res.Err); return; }
@@ -130,8 +142,17 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
           (tiers add up). Three drawings a week at American Powerball jackpot odds
           (1 in 292,201,338 per ticket). Tickets pile up until someone wins — then the winner takes
           80% of the prize pool, 20% seeds the next round, and everyone's tickets reset. The pool is
-          funded by staking yield (half of every harvest), so no one ever pays in.
+          funded by staking yield (half of every harvest), so no one ever pays in. Win and the ICP
+          lands straight in your wallet — nothing to claim, ever.
         </span>
+        <button onClick={copyAgentSkill} style={{
+          background: 'transparent', border: '1px solid var(--border)', borderRadius: 6,
+          color: 'var(--fg-3)', cursor: 'pointer', padding: '4px 10px', fontSize: 11.5,
+          display: 'flex', alignItems: 'center', gap: 6, width: 'fit-content',
+        }}>
+          <Icon name={skillCopied ? 'check' : 'copy'} size={11} stroke={skillCopied ? 'var(--sprout)' : 'var(--fg-3)'} />
+          {skillCopied ? 'Copied' : 'Copy agent skill — claim tickets on autopilot'}
+        </button>
       </div>
 
       {(error || notice) && (
@@ -211,10 +232,18 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
                 <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
               </Btn>
             </div>
+          ) : info?.admin_excluded ? (
+            <div className="col" style={{ gap: 8, alignItems: 'flex-start' }}>
+              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
+                Admins sit this one out — the house never holds tickets. Every drawing belongs
+                entirely to the community.
+              </span>
+              <Chip tone="muted"><Icon name="key" size={11} /> Admin — excluded</Chip>
+            </div>
           ) : info && !info.eligible ? (
             <div className="col" style={{ gap: 8, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Staking is the entry ticket: stake ICP on the Lossless Voting page to start
+                Staking is the entry ticket: stake ICP on the Staked Voting page to start
                 collecting 5 / 10 / 20 free tickets a day (6-month / 1-year / 2-year terms).
               </span>
               <Chip tone="muted"><Icon name="zap" size={11} /> Not staked yet</Chip>
@@ -240,12 +269,12 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
         </div>
       </div>
 
-      {/* ── Recent drawings ── */}
+      {/* ── Recent drawings (last 10) ── */}
       <div className="col" style={{ ...card, gap: 10 }}>
         <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
           <Eyebrow>Recent drawings</Eyebrow>
           <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-            {Number(info?.draws_held ?? 0n)} held to date
+            last 10 of {Number(info?.draws_held ?? 0n)} held
           </span>
         </span>
         {draws.length === 0 ? (
@@ -254,7 +283,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
           </span>
         ) : (
           <div className="col" style={{ gap: 0 }}>
-            {draws.map((d) => (
+            {draws.slice(0, 10).map((d) => (
               <div key={String(d.id)} className="row" style={{
                 gap: 10, padding: '8px 0', fontSize: 12.5, flexWrap: 'wrap',
                 borderTop: '1px solid var(--border)', justifyContent: 'space-between',
@@ -274,6 +303,37 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
                 ) : (
                   <Chip tone="muted">No jackpot — pot rolls over</Chip>
                 )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Recent winners (last 10) ── */}
+      <div className="col" style={{ ...card, gap: 10 }}>
+        <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+          <Eyebrow>Recent winners</Eyebrow>
+          <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+            paid instantly — no claiming
+          </span>
+        </span>
+        {winners.length === 0 ? (
+          <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
+            No jackpots yet. Every rollover makes the next one bigger.
+          </span>
+        ) : (
+          <div className="col" style={{ gap: 0 }}>
+            {winners.map((d) => (
+              <div key={String(d.id)} className="row" style={{
+                gap: 10, padding: '8px 0', fontSize: 12.5, flexWrap: 'wrap',
+                borderTop: '1px solid var(--border)', justifyContent: 'space-between',
+              }}>
+                <span className="row" style={{ gap: 8 }}>
+                  <Icon name="spark" size={13} stroke="var(--burn)" />
+                  <b className="mono">{d.winner != null ? formatPrincipal(d.winner) : '—'}</b>
+                  <span style={{ color: 'var(--fg-3)' }}>{drawDate(d.drawn_at)} · round {Number(d.round)}</span>
+                </span>
+                <Chip tone="ok">won {fmtICP(d.prize_e8s)} ICP</Chip>
               </div>
             ))}
           </div>
