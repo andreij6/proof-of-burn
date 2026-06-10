@@ -288,6 +288,8 @@ type PendingUnstake = record {
   // tier's full term).
   dissolve_eta : nat64;
   disburse_block : opt nat64;
+  // Treasury fee reimbursement (0.0003 ICP) — makes the cycle zero-loss.
+  fee_refund_block : opt nat64;
   settled_at : opt nat64;
 };
 type LosslessVote = record {
@@ -488,8 +490,9 @@ service : (InitPayload) -> {
   // Spend deposited funds on a project: 100% → protocol treasury.
   fund_project : (nat64, IdeaToken, nat64) -> (Result);
   // ── Lossless Voting (pooled staking, 3 fixed-term tiers) ──
-  // The caller's stake-escrow subaccount. Fund it with amount + 0.0001 ICP,
-  // then call stake(amount, tier).
+  // The caller's stake-escrow subaccount. Fund it with EXACTLY the stake
+  // amount, then call stake(amount, tier) — the treasury covers every
+  // transfer fee in the cycle (zero-loss).
   get_stake_deposit_address : () -> (LedgerAccount) query;
   // Stake deposited ICP into the tier's pooled neuron (a tier's first stake
   // must be ≥ 1 ICP — it creates that tier's neuron).
@@ -535,4 +538,6 @@ service : (InitPayload) -> {
   // Local-dev: promote the caller to admin (require_local_dev — never
   // available in production).
   dev_become_admin : () -> (Result);
+  // Local-dev: seed mock payout history for the caller (no-op if non-empty).
+  dev_seed_payouts : () -> (Result);
 }

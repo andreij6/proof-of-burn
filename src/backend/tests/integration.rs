@@ -439,6 +439,24 @@ impl SagaEnv {
         let res: TransferResult = decode_one(&res).unwrap();
         assert!(matches!(res, TransferResult::Ok(_)), "mint failed: {:?}", res);
     }
+
+    /// Mint into a specific subaccount (e.g. the backend treasury).
+    fn mint_sub(&self, to: Principal, subaccount: Vec<u8>, amount_e8s: u64) {
+        let xfer = TransferArg {
+            from_subaccount: None,
+            to: LAccount { owner: to, subaccount: Some(subaccount) },
+            amount: candid::Nat::from(amount_e8s),
+            fee: None,
+            memo: None,
+            created_at_time: None,
+        };
+        let res = self
+            .pic
+            .update_call(self.ledger, self.minter, "icrc1_transfer", encode_one(xfer).unwrap())
+            .expect("mint_sub call");
+        let res: TransferResult = decode_one(&res).unwrap();
+        assert!(matches!(res, TransferResult::Ok(_)), "mint_sub failed: {:?}", res);
+    }
 }
 
 /// Full environment: ICRC ledger (user pre-funded) + backend pointed at it.
@@ -1843,6 +1861,9 @@ enum NatResult {
 /// `stake(amount, tier)`.
 fn do_stake_as(env: &SagaEnv, user: Principal, amount_e8s: u64, tier: StakeTier) -> UnitResult {
     env.mint(user, amount_e8s + 1_000_000);
+    // The treasury fronts the stake-transfer fee and the unstake fee
+    // reimbursement — keep it funded like a live deployment.
+    env.mint_sub(env.backend, vec![1u8; 32], 1_000_000);
 
     let reply = env
         .pic
@@ -1850,10 +1871,12 @@ fn do_stake_as(env: &SagaEnv, user: Principal, amount_e8s: u64, tier: StakeTier)
         .expect("get_stake_deposit_address");
     let escrow: LAccountDe = decode_one(&reply).unwrap();
 
+    // Zero-loss: the user deposits exactly the stake amount — every fee in
+    // the cycle is covered or reimbursed by the treasury.
     let xfer = TransferArg {
         from_subaccount: None,
         to: LAccount { owner: escrow.owner, subaccount: escrow.subaccount },
-        amount: candid::Nat::from(amount_e8s + 10_000),
+        amount: candid::Nat::from(amount_e8s),
         fee: None,
         memo: None,
         created_at_time: None,
@@ -1957,9 +1980,16 @@ fn test_stake_unstake_roundtrip_integration() {
     assert_eq!(pending[0].status, UnstakeStatus::Disbursed);
     assert!(pending[0].disburse_block.is_some());
 
-    // Net payout = amount − split fee − disburse fee.
+    // Zero-loss: disburse = amount − split/disburse fees, then the treasury
+    // reimburses all 3 cycle fees (0.0003 ICP) in the same sweep pass — so
+    // relative to the pre-unstake balance the user is UP by one fee (the
+    // deposit fee they paid from their wallet at stake time).
     let after = balance_of(&env, env.user, None);
-    assert_eq!(after - before, 150_000_000 - 20_000, "user receives amount minus 2 fees");
+    assert_eq!(
+        after - before,
+        150_000_000 + 10_000,
+        "amount − 2 fees + 3-fee treasury reimbursement"
+    );
 }
 
 #[test]
@@ -2049,7 +2079,14 @@ fn test_yield_distribution_integration() {
     let treasury = balance_of(&env, env.backend, Some(vec![1u8; 32]));
     let lottery = balance_of(&env, env.backend, Some(vec![3u8; 32]));
     assert_eq!(lottery, spendable / 2, "50% → lottery prize pot");
-    assert_eq!(treasury, spendable - spendable / 2, "50% → treasury");
+    // Treasury = its yield share + the seeded fee-cover float (minted in
+    // do_stake_as) minus the 2 fees it fronted for the zero-loss stake.
+    let treasury_float = 1_000_000 - 20_000;
+    assert_eq!(
+        treasury,
+        (spendable - spendable / 2) + treasury_float,
+        "50% → treasury (plus the fee-cover float)"
+    );
     assert_eq!(balance_of(&env, env.backend, Some(vec![2u8; 32])), 0, "inbox drained");
 
     let pool = staking_pool_info(&env);

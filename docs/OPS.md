@@ -89,7 +89,11 @@ The backend controls THREE pooled NNS neurons, one per fixed term:
 Users stake ICP into a tier (`stake(amount, tier)`); platform voting power =
 Σ stake × multiplier across tiers (proportional to the term). Unstaking
 (`unstake(amount, tier)`) splits the tier's neuron and dissolves for the
-tier's FULL term. Staking is also the lossless-lottery eligibility gate (the
+tier's FULL term. **Zero-loss fee model:** the user deposits EXACTLY the
+stake amount; the treasury fronts the escrow→neuron transfer fee at stake
+time (`TREASURY_FEE_COVER` error if the treasury can't — keep it funded)
+and reimburses all three cycle fees (0.0003 ICP, `fee_refund_block` on the
+PendingUnstake, retried by the sweep) with the disbursement. Staking is also the lossless-lottery eligibility gate (the
 daily ticket grant = base 5 × multiplier per staked tier). Maturity from all
 three neurons is harvested on the 5-minute sweep into the shared yield inbox
 (`[2u8;32]`) and split **50% lottery prize pot (`[3u8;32]`) / 50% treasury**.

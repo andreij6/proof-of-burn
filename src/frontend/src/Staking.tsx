@@ -138,14 +138,15 @@ export default function Staking({
       setError(`Minimum ${firstStake ? 'first ' : ''}stake is ${fmtICP(minStakeE8s)} ICP${firstStake ? ` (creates the ${termLabel} pool neuron)` : ''}.`);
       return;
     }
-    // Fund the stake escrow with amount + the stake-transfer fee, then stake.
+    // Zero-loss: deposit exactly the stake amount — the treasury covers
+    // every transfer fee in the cycle.
     const ledger = createLedgerActor(ledgerCanisterId, {
       agentOptions: { host, identity, rootKey },
     });
     const depositAccount = await actor.get_stake_deposit_address();
     const xfer = await ledger.icrc1_transfer({
       to: { owner: depositAccount.owner, subaccount: depositAccount.subaccount },
-      amount: amount + ICP_FEE,
+      amount,
     });
     if (xfer.__kind__ === "Err") {
       setError(`Deposit transfer failed: ${JSON.stringify(xfer.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
@@ -184,7 +185,7 @@ export default function Staking({
       return;
     }
     setUnstakeInput('');
-    setNotice(`Unstake started — ICP lands in your wallet after the full ${termLabel} term (net of ~0.0002 ICP fees).`);
+    setNotice(`Unstake started — your full ICP lands in your wallet after the ${termLabel} term. The treasury picks up the fees.`);
     await refresh();
     onActivity();
   });
@@ -314,7 +315,7 @@ export default function Staking({
                 </div>
                 <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
                   <Icon name="info" size={12} stroke="var(--fg-3)" />
-                  Costs amount + 0.0002 ICP in ledger fees. {firstStake ? `The first ${termLabel} stake creates that tier's neuron (min 1 ICP).` : ""}
+                  Zero-loss: the treasury pays every transfer fee — what you stake is exactly what comes back. {firstStake ? `The first ${termLabel} stake creates that tier's neuron (min 1 ICP).` : ""}
                 </span>
 
                 <div style={{ borderTop: '1px solid var(--border)' }} />
@@ -336,7 +337,7 @@ export default function Staking({
                 <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
                   <Icon name="clock" size={12} stroke="var(--fg-3)" />
                   Splits the {termLabel} neuron and dissolves for the full term (~{Math.round(termDays)} days),
-                  then your ICP arrives automatically (net of ~0.0002 ICP fees).
+                  then your full ICP arrives automatically — the treasury reimburses every fee.
                 </span>
               </div>
             </>

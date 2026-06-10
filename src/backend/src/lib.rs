@@ -4956,6 +4956,11 @@ fn seed_mock_ideas() {
 
 const ONE_ICP_E8S: u64 = 100_000_000;
 const ICP_FEE_E8S: u64 = 10_000;
+/// True zero-loss staking: the treasury reimburses every fee the user's
+/// stake/unstake cycle touches — the wallet→escrow deposit fee, the neuron
+/// split fee and the disburse fee (3 × 0.0001 ICP) — paid out with the
+/// disbursement so the user ends exactly where they started.
+const STAKE_FEE_REIMBURSEMENT_E8S: u64 = 30_000;
 /// Subaccount seed for the per-user stake escrow (one below REGISTRATION_SEED).
 const STAKE_SEED: u64 = 0xFFFF_FFFF_FFFF_FFFE;
 /// Disbursed maturity from all three tier neurons lands here (mints arrive
@@ -5116,6 +5121,10 @@ pub struct PendingUnstake {
     /// tier's full term).
     pub dissolve_eta: u64,
     pub disburse_block: Option<u64>,
+    /// Treasury fee reimbursement (0.0003 ICP) — makes the cycle zero-loss.
+    /// Set when the refund transfer lands; the sweep retries until it does.
+    #[serde(default)]
+    pub fee_refund_block: Option<u64>,
     pub settled_at: Option<u64>,
 }
 
@@ -5756,10 +5765,24 @@ async fn stake(amount_e8s: u64, tier: StakeTier) -> Result<(), String> {
         owner: get_canister_id(),
         subaccount: Some(sub),
     };
-    let balance = call_ledger_balance(config.ledger_canister_id, escrow).await?;
-    if balance < amount_e8s + ICP_FEE_E8S {
+    let balance = call_ledger_balance(config.ledger_canister_id, escrow.clone()).await?;
+    // Zero-loss: the user deposits exactly `amount` — no fee padding.
+    if balance < amount_e8s {
         return Err("INSUFFICIENT_DEPOSIT".to_string());
     }
+
+    // The treasury covers the escrow→staking-account transfer fee: top the
+    // escrow up by one fee so the user's full amount stakes. Fails loudly
+    // (before any state change) if the treasury can't cover it.
+    call_ledger_transfer(
+        config.ledger_canister_id,
+        Some(TREASURY_SUBACCOUNT),
+        escrow,
+        ICP_FEE_E8S,
+        Some(ICP_FEE_E8S),
+    )
+    .await
+    .map_err(|e| format!("TREASURY_FEE_COVER: {}", e))?;
 
     // Fix the claim nonce at the tier's very first stake — the governance
     // staking account is derived from it and must never change afterwards.
@@ -5958,6 +5981,7 @@ async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
         created_at: now,
         dissolve_eta: now.saturating_add(delay_ns),
         disburse_block: None,
+        fee_refund_block: None,
         settled_at: None,
     };
     // Best-effort StartDissolving; the sweep retries (and re-stamps the ETA).
@@ -6065,11 +6089,12 @@ async fn staking_sweep() {
 async fn process_pending_unstakes() {
     let now = current_time();
 
+    let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
     let open: Vec<PendingUnstake> = PENDING_UNSTAKES.with(|m| {
         m.borrow()
             .iter()
             .map(|e| e.value())
-            .filter(|u| u.status != UnstakeStatus::Disbursed)
+            .filter(|u| u.status != UnstakeStatus::Disbursed || u.fee_refund_block.is_none())
             .collect()
     });
 
@@ -6096,10 +6121,13 @@ async fn process_pending_unstakes() {
                         let amount = unstake.amount_e8s;
                         let id = unstake.id;
                         PENDING_UNSTAKES.with(|m| {
-                            m.borrow_mut().insert(id, unstake);
+                            m.borrow_mut().insert(id, unstake.clone());
                         });
                         staking_audit("unstake_disbursed", user, amount, id);
                         record_payout(user, PayoutType::UnstakeDisbursement, IdeaToken::ICP, amount, id);
+                        // Zero-loss: reimburse all cycle fees from the
+                        // treasury right away (retried below if it fails).
+                        settle_unstake_fee_refund(ledger_id, &mut unstake).await;
                     }
                     Err(e) => {
                         // Not dissolved yet, or transient — retry next tick.
@@ -6110,7 +6138,40 @@ async fn process_pending_unstakes() {
                     }
                 }
             }
+            UnstakeStatus::Disbursed if unstake.fee_refund_block.is_none() => {
+                settle_unstake_fee_refund(ledger_id, &mut unstake).await;
+            }
             _ => {}
+        }
+    }
+}
+
+/// Pay the user back every fee the stake/unstake cycle cost them (deposit +
+/// split + disburse = 0.0003 ICP) from the treasury. Idempotent via the
+/// persisted block index; the sweep retries until the transfer lands.
+async fn settle_unstake_fee_refund(ledger_id: Principal, unstake: &mut PendingUnstake) {
+    if unstake.fee_refund_block.is_some() {
+        return;
+    }
+    let dest = LedgerAccount { owner: unstake.user, subaccount: None };
+    match call_ledger_transfer(
+        ledger_id,
+        Some(TREASURY_SUBACCOUNT),
+        dest,
+        STAKE_FEE_REIMBURSEMENT_E8S,
+        Some(ICP_FEE_E8S),
+    )
+    .await
+    {
+        Ok(b) => {
+            unstake.fee_refund_block = Some(b);
+            PENDING_UNSTAKES.with(|m| {
+                m.borrow_mut().insert(unstake.id, unstake.clone());
+            });
+            staking_audit("unstake_fee_refund", unstake.user, STAKE_FEE_REIMBURSEMENT_E8S, unstake.id);
+        }
+        Err(e) => {
+            canister_print(&format!("unstake {} fee refund pending: {}", unstake.id, e));
         }
     }
 }
@@ -7159,6 +7220,48 @@ async fn dev_run_lottery_draw(force_win: bool) -> Result<(), String> {
         return Err("NO_TICKETS".to_string());
     }
     run_lottery_draw(if force_win { Some(0) } else { None }).await;
+    Ok(())
+}
+
+/// Local-dev: seed a varied set of mock payout records for the caller so the
+/// Profile page has realistic data. No-op if the caller already has payouts.
+#[ic_cdk::update]
+fn dev_seed_payouts() -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let caller = get_caller();
+    let already = PAYOUTS.with(|m| m.borrow().iter().any(|e| e.value().user == caller));
+    if already {
+        return Ok(());
+    }
+    let now = current_time();
+    let day = 86_400u64 * 1_000_000_000;
+    let seeds: [(PayoutType, IdeaToken, u64, u64, u64); 6] = [
+        (PayoutType::LotteryWin, IdeaToken::ICP, 399_990_000, 1, 1),
+        (PayoutType::UnstakeDisbursement, IdeaToken::ICP, 150_000_000, 2, 3),
+        (PayoutType::IdeaUpvoteShare, IdeaToken::CkBTC, 2_500, 7, 5),
+        (PayoutType::IdeaUpvoteShare, IdeaToken::ICP, 5_000_000, 4, 8),
+        (PayoutType::CommitmentRefund, IdeaToken::ICP, 200_000_000, 9, 12),
+        (PayoutType::PoolReward, IdeaToken::ICP, 49_990_000, 3, 16),
+    ];
+    for (payout_type, token, amount, ref_id, days_ago) in seeds {
+        let id = NEXT_PAYOUT_ID.with(|c| {
+            let id = *c.borrow().get();
+            c.borrow_mut().set(id + 1);
+            id
+        });
+        PAYOUTS.with(|m| {
+            m.borrow_mut().insert(id, Payout {
+                id,
+                user: caller,
+                payout_type,
+                token,
+                amount,
+                created_at: now.saturating_sub(days_ago * day),
+                ref_id,
+            });
+        });
+    }
     Ok(())
 }
 
@@ -9296,6 +9399,7 @@ mod tests {
             created_at: 1,
             dissolve_eta: 2,
             disburse_block: None,
+            fee_refund_block: None,
             settled_at: None,
         };
         let decoded = PendingUnstake::from_bytes(unstake.to_bytes());
@@ -10921,6 +11025,62 @@ mod tests {
             1
         );
         assert!(require_admin().is_ok(), "freshly minted admin passes the guard");
+    }
+
+
+    #[tokio::test]
+    async fn test_stake_unstake_cycle_is_zero_loss() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_transfer(Ok(1));
+
+        // Zero-loss deposit: escrow holding EXACTLY the amount is enough —
+        // the treasury fronts the transfer fee.
+        set_mock_ledger_balance(500_000_000);
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap();
+        assert_eq!(tier_pool(StakeTier::SixMonths).total_staked_e8s, 500_000_000);
+
+        // Unstake → fast-forward → one sweep pass disburses AND reimburses
+        // every fee from the treasury.
+        let id = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        dev_fast_forward_dissolve(id).unwrap();
+        staking_sweep().await;
+        let pu = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(pu.status, UnstakeStatus::Disbursed);
+        assert!(pu.fee_refund_block.is_some(), "treasury reimbursed the cycle fees");
+
+        // If the refund transfer fails at disburse time, the sweep retries it.
+        let id2 = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        dev_fast_forward_dissolve(id2).unwrap();
+        set_mock_ledger_transfer(Err("treasury hiccup".to_string()));
+        staking_sweep().await;
+        // Disburse itself failed too (same mocked ledger) — recover both.
+        set_mock_ledger_transfer(Ok(9));
+        staking_sweep().await;
+        let pu2 = PENDING_UNSTAKES.with(|m| m.borrow().get(&id2)).unwrap();
+        assert_eq!(pu2.status, UnstakeStatus::Disbursed);
+        assert_eq!(pu2.fee_refund_block, Some(9));
+    }
+
+    #[test]
+    fn test_dev_seed_payouts_local_only_and_idempotent() {
+        CONFIG.with(|cell| { cell.borrow_mut().set(test_config(false)); });
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        assert_eq!(dev_seed_payouts().unwrap_err(), "DEV_ONLY");
+
+        install_staking_test_config();
+        dev_seed_payouts().unwrap();
+        set_mock_caller(alice);
+        let mine = get_my_payouts();
+        assert_eq!(mine.len(), 6, "varied mock history seeded");
+        assert!(mine.iter().any(|p| p.payout_type == PayoutType::LotteryWin));
+        assert!(mine.iter().any(|p| p.token == IdeaToken::CkBTC));
+
+        // Re-seeding never duplicates.
+        dev_seed_payouts().unwrap();
+        assert_eq!(get_my_payouts().len(), 6);
     }
 
 }

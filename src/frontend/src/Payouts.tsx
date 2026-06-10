@@ -15,6 +15,7 @@ import { Icon, Eyebrow, Chip, Btn, formatPrincipal } from "./ui";
 interface PayoutsProps {
   actor: any;
   principal: Principal | null;
+  isLocal: boolean;
   onSignIn: () => void;
 }
 
@@ -53,7 +54,7 @@ function payoutDate(atNs: bigint): string {
   });
 }
 
-export default function Payouts({ actor, principal, onSignIn }: PayoutsProps) {
+export default function Payouts({ actor, principal, isLocal, onSignIn }: PayoutsProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
   const [payouts, setPayouts] = useState<Payout[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -62,13 +63,20 @@ export default function Payouts({ actor, principal, onSignIn }: PayoutsProps) {
     (async () => {
       if (!actor || !signedIn) { setPayouts([]); setLoaded(false); return; }
       try {
-        setPayouts(await actor.get_my_payouts());
+        let mine = await actor.get_my_payouts();
+        // Local dev: seed a varied mock history on first visit so the page
+        // is never empty while testing (no-op on mainnet and once seeded).
+        if (isLocal && mine.length === 0) {
+          const res = await actor.dev_seed_payouts();
+          if (res.__kind__ === "Ok") mine = await actor.get_my_payouts();
+        }
+        setPayouts(mine);
         setLoaded(true);
       } catch (err) {
         console.error("Failed to fetch payouts:", err);
       }
     })();
-  }, [actor, principal, signedIn]);
+  }, [actor, principal, signedIn, isLocal]);
 
   const card: React.CSSProperties = {
     border: '1px solid var(--border)', borderRadius: 10,

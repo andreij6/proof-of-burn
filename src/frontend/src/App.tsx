@@ -292,20 +292,6 @@ function fmtVP(vp: bigint): string {
   return whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
-function getMinVotingPowerForTop25(poolInfo: PoolInfo | null): bigint {
-  if (!poolInfo || poolInfo.active_neurons.length === 0) {
-    return 0n;
-  }
-  const sorted = [...poolInfo.active_neurons].sort((a, b) => {
-    if (a.voting_power > b.voting_power) return -1;
-    if (a.voting_power < b.voting_power) return 1;
-    return 0;
-  });
-  if (sorted.length <= 25) {
-    return sorted[sorted.length - 1].voting_power;
-  }
-  return sorted[24].voting_power;
-}
 
 function hexToBytes(hex: string): Uint8Array {
   const bytes = new Uint8Array(hex.length / 2);
@@ -1855,6 +1841,7 @@ export default function App() {
             <Payouts
               actor={actor}
               principal={principal}
+              isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
             />
           ) : page === 'admin' ? (
@@ -1871,92 +1858,6 @@ export default function App() {
             />
           ) : (
           <div className="dashboard-container">
-
-            {/* ── Admin console pointer (controls live on the Admin page) ── */}
-            {isAdmin && (
-              <Reveal delay={20} motion={motion}>
-                <div className="row" style={{
-                  gap: 12, border: '1px dashed var(--burn)', borderRadius: 10,
-                  background: 'var(--burn-950)', padding: '12px 14px',
-                  justifyContent: 'space-between', flexWrap: 'wrap', alignItems: 'center',
-                }}>
-                  <span className="row" style={{ gap: 8 }}>
-                    <Icon name="key" size={13} stroke="var(--burn)" />
-                    <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                      <b style={{ color: 'var(--fg)' }}>Admin console</b> — thresholds, fees, kill switches and the treasury moved to their own page.
-                    </span>
-                  </span>
-                  <Btn variant="primary" sm onClick={() => setPage('admin')}>
-                    <Icon name="key" size={13} stroke="var(--char-950)" /> Open console
-                  </Btn>
-                </div>
-              </Reveal>
-            )}
-
-            {/* ── Community R&D promo (links to the page; hidden when the flag is off) ── */}
-            {ideaBoardEnabled && (
-              <Reveal delay={25} motion={motion}>
-                <div className="row" style={{
-                  gap: 12, border: '1px solid var(--border)', borderRadius: 10,
-                  background: 'var(--surface)', padding: '12px 14px',
-                  justifyContent: 'space-between', flexWrap: 'wrap'
-                }}>
-                  <span className="row" style={{ gap: 10, minWidth: 0, flex: 1 }}>
-                    <span style={{
-                      width: 30, height: 30, flexShrink: 0, display: 'grid', placeItems: 'center',
-                      border: '1px solid var(--burn)', borderRadius: 7, background: 'var(--burn-950)'
-                    }}>
-                      <Icon name="bulb" size={15} stroke="var(--burn)" />
-                    </span>
-                    <span className="col" style={{ gap: 2, minWidth: 0 }}>
-                      <b style={{ fontSize: 13.5, color: 'var(--fg)' }}>Community R&D</b>
-                      <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                        Pitch ways to burn more ICP, back the best ideas, and fund official projects — with ICP, ckBTC, or ckETH.
-                      </span>
-                    </span>
-                  </span>
-                  <Btn variant="secondary" sm onClick={() => setPage('ideas')}>
-                    Open the board <Icon name="chevRight" size={13} />
-                  </Btn>
-                </div>
-              </Reveal>
-            )}
-
-            {/* ── Lossless Voting + Lottery promo (hidden when the flags are off) ── */}
-            {losslessEnabled && (
-              <Reveal delay={28} motion={motion}>
-                <div className="row" style={{
-                  gap: 12, border: '1px solid var(--border)', borderRadius: 10,
-                  background: 'var(--surface)', padding: '12px 14px',
-                  justifyContent: 'space-between', flexWrap: 'wrap'
-                }}>
-                  <span className="row" style={{ gap: 10, minWidth: 0, flex: 1 }}>
-                    <span style={{
-                      width: 30, height: 30, flexShrink: 0, display: 'grid', placeItems: 'center',
-                      borderRadius: 8, background: 'var(--burn-950)', border: '1px solid var(--border)'
-                    }}>
-                      <Icon name="zap" size={15} stroke="var(--burn)" />
-                    </span>
-                    <span className="col" style={{ gap: 2, minWidth: 0 }}>
-                      <b style={{ fontSize: 13.5, color: 'var(--fg)' }}>Lossless Voting{lotteryEnabled ? ' & Lottery' : ''}</b>
-                      <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                        Stake for 6 months, 1 or 2 years — keep every e8, vote free with up to 4× weight{lotteryEnabled ? ', and collect daily Powerball tickets funded by the yield' : ''}.
-                      </span>
-                    </span>
-                  </span>
-                  <span className="row" style={{ gap: 8 }}>
-                    <Btn variant="secondary" sm onClick={() => setPage('staking')}>
-                      Stake <Icon name="chevRight" size={13} />
-                    </Btn>
-                    {lotteryEnabled && (
-                      <Btn variant="secondary" sm onClick={() => setPage('lottery')}>
-                        Lottery <Icon name="chevRight" size={13} />
-                      </Btn>
-                    )}
-                  </span>
-                </div>
-              </Reveal>
-            )}
 
             {/* ── Your activity (Tier 3) — PRIMARY, prominent ──
                 Personal stats matter more than site-wide totals, so when the
@@ -2025,7 +1926,7 @@ export default function App() {
                   border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-alt)',
                   padding: '12px 14px', gap: 10
                 }}>
-                  {/* Row 1: General Stats */}
+                  {/* Voting totals only — TVL, burned, pending burn, votes cast. */}
                   <div className="row" style={{ justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', width: '100%' }}>
 
                     <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
@@ -2060,32 +1961,6 @@ export default function App() {
                     </span>
                   </div>
 
-                  {/* Horizontal Divider */}
-                  <div style={{ height: 1, background: 'var(--border)', width: '100%' }} />
-
-                  {/* Row 2: Pooled Neuron Stats */}
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', width: '100%' }}>
-                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                      <span>Neurons</span>
-                      <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
-                        {poolInfo ? poolInfo.active_count.toString() : "…"}
-                      </span>
-                    </span>
-                    <span style={{ color: 'var(--border-hi)' }}>·</span>
-                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                      <span>TVP</span>
-                      <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
-                        {poolInfo || leaderInfo ? `${fmtVP(totalSyndicateVP)} VP` : "…"}
-                      </span>
-                    </span>
-                    <span style={{ color: 'var(--border-hi)' }}>·</span>
-                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                      <span>Top 25 Cutoff</span>
-                      <span className="mono" style={{ fontSize: 14, color: 'var(--sprout)' }}>
-                        {poolInfo ? `${fmtVP(getMinVotingPowerForTop25(poolInfo))} VP` : "…"}
-                      </span>
-                    </span>
-                  </div>
                 </div>
               </div>
             </Reveal>
