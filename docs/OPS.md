@@ -159,6 +159,10 @@ icp canister call backend get_my_payouts --query -e local --identity dev2
 ```
 
 Notes:
+- **Eligibility is live:** fully unstaking (all tiers) voids the user's
+  current-round tickets immediately (`void_current_round_tickets`), as does
+  promotion to admin — no future drawing can select them. The daily-claim
+  clock survives, so re-staking the same day can't double-claim.
 - A drawing with a hit ticket but a pot too small to cover one ledger fee
   records **no winner** (rolls over) — nobody's tickets are burned for a
   zero prize.

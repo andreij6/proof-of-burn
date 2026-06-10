@@ -143,7 +143,8 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
           (1 in 292,201,338 per ticket). Tickets pile up until someone wins — then the winner takes
           80% of the prize pool, 20% seeds the next round, and everyone's tickets reset. The pool is
           funded by staking yield (half of every harvest), so no one ever pays in. Win and the ICP
-          lands straight in your wallet — nothing to claim, ever.
+          lands straight in your wallet — nothing to claim, ever. Staying staked is the deal:
+          unstake everything and your tickets void on the spot.
         </span>
         <button onClick={copyAgentSkill} style={{
           background: 'transparent', border: '1px solid var(--border)', borderRadius: 6,

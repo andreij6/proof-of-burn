@@ -329,7 +329,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       </Section>
 
       <Section icon="spark" title="Lossless lottery — Powerball odds, funded by yield">
-        <Li>Stakers only. Daily ticket grant = base ({base}) × term multiplier, summed across staked tiers: {base}/{base * 2}/{base * 4} per day for 6mo/1y/2y. Claimed automatically on login.</Li>
+        <Li>Stakers only — and eligibility is live: daily grant = base ({base}) × term multiplier across staked tiers ({base}/{base * 2}/{base * 4} per day for 6mo/1y/2y), claimed automatically on login. Fully unstake and any tickets already held void immediately; the same happens on promotion to admin.</Li>
         <Li>Drawings 3× a week on the American Powerball cadence (Mon/Wed/Sat nights US Eastern). Each ticket has the real jackpot odds: 1 in 292,201,338 per drawing, from on-chain randomness (raw_rand).</Li>
         <Li>Tickets accumulate round over round until someone hits. The winner takes 80% of the prize pot; 20% seeds the next round; all tickets reset.</Li>
         <Li>The pot is funded purely by staking yield — players never pay in, so nobody can lose money. A hit with a dust pot rolls over instead of wasting the win.</Li>

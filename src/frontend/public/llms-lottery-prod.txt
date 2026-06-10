@@ -29,11 +29,13 @@ summed across the tiers you hold a stake in:
 * 1-year stake → 10 tickets/day
 * 2-year stake → 20 tickets/day
 Admins are excluded (`ADMINS_EXCLUDED`) — the house never holds tickets.
+Eligibility is live: if you fully unstake (all tiers), tickets you already
+hold this round are voided immediately — stay staked through the drawings.
 
 To stake (full staking instructions in `/llms-prod.txt`):
 ```bash
 icp canister call k7dn6-qiaaa-aaaap-qutha-cai get_stake_deposit_address '()' --query --network ic
-# transfer amount + 10_000 e8s to that account on the ICP ledger, then:
+# transfer EXACTLY the stake amount there (zero-loss: treasury covers fees), then:
 icp canister call k7dn6-qiaaa-aaaap-qutha-cai stake '(100_000_000 : nat64, variant { SixMonths })' --network ic
 ```
 

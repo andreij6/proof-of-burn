@@ -954,8 +954,11 @@ fn add_admin(admin: Principal) -> Result<(), String> {
             config.admins.push(admin);
             cell.borrow_mut().set(config);
         }
-        Ok(())
-    })
+    });
+    // Admins are excluded from the lottery — any tickets they hold die with
+    // the promotion.
+    void_current_round_tickets(admin);
+    Ok(())
 }
 
 #[ic_cdk::update(guard = "require_admin")]
@@ -5965,6 +5968,12 @@ async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     pool.total_staked_e8s = pool.total_staked_e8s.saturating_sub(amount_e8s);
     set_tier_pool(tier, pool);
 
+    // Fully unstaked across every tier → lottery eligibility ends NOW:
+    // current-round tickets are void, no future drawing can pick them.
+    if !user_has_stake(caller) {
+        void_current_round_tickets(caller);
+    }
+
     let id = NEXT_UNSTAKE_ID.with(|c| {
         let id = *c.borrow().get();
         c.borrow_mut().set(id + 1);
@@ -7025,6 +7034,25 @@ fn is_admin_principal(user: Principal) -> bool {
     CONFIG.with(|c| c.borrow().get().admins.contains(&user))
 }
 
+/// Zero out the user's current-round tickets the moment they become
+/// ineligible (full unstake, or promotion to admin). Eligibility is a LIVE
+/// requirement: no stake → no shot at the next drawing, even with tickets
+/// already claimed this round. Keeps `last_claim_day` so re-staking the same
+/// day can't double-claim the daily grant.
+fn void_current_round_tickets(user: Principal) {
+    let mut state = lottery_state();
+    if let Some(mut entry) = LOTTERY_TICKETS.with(|m| m.borrow().get(&user)) {
+        if entry.round == state.round && entry.count > 0 {
+            state.total_tickets = state.total_tickets.saturating_sub(entry.count);
+            entry.count = 0;
+            LOTTERY_TICKETS.with(|m| {
+                m.borrow_mut().insert(user, entry);
+            });
+            set_lottery_state(state);
+        }
+    }
+}
+
 /// Tickets the user collects per login day: the base grant × the term
 /// multiplier, summed over every tier they hold a stake in (6mo = 1×,
 /// 1y = 2×, 2y = 4× — i.e. 5/10/20 at the default base of 5). Zero when
@@ -7280,6 +7308,7 @@ fn dev_become_admin() -> Result<(), String> {
             cell.borrow_mut().set(config);
         }
     });
+    void_current_round_tickets(caller);
     Ok(())
 }
 
@@ -11081,6 +11110,74 @@ mod tests {
         // Re-seeding never duplicates.
         dev_seed_payouts().unwrap();
         assert_eq!(get_my_payouts().len(), 6);
+    }
+
+
+    #[tokio::test]
+    async fn test_full_unstake_voids_tickets_immediately() {
+        install_staking_test_config();
+        enable_lottery();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_caller(bob);
+        seed_stake(StakeTier::SixMonths, bob, 100_000_000);
+        claim_daily_tickets().unwrap(); // bob: 5 tickets keep the round alive
+
+        // A third staker keeps the 1-year pool above the 1 ICP floor so
+        // alice can fully exit.
+        let carol = p("2vxsx-fae");
+        let carol = Principal::self_authenticating(carol.as_slice());
+        set_mock_caller(carol);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(200_000_000, StakeTier::OneYear).await.unwrap();
+
+        set_mock_caller(alice);
+        stake(300_000_000, StakeTier::OneYear).await.unwrap();
+        assert_eq!(claim_daily_tickets().unwrap(), 10);
+        assert_eq!(lottery_state().total_tickets, 15);
+
+        // Partial unstake: still staked → tickets stay live.
+        unstake(150_000_000, StakeTier::OneYear).await.unwrap();
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&alice)).unwrap().count,
+            10,
+            "partial unstake keeps tickets"
+        );
+
+        // Unstake the rest: eligibility ends NOW — tickets void, pool total
+        // shrinks, no future drawing can pick her.
+        unstake(150_000_000, StakeTier::OneYear).await.unwrap();
+        let entry = LOTTERY_TICKETS.with(|m| m.borrow().get(&alice)).unwrap();
+        assert_eq!(entry.count, 0, "full unstake voids current-round tickets");
+        assert_eq!(lottery_state().total_tickets, 5, "only bob's tickets remain");
+        assert_eq!(find_ticket_owner(lottery_state().round, 4), Some(bob));
+        assert_eq!(find_ticket_owner(lottery_state().round, 5), None);
+
+        // The daily-claim clock survives the void: re-staking the same day
+        // does NOT mint a fresh grant.
+        set_mock_ledger_balance(100_000_000_000);
+        stake(100_000_000, StakeTier::SixMonths).await.unwrap();
+        assert_eq!(claim_daily_tickets().unwrap_err(), "ALREADY_CLAIMED_TODAY");
+    }
+
+    #[test]
+    fn test_admin_promotion_voids_tickets() {
+        install_staking_test_config();
+        enable_lottery();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        seed_stake(StakeTier::TwoYears, alice, 100_000_000);
+        assert_eq!(claim_daily_tickets().unwrap(), 20);
+        assert_eq!(lottery_state().total_tickets, 20);
+
+        add_admin(alice).unwrap();
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&alice)).unwrap().count,
+            0,
+            "the house holds no tickets — promotion voids them"
+        );
+        assert_eq!(lottery_state().total_tickets, 0);
     }
 
 }
