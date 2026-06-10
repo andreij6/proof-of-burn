@@ -370,6 +370,12 @@ pub struct CommitmentKey {
     pub principal: Principal,
 }
 
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IdeaViewKey {
+    pub idea_id: u64,
+    pub user: Principal,
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Vote {
     Yes,
@@ -460,6 +466,7 @@ impl_storable!(Config);
 impl_storable!(Proposal);
 impl_storable!(Commitment);
 impl_storable!(CommitmentKey);
+impl_storable!(IdeaViewKey);
 impl_storable!(VoteRecord);
 impl_storable!(UserAggregates);
 impl_storable!(AuditLogEntry);
@@ -3585,6 +3592,10 @@ thread_local! {
     static NEXT_FUNDING_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(17)), 1u64))
     });
+
+    static IDEA_VIEWS: RefCell<StableBTreeMap<IdeaViewKey, (), Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(18))))
+    });
 }
 
 fn feature_default(key: &str) -> bool {
@@ -3843,6 +3854,22 @@ fn list_ideas() -> Vec<Idea> {
 fn record_idea_view(idea_id: u64) -> Result<(), String> {
     require_authenticated()?;
     require_idea_board_enabled()?;
+    let caller = get_caller();
+    let key = IdeaViewKey { idea_id, user: caller };
+
+    let already_viewed = IDEA_VIEWS.with(|m| m.borrow().contains_key(&key));
+    if already_viewed {
+        return Ok(());
+    }
+
+    // Insert key before checking idea existence, but we should make sure the idea exists
+    let idea_exists = IDEAS.with(|m| m.borrow().contains_key(&idea_id));
+    if !idea_exists {
+        return Err("IDEA_NOT_FOUND".to_string());
+    }
+
+    IDEA_VIEWS.with(|m| m.borrow_mut().insert(key, ()));
+
     IDEAS.with(|m| {
         let mut m = m.borrow_mut();
         match m.get(&idea_id) {
@@ -6557,20 +6584,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_idea_view() {
-        let caller = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(caller);
+        let caller1 = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let caller2 = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+
+        set_mock_caller(caller1);
         set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
         set_mock_ledger_transfer(Ok(1));
         let id = post_idea("Viewable".into(), "Desc".into(), "".into()).await.unwrap();
 
+        // Caller 1 views -> view count = 1
         record_idea_view(id).unwrap();
+        // Caller 1 views again -> view count still 1
+        record_idea_view(id).unwrap();
+        assert_eq!(IDEAS.with(|m| m.borrow().get(&id)).unwrap().views, 1);
+
+        // Caller 2 views -> view count = 2
+        set_mock_caller(caller2);
         record_idea_view(id).unwrap();
         assert_eq!(IDEAS.with(|m| m.borrow().get(&id)).unwrap().views, 2);
 
         assert_eq!(record_idea_view(999_999).unwrap_err(), "IDEA_NOT_FOUND");
         set_mock_caller(anon());
         assert!(record_idea_view(id).is_err());
-        set_mock_caller(caller);
     }
 
     #[tokio::test]

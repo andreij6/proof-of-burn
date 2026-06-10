@@ -132,7 +132,7 @@ export function LiveDot({ color = 'var(--burn)', size = 6, on = true, style }: {
 
 // Formatting helpers
 export function fmtICP(n: number | bigint) {
-  return (Number(n) / 100_000_000).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return (Number(n) / 100_000_000).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 5 });
 }
 
 export function formatPrincipal(p: Principal | null): string {

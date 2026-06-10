@@ -6,7 +6,7 @@ import { isValidAccountId } from '../App';
 function fmtICP(n: number | bigint): string {
   return (Number(n) / 100_000_000).toLocaleString('en-US', {
     minimumFractionDigits: 1,
-    maximumFractionDigits: 1,
+    maximumFractionDigits: 5,
   });
 }
 
