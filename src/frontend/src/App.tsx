@@ -23,8 +23,14 @@ import type {
   LedgerAccount,
   FeatureFlag,
   IdeaBoardInfo,
+  UserStakeInfo,
+  LosslessVote,
 } from "./bindings/backend";
 import IdeaBoard, { tokenMeta, parseTokenAmount, fmtTokenAmount, TOKEN_ORDER } from "./IdeaBoard";
+import Staking from "./Staking";
+import Lottery from "./Lottery";
+import Payouts from "./Payouts";
+import Admin from "./Admin";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
 import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal } from "./ui";
 
@@ -92,6 +98,66 @@ function BalanceOfPowerBar({ adopt, reject }: { adopt: bigint; reject: bigint })
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// Lossless staking: free adopt/reject vote with staked weight. Joins the
+// balance of power only — the burn threshold is untouched. Renders nothing
+// for users without stake; shows the cast vote once made (immutable).
+function LosslessVoteRow({ proposal, myVote, stakeE8s, voting, onVote }: {
+  proposal: Proposal;
+  myVote: LosslessVote | undefined;
+  stakeE8s: bigint;
+  voting: boolean;
+  onVote: (proposalId: bigint, stance: Stance) => void;
+}) {
+  const hasLossless = proposal.lossless_adopt_e8s > 0n || proposal.lossless_reject_e8s > 0n;
+  const breakdown = hasLossless ? (
+    <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
+      incl. staked power: {fmtICP(proposal.lossless_adopt_e8s)} adopt / {fmtICP(proposal.lossless_reject_e8s)} reject
+    </span>
+  ) : null;
+
+  if (myVote) {
+    return (
+      <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+          <Icon name="zap" size={11} stroke="var(--fg-3)" /> Your staked power
+          <Chip tone={myVote.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 18, fontSize: 10.5 }}>
+            {myVote.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'} · {fmtICP(myVote.weight_e8s)} ICP
+          </Chip>
+        </span>
+        {breakdown}
+      </div>
+    );
+  }
+  const open = proposal.status === 'open' || proposal.status === 'met';
+  if (stakeE8s <= 0n || !open) {
+    return breakdown ? <div className="row" style={{ justifyContent: 'flex-end' }}>{breakdown}</div> : null;
+  }
+  return (
+    <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+      <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+        <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+          <Icon name="zap" size={11} stroke="var(--burn)" /> Vote free with {fmtICP(stakeE8s)} voting power (stake × term)
+        </span>
+        <Btn
+          variant="ghost" sm
+          style={{ height: 22, fontSize: 11, color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
+          onClick={() => onVote(proposal.id, Stance.Adopt)} disabled={voting}
+        >
+          {voting ? <LiveDot size={6} /> : <Icon name="checkCircle" size={11} stroke="var(--sprout)" />} ADOPT
+        </Btn>
+        <Btn
+          variant="ghost" sm
+          style={{ height: 22, fontSize: 11, color: 'var(--ember)', border: '1px solid var(--ember)' }}
+          onClick={() => onVote(proposal.id, Stance.Reject)} disabled={voting}
+        >
+          {voting ? <LiveDot size={6} /> : <Icon name="x" size={11} stroke="var(--ember)" />} REJECT
+        </Btn>
+      </span>
+      {breakdown}
     </div>
   );
 }
@@ -344,8 +410,6 @@ export default function App() {
   const [isFollowModalOpen, setIsFollowModalOpen] = useState(false);
   const [nnsOpened, setNnsOpened] = useState(false);
   const [hotkeyCopied, setHotkeyCopied] = useState(false);
-  const [thresholdInput, setThresholdInput] = useState("");
-  const [isSettingThreshold, setIsSettingThreshold] = useState(false);
   const [eligibility, setEligibility] = useState<EligibilityInfo | null>(null);
   const [voteHistory, setVoteHistory] = useState<VoteRecord[]>([]);
   const [holdings, setHoldings] = useState<bigint>(0n);
@@ -438,14 +502,21 @@ export default function App() {
   // Help modal status
   const [isHelpOpen, setIsHelpOpen] = useState(false);
 
-  // Page routing (dashboard | Community R&D) + feature flags
-  const [page, setPage] = useState<'dashboard' | 'ideas'>('dashboard');
+  // Page routing (dashboard | Community R&D | Lossless Voting | Lottery |
+  // Payout history) + feature flags
+  const [page, setPage] = useState<'dashboard' | 'ideas' | 'staking' | 'lottery' | 'payouts' | 'admin'>('dashboard');
   const [featureFlags, setFeatureFlags] = useState<FeatureFlag[]>([]);
-  const [togglingFlag, setTogglingFlag] = useState<string | null>(null);
 
   // Feature flag: the Community R&D page + nav are fully hidden when disabled
   // (the backend also rejects its update methods, so this is belt + braces).
   const ideaBoardEnabled = featureFlags.find(f => f.key === 'idea_board')?.enabled ?? false;
+  const losslessEnabled = featureFlags.find(f => f.key === 'lossless_voting')?.enabled ?? false;
+  const lotteryEnabled = featureFlags.find(f => f.key === 'lossless_lottery')?.enabled ?? false;
+
+  // Lossless staking: the caller's stake (= free voting power) and votes cast.
+  const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
+  const [myLosslessVotes, setMyLosslessVotes] = useState<LosslessVote[]>([]);
+  const [losslessVoting, setLosslessVoting] = useState<bigint | null>(null);
 
   // Token-ledger info (drives the multi-token wallet + R&D board).
   const [boardInfo, setBoardInfo] = useState<IdeaBoardInfo | null>(null);
@@ -617,6 +688,52 @@ export default function App() {
     }
   };
 
+  const fetchMyStake = async (currentActor = actor, currentPrincipal = principal) => {
+    if (!currentActor || !currentPrincipal || currentPrincipal.isAnonymous()) {
+      setMyStake(null);
+      return;
+    }
+    try {
+      // Always a record now; empty `tiers` (total weight 0) = no stake.
+      setMyStake(await currentActor.get_my_stake());
+    } catch (err) {
+      console.error("Failed to fetch my stake:", err);
+    }
+  };
+
+  const fetchMyLosslessVotes = async (currentActor = actor, currentPrincipal = principal) => {
+    if (!currentActor || !currentPrincipal || currentPrincipal.isAnonymous()) {
+      setMyLosslessVotes([]);
+      return;
+    }
+    try {
+      setMyLosslessVotes(await currentActor.get_my_lossless_votes());
+    } catch (err) {
+      console.error("Failed to fetch lossless votes:", err);
+    }
+  };
+
+  // Cast a free vote with staked weight (standalone — no burn needed).
+  const handleLosslessVote = async (proposalId: bigint, stance: Stance) => {
+    if (!actor || losslessVoting !== null) return;
+    setLosslessVoting(proposalId);
+    try {
+      const res = await actor.cast_lossless_vote(proposalId, stance);
+      if (res.__kind__ === "Err") {
+        alert(`Lossless vote failed: ${res.Err}`);
+      }
+      await Promise.all([
+        fetchMyLosslessVotes(actor),
+        actor.list_all_proposals().then((list: Proposal[]) => setProposals(list)),
+      ]);
+    } catch (err: any) {
+      console.error("Failed to cast lossless vote:", err);
+      alert(`Error: ${err.message || err}`);
+    } finally {
+      setLosslessVoting(null);
+    }
+  };
+
   // Withdraw ICP out of the app account to a destination Account ID (legacy ledger transfer).
   const handleWithdraw = async () => {
     if (!identity || isWithdrawing) return;
@@ -736,6 +853,8 @@ export default function App() {
         fetchPoolInfo(actor),
         fetchMyPoolNeuron(actor),
         fetchFeatureFlags(actor),
+        fetchMyStake(actor),
+        fetchMyLosslessVotes(actor),
         actor.list_all_proposals().then((list: Proposal[]) => setProposals(list)),
       ]);
       // Also fetch balance
@@ -769,31 +888,6 @@ export default function App() {
   };
 
   // Admin: set the default voting threshold at runtime (no redeploy).
-  const handleSetThreshold = async () => {
-    if (!actor || isSettingThreshold) return;
-    const icp = parseFloat(thresholdInput);
-    if (isNaN(icp) || icp < 1) {
-      alert("Enter a threshold of at least 1 ICP.");
-      return;
-    }
-    const e8s = BigInt(Math.round(icp * 100_000_000));
-    setIsSettingThreshold(true);
-    try {
-      const res = await actor.admin_set_default_threshold(e8s);
-      if (res.__kind__ === "Ok") {
-        setThresholdInput("");
-        await refreshAllData();
-      } else {
-        alert(`Failed to set threshold: ${res.Err}`);
-      }
-    } catch (err: any) {
-      console.error("Failed to set threshold:", err);
-      alert(`Error: ${err.message || err}`);
-    } finally {
-      setIsSettingThreshold(false);
-    }
-  };
-
   // Local-dev: faucet for any of the three test tokens.
   const handleFaucet = async (token: IdeaToken) => {
     if (!actor) return;
@@ -810,23 +904,6 @@ export default function App() {
     }
   };
 
-  // Admin: flip a feature flag on/off, then re-read the flag list.
-  const handleToggleFlag = async (key: string, currentlyEnabled: boolean) => {
-    if (!actor || togglingFlag) return;
-    setTogglingFlag(key);
-    try {
-      const res = await actor.admin_set_feature_flag(key, !currentlyEnabled);
-      if (res.__kind__ === "Err") {
-        alert(`Failed to update flag: ${res.Err}`);
-      }
-      await fetchFeatureFlags();
-    } catch (err: any) {
-      console.error("Failed to toggle feature flag:", err);
-      alert(`Error: ${err.message || err}`);
-    } finally {
-      setTogglingFlag(null);
-    }
-  };
 
   // Admin: open the Treasury Wallet and refresh the (update-call) balance.
   const openTreasury = async () => {
@@ -922,7 +999,22 @@ export default function App() {
     if (page === 'ideas' && featureFlags.length > 0 && !ideaBoardEnabled) {
       setPage('dashboard');
     }
-  }, [page, ideaBoardEnabled, featureFlags.length]);
+    if (page === 'staking' && featureFlags.length > 0 && !losslessEnabled) {
+      setPage('dashboard');
+    }
+    if (page === 'lottery' && featureFlags.length > 0 && !lotteryEnabled) {
+      setPage('dashboard');
+    }
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, featureFlags.length]);
+
+  // Lossless lottery: the daily ticket grant is tied to logging in, so claim
+  // as soon as a signed-in actor exists (the Lottery page also claims for
+  // users who keep the tab open across midnight UTC). Errors are expected
+  // noise: ALREADY_CLAIMED_TODAY / FEATURE_DISABLED.
+  useEffect(() => {
+    if (!actor || !lotteryEnabled || !principal || principal.isAnonymous()) return;
+    actor.claim_daily_tickets().catch(() => {});
+  }, [actor, principal, lotteryEnabled]);
 
   // Initialize Auth
   useEffect(() => {
@@ -978,6 +1070,8 @@ export default function App() {
     fetchMyPoolNeuron(actor);
     fetchFeatureFlags(actor);
     fetchBoardInfo(actor);
+    fetchMyStake(actor);
+    fetchMyLosslessVotes(actor);
   }, [actor]);
 
   // Refresh ckBTC/ckETH balances whenever the wallet opens.
@@ -1427,6 +1521,14 @@ export default function App() {
     config.admins.some((a) => a.toString() === principal.toString())
   );
 
+
+  // The Admin page is invisible to non-admins; bounce them if they land on it.
+  useEffect(() => {
+    if (page === 'admin' && !isAdmin) {
+      setPage('dashboard');
+    }
+  }, [page, isAdmin]);
+
   // Partition proposals into three display buckets
   const ACTIVE_STATUSES = new Set([
     CommitmentStatus.Pending, CommitmentStatus.ThresholdMet,
@@ -1505,6 +1607,28 @@ export default function App() {
               <Btn variant={page === 'ideas' ? 'primary' : 'ghost'} sm onClick={() => setPage('ideas')}>
                 <Icon name="bulb" size={13} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
                 <span className="hide-mobile">Community R&D</span>
+              </Btn>
+            )}
+            {losslessEnabled && (
+              <Btn variant={page === 'staking' ? 'primary' : 'ghost'} sm onClick={() => setPage('staking')}>
+                <Icon name="zap" size={13} stroke={page === 'staking' ? 'var(--char-950)' : 'currentColor'} />
+                <span className="hide-mobile">Lossless Voting</span>
+              </Btn>
+            )}
+            {lotteryEnabled && (
+              <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} sm onClick={() => setPage('lottery')}>
+                <Icon name="target" size={13} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
+                <span className="hide-mobile">Lottery</span>
+              </Btn>
+            )}
+            <Btn variant={page === 'payouts' ? 'primary' : 'ghost'} sm onClick={() => setPage('payouts')}>
+              <Icon name="coins" size={13} stroke={page === 'payouts' ? 'var(--char-950)' : 'currentColor'} />
+              <span className="hide-mobile">Payouts</span>
+            </Btn>
+            {isAdmin && (
+              <Btn variant={page === 'admin' ? 'primary' : 'ghost'} sm onClick={() => setPage('admin')}>
+                <Icon name="key" size={13} stroke={page === 'admin' ? 'var(--char-950)' : 'currentColor'} />
+                <span className="hide-mobile">Admin</span>
               </Btn>
             )}
           </nav>
@@ -1689,81 +1813,59 @@ export default function App() {
               isAdmin={isAdmin}
               onSignIn={handleLogin}
             />
+          ) : page === 'staking' ? (
+            <Staking
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
+              isLocal={config?.is_local ?? false}
+              onSignIn={handleLogin}
+              onActivity={refreshAllData}
+            />
+          ) : page === 'lottery' ? (
+            <Lottery
+              actor={actor}
+              principal={principal}
+              isLocal={config?.is_local ?? false}
+              onSignIn={handleLogin}
+            />
+          ) : page === 'payouts' ? (
+            <Payouts
+              actor={actor}
+              principal={principal}
+              onSignIn={handleLogin}
+            />
+          ) : page === 'admin' ? (
+            <Admin
+              actor={actor}
+              config={config}
+              featureFlags={featureFlags}
+              onChanged={() => { fetchConfig(); fetchFeatureFlags(); }}
+              openTreasury={openTreasury}
+            />
           ) : (
           <div className="dashboard-container">
 
-            {/* ── Admin: voting threshold control (admins only) ── */}
+            {/* ── Admin console pointer (controls live on the Admin page) ── */}
             {isAdmin && (
               <Reveal delay={20} motion={motion}>
-                <div className="col" style={{
+                <div className="row" style={{
                   gap: 12, border: '1px dashed var(--burn)', borderRadius: 10,
-                  background: 'var(--burn-950)', padding: 14
+                  background: 'var(--burn-950)', padding: '12px 14px',
+                  justifyContent: 'space-between', flexWrap: 'wrap', alignItems: 'center',
                 }}>
-                  <div className="row" style={{ gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
-                    <span className="row" style={{ gap: 8, alignItems: 'center' }}>
-                      <Icon name="key" size={13} stroke="var(--burn)" />
-                      <Eyebrow>Admin · voting threshold</Eyebrow>
+                  <span className="row" style={{ gap: 8 }}>
+                    <Icon name="key" size={13} stroke="var(--burn)" />
+                    <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
+                      <b style={{ color: 'var(--fg)' }}>Admin console</b> — thresholds, fees, kill switches and the treasury moved to their own page.
                     </span>
-                    <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                      Current: <span style={{ color: 'var(--fg)' }}>{config ? fmtICP(config.default_threshold) : "…"} ICP</span>
-                    </span>
-                  </div>
-                  <div className="row" style={{ gap: 8 }}>
-                    <div style={{ flex: 1, position: 'relative' }}>
-                      <input
-                        type="number"
-                        min="1"
-                        step="0.5"
-                        placeholder="New threshold"
-                        className="burn-input"
-                        style={{ fontFamily: 'var(--font-mono)' }}
-                        value={thresholdInput}
-                        onChange={(e) => setThresholdInput(e.target.value)}
-                      />
-                      <span className="mono" style={{
-                        position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)',
-                        fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none'
-                      }}>ICP</span>
-                    </div>
-                    <Btn variant="primary" sm onClick={handleSetThreshold} disabled={isSettingThreshold || !thresholdInput}>
-                      {isSettingThreshold ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />}
-                      {isSettingThreshold ? " Updating…" : " Update"}
-                    </Btn>
-                  </div>
-                  <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                    <Icon name="info" size={12} stroke="var(--fg-3)" /> Applies to new proposals and re-thresholds all open ones. Min 1 ICP. No redeploy.
                   </span>
-                  <div style={{ borderTop: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)' }} />
-                  <Btn variant="secondary" sm onClick={openTreasury} style={{ alignSelf: 'flex-start' }}>
-                    <Icon name="wallet" size={13} stroke="var(--burn)" /> Treasury Wallet
+                  <Btn variant="primary" sm onClick={() => setPage('admin')}>
+                    <Icon name="key" size={13} stroke="var(--char-950)" /> Open console
                   </Btn>
-
-                  {/* ── Feature flags (kill switches) ── */}
-                  <div style={{ borderTop: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)' }} />
-                  <div className="col" style={{ gap: 8 }}>
-                    <span className="row" style={{ gap: 8 }}>
-                      <Icon name="zap" size={13} stroke="var(--burn)" />
-                      <Eyebrow>Admin · feature flags</Eyebrow>
-                    </span>
-                    {featureFlags.map(f => (
-                      <div key={f.key} className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                        <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg-1)' }}>{f.key}</span>
-                        <Btn
-                          variant={f.enabled ? 'primary' : 'secondary'} sm
-                          onClick={() => handleToggleFlag(f.key, f.enabled)}
-                          disabled={togglingFlag === f.key}
-                        >
-                          {togglingFlag === f.key
-                            ? <LiveDot size={7} color={f.enabled ? 'var(--char-950)' : 'var(--fg)'} />
-                            : <Icon name={f.enabled ? 'check' : 'x'} size={12} stroke={f.enabled ? 'var(--char-950)' : 'currentColor'} />}
-                          {f.enabled ? ' Enabled' : ' Disabled'}
-                        </Btn>
-                      </div>
-                    ))}
-                    <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                      <Icon name="info" size={12} stroke="var(--fg-3)" /> Disabling hides the feature everywhere and blocks its canister methods instantly.
-                    </span>
-                  </div>
                 </div>
               </Reveal>
             )}
@@ -1793,6 +1895,42 @@ export default function App() {
                   <Btn variant="secondary" sm onClick={() => setPage('ideas')}>
                     Open the board <Icon name="chevRight" size={13} />
                   </Btn>
+                </div>
+              </Reveal>
+            )}
+
+            {/* ── Lossless Voting + Lottery promo (hidden when the flags are off) ── */}
+            {losslessEnabled && (
+              <Reveal delay={28} motion={motion}>
+                <div className="row" style={{
+                  gap: 12, border: '1px solid var(--border)', borderRadius: 10,
+                  background: 'var(--surface)', padding: '12px 14px',
+                  justifyContent: 'space-between', flexWrap: 'wrap'
+                }}>
+                  <span className="row" style={{ gap: 10, minWidth: 0, flex: 1 }}>
+                    <span style={{
+                      width: 30, height: 30, flexShrink: 0, display: 'grid', placeItems: 'center',
+                      borderRadius: 8, background: 'var(--burn-950)', border: '1px solid var(--border)'
+                    }}>
+                      <Icon name="zap" size={15} stroke="var(--burn)" />
+                    </span>
+                    <span className="col" style={{ gap: 2, minWidth: 0 }}>
+                      <b style={{ fontSize: 13.5, color: 'var(--fg)' }}>Lossless Voting{lotteryEnabled ? ' & Lottery' : ''}</b>
+                      <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+                        Stake for 6 months, 1 or 2 years — keep every e8, vote free with up to 4× weight{lotteryEnabled ? ', and collect daily Powerball tickets funded by the yield' : ''}.
+                      </span>
+                    </span>
+                  </span>
+                  <span className="row" style={{ gap: 8 }}>
+                    <Btn variant="secondary" sm onClick={() => setPage('staking')}>
+                      Stake <Icon name="chevRight" size={13} />
+                    </Btn>
+                    {lotteryEnabled && (
+                      <Btn variant="secondary" sm onClick={() => setPage('lottery')}>
+                        Lottery <Icon name="chevRight" size={13} />
+                      </Btn>
+                    )}
+                  </span>
                 </div>
               </Reveal>
             )}
@@ -2282,10 +2420,22 @@ export default function App() {
                               </div>
                             </div>
 
-                            {/* Balance of power + burn progress (gated for anonymous) */}
+                            {/* Balance of power + burn progress (gated for anonymous).
+                                Lossless staked weight joins the bar; the threshold bar
+                                below stays burn-only. */}
                             {showBurn ? (
                               <div className="col" style={{ gap: 10 }}>
-                                <BalanceOfPowerBar adopt={p.adopt_pot_e8s} reject={p.reject_pot_e8s} />
+                                <BalanceOfPowerBar
+                                  adopt={p.adopt_pot_e8s + p.lossless_adopt_e8s}
+                                  reject={p.reject_pot_e8s + p.lossless_reject_e8s}
+                                />
+                                <LosslessVoteRow
+                                  proposal={p}
+                                  myVote={myLosslessVotes.find(v => v.proposal_id === p.id)}
+                                  stakeE8s={myStake?.total_weight_e8s ?? 0n}
+                                  voting={losslessVoting === p.id}
+                                  onVote={handleLosslessVote}
+                                />
                                 <HeatBar pct={pct} committed={committedLabel} req={reqLabel} met={met} />
                               </div>
                             ) : (
@@ -2438,7 +2588,17 @@ export default function App() {
                                 {flipLabel}
                               </div>
                             </div>
-                            <BalanceOfPowerBar adopt={p.adopt_pot_e8s} reject={p.reject_pot_e8s} />
+                            <BalanceOfPowerBar
+                              adopt={p.adopt_pot_e8s + p.lossless_adopt_e8s}
+                              reject={p.reject_pot_e8s + p.lossless_reject_e8s}
+                            />
+                            <LosslessVoteRow
+                              proposal={p}
+                              myVote={myLosslessVotes.find(v => v.proposal_id === p.id)}
+                              stakeE8s={myStake?.total_weight_e8s ?? 0n}
+                              voting={losslessVoting === p.id}
+                              onVote={handleLosslessVote}
+                            />
                             <HeatBar pct={pct} committed={`${fmtICP(p.total_committed_e8s)} ICP`} req={met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`} met={met} />
                             <div style={{ borderTop: '1px solid var(--border)' }} />
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
@@ -3921,9 +4081,9 @@ export default function App() {
               </div>
 
               <div className="col" style={{ gap: 4 }}>
-                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Stake Cap</span>
+                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Commitment Cap</span>
                 <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
-                  The total ICP staked in your verified NNS neuron. Your active burn commitment is capped at this value as a security measure. This ensures participants have real "skin in the game" through locked neuron stakes, aligning governance influence with long-term ecosystem incentives and preventing short-term market speculation.
+                  Commits are capped by your wallet: the full amount must sit in escrow before it counts. No credit, no IOUs — every vote is backed by real ICP you've already put up.
                 </p>
               </div>
 
@@ -4013,6 +4173,44 @@ export default function App() {
             >
               <Icon name="bulb" size={14} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
               Community R&D
+            </Btn>
+          )}
+          {losslessEnabled && (
+            <Btn
+              variant={page === 'staking' ? 'primary' : 'ghost'}
+              style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
+              onClick={() => { setPage('staking'); setMobileMenuOpen(false); }}
+            >
+              <Icon name="zap" size={14} stroke={page === 'staking' ? 'var(--char-950)' : 'currentColor'} />
+              Lossless Voting
+            </Btn>
+          )}
+          {lotteryEnabled && (
+            <Btn
+              variant={page === 'lottery' ? 'primary' : 'ghost'}
+              style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
+              onClick={() => { setPage('lottery'); setMobileMenuOpen(false); }}
+            >
+              <Icon name="target" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
+              Lottery
+            </Btn>
+          )}
+          <Btn
+            variant={page === 'payouts' ? 'primary' : 'ghost'}
+            style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
+            onClick={() => { setPage('payouts'); setMobileMenuOpen(false); }}
+          >
+            <Icon name="coins" size={14} stroke={page === 'payouts' ? 'var(--char-950)' : 'currentColor'} />
+            Payouts
+          </Btn>
+          {isAdmin && (
+            <Btn
+              variant={page === 'admin' ? 'primary' : 'ghost'}
+              style={{ justifyContent: 'flex-start', width: '100%', height: 38 }}
+              onClick={() => { setPage('admin'); setMobileMenuOpen(false); }}
+            >
+              <Icon name="key" size={14} stroke={page === 'admin' ? 'var(--char-950)' : 'currentColor'} />
+              Admin
             </Btn>
           )}
         </div>

@@ -1762,3 +1762,296 @@ fn test_admin_remove_idea_integration() {
 
 
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// Lossless Voting (pooled staking) — stake → vote → unstake → yield, against
+// the real ICRC ledger. NNS governance is absent in PocketIC, so the backend's
+// local mock state machine drives the neuron lifecycle (same code path as
+// local dev). Real ManageNeuron wire compatibility needs a mainnet canary.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[derive(CandidType, Deserialize, Debug, PartialEq)]
+enum StakingBootstrap {
+    NotStarted,
+    Claimed,
+    DelaySet,
+    Ready,
+}
+
+#[derive(CandidType, Deserialize, Debug, PartialEq)]
+enum UnstakeStatus {
+    SplitDone,
+    Dissolving,
+    Disbursed,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone, Copy, PartialEq)]
+enum StakeTier {
+    SixMonths,
+    OneYear,
+    TwoYears,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct TierPoolInfoLite {
+    tier: StakeTier,
+    dissolve_delay_secs: u64,
+    weight_multiplier: u64,
+    daily_tickets: u64,
+    neuron_id: Option<u64>,
+    total_staked_e8s: u64,
+    staker_count: u64,
+    bootstrap: StakingBootstrap,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct StakingPoolInfoLite {
+    pools: Vec<TierPoolInfoLite>,
+    total_staked_e8s: u64,
+    total_yield_e8s: u64,
+}
+
+impl StakingPoolInfoLite {
+    fn tier(&self, tier: StakeTier) -> &TierPoolInfoLite {
+        self.pools.iter().find(|p| p.tier == tier).expect("tier present")
+    }
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct PendingUnstakeLite {
+    id: u64,
+    amount_e8s: u64,
+    status: UnstakeStatus,
+    disburse_block: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct ProposalLossless {
+    id: u64,
+    status: String,
+    lossless_adopt_e8s: u64,
+    lossless_reject_e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+enum NatResult {
+    Ok(u64),
+    Err(String),
+}
+
+/// Deposit `amount` into the caller's stake escrow and call
+/// `stake(amount, tier)`.
+fn do_stake_as(env: &SagaEnv, user: Principal, amount_e8s: u64, tier: StakeTier) -> UnitResult {
+    env.mint(user, amount_e8s + 1_000_000);
+
+    let reply = env
+        .pic
+        .query_call(env.backend, user, "get_stake_deposit_address", encode_one(()).unwrap())
+        .expect("get_stake_deposit_address");
+    let escrow: LAccountDe = decode_one(&reply).unwrap();
+
+    let xfer = TransferArg {
+        from_subaccount: None,
+        to: LAccount { owner: escrow.owner, subaccount: escrow.subaccount },
+        amount: candid::Nat::from(amount_e8s + 10_000),
+        fee: None,
+        memo: None,
+        created_at_time: None,
+    };
+    let res = env
+        .pic
+        .update_call(env.ledger, user, "icrc1_transfer", encode_one(xfer).unwrap())
+        .expect("escrow deposit");
+    let res: TransferResult = decode_one(&res).unwrap();
+    assert!(matches!(res, TransferResult::Ok(_)), "deposit failed: {:?}", res);
+
+    let reply = env
+        .pic
+        .update_call(env.backend, user, "stake", encode_args((amount_e8s, tier)).unwrap())
+        .expect("stake call");
+    decode_one(&reply).unwrap()
+}
+
+fn staking_pool_info(env: &SagaEnv) -> StakingPoolInfoLite {
+    let reply = env
+        .pic
+        .query_call(env.backend, Principal::anonymous(), "get_staking_pool_info", encode_one(()).unwrap())
+        .expect("get_staking_pool_info");
+    decode_one(&reply).unwrap()
+}
+
+fn run_staking_sweep(env: &SagaEnv, caller: Principal) {
+    let reply = env
+        .pic
+        .update_call(env.backend, caller, "dev_run_staking_sweep", encode_one(()).unwrap())
+        .expect("dev_run_staking_sweep");
+    let res: UnitResult = decode_one(&reply).unwrap();
+    assert!(matches!(res, UnitResult::Ok), "sweep failed: {:?}", res);
+}
+
+#[test]
+fn test_stake_unstake_roundtrip_integration() {
+    let Some(env) = setup_saga() else { return };
+
+    // Stake 3 ICP into the 1-year tier: the first stake claims the (mock)
+    // neuron and bootstraps it.
+    let res = do_stake_as(&env, env.user, 300_000_000, StakeTier::OneYear);
+    assert!(matches!(res, UnitResult::Ok), "stake failed: {:?}", res);
+
+    let pool = staking_pool_info(&env);
+    assert_eq!(pool.total_staked_e8s, 300_000_000);
+    let tier = pool.tier(StakeTier::OneYear);
+    assert_eq!(tier.total_staked_e8s, 300_000_000);
+    assert_eq!(tier.staker_count, 1);
+    assert_eq!(tier.bootstrap, StakingBootstrap::Ready);
+    assert!(tier.neuron_id.is_some());
+    assert_eq!(tier.dissolve_delay_secs, 31_557_600, "1-year term");
+    assert_eq!(tier.weight_multiplier, 2);
+    assert_eq!(tier.daily_tickets, 10, "1y staker collects 10 tickets/day");
+    // The untouched tiers report empty pools.
+    assert_eq!(pool.tier(StakeTier::SixMonths).total_staked_e8s, 0);
+    assert_eq!(pool.tier(StakeTier::SixMonths).daily_tickets, 5);
+    assert_eq!(pool.tier(StakeTier::TwoYears).daily_tickets, 20);
+
+    // The staked ICP physically sits in the local mock stake subaccount.
+    assert_eq!(balance_of(&env, env.backend, Some(vec![4u8; 32])), 300_000_000);
+
+    // Unstake 1.5 ICP → split + dissolving.
+    let reply = env
+        .pic
+        .update_call(env.backend, env.user, "unstake", encode_args((150_000_000u64, StakeTier::OneYear)).unwrap())
+        .expect("unstake call");
+    let res: NatResult = decode_one(&reply).unwrap();
+    let unstake_id = match res {
+        NatResult::Ok(id) => id,
+        NatResult::Err(e) => panic!("unstake failed: {}", e),
+    };
+    let pool = staking_pool_info(&env);
+    assert_eq!(pool.total_staked_e8s, 150_000_000);
+
+    // Sweep before the dissolve delay: still locked.
+    run_staking_sweep(&env, env.user);
+    let reply = env
+        .pic
+        .query_call(env.backend, env.user, "list_my_pending_unstakes", encode_one(()).unwrap())
+        .expect("list_my_pending_unstakes");
+    let pending: Vec<PendingUnstakeLite> = decode_one(&reply).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].status, UnstakeStatus::Dissolving);
+
+    // Fast-forward the dissolve (dev) and sweep: ICP lands in the wallet.
+    let before = balance_of(&env, env.user, None);
+    let reply = env
+        .pic
+        .update_call(env.backend, env.user, "dev_fast_forward_dissolve", encode_one(unstake_id).unwrap())
+        .expect("dev_fast_forward_dissolve");
+    let res: UnitResult = decode_one(&reply).unwrap();
+    assert!(matches!(res, UnitResult::Ok), "fast-forward failed: {:?}", res);
+    run_staking_sweep(&env, env.user);
+
+    let reply = env
+        .pic
+        .query_call(env.backend, env.user, "list_my_pending_unstakes", encode_one(()).unwrap())
+        .expect("list_my_pending_unstakes 2");
+    let pending: Vec<PendingUnstakeLite> = decode_one(&reply).unwrap();
+    assert_eq!(pending[0].status, UnstakeStatus::Disbursed);
+    assert!(pending[0].disburse_block.is_some());
+
+    // Net payout = amount − split fee − disburse fee.
+    let after = balance_of(&env, env.user, None);
+    assert_eq!(after - before, 150_000_000 - 20_000, "user receives amount minus 2 fees");
+}
+
+#[test]
+fn test_lossless_vote_integration() {
+    let Some(env) = setup_saga() else { return };
+
+    // Pick a seeded open proposal.
+    let reply = env
+        .pic
+        .query_call(env.backend, Principal::anonymous(), "list_active_proposals", encode_args(()).unwrap())
+        .expect("list_active_proposals");
+    let proposals: Vec<ProposalLite> = decode_one(&reply).unwrap();
+    let pid = proposals
+        .iter()
+        .find(|p| p.status == "open")
+        .expect("seeded open proposal")
+        .id;
+
+    // No stake → NO_STAKE.
+    let stranger = Principal::from_slice(&[9, 9, 9]);
+    let reply = env
+        .pic
+        .update_call(env.backend, stranger, "cast_lossless_vote", encode_args((pid, Stance::Adopt)).unwrap())
+        .expect("cast as stranger");
+    let res: UnitResult = decode_one(&reply).unwrap();
+    assert!(matches!(res, UnitResult::Err(ref e) if e == "NO_STAKE"), "{:?}", res);
+
+    // Stake 2 ICP in the 2-year tier → the vote carries 4× weight (8 ICP).
+    let res = do_stake_as(&env, env.user, 200_000_000, StakeTier::TwoYears);
+    assert!(matches!(res, UnitResult::Ok), "stake failed: {:?}", res);
+    let reply = env
+        .pic
+        .update_call(env.backend, env.user, "cast_lossless_vote", encode_args((pid, Stance::Adopt)).unwrap())
+        .expect("cast vote");
+    let res: UnitResult = decode_one(&reply).unwrap();
+    assert!(matches!(res, UnitResult::Ok), "vote failed: {:?}", res);
+
+    let reply = env
+        .pic
+        .query_call(env.backend, Principal::anonymous(), "get_proposal", encode_one(pid).unwrap())
+        .expect("get_proposal");
+    let prop: Option<ProposalLossless> = decode_one(&reply).unwrap();
+    let prop = prop.expect("proposal exists");
+    assert_eq!(prop.lossless_adopt_e8s, 800_000_000, "2 ICP × 4 (2-year multiplier)");
+    assert_eq!(prop.lossless_reject_e8s, 0);
+
+    // One vote per user per proposal.
+    let reply = env
+        .pic
+        .update_call(env.backend, env.user, "cast_lossless_vote", encode_args((pid, Stance::Reject)).unwrap())
+        .expect("double vote");
+    let res: UnitResult = decode_one(&reply).unwrap();
+    assert!(matches!(res, UnitResult::Err(ref e) if e == "ALREADY_VOTED"), "{:?}", res);
+}
+
+#[test]
+fn test_yield_distribution_integration() {
+    let Some(env) = setup_saga() else { return };
+
+    let res = do_stake_as(&env, env.user, 200_000_000, StakeTier::SixMonths);
+    assert!(matches!(res, UnitResult::Ok), "stake failed: {:?}", res);
+
+    // The local mock "mints" disbursed maturity from the backend's own default
+    // account — fund it so the harvest transfer can settle.
+    env.mint(env.backend, 1_000_000_000);
+
+    // 2 ICP of simulated maturity (above the 1.05 threshold).
+    let reply = env
+        .pic
+        .update_call(
+            env.backend,
+            env.user,
+            "dev_add_mock_maturity",
+            encode_args((200_000_000u64, StakeTier::SixMonths)).unwrap(),
+        )
+        .expect("dev_add_mock_maturity");
+    let res: UnitResult = decode_one(&reply).unwrap();
+    assert!(matches!(res, UnitResult::Ok), "mock maturity failed: {:?}", res);
+
+    // One sweep pass runs harvest → inbox → distribution back-to-back
+    // (locally the mock mints instantly; on mainnet the 7-day mint delay means
+    // the distribution happens on a later tick, off the inbox balance).
+    run_staking_sweep(&env, env.user);
+
+    // All neuron yield is split 50% lottery prize pot / 50% treasury.
+    let spendable = 200_000_000 - 20_000;
+    let treasury = balance_of(&env, env.backend, Some(vec![1u8; 32]));
+    let lottery = balance_of(&env, env.backend, Some(vec![3u8; 32]));
+    assert_eq!(lottery, spendable / 2, "50% → lottery prize pot");
+    assert_eq!(treasury, spendable - spendable / 2, "50% → treasury");
+    assert_eq!(balance_of(&env, env.backend, Some(vec![2u8; 32])), 0, "inbox drained");
+
+    let pool = staking_pool_info(&env);
+    assert_eq!(pool.total_yield_e8s, 200_000_000, "harvested maturity tracked per tier");
+}

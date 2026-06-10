@@ -49,6 +49,10 @@ pub struct Neuron {
     pub controller: Option<Principal>,
     pub hot_keys: Vec<Principal>,
     pub cached_neuron_stake_e8s: u64,
+    /// Unstaked maturity (e8s-equivalent) — harvested by the lossless-staking
+    /// yield sweep once it crosses the disburse threshold.
+    #[serde(default)]
+    pub maturity_e8s_equivalent: u64,
     pub voting_power: u64,
     pub followees: Vec<(i32, Followees)>,
 }
@@ -300,6 +304,30 @@ fn default_pool_initiation_fee_e8s() -> u64 {
     12_500_000_000
 }
 
+/// Minimum stake per call once the pool neuron exists (the very first stake
+/// must instead clear the NNS 1 ICP minimum neuron stake).
+fn default_min_stake_e8s() -> u64 {
+    10_000_000 // 0.1 ICP
+}
+
+/// Minimum unstake: 1 ICP + ledger fee, so the split child neuron stays at or
+/// above the NNS minimum stake after paying the split fee.
+fn default_min_unstake_e8s() -> u64 {
+    100_010_000
+}
+
+/// Maturity level at which the yield sweep disburses (NNS floor ≈ 1.05 ICP).
+fn default_maturity_threshold_e8s() -> u64 {
+    105_000_000
+}
+
+/// Lossless lottery: BASE tickets credited per login day for a 6-month
+/// staker (admin-tunable). Tiers scale it by the term multiplier:
+/// 6mo = 5, 1y = 10, 2y = 20.
+fn default_lottery_tickets_per_day() -> u64 {
+    5
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     pub primary_neuron_id: u64,
@@ -336,6 +364,16 @@ pub struct Config {
     pub min_upvote_ckbtc_e8s: Option<u64>,
     #[serde(default)]
     pub min_upvote_cketh_wei: Option<u64>,
+    /// ── Lossless staking (3 fixed tiers: 6mo / 1y / 2y) ──
+    #[serde(default = "default_min_stake_e8s")]
+    pub min_stake_e8s: u64,
+    #[serde(default = "default_min_unstake_e8s")]
+    pub min_unstake_e8s: u64,
+    #[serde(default = "default_maturity_threshold_e8s")]
+    pub maturity_threshold_e8s: u64,
+    /// ── Lossless lottery ──
+    #[serde(default = "default_lottery_tickets_per_day")]
+    pub lottery_tickets_per_day: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -362,6 +400,13 @@ pub struct Proposal {
     pub first_stance: Option<Stance>,
     #[serde(default)]
     pub pool_distributed: bool,
+    /// Lossless-staking vote weight on each side. Adds to the balance-of-power
+    /// that decides the NNS vote direction; never counts toward the burn
+    /// threshold (`total_committed_e8s`). Defaulted on decode for upgrades.
+    #[serde(default)]
+    pub lossless_adopt_e8s: u64,
+    #[serde(default)]
+    pub lossless_reject_e8s: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -496,6 +541,10 @@ thread_local! {
             min_upvote_icp_e8s: None,
             min_upvote_ckbtc_e8s: None,
             min_upvote_cketh_wei: None,
+            min_stake_e8s: default_min_stake_e8s(),
+            min_unstake_e8s: default_min_unstake_e8s(),
+            maturity_threshold_e8s: default_maturity_threshold_e8s(),
+            lottery_tickets_per_day: default_lottery_tickets_per_day(),
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -560,7 +609,7 @@ thread_local! {
 /// Note: inspect_message only fires for direct ingress calls, not inter-canister.
 #[ic_cdk::inspect_message]
 fn inspect_message() {
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     // wallet_receive is the only update callable without authentication
     let method = ic_cdk::api::call::method_name();
     if caller == Principal::anonymous() && method != "wallet_receive" {
@@ -585,7 +634,7 @@ fn set_mock_caller(caller: Principal) {
 fn get_caller() -> Principal {
     #[cfg(target_arch = "wasm32")]
     {
-        ic_cdk::caller()
+        ic_cdk::api::caller()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -624,7 +673,7 @@ fn require_authenticated() -> Result<(), String> {
 
 fn require_admin() -> Result<(), String> {
     require_authenticated()?;
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     CONFIG.with(|cell| {
         let borrowed = cell.borrow();
         let config = borrowed.get();
@@ -663,6 +712,10 @@ fn init(payload: InitPayload) {
         min_upvote_icp_e8s: None,
         min_upvote_ckbtc_e8s: None,
         min_upvote_cketh_wei: None,
+        min_stake_e8s: default_min_stake_e8s(),
+        min_unstake_e8s: default_min_unstake_e8s(),
+        maturity_threshold_e8s: default_maturity_threshold_e8s(),
+        lottery_tickets_per_day: default_lottery_tickets_per_day(),
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
@@ -709,7 +762,7 @@ fn get_config() -> Config {
 
 #[ic_cdk::query]
 fn get_caller_principal() -> Principal {
-    ic_cdk::caller()
+    get_caller()
 }
 
 #[ic_cdk::query]
@@ -866,6 +919,7 @@ async fn distribute_pool_rewards(proposal_id: u64) -> Result<(), String> {
                 AUDIT_LOG.with(|log| {
                     let _ = log.borrow_mut().append(&log_entry);
                 });
+                record_payout(recipient, PayoutType::PoolReward, IdeaToken::ICP, payout_amt, proposal_id);
             }
             Err(e) => {
                 canister_print(&format!(
@@ -930,7 +984,7 @@ fn admin_set_proposal_deadline(proposal_id: u64, deadline: u64) -> Result<(), St
     // F-106: a deadline inside the cutoff window underflows the `deadline - cutoff`
     // subtraction in `commit` / `proposal_sync_sweep`, wrapping to a huge value
     // and permanently leaving the proposal open. Require deadline > now + cutoff.
-    let now = ic_cdk::api::time();
+    let now = current_time();
     let min_deadline = now.checked_add(CUTOFF_NANOS)
         .and_then(|v| v.checked_add(1))
         .ok_or_else(|| "DEADLINE_OVERFLOW".to_string())?;
@@ -1032,6 +1086,7 @@ async fn admin_trigger_sweep() -> Result<(), String> {
     retry_failed_fundings().await;
     delete_expired_ideas();
     cycle_topup_check().await;
+    staking_sweep().await;
     Ok(())
 }
 
@@ -1076,7 +1131,7 @@ fn seed_mock_proposals() {
     PROPOSALS.with(|map| {
         let mut m = map.borrow_mut();
         if m.is_empty() {
-            let now = ic_cdk::api::time();
+            let now = current_time();
             
             // 14 hours in nanoseconds
             let dur_14h = 14 * 60 * 60 * 1_000_000_000;
@@ -1101,6 +1156,8 @@ fn seed_mock_proposals() {
                 total_burned_e8s: None,
                 first_stance: None,
                 pool_distributed: false,
+                lossless_adopt_e8s: 0,
+                lossless_reject_e8s: 0,
             });
 
             m.insert(138388, Proposal {
@@ -1119,6 +1176,8 @@ fn seed_mock_proposals() {
                 total_burned_e8s: None,
                 first_stance: None,
                 pool_distributed: false,
+                lossless_adopt_e8s: 0,
+                lossless_reject_e8s: 0,
             });
 
             m.insert(138376, Proposal {
@@ -1137,6 +1196,8 @@ fn seed_mock_proposals() {
                 total_burned_e8s: None,
                 first_stance: None,
                 pool_distributed: false,
+                lossless_adopt_e8s: 0,
+                lossless_reject_e8s: 0,
             });
         }
     });
@@ -1144,7 +1205,7 @@ fn seed_mock_proposals() {
     VOTES.with(|map| {
         let mut m = map.borrow_mut();
         if m.is_empty() {
-            let now = ic_cdk::api::time();
+            let now = current_time();
             let dur_1d = 24 * 60 * 60 * 1_000_000_000;
             m.insert(138300, VoteRecord {
                 proposal_id: 138300,
@@ -1241,7 +1302,7 @@ async fn fetch_leader_neuron_info() {
         (cfg.primary_neuron_id, cfg.is_local)
     });
     let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
-    let now = ic_cdk::api::time();
+    let now = current_time();
 
     let response: Result<(GetNeuronInfoResult,), _> =
         ic_cdk::call(nns_gov, "get_neuron_info", (leader_id,)).await;
@@ -1271,10 +1332,10 @@ async fn fetch_leader_neuron_info() {
             });
         }
         Ok((GetNeuronInfoResult::Err(e),)) => {
-            ic_cdk::api::print(&format!("get_neuron_info error: {}", e.error_message));
+            canister_print(&format!("get_neuron_info error: {}", e.error_message));
         }
         Err((code, msg)) => {
-            ic_cdk::api::print(&format!("get_neuron_info call failed (code {:?}): {}", code, msg));
+            canister_print(&format!("get_neuron_info call failed (code {:?}): {}", code, msg));
         }
     }
     refresh_pool_neurons().await;
@@ -1300,11 +1361,11 @@ fn get_leader_neuron_info() -> LeaderNeuronInfo {
 #[ic_cdk::update]
 fn confirm_follow() -> Result<(), String> {
     require_authenticated()?;
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     let state = UserNeuronState {
         neuron_id: 0,
         is_following: true,
-        verified_at: ic_cdk::api::time(),
+        verified_at: current_time(),
         cached_stake_e8s: 0,
     };
     USER_NEURONS.with(|map| {
@@ -1315,7 +1376,7 @@ fn confirm_follow() -> Result<(), String> {
 
 #[ic_cdk::query]
 fn get_eligibility() -> EligibilityInfo {
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     let authenticated = caller != Principal::anonymous();
     
     let following = if authenticated {
@@ -1473,7 +1534,7 @@ fn account_id_hex(owner: Principal, subaccount: &[u8; 32]) -> String {
 /// (sub-account = 0) ICP account. Fund this to participate.
 #[ic_cdk::query]
 fn get_account_id() -> String {
-    account_id_hex(ic_cdk::caller(), &[0u8; 32])
+    account_id_hex(get_caller(), &[0u8; 32])
 }
 
 // Ledger Call Structs
@@ -1691,6 +1752,9 @@ fn cmc_account_id(target_canister: &Principal) -> [u8; 32] {
     account_id_bytes(cmc, &sub)
 }
 
+/// Legacy `transfer` (AccountIdentifier destination). The memo matters in two
+/// places: CMC top-ups use 0; neuron staking must pass the claim nonce so
+/// governance's ClaimOrRefresh can match the deposit.
 #[cfg(target_arch = "wasm32")]
 async fn call_ledger_legacy_transfer(
     ledger_id: Principal,
@@ -1698,9 +1762,10 @@ async fn call_ledger_legacy_transfer(
     to_account_id: [u8; 32],
     amount_e8s: u64,
     fee_e8s: u64,
+    memo: u64,
 ) -> Result<u64, String> {
     let args = SendArgs {
-        memo: 0,
+        memo,
         amount: TokensAmount { e8s: amount_e8s },
         fee: TokensAmount { e8s: fee_e8s },
         from_subaccount: from_sub,
@@ -1727,6 +1792,7 @@ async fn call_ledger_legacy_transfer(
     _to_account_id: [u8; 32],
     _amount_e8s: u64,
     _fee_e8s: u64,
+    _memo: u64,
 ) -> Result<u64, String> {
     TEST_MOCK_LEDGER_TRANSFER.with(|cell| cell.borrow().clone())
 }
@@ -1763,6 +1829,7 @@ async fn call_cmc_topup_transfer(
             cmc_account_id(&target_canister),
             amount_e8s,
             fee_e8s,
+            0,
         )
         .await
     }
@@ -1865,7 +1932,7 @@ async fn settle_burn_split(
     commitment: &mut Commitment,
 ) -> Result<(), String> {
     let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
-    let treasury_dest = LedgerAccount { owner: ic_cdk::id(), subaccount: Some(TREASURY_SUBACCOUNT) };
+    let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
 
     let treasury_amt = amount_e8s / 2;
     let backend_amt = amount_e8s / 4;
@@ -1883,7 +1950,7 @@ async fn settle_burn_split(
         let b = call_cmc_topup_transfer(
             ledger_id,
             Some(from_subaccount),
-            ic_cdk::id(),
+            get_canister_id(),
             backend_amt,
             10_000,
         )
@@ -1893,7 +1960,7 @@ async fn settle_burn_split(
     }
     notify_cmc_topup(
         cmc,
-        ic_cdk::id(),
+        get_canister_id(),
         commitment.cmc_block_index.unwrap(),
         commitment.proposal_id != 138388,
     )
@@ -1925,23 +1992,23 @@ async fn settle_burn_split(
 
 #[ic_cdk::query]
 fn get_deposit_address(proposal_id: u64) -> LedgerAccount {
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     let sub = derive_subaccount(&caller, proposal_id);
     LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(sub),
     }
 }
 
 #[ic_cdk::query]
 fn get_registration_address() -> LedgerAccount {
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     if caller == Principal::anonymous() {
         panic!("Anonymous principal is not allowed");
     }
     let sub = derive_subaccount(&caller, REGISTRATION_SEED);
     LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(sub),
     }
 }
@@ -1949,12 +2016,12 @@ fn get_registration_address() -> LedgerAccount {
 #[ic_cdk::update]
 async fn refund_registration() -> Result<(), String> {
     require_authenticated()?;
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     let sub = derive_subaccount(&caller, REGISTRATION_SEED);
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
     let escrow_acc = LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(sub),
     };
     let bal = call_ledger_balance(ledger_id, escrow_acc).await?;
@@ -2292,7 +2359,7 @@ fn unregister_leader_neuron(neuron_id: u64) -> Result<(), String> {
 #[ic_cdk::update]
 async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(), String> {
     require_authenticated()?;
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
 
     let _guard = CallerGuard::new(caller)?;
 
@@ -2353,8 +2420,8 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         return Err("COMMITMENT_CLOSED".to_string());
     }
 
-    let now = ic_cdk::api::time();
-    if now >= proposal.deadline - 3_600_000_000_000 {
+    let now = current_time();
+    if now >= proposal.deadline.saturating_sub(3_600_000_000_000) {
         return Err("COMMITMENT_CLOSED".to_string());
     }
 
@@ -2363,7 +2430,7 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
     let ledger_id = config.ledger_canister_id;
 
     let escrow_account = LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(subaccount),
     };
 
@@ -2377,7 +2444,7 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
     }
 
     let treasury_dest = LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(TREASURY_SUBACCOUNT),
     };
 
@@ -2469,7 +2536,7 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
 #[ic_cdk::update]
 async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), String> {
     require_authenticated()?;
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
 
     // 1. Lookup existing commitment — must exist and be Pending
@@ -2497,8 +2564,8 @@ async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), 
     if proposal.status != "open" && proposal.status != "met" {
         return Err("COMMITMENT_CLOSED".to_string());
     }
-    let now = ic_cdk::api::time();
-    if now >= proposal.deadline - 3_600_000_000_000 {
+    let now = current_time();
+    if now >= proposal.deadline.saturating_sub(3_600_000_000_000) {
         return Err("COMMITMENT_CLOSED".to_string());
     }
 
@@ -2509,7 +2576,7 @@ async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), 
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
     let escrow_account = LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(subaccount),
     };
     let balance = call_ledger_balance(ledger_id, escrow_account).await?;
@@ -2564,7 +2631,7 @@ async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), 
 
 #[ic_cdk::query]
 fn get_my_commitments() -> Vec<Commitment> {
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     if caller == Principal::anonymous() {
         return vec![];
     }
@@ -2582,7 +2649,7 @@ async fn get_treasury_balance() -> BalanceResult {
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
     let treasury_account = LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(TREASURY_SUBACCOUNT),
     };
     match call_ledger_balance(ledger_id, treasury_account).await {
@@ -2608,9 +2675,31 @@ async fn admin_withdraw_treasury(to: Principal, amount_e8s: u64) -> Result<(), S
         .map_err(|e| format!("TREASURY_WITHDRAW_FAILED: {}", e))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// Host-test cycles balance (default: comfortably above the top-up floor).
+    static TEST_MOCK_CYCLES: RefCell<u64> = const { RefCell::new(10_000_000_000_000) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_cycles(balance: u64) {
+    TEST_MOCK_CYCLES.with(|cell| *cell.borrow_mut() = balance);
+}
+
+fn canister_cycle_balance() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ic_cdk::api::canister_balance()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        TEST_MOCK_CYCLES.with(|cell| *cell.borrow())
+    }
+}
+
 #[ic_cdk::query]
 fn get_cycle_balance() -> u64 {
-    ic_cdk::api::canister_balance()
+    canister_cycle_balance()
 }
 
 #[ic_cdk::update]
@@ -2636,9 +2725,98 @@ pub struct RegisterVoteCommand {
     pub vote: i32,
 }
 
+// ── ManageNeuron commands (subset of the governance candid; variant and field
+// names verified against dfinity/ic rs/nns/governance/canister/governance.did.
+// Candid encodes variants by name, so a subset enum stays wire-compatible). ──
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct EmptyRecord {}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct MemoAndController {
+    pub controller: Option<Principal>,
+    pub memo: u64,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub enum By {
+    MemoAndController(MemoAndController),
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct ClaimOrRefreshCmd {
+    pub by: Option<By>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct IncreaseDissolveDelay {
+    pub additional_dissolve_delay_seconds: u32,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub enum Operation {
+    StartDissolving(EmptyRecord),
+    IncreaseDissolveDelay(IncreaseDissolveDelay),
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct ConfigureCmd {
+    pub operation: Option<Operation>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct FollowCmd {
+    pub topic: i32,
+    pub followees: Vec<NeuronId>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct SplitCmd {
+    pub amount_e8s: u64,
+    pub memo: Option<u64>,
+}
+
+/// Governance `AccountIdentifier` — the 28-byte SHA-224 hash WITHOUT the CRC32
+/// prefix (unlike the 32-byte ledger address form).
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct GovAccountIdentifier {
+    pub hash: Vec<u8>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct Amount {
+    pub e8s: u64,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct DisburseCmd {
+    pub to_account: Option<GovAccountIdentifier>,
+    pub amount: Option<Amount>,
+}
+
+/// Governance's ICRC-1-style account (`owner`/`subaccount` both optional).
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct GovAccount {
+    pub owner: Option<Principal>,
+    pub subaccount: Option<Vec<u8>>,
+}
+
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct DisburseMaturityCmd {
+    pub percentage_to_disburse: u32,
+    pub to_account: Option<GovAccount>,
+    pub to_account_identifier: Option<GovAccountIdentifier>,
+}
+
 #[derive(CandidType, Serialize, Clone, Debug)]
 pub enum Command {
     RegisterVote(RegisterVoteCommand),
+    ClaimOrRefresh(ClaimOrRefreshCmd),
+    Configure(ConfigureCmd),
+    Follow(FollowCmd),
+    Split(SplitCmd),
+    Disburse(DisburseCmd),
+    DisburseMaturity(DisburseMaturityCmd),
 }
 
 #[derive(CandidType, Serialize, Clone, Debug)]
@@ -2654,9 +2832,36 @@ pub struct ManageNeuronResponse {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ClaimOrRefreshResponse {
+    pub refreshed_neuron_id: Option<NeuronId>,
+}
+
+/// Response to both `Split` and `Spawn` in the governance candid.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct SpawnResponse {
+    pub created_neuron_id: Option<NeuronId>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct DisburseResponse {
+    pub transfer_block_height: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct DisburseMaturityResponse {
+    pub amount_disbursed_e8s: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
 pub enum CommandResponse {
     RegisterVote(RegisterVoteResponse),
     Error(GovernanceError),
+    ClaimOrRefresh(ClaimOrRefreshResponse),
+    Configure(EmptyRecord),
+    Follow(EmptyRecord),
+    Split(SpawnResponse),
+    Disburse(DisburseResponse),
+    DisburseMaturity(DisburseMaturityResponse),
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -2738,13 +2943,13 @@ async fn fetch_live_proposals() {
     let infos = match response {
         Ok((resp,)) => resp.proposal_info,
         Err((code, msg)) => {
-            ic_cdk::api::print(&format!("list_proposals failed (code {:?}): {}", code, msg));
+            canister_print(&format!("list_proposals failed (code {:?}): {}", code, msg));
             return;
         }
     };
 
     let default_threshold = CONFIG.with(|c| c.borrow().get().default_threshold);
-    let now = ic_cdk::api::time();
+    let now = current_time();
 
     for info in infos {
         // Only open proposals with a real id and a future voting deadline.
@@ -2799,6 +3004,8 @@ async fn fetch_live_proposals() {
             total_burned_e8s: None,
             first_stance: None,
             pool_distributed: false,
+            lossless_adopt_e8s: 0,
+            lossless_reject_e8s: 0,
         };
         PROPOSALS.with(|map| {
             map.borrow_mut().insert(nns_id, proposal);
@@ -2806,6 +3013,27 @@ async fn fetch_live_proposals() {
     }
 }
 
+/// Host-test mock: governance is unreachable off-canister. Defaults to Ok so
+/// unit tests can drive the full voted-settlement path; override via
+/// `set_mock_nns_vote` to exercise the failure branches.
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static TEST_MOCK_NNS_VOTE: RefCell<Result<(), String>> = const { RefCell::new(Ok(())) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_nns_vote(res: Result<(), String>) {
+    TEST_MOCK_NNS_VOTE.with(|cell| {
+        *cell.borrow_mut() = res;
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn cast_nns_vote(_leader_id: u64, _proposal_id: u64, _vote_choice: i32) -> Result<(), String> {
+    TEST_MOCK_NNS_VOTE.with(|cell| cell.borrow().clone())
+}
+
+#[cfg(target_arch = "wasm32")]
 async fn cast_nns_vote(leader_id: u64, proposal_id: u64, vote_choice: i32) -> Result<(), String> {
     let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
     let args = ManageNeuron {
@@ -2823,6 +3051,7 @@ async fn cast_nns_vote(leader_id: u64, proposal_id: u64, vote_choice: i32) -> Re
             match res.command {
                 Some(CommandResponse::RegisterVote(_)) => Ok(()),
                 Some(CommandResponse::Error(err)) => Err(format!("NNS error: {}", err.error_message)),
+                Some(_) => Err("Unexpected NNS command response".to_string()),
                 None => Err("No command response from NNS".to_string()),
             }
         }
@@ -2872,10 +3101,11 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
     let met = proposal.total_committed_e8s >= proposal.threshold_e8s;
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     // PB-123: majority of committed ICP wins; an exact tie is broken by the
-    // first stance committed on this proposal (first vote wins).
+    // first stance committed on this proposal (first vote wins). Lossless
+    // staking weight joins the balance of power here — never the threshold.
     let vote_choice = decide_vote_choice(
-        proposal.adopt_pot_e8s,
-        proposal.reject_pot_e8s,
+        proposal.adopt_pot_e8s.saturating_add(proposal.lossless_adopt_e8s),
+        proposal.reject_pot_e8s.saturating_add(proposal.lossless_reject_e8s),
         proposal.first_stance.clone(),
     );
 
@@ -2886,15 +3116,32 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
             match vote_result {
                 Ok(_) => {
                     vote_success = true;
-                    proposal.vote_executed_at = Some(ic_cdk::api::time());
+                    proposal.vote_executed_at = Some(current_time());
                 }
                 Err(e) => {
-                    ic_cdk::api::print(&format!("NNS vote failed for proposal {}: {}", pid, e));
+                    canister_print(&format!("NNS vote failed for proposal {}: {}", pid, e));
+                }
+            }
+            // The lossless staking neurons (all three tiers) echo the
+            // platform outcome. Best-effort: they follow the leader on every
+            // topic, so governance may report them as having already voted —
+            // that is success, and a failure here must never change the
+            // proposal's lifecycle.
+            for tier in StakeTier::all() {
+                let pool = tier_pool(tier);
+                if let Some(pool_neuron_id) = pool.neuron_id {
+                    if pool.bootstrap == StakingBootstrap::Ready {
+                        if let Err(e) = cast_nns_vote(pool_neuron_id, nns_id, vote_choice).await {
+                            canister_print(&format!(
+                                "staking-pool neuron vote skipped for {}: {}", nns_id, e
+                            ));
+                        }
+                    }
                 }
             }
         }
         None => {
-            ic_cdk::api::print(&format!("Proposal {} has no nns_proposal_id; skipping vote", pid));
+            canister_print(&format!("Proposal {} has no nns_proposal_id; skipping vote", pid));
         }
     }
 
@@ -2910,7 +3157,7 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
             proposal_id: pid,
             vote: if vote_choice == 1 { Vote::Yes } else { Vote::No },
             icp_burned_e8s: if met { proposal.total_committed_e8s } else { 0 },
-            decided_at: ic_cdk::api::time(),
+            decided_at: current_time(),
             nns_outcome: Some(if vote_choice == 1 { "adopted".to_string() } else { "rejected".to_string() }),
         };
         VOTES.with(|map| {
@@ -2951,7 +3198,7 @@ async fn settle_proposal_commitments(proposal_id: u64) {
 
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
-    let now = ic_cdk::api::time();
+    let now = current_time();
 
     let mut total_burned_this_sweep: u64 = 0;
 
@@ -2996,14 +3243,14 @@ async fn settle_proposal_commitments(proposal_id: u64) {
                         let _ = log.borrow_mut().append(&log_entry);
                     });
 
-                    ic_cdk::api::print(&format!(
+                    canister_print(&format!(
                         "Commitment settled (split 50/25/25): {} e8s for user {}",
                         commitment.amount_e8s, user
                     ));
                 }
                 Err(e) => {
                     commitment.status = CommitmentStatus::FailedBurn;
-                    ic_cdk::api::print(&format!("settle_burn_split failed for user {}: {}", user, e));
+                    canister_print(&format!("settle_burn_split failed for user {}: {}", user, e));
                 }
             }
         } else if is_abstained {
@@ -3040,10 +3287,11 @@ async fn settle_proposal_commitments(proposal_id: u64) {
                     AUDIT_LOG.with(|log| {
                         let _ = log.borrow_mut().append(&log_entry);
                     });
+                    record_payout(user, PayoutType::CommitmentRefund, IdeaToken::ICP, commitment.amount_e8s, proposal_id);
                 }
                 Err(e) => {
                     commitment.status = CommitmentStatus::FailedRefund;
-                    ic_cdk::api::print(&format!("Failed to refund commitment for user {}: {}", user, e));
+                    canister_print(&format!("Failed to refund commitment for user {}: {}", user, e));
                 }
             }
         }
@@ -3070,13 +3318,13 @@ async fn settle_proposal_commitments(proposal_id: u64) {
 }
 
 async fn proposal_sync_sweep() {
-    let now = ic_cdk::api::time();
+    let now = current_time();
     let mut proposals_to_process = Vec::new();
 
     PROPOSALS.with(|map| {
         for entry in map.borrow().iter() {
             let p = entry.value();
-            if (p.status == "open" || p.status == "met") && now >= (p.deadline - 3_600_000_000_000) {
+            if (p.status == "open" || p.status == "met") && now >= p.deadline.saturating_sub(3_600_000_000_000) {
                 proposals_to_process.push(p.id);
             }
         }
@@ -3120,7 +3368,7 @@ async fn retry_failed_settlements() {
 
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
-    let now = ic_cdk::api::time();
+    let now = current_time();
 
     for (proposal_id, user) in to_retry {
         let key = CommitmentKey {
@@ -3165,13 +3413,13 @@ async fn retry_failed_settlements() {
 }
 
 async fn cycle_topup_check() {
-    let cycles = ic_cdk::api::canister_balance();
+    let cycles = canister_cycle_balance();
     if cycles < 5_000_000_000_000 {
         let config = CONFIG.with(|cell| cell.borrow().get().clone());
         let ledger_id = config.ledger_canister_id;
 
         let treasury_account = LedgerAccount {
-            owner: ic_cdk::id(),
+            owner: get_canister_id(),
             subaccount: Some(TREASURY_SUBACCOUNT),
         };
 
@@ -3191,7 +3439,7 @@ async fn cycle_topup_check() {
                 let transfer_res = call_cmc_topup_transfer(
                     ledger_id,
                     Some(TREASURY_SUBACCOUNT),
-                    ic_cdk::id(),
+                    get_canister_id(),
                     balance - 10_000,
                     10_000,
                 )
@@ -3207,22 +3455,15 @@ async fn cycle_topup_check() {
         };
 
         // Phase B: notify the CMC. Idempotent — `AlreadyNotified` is success.
-        let notify_args = NotifyTopUpArgs {
-            canister_id: ic_cdk::id(),
-            block_index: candid::Nat::from(block_index),
-        };
-        let notify_res: Result<(NotifyTopUpResult,), _> =
-            ic_cdk::call(cmc_principal, "notify_top_up", (notify_args,)).await;
-        match notify_res {
-            Ok((NotifyTopUpResult::Ok(_) | NotifyTopUpResult::Err(NotifyError::AlreadyNotified),)) => {
-                // Success — clear the persisted block index so the next sweep
-                // re-evaluates the treasury balance fresh.
-                LAST_TOPUP_BLOCK.with(|cell| *cell.borrow_mut() = None);
-            }
-            _ => {
-                // Transient failure — leave the block index persisted so the
-                // next timer tick retries Phase B only (no double transfer).
-            }
+        // Any failure leaves the block index persisted so the next timer tick
+        // retries Phase B only (no double transfer).
+        if notify_cmc_topup(cmc_principal, get_canister_id(), block_index, true)
+            .await
+            .is_ok()
+        {
+            // Success — clear the persisted block index so the next sweep
+            // re-evaluates the treasury balance fresh.
+            LAST_TOPUP_BLOCK.with(|cell| *cell.borrow_mut() = None);
         }
     }
 }
@@ -3241,6 +3482,8 @@ fn setup_timers() {
         retry_failed_fundings().await;
         delete_expired_ideas();
         cycle_topup_check().await;
+        staking_sweep().await;
+        lottery_draw_check().await;
     });
 }
 
@@ -3252,11 +3495,13 @@ async fn dev_faucet() -> Result<(), String> {
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
 
     // Block on mainnet: ICP mainnet ledger canister ID
-    if config.ledger_canister_id == Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap() {
+    if !config.is_local
+        || config.ledger_canister_id == Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
+    {
         return Err("dev_faucet is only available on the local network".to_string());
     }
 
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     let dest = LedgerAccount { owner: caller, subaccount: None };
     let amount: u64 = 10_000_000_000; // 100 ICP
 
@@ -3274,7 +3519,9 @@ fn dev_seed_pool_neuron(neuron_id: u64, voting_power: u64) -> Result<(), String>
     require_authenticated()?;
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
 
-    if config.ledger_canister_id == Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap() {
+    if !config.is_local
+        || config.ledger_canister_id == Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
+    {
         return Err("dev_seed_pool_neuron is only available on the local network".to_string());
     }
 
@@ -3397,7 +3644,13 @@ fn get_audit_log(offset: u64, limit: u64) -> Vec<AuditLogEntry> {
 /// Feature-flag key for the Idea Board. Flags default via `feature_default`;
 /// an admin override in FEATURE_FLAGS (1 = on, 0 = off) wins over the default.
 pub const FLAG_IDEA_BOARD: &str = "idea_board";
-const KNOWN_FEATURE_FLAGS: [&str; 1] = [FLAG_IDEA_BOARD];
+/// Kill switch for lossless staking + voting (stake/unstake/cast_lossless_vote).
+pub const FLAG_LOSSLESS_VOTING: &str = "lossless_voting";
+/// Lossless lottery (Powerball-style draws over the staking-yield lottery
+/// pot). Ships dark — default OFF until an admin flips it on.
+pub const FLAG_LOSSLESS_LOTTERY: &str = "lossless_lottery";
+const KNOWN_FEATURE_FLAGS: [&str; 3] =
+    [FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
 const MAX_FLAG_KEY_LEN: usize = 64;
@@ -3601,6 +3854,10 @@ thread_local! {
 fn feature_default(key: &str) -> bool {
     match key {
         FLAG_IDEA_BOARD => true,
+        FLAG_LOSSLESS_VOTING => true,
+        // Money-moving and unproven on mainnet — ships dark until an admin
+        // enables it (see docs/OPS.md § "Lossless Lottery").
+        FLAG_LOSSLESS_LOTTERY => false,
         _ => false,
     }
 }
@@ -3887,9 +4144,9 @@ fn record_idea_view(idea_id: u64) -> Result<(), String> {
 /// `post_fee + 0.0001 ICP` on the ICP ledger, then call `post_idea`.
 #[ic_cdk::query]
 fn get_idea_post_deposit_address() -> LedgerAccount {
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(derive_idea_subaccount(&caller, IDEA_POST_SEED)),
     }
 }
@@ -3992,9 +4249,9 @@ async fn post_idea(title: String, description: String, detail: String) -> Result
 /// intend to upvote with, then call `upvote_idea`.
 #[ic_cdk::query]
 fn get_idea_deposit_address(idea_id: u64) -> LedgerAccount {
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(derive_idea_subaccount(&caller, idea_id)),
     }
 }
@@ -4033,6 +4290,7 @@ async fn run_upvote_payout(
         IDEA_UPVOTES.with(|m| {
             m.borrow_mut().insert(uv.id, uv.clone());
         });
+        record_payout(poster, PayoutType::IdeaUpvoteShare, uv.token, poster_amt, uv.id);
     }
 
     Ok(())
@@ -4365,9 +4623,9 @@ fn list_projects() -> Vec<Project> {
 /// chosen token's ledger with `amount + fee`, then call `fund_project`.
 #[ic_cdk::query]
 fn get_project_deposit_address(project_id: u64) -> LedgerAccount {
-    let caller = ic_cdk::caller();
+    let caller = get_caller();
     LedgerAccount {
-        owner: ic_cdk::id(),
+        owner: get_canister_id(),
         subaccount: Some(derive_project_subaccount(&caller, project_id)),
     }
 }
@@ -4680,6 +4938,2192 @@ fn seed_mock_ideas() {
     }
 }
 
+// ==========================================
+// 13. Lossless Voting (Pooled Staking, WaterNeuron-inspired)
+// ==========================================
+//
+// Users stake ICP into one of THREE pooled NNS neurons controlled by this
+// canister — fixed terms of 6 months, 1 year and 2 years (dissolve delays).
+// Shares are plain e8s amounts — yield is disbursed, never compounded, so
+// stake e8s are exact. Stakers vote on tracked proposals for free with weight
+// proportional to stake × term (6mo = 1×, 1y = 2×, 2y = 4×). Unstaking splits
+// the tier's neuron, dissolves the child for the tier's full term, then
+// disburses to the user's wallet. Maturity from ALL three neurons is
+// harvested into one shared yield inbox and split 50% to the single
+// lossless-lottery prize pot / 50% to the treasury. Staking is also the
+// lottery eligibility gate: the daily ticket grant scales with the same
+// 1×/2×/4× term multiplier.
+
+const ONE_ICP_E8S: u64 = 100_000_000;
+const ICP_FEE_E8S: u64 = 10_000;
+/// Subaccount seed for the per-user stake escrow (one below REGISTRATION_SEED).
+const STAKE_SEED: u64 = 0xFFFF_FFFF_FFFF_FFFE;
+/// Disbursed maturity from all three tier neurons lands here (mints arrive
+/// ~7 days after DisburseMaturity); the sweep drains it 50% to the lottery
+/// pot / 50% to the treasury.
+const YIELD_INBOX_SUBACCOUNT: [u8; 32] = [2u8; 32];
+/// The single lossless-lottery prize pot, fed by all three neurons' yield.
+const LOTTERY_SUBACCOUNT: [u8; 32] = [3u8; 32];
+/// Local/dev only: staked ICP parks here (instead of the governance staking
+/// account) so a mock disburse can really pay users back from the local ledger.
+const MOCK_STAKE_SUBACCOUNT: [u8; 32] = [4u8; 32];
+/// NNS follow topics. Topic 0 is the catch-all, which deliberately EXCLUDES
+/// Governance (4) and SNS & Neurons' Fund (14) — both carry voting rewards,
+/// so the pool neuron must follow all three explicitly.
+const TOPIC_CATCH_ALL: i32 = 0;
+const TOPIC_SNS_AND_NEURONS_FUND: i32 = 14;
+const NNS_GOVERNANCE_ID: &str = "rrkah-fqaaa-aaaaa-aaaaq-cai";
+/// Don't run a yield distribution below this (must dwarf the transfer fee).
+const YIELD_MIN_DISTRIBUTION_E8S: u64 = 1_000_000;
+/// DisburseMaturity mints ICP ~7 days later.
+const MATURITY_MINT_DELAY_NANOS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+/// Mock neuron ids start here so they never collide with anything real-looking.
+const MOCK_NEURON_ID_BASE: u64 = 990_000;
+/// Cap the informational pending-maturity list.
+const MAX_PENDING_MATURITY: usize = 20;
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StakingBootstrap {
+    /// No neuron yet (no stake has ever been claimed).
+    NotStarted,
+    /// Neuron claimed; dissolve delay not yet set.
+    Claimed,
+    /// Dissolve delay set; followees not yet configured.
+    DelaySet,
+    /// Fully configured: delay set + following the leader on all topics.
+    Ready,
+}
+
+/// Fixed staking terms. The 6-month minimum matches the NNS minimum dissolve
+/// delay for voting eligibility, so no Mission 70 gate applies. Voting weight
+/// and the daily lottery-ticket grant both scale with the same multiplier,
+/// proportional to the term length (6mo = 1×, 1y = 2×, 2y = 4×).
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StakeTier {
+    SixMonths,
+    OneYear,
+    TwoYears,
+}
+
+impl StakeTier {
+    pub fn all() -> [StakeTier; 3] {
+        [StakeTier::SixMonths, StakeTier::OneYear, StakeTier::TwoYears]
+    }
+
+    pub fn idx(self) -> u8 {
+        match self {
+            StakeTier::SixMonths => 0,
+            StakeTier::OneYear => 1,
+            StakeTier::TwoYears => 2,
+        }
+    }
+
+    pub fn dissolve_delay_secs(self) -> u64 {
+        match self {
+            StakeTier::SixMonths => 15_778_800, // 6 months
+            StakeTier::OneYear => 31_557_600,   // 1 year
+            StakeTier::TwoYears => 63_115_200,  // 2 years
+        }
+    }
+
+    /// Term multiplier applied to both voting weight and the daily lottery
+    /// ticket grant.
+    pub fn weight_multiplier(self) -> u64 {
+        match self {
+            StakeTier::SixMonths => 1,
+            StakeTier::OneYear => 2,
+            StakeTier::TwoYears => 4,
+        }
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct MaturityDisbursement {
+    pub amount_e8s: u64,
+    pub initiated_at: u64,
+    /// When the minted ICP should arrive in the yield inbox (~+7 days).
+    pub expected_at: u64,
+}
+
+/// One per StakeTier (keyed by `StakeTier::idx()` in STAKING_POOLS).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct StakingPool {
+    pub neuron_id: Option<u64>,
+    /// ClaimOrRefresh memo, fixed at the tier's first stake. The governance
+    /// staking account is derived from (canister principal, nonce) — never
+    /// change it.
+    pub nonce: u64,
+    pub total_staked_e8s: u64,
+    pub bootstrap: StakingBootstrap,
+    /// ICP transferred to the staking account but not yet claimed/refreshed
+    /// into the neuron. The sweep retries ClaimOrRefresh until this drains;
+    /// the local mock credits exactly this amount to the simulated neuron.
+    pub pending_refresh_e8s: u64,
+    pub pending_maturity: Vec<MaturityDisbursement>,
+    /// Lifetime yield harvested from this tier's neuron (split 50% lottery
+    /// pot / 50% treasury at distribution).
+    pub total_yield_e8s: u64,
+}
+
+impl Default for StakingPool {
+    fn default() -> Self {
+        StakingPool {
+            neuron_id: None,
+            nonce: 0,
+            total_staked_e8s: 0,
+            bootstrap: StakingBootstrap::NotStarted,
+            pending_refresh_e8s: 0,
+            pending_maturity: vec![],
+            total_yield_e8s: 0,
+        }
+    }
+}
+
+/// STAKES key: one stake record per (tier, user).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StakeKey {
+    pub tier: u8,
+    pub user: Principal,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct UserStake {
+    pub amount_e8s: u64,
+    pub staked_at: u64,
+    pub last_action_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum UnstakeStatus {
+    /// Neuron split off; StartDissolving not yet confirmed (sweep retries).
+    SplitDone,
+    /// Dissolving; disbursable once `dissolve_eta` passes.
+    Dissolving,
+    /// ICP disbursed to the user's wallet. Terminal.
+    Disbursed,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PendingUnstake {
+    pub id: u64,
+    pub user: Principal,
+    pub tier: StakeTier,
+    pub amount_e8s: u64,
+    pub split_neuron_id: u64,
+    pub status: UnstakeStatus,
+    pub created_at: u64,
+    /// Nanosecond timestamp when the split neuron finishes dissolving (the
+    /// tier's full term).
+    pub dissolve_eta: u64,
+    pub disburse_block: Option<u64>,
+    pub settled_at: Option<u64>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LosslessVote {
+    pub proposal_id: u64,
+    pub principal: Principal,
+    pub stance: Stance,
+    /// Stake snapshot at cast time — later stake changes don't retro-apply.
+    pub weight_e8s: u64,
+    pub cast_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum YieldStatus {
+    InProgress,
+    Done,
+}
+
+/// Saga journal for one yield distribution: the shared yield inbox (fed by
+/// all three tier neurons) is drained 50% to the lottery prize pot / 50% to
+/// the treasury. Persisted per-leg block indices make a retry skip completed
+/// transfers (same idempotency as `settle_burn_split`).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct YieldDistribution {
+    pub id: u64,
+    /// Inbox balance this distribution drains (includes the 2 transfer fees).
+    pub amount_e8s: u64,
+    pub lottery_amount_e8s: u64,
+    pub treasury_amount_e8s: u64,
+    pub lottery_block: Option<u64>,
+    pub treasury_block: Option<u64>,
+    pub status: YieldStatus,
+    pub created_at: u64,
+    pub completed_at: Option<u64>,
+}
+
+/// The caller's stake in one tier (part of UserStakeInfo).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct UserTierStake {
+    pub tier: StakeTier,
+    pub amount_e8s: u64,
+    /// amount × the tier's term multiplier — the voting power this position
+    /// contributes.
+    pub weight_e8s: u64,
+    pub staked_at: u64,
+    pub last_action_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct UserStakeInfo {
+    pub tiers: Vec<UserTierStake>,
+    /// Sum of the caller's stakes across tiers.
+    pub total_staked_e8s: u64,
+    /// Sum of amount × multiplier across tiers — the caller's voting power.
+    pub total_weight_e8s: u64,
+}
+
+/// Public state of one tier's pooled neuron.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TierPoolInfo {
+    pub tier: StakeTier,
+    pub dissolve_delay_secs: u64,
+    pub weight_multiplier: u64,
+    /// Daily lottery tickets a staker in this tier collects.
+    pub daily_tickets: u64,
+    pub neuron_id: Option<u64>,
+    pub total_staked_e8s: u64,
+    pub staker_count: u64,
+    pub bootstrap: StakingBootstrap,
+    pub pending_refresh_e8s: u64,
+    pub pending_maturity: Vec<MaturityDisbursement>,
+    pub total_yield_e8s: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct StakingPoolInfo {
+    pub pools: Vec<TierPoolInfo>,
+    pub total_staked_e8s: u64,
+    pub min_stake_e8s: u64,
+    pub min_unstake_e8s: u64,
+    /// Lifetime yield harvested across all tiers (split 50/50 lottery pot /
+    /// treasury at distribution).
+    pub total_yield_e8s: u64,
+}
+
+impl_storable!(StakingPool);
+impl_storable!(StakeKey);
+impl_storable!(UserStake);
+impl_storable!(PendingUnstake);
+impl_storable!(LosslessVote);
+impl_storable!(YieldDistribution);
+
+/// Local/dev-only simulation of the NNS neuron lifecycle, driven by the same
+/// rejected-call fallback as `cast_nns_vote` (F-102 posture: mainnet never
+/// reaches it). Heap state — reset on upgrade — acceptable for local dev.
+#[derive(Default)]
+struct MockNeuronState {
+    stake_e8s: u64,
+    /// Configured dissolve delay (set by the mock IncreaseDissolveDelay,
+    /// inherited by split children) — drives the mock dissolve clock.
+    delay_secs: u64,
+    dissolving: bool,
+    dissolve_eta: u64,
+    maturity_e8s: u64,
+}
+
+struct MockGovernance {
+    neurons: std::collections::HashMap<u64, MockNeuronState>,
+    next_id: u64,
+}
+
+impl Default for MockGovernance {
+    fn default() -> Self {
+        MockGovernance {
+            neurons: std::collections::HashMap::new(),
+            next_id: MOCK_NEURON_ID_BASE,
+        }
+    }
+}
+
+thread_local! {
+    // One pool per StakeTier, keyed by `StakeTier::idx()`. (This region held
+    // the old single-pool cell — restructured 2026-06-10 before any deploy
+    // carried staking state, so no migration applies.)
+    static STAKING_POOLS: RefCell<StableBTreeMap<u8, StakingPool, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(19))))
+    });
+
+    static STAKES: RefCell<StableBTreeMap<StakeKey, UserStake, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(20))))
+    });
+
+    static PENDING_UNSTAKES: RefCell<StableBTreeMap<u64, PendingUnstake, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(21))))
+    });
+
+    static NEXT_UNSTAKE_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(22)), 1u64))
+    });
+
+    static LOSSLESS_VOTES: RefCell<StableBTreeMap<CommitmentKey, LosslessVote, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(23))))
+    });
+
+    static YIELD_DISTRIBUTIONS: RefCell<StableBTreeMap<u64, YieldDistribution, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(24))))
+    });
+
+    static NEXT_YIELD_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(25)), 1u64))
+    });
+
+    static STAKING_BUSY: RefCell<bool> = const { RefCell::new(false) };
+
+    static MOCK_GOV: RefCell<MockGovernance> = RefCell::new(MockGovernance::default());
+}
+
+/// Serializes every operation that touches the pooled neuron or share
+/// accounting (stake, unstake, the sweep). Share attribution depends on
+/// neuron mutations never interleaving across await points.
+pub struct StakingLock;
+
+impl StakingLock {
+    pub fn new() -> Result<Self, String> {
+        STAKING_BUSY.with(|b| {
+            let mut busy = b.borrow_mut();
+            if *busy {
+                return Err("STAKING_BUSY".to_string());
+            }
+            *busy = true;
+            Ok(StakingLock)
+        })
+    }
+}
+
+impl Drop for StakingLock {
+    fn drop(&mut self) {
+        STAKING_BUSY.with(|b| *b.borrow_mut() = false);
+    }
+}
+
+fn require_lossless_enabled() -> Result<(), String> {
+    if !feature_enabled(FLAG_LOSSLESS_VOTING) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+fn tier_pool(tier: StakeTier) -> StakingPool {
+    STAKING_POOLS
+        .with(|m| m.borrow().get(&tier.idx()))
+        .unwrap_or_default()
+}
+
+fn set_tier_pool(tier: StakeTier, pool: StakingPool) {
+    STAKING_POOLS.with(|m| {
+        m.borrow_mut().insert(tier.idx(), pool);
+    });
+}
+
+fn stake_key(tier: StakeTier, user: Principal) -> StakeKey {
+    StakeKey { tier: tier.idx(), user }
+}
+
+/// The caller's total voting weight: Σ stake × term multiplier over tiers.
+fn user_voting_weight(user: Principal) -> u64 {
+    StakeTier::all().iter().fold(0u64, |acc, &tier| {
+        let amount = STAKES
+            .with(|m| m.borrow().get(&stake_key(tier, user)))
+            .map(|s| s.amount_e8s)
+            .unwrap_or(0);
+        acc.saturating_add(amount.saturating_mul(tier.weight_multiplier()))
+    })
+}
+
+/// True when the user holds a stake in any tier (the lottery eligibility gate).
+fn user_has_stake(user: Principal) -> bool {
+    StakeTier::all()
+        .iter()
+        .any(|&tier| STAKES.with(|m| m.borrow().get(&stake_key(tier, user)).is_some()))
+}
+
+fn staking_audit(event_type: &str, user: Principal, amount_e8s: u64, ref_id: u64) {
+    let entry = AuditLogEntry {
+        timestamp: current_time(),
+        event_type: event_type.to_string(),
+        proposal_id: ref_id,
+        user,
+        amount_e8s,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&entry);
+    });
+}
+
+/// Governance neuron-staking (sub)account: sha256(0x0c · "neuron-stake" ·
+/// controller · nonce). ICP sent here with memo == nonce is claimable via
+/// ClaimOrRefresh{MemoAndController}.
+fn neuron_staking_subaccount(controller: Principal, nonce: u64) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update([0x0c]);
+    hasher.update(b"neuron-stake");
+    hasher.update(controller.as_slice());
+    hasher.update(nonce.to_be_bytes());
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&hasher.finalize());
+    sub
+}
+
+/// The 28-byte SHA-224 account-identifier hash WITHOUT the CRC32 prefix —
+/// the form governance's `Disburse.to_account` expects.
+fn account_id_hash28(owner: Principal, subaccount: &[u8; 32]) -> Vec<u8> {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha224::new();
+    hasher.update(b"\x0Aaccount-id");
+    hasher.update(owner.as_slice());
+    hasher.update(&subaccount[..]);
+    hasher.finalize().to_vec()
+}
+
+// ── manage_neuron plumbing ──
+
+enum GovOutcome {
+    Response(CommandResponse),
+    /// Local dev only: the call was rejected by the stub network — drive the
+    /// mock state machine instead (same posture as cast_nns_vote / F-102).
+    LocalFallback,
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn call_manage_neuron(neuron_id: Option<u64>, command: Command) -> Result<GovOutcome, String> {
+    let nns_gov = Principal::from_text(NNS_GOVERNANCE_ID).unwrap();
+    let args = ManageNeuron {
+        id: neuron_id.map(|id| NeuronId { id }),
+        command: Some(command),
+        neuron_id_or_subaccount: None,
+    };
+    let response: Result<(ManageNeuronResponse,), _> =
+        ic_cdk::call(nns_gov, "manage_neuron", (args,)).await;
+    match response {
+        Ok((res,)) => match res.command {
+            Some(CommandResponse::Error(err)) => {
+                Err(format!("NNS error {}: {}", err.error_type, err.error_message))
+            }
+            Some(cmd) => Ok(GovOutcome::Response(cmd)),
+            None => Err("No command response from NNS".to_string()),
+        },
+        Err((code, msg)) => {
+            let is_local = CONFIG.with(|cell| cell.borrow().get().is_local);
+            if is_local
+                && (code == ic_cdk::api::call::RejectionCode::DestinationInvalid
+                    || code == ic_cdk::api::call::RejectionCode::CanisterError
+                    || code == ic_cdk::api::call::RejectionCode::CanisterReject)
+            {
+                Ok(GovOutcome::LocalFallback)
+            } else {
+                Err(format!("NNS call rejected (code {:?}): {}", code, msg))
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static TEST_MOCK_MANAGE_NEURON: RefCell<Option<Result<CommandResponse, String>>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_manage_neuron(res: Option<Result<CommandResponse, String>>) {
+    TEST_MOCK_MANAGE_NEURON.with(|cell| {
+        *cell.borrow_mut() = res;
+    });
+}
+
+/// Host tests: an explicit mock response wins; otherwise fall through to the
+/// mock state machine so unit tests exercise the full local flow.
+#[cfg(not(target_arch = "wasm32"))]
+async fn call_manage_neuron(_neuron_id: Option<u64>, _command: Command) -> Result<GovOutcome, String> {
+    let mock = TEST_MOCK_MANAGE_NEURON.with(|cell| cell.borrow().clone());
+    match mock {
+        Some(res) => res.map(GovOutcome::Response),
+        None => Ok(GovOutcome::LocalFallback),
+    }
+}
+
+/// Claim the pool neuron (first stake) or refresh its cached stake after a
+/// top-up. `mock_amount_e8s` only feeds the local fallback, which cannot read
+/// the real staking account.
+async fn gov_claim_or_refresh(
+    nonce: u64,
+    mock_amount_e8s: u64,
+    existing_neuron: Option<u64>,
+) -> Result<u64, String> {
+    let cmd = Command::ClaimOrRefresh(ClaimOrRefreshCmd {
+        by: Some(By::MemoAndController(MemoAndController {
+            controller: Some(get_canister_id()),
+            memo: nonce,
+        })),
+    });
+    match call_manage_neuron(None, cmd).await? {
+        GovOutcome::Response(CommandResponse::ClaimOrRefresh(r)) => r
+            .refreshed_neuron_id
+            .map(|n| n.id)
+            .ok_or_else(|| "CLAIM_NO_NEURON_ID".to_string()),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => Ok(mock_claim_or_refresh(existing_neuron, mock_amount_e8s)),
+    }
+}
+
+fn mock_claim_or_refresh(existing: Option<u64>, amount_e8s: u64) -> u64 {
+    MOCK_GOV.with(|g| {
+        let mut g = g.borrow_mut();
+        let id = existing.unwrap_or_else(|| {
+            g.next_id += 1;
+            g.next_id
+        });
+        let neuron = g.neurons.entry(id).or_default();
+        neuron.stake_e8s = neuron.stake_e8s.saturating_add(amount_e8s);
+        id
+    })
+}
+
+async fn gov_increase_dissolve_delay(neuron_id: u64, additional_secs: u32) -> Result<(), String> {
+    let cmd = Command::Configure(ConfigureCmd {
+        operation: Some(Operation::IncreaseDissolveDelay(IncreaseDissolveDelay {
+            additional_dissolve_delay_seconds: additional_secs,
+        })),
+    });
+    match call_manage_neuron(Some(neuron_id), cmd).await? {
+        GovOutcome::Response(CommandResponse::Configure(_)) => Ok(()),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => {
+            MOCK_GOV.with(|g| {
+                if let Some(n) = g.borrow_mut().neurons.get_mut(&neuron_id) {
+                    n.delay_secs = n.delay_secs.saturating_add(additional_secs as u64);
+                }
+            });
+            Ok(())
+        }
+    }
+}
+
+async fn gov_follow(neuron_id: u64, topic: i32, leader_id: u64) -> Result<(), String> {
+    let cmd = Command::Follow(FollowCmd {
+        topic,
+        followees: vec![NeuronId { id: leader_id }],
+    });
+    match call_manage_neuron(Some(neuron_id), cmd).await? {
+        GovOutcome::Response(CommandResponse::Follow(_)) => Ok(()),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => Ok(()),
+    }
+}
+
+/// Follow the leader on the catch-all topic plus the two reward-bearing topics
+/// it excludes, so the pool neuron never misses voting rewards.
+async fn gov_follow_all_topics(neuron_id: u64, leader_id: u64) -> Result<(), String> {
+    for topic in [TOPIC_CATCH_ALL, TOPIC_GOVERNANCE, TOPIC_SNS_AND_NEURONS_FUND] {
+        gov_follow(neuron_id, topic, leader_id).await?;
+    }
+    Ok(())
+}
+
+async fn gov_split(neuron_id: u64, amount_e8s: u64) -> Result<u64, String> {
+    let cmd = Command::Split(SplitCmd {
+        amount_e8s,
+        memo: None,
+    });
+    match call_manage_neuron(Some(neuron_id), cmd).await? {
+        GovOutcome::Response(CommandResponse::Split(r)) => r
+            .created_neuron_id
+            .map(|n| n.id)
+            .ok_or_else(|| "SPLIT_NO_NEURON_ID".to_string()),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => mock_split(neuron_id, amount_e8s),
+    }
+}
+
+fn mock_split(parent_id: u64, amount_e8s: u64) -> Result<u64, String> {
+    MOCK_GOV.with(|g| {
+        let mut g = g.borrow_mut();
+        let parent = g
+            .neurons
+            .get_mut(&parent_id)
+            .ok_or_else(|| "MOCK_NEURON_NOT_FOUND".to_string())?;
+        if parent.stake_e8s < amount_e8s {
+            return Err("MOCK_INSUFFICIENT_STAKE".to_string());
+        }
+        parent.stake_e8s -= amount_e8s;
+        let parent_delay = parent.delay_secs;
+        g.next_id += 1;
+        let child_id = g.next_id;
+        g.neurons.insert(
+            child_id,
+            MockNeuronState {
+                // The real NNS charges the transfer fee out of the split amount.
+                stake_e8s: amount_e8s.saturating_sub(ICP_FEE_E8S),
+                // A split child inherits the parent's dissolve delay.
+                delay_secs: parent_delay,
+                ..Default::default()
+            },
+        );
+        Ok(child_id)
+    })
+}
+
+async fn gov_start_dissolving(neuron_id: u64) -> Result<(), String> {
+    let cmd = Command::Configure(ConfigureCmd {
+        operation: Some(Operation::StartDissolving(EmptyRecord {})),
+    });
+    match call_manage_neuron(Some(neuron_id), cmd).await? {
+        GovOutcome::Response(CommandResponse::Configure(_)) => Ok(()),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => mock_start_dissolving(neuron_id),
+    }
+}
+
+fn mock_start_dissolving(neuron_id: u64) -> Result<(), String> {
+    MOCK_GOV.with(|g| {
+        let mut g = g.borrow_mut();
+        let neuron = g
+            .neurons
+            .get_mut(&neuron_id)
+            .ok_or_else(|| "MOCK_NEURON_NOT_FOUND".to_string())?;
+        if !neuron.dissolving {
+            let delay_ns = neuron.delay_secs.saturating_mul(1_000_000_000);
+            neuron.dissolving = true;
+            neuron.dissolve_eta = current_time().saturating_add(delay_ns);
+        }
+        Ok(())
+    })
+}
+
+/// Disburse a fully-dissolved split neuron to the user's main ICP account.
+/// Governance rejects if the neuron hasn't finished dissolving — callers just
+/// retry on the next sweep tick.
+async fn gov_disburse(neuron_id: u64, owner: Principal) -> Result<u64, String> {
+    let cmd = Command::Disburse(DisburseCmd {
+        to_account: Some(GovAccountIdentifier {
+            hash: account_id_hash28(owner, &[0u8; 32]),
+        }),
+        amount: None, // full stake
+    });
+    match call_manage_neuron(Some(neuron_id), cmd).await? {
+        GovOutcome::Response(CommandResponse::Disburse(r)) => Ok(r.transfer_block_height),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => mock_disburse(neuron_id, owner).await,
+    }
+}
+
+async fn mock_disburse(neuron_id: u64, owner: Principal) -> Result<u64, String> {
+    let stake = MOCK_GOV.with(|g| {
+        let g = g.borrow();
+        let neuron = g
+            .neurons
+            .get(&neuron_id)
+            .ok_or_else(|| "MOCK_NEURON_NOT_FOUND".to_string())?;
+        if !neuron.dissolving {
+            return Err("MOCK_NOT_DISSOLVING".to_string());
+        }
+        if current_time() < neuron.dissolve_eta {
+            return Err("MOCK_NOT_DISSOLVED_YET".to_string());
+        }
+        Ok(neuron.stake_e8s)
+    })?;
+    let block = if stake > ICP_FEE_E8S {
+        let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+        let dest = LedgerAccount {
+            owner,
+            subaccount: None,
+        };
+        call_ledger_transfer(
+            ledger_id,
+            Some(MOCK_STAKE_SUBACCOUNT),
+            dest,
+            stake - ICP_FEE_E8S,
+            Some(ICP_FEE_E8S),
+        )
+        .await?
+    } else {
+        0
+    };
+    MOCK_GOV.with(|g| {
+        g.borrow_mut().neurons.remove(&neuron_id);
+    });
+    Ok(block)
+}
+
+/// Disburse 100% of the pool neuron's maturity to the yield inbox. The real
+/// NNS mints the ICP ~7 days later; the local mock transfers immediately from
+/// the canister's own funds (faucet-style) so the distribution runs for real.
+async fn gov_disburse_maturity(neuron_id: u64) -> Result<(), String> {
+    let cmd = Command::DisburseMaturity(DisburseMaturityCmd {
+        percentage_to_disburse: 100,
+        to_account: Some(GovAccount {
+            owner: Some(get_canister_id()),
+            subaccount: Some(YIELD_INBOX_SUBACCOUNT.to_vec()),
+        }),
+        to_account_identifier: None,
+    });
+    match call_manage_neuron(Some(neuron_id), cmd).await? {
+        GovOutcome::Response(CommandResponse::DisburseMaturity(_)) => Ok(()),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => mock_disburse_maturity(neuron_id).await,
+    }
+}
+
+async fn mock_disburse_maturity(neuron_id: u64) -> Result<(), String> {
+    let amount = MOCK_GOV.with(|g| {
+        g.borrow()
+            .neurons
+            .get(&neuron_id)
+            .map(|n| n.maturity_e8s)
+            .ok_or_else(|| "MOCK_NEURON_NOT_FOUND".to_string())
+    })?;
+    if amount == 0 {
+        return Ok(());
+    }
+    let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+    let dest = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(YIELD_INBOX_SUBACCOUNT),
+    };
+    call_ledger_transfer(ledger_id, None, dest, amount, Some(ICP_FEE_E8S)).await?;
+    MOCK_GOV.with(|g| {
+        if let Some(n) = g.borrow_mut().neurons.get_mut(&neuron_id) {
+            n.maturity_e8s = 0;
+        }
+    });
+    Ok(())
+}
+
+/// Current unstaked maturity on the pool neuron. The canister is the neuron's
+/// controller, so `get_full_neuron` is permitted on mainnet; locally and in
+/// host tests the mock neuron is the source of truth.
+async fn staking_neuron_maturity(neuron_id: u64) -> Result<u64, String> {
+    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+    if is_local || cfg!(not(target_arch = "wasm32")) {
+        return Ok(MOCK_GOV.with(|g| {
+            g.borrow()
+                .neurons
+                .get(&neuron_id)
+                .map(|n| n.maturity_e8s)
+                .unwrap_or(0)
+        }));
+    }
+    get_full_neuron(neuron_id)
+        .await
+        .map(|n| n.maturity_e8s_equivalent)
+}
+
+// ── Stake ──
+
+/// The caller's stake-escrow subaccount. Fund it with amount + 0.0001 ICP fee,
+/// then call `stake(amount)`.
+#[ic_cdk::query]
+fn get_stake_deposit_address() -> LedgerAccount {
+    let caller = get_caller();
+    if caller == Principal::anonymous() {
+        panic!("Anonymous principal is not allowed");
+    }
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(derive_subaccount(&caller, STAKE_SEED)),
+    }
+}
+
+#[ic_cdk::update]
+async fn stake(amount_e8s: u64, tier: StakeTier) -> Result<(), String> {
+    require_authenticated()?;
+    require_lossless_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    let _lock = StakingLock::new()?;
+
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let mut pool = tier_pool(tier);
+
+    // The first stake into a tier creates its neuron, so it must clear the
+    // NNS 1 ICP minimum; afterwards the configured minimum applies.
+    let min = if pool.neuron_id.is_none() {
+        ONE_ICP_E8S
+    } else {
+        config.min_stake_e8s
+    };
+    if amount_e8s < min {
+        return Err("BELOW_MINIMUM".to_string());
+    }
+    if amount_e8s > MAX_COMMIT_E8S {
+        return Err("EXCEEDS_GLOBAL_CAP".to_string());
+    }
+
+    let sub = derive_subaccount(&caller, STAKE_SEED);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(config.ledger_canister_id, escrow).await?;
+    if balance < amount_e8s + ICP_FEE_E8S {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+
+    // Fix the claim nonce at the tier's very first stake — the governance
+    // staking account is derived from it and must never change afterwards.
+    // (+idx keeps the three tiers' nonces distinct even within one tick.)
+    if pool.nonce == 0 {
+        pool.nonce = current_time() + tier.idx() as u64;
+        set_tier_pool(tier, pool.clone());
+    }
+
+    // Escrow → staking account (point of no return). Mainnet: legacy transfer
+    // with memo == nonce to the governance staking account. Local: park the
+    // funds in MOCK_STAKE_SUBACCOUNT so a mock disburse can really pay back.
+    if config.is_local || cfg!(not(target_arch = "wasm32")) {
+        let dest = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(MOCK_STAKE_SUBACCOUNT),
+        };
+        call_ledger_transfer(
+            config.ledger_canister_id,
+            Some(sub),
+            dest,
+            amount_e8s,
+            Some(ICP_FEE_E8S),
+        )
+        .await
+        .map_err(|e| format!("STAKE_TRANSFER_FAILED: {}", e))?;
+    } else {
+        let gov = Principal::from_text(NNS_GOVERNANCE_ID).unwrap();
+        let staking_sub = neuron_staking_subaccount(get_canister_id(), pool.nonce);
+        call_ledger_legacy_transfer(
+            config.ledger_canister_id,
+            Some(sub),
+            account_id_bytes(gov, &staking_sub),
+            amount_e8s,
+            ICP_FEE_E8S,
+            pool.nonce,
+        )
+        .await
+        .map_err(|e| format!("STAKE_TRANSFER_FAILED: {}", e))?;
+    }
+
+    // Credit the share immediately — the funds have left the user's escrow.
+    let now = current_time();
+    let key = stake_key(tier, caller);
+    STAKES.with(|m| {
+        let mut s = m.borrow().get(&key).unwrap_or(UserStake {
+            amount_e8s: 0,
+            staked_at: now,
+            last_action_at: now,
+        });
+        s.amount_e8s = s.amount_e8s.checked_add(amount_e8s).unwrap_or(u64::MAX);
+        s.last_action_at = now;
+        m.borrow_mut().insert(key, s);
+    });
+    pool.total_staked_e8s = pool.total_staked_e8s.checked_add(amount_e8s).unwrap_or(u64::MAX);
+    pool.pending_refresh_e8s = pool
+        .pending_refresh_e8s
+        .checked_add(amount_e8s)
+        .unwrap_or(u64::MAX);
+    set_tier_pool(tier, pool);
+    staking_audit("stake", caller, amount_e8s, tier.idx() as u64);
+
+    // Best-effort claim/refresh + bootstrap; the sweep repairs any failure.
+    if let Err(e) = advance_staking_bootstrap().await {
+        canister_print(&format!("stake: bootstrap deferred to sweep: {}", e));
+    }
+    Ok(())
+}
+
+/// Drive every tier's pool-neuron state machine forward: claim/refresh
+/// pending stake, then (once) set the tier's dissolve delay and follow the
+/// leader on all topics. Callers must hold the StakingLock. Returns the first
+/// error but still attempts every tier.
+async fn advance_staking_bootstrap() -> Result<(), String> {
+    let mut first_err: Option<String> = None;
+    for tier in StakeTier::all() {
+        if let Err(e) = advance_tier_bootstrap(tier).await {
+            if first_err.is_none() {
+                first_err = Some(format!("{:?}: {}", tier, e));
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+async fn advance_tier_bootstrap(tier: StakeTier) -> Result<(), String> {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let mut pool = tier_pool(tier);
+
+    if pool.pending_refresh_e8s > 0 && pool.nonce != 0 {
+        let id =
+            gov_claim_or_refresh(pool.nonce, pool.pending_refresh_e8s, pool.neuron_id).await?;
+        pool.pending_refresh_e8s = 0;
+        if pool.neuron_id.is_none() {
+            pool.neuron_id = Some(id);
+            pool.bootstrap = StakingBootstrap::Claimed;
+        }
+        set_tier_pool(tier, pool.clone());
+    }
+
+    let neuron_id = match pool.neuron_id {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    if pool.bootstrap == StakingBootstrap::Claimed {
+        let delay = u32::try_from(tier.dissolve_delay_secs()).unwrap_or(u32::MAX);
+        gov_increase_dissolve_delay(neuron_id, delay).await?;
+        pool.bootstrap = StakingBootstrap::DelaySet;
+        set_tier_pool(tier, pool.clone());
+    }
+    if pool.bootstrap == StakingBootstrap::DelaySet {
+        gov_follow_all_topics(neuron_id, config.primary_neuron_id).await?;
+        pool.bootstrap = StakingBootstrap::Ready;
+        set_tier_pool(tier, pool.clone());
+    }
+    Ok(())
+}
+
+// ── Unstake ──
+
+/// Split `amount_e8s` off the tier's pool neuron and start dissolving it; the
+/// sweep disburses to the caller's wallet once the tier's full term passes.
+/// Returns the pending-unstake id. The user nets amount − 0.0002 ICP (split +
+/// disburse fees).
+#[ic_cdk::update]
+async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
+    require_authenticated()?;
+    require_lossless_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    let _lock = StakingLock::new()?;
+
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let mut pool = tier_pool(tier);
+    let neuron_id = pool.neuron_id.ok_or("POOL_NOT_READY")?;
+    if pool.bootstrap != StakingBootstrap::Ready {
+        return Err("POOL_NOT_READY".to_string());
+    }
+    if pool.pending_refresh_e8s > 0 {
+        return Err("REFRESH_PENDING".to_string());
+    }
+
+    let key = stake_key(tier, caller);
+    let mut stake = STAKES
+        .with(|m| m.borrow().get(&key))
+        .ok_or("NO_STAKE")?;
+    if amount_e8s > stake.amount_e8s {
+        return Err("EXCEEDS_STAKE".to_string());
+    }
+    if amount_e8s < config.min_unstake_e8s {
+        return Err("BELOW_MINIMUM".to_string());
+    }
+    // The pool neuron must keep ≥ 1 ICP after the split (NNS minimum stake).
+    // The last ~1 ICP of shares can only exit after someone else stakes.
+    if pool.total_staked_e8s.saturating_sub(amount_e8s) < ONE_ICP_E8S {
+        return Err("POOL_FLOOR".to_string());
+    }
+
+    // Split is the point of no return — a clean failure means nothing moved.
+    let split_neuron_id = gov_split(neuron_id, amount_e8s)
+        .await
+        .map_err(|e| format!("SPLIT_FAILED: {}", e))?;
+
+    let now = current_time();
+    stake.amount_e8s -= amount_e8s;
+    stake.last_action_at = now;
+    if stake.amount_e8s == 0 {
+        STAKES.with(|m| {
+            m.borrow_mut().remove(&key);
+        });
+    } else {
+        STAKES.with(|m| {
+            m.borrow_mut().insert(key, stake);
+        });
+    }
+    pool.total_staked_e8s = pool.total_staked_e8s.saturating_sub(amount_e8s);
+    set_tier_pool(tier, pool);
+
+    let id = NEXT_UNSTAKE_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    let delay_ns = tier.dissolve_delay_secs().saturating_mul(1_000_000_000);
+    let mut pending = PendingUnstake {
+        id,
+        user: caller,
+        tier,
+        amount_e8s,
+        split_neuron_id,
+        status: UnstakeStatus::SplitDone,
+        created_at: now,
+        dissolve_eta: now.saturating_add(delay_ns),
+        disburse_block: None,
+        settled_at: None,
+    };
+    // Best-effort StartDissolving; the sweep retries (and re-stamps the ETA).
+    if gov_start_dissolving(split_neuron_id).await.is_ok() {
+        pending.status = UnstakeStatus::Dissolving;
+    }
+    PENDING_UNSTAKES.with(|m| {
+        m.borrow_mut().insert(id, pending);
+    });
+    staking_audit("unstake_split", caller, amount_e8s, id);
+    Ok(id)
+}
+
+// ── Lossless voting ──
+
+/// Cast a free vote with the caller's staked weight. Standalone — no burn
+/// required. Adds to the balance of power that decides the NNS vote direction;
+/// never counts toward the proposal's burn threshold. One immutable vote per
+/// user per proposal; the weight is snapshotted at cast time.
+#[ic_cdk::update]
+fn cast_lossless_vote(proposal_id: u64, stance: Stance) -> Result<(), String> {
+    require_authenticated()?;
+    require_lossless_enabled()?;
+    let caller = get_caller();
+
+    // Weight is proportional to stake × term: 6mo = 1×, 1y = 2×, 2y = 4×.
+    let weight = user_voting_weight(caller);
+    if weight == 0 {
+        return Err("NO_STAKE".to_string());
+    }
+
+    let key = CommitmentKey {
+        proposal_id,
+        principal: caller,
+    };
+    if LOSSLESS_VOTES.with(|m| m.borrow().get(&key).is_some()) {
+        return Err("ALREADY_VOTED".to_string());
+    }
+
+    let proposal = PROPOSALS.with(|map| map.borrow().get(&proposal_id));
+    let mut proposal = match proposal {
+        Some(p) => p,
+        None => return Err("PROPOSAL_NOT_FOUND".to_string()),
+    };
+    if proposal.status != "open" && proposal.status != "met" {
+        return Err("VOTING_CLOSED".to_string());
+    }
+    let now = current_time();
+    if now >= proposal.deadline.saturating_sub(3_600_000_000_000) {
+        return Err("VOTING_CLOSED".to_string());
+    }
+
+    if proposal.first_stance.is_none() {
+        proposal.first_stance = Some(stance.clone());
+    }
+    if stance == Stance::Adopt {
+        proposal.lossless_adopt_e8s = proposal
+            .lossless_adopt_e8s
+            .checked_add(weight)
+            .ok_or("POT_OVERFLOW")?;
+    } else {
+        proposal.lossless_reject_e8s = proposal
+            .lossless_reject_e8s
+            .checked_add(weight)
+            .ok_or("POT_OVERFLOW")?;
+    }
+
+    LOSSLESS_VOTES.with(|m| {
+        m.borrow_mut().insert(
+            key,
+            LosslessVote {
+                proposal_id,
+                principal: caller,
+                stance,
+                weight_e8s: weight,
+                cast_at: now,
+            },
+        );
+    });
+    PROPOSALS.with(|map| {
+        map.borrow_mut().insert(proposal_id, proposal);
+    });
+    staking_audit("lossless_vote", caller, weight, proposal_id);
+    Ok(())
+}
+
+// ── Sweep: bootstrap repair, unstakes, maturity, yield ──
+
+/// One pass of the staking machinery, run on the 5-minute timer. Skips the
+/// tick entirely if a user call currently holds the lock.
+async fn staking_sweep() {
+    let _lock = match StakingLock::new() {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+
+    if let Err(e) = advance_staking_bootstrap().await {
+        canister_print(&format!("staking_sweep: bootstrap: {}", e));
+    }
+    process_pending_unstakes().await;
+    harvest_staking_maturity().await;
+    distribute_yield_inbox().await;
+}
+
+async fn process_pending_unstakes() {
+    let now = current_time();
+
+    let open: Vec<PendingUnstake> = PENDING_UNSTAKES.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|u| u.status != UnstakeStatus::Disbursed)
+            .collect()
+    });
+
+    for mut unstake in open {
+        match unstake.status {
+            UnstakeStatus::SplitDone => {
+                if gov_start_dissolving(unstake.split_neuron_id).await.is_ok() {
+                    let delay_ns =
+                        unstake.tier.dissolve_delay_secs().saturating_mul(1_000_000_000);
+                    unstake.status = UnstakeStatus::Dissolving;
+                    unstake.dissolve_eta = now.saturating_add(delay_ns);
+                    PENDING_UNSTAKES.with(|m| {
+                        m.borrow_mut().insert(unstake.id, unstake);
+                    });
+                }
+            }
+            UnstakeStatus::Dissolving if now >= unstake.dissolve_eta => {
+                match gov_disburse(unstake.split_neuron_id, unstake.user).await {
+                    Ok(block) => {
+                        unstake.disburse_block = Some(block);
+                        unstake.status = UnstakeStatus::Disbursed;
+                        unstake.settled_at = Some(now);
+                        let user = unstake.user;
+                        let amount = unstake.amount_e8s;
+                        let id = unstake.id;
+                        PENDING_UNSTAKES.with(|m| {
+                            m.borrow_mut().insert(id, unstake);
+                        });
+                        staking_audit("unstake_disbursed", user, amount, id);
+                        record_payout(user, PayoutType::UnstakeDisbursement, IdeaToken::ICP, amount, id);
+                    }
+                    Err(e) => {
+                        // Not dissolved yet, or transient — retry next tick.
+                        canister_print(&format!(
+                            "unstake {} disburse pending: {}",
+                            unstake.id, e
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Harvest matured yield from every tier's neuron into the shared yield
+/// inbox (each tier is independent — one failing doesn't block the others).
+async fn harvest_staking_maturity() {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    for tier in StakeTier::all() {
+        let mut pool = tier_pool(tier);
+        let neuron_id = match pool.neuron_id {
+            Some(id) if pool.bootstrap == StakingBootstrap::Ready => id,
+            _ => continue,
+        };
+
+        let maturity = match staking_neuron_maturity(neuron_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                canister_print(&format!("maturity check failed ({:?}): {}", tier, e));
+                continue;
+            }
+        };
+        if maturity < config.maturity_threshold_e8s {
+            continue;
+        }
+
+        if let Err(e) = gov_disburse_maturity(neuron_id).await {
+            canister_print(&format!("disburse_maturity failed ({:?}): {}", tier, e));
+            continue;
+        }
+        let now = current_time();
+        // Local mocks mint instantly; the real NNS takes ~7 days.
+        let expected_at = if config.is_local || cfg!(not(target_arch = "wasm32")) {
+            now
+        } else {
+            now.saturating_add(MATURITY_MINT_DELAY_NANOS)
+        };
+        pool.pending_maturity.push(MaturityDisbursement {
+            amount_e8s: maturity,
+            initiated_at: now,
+            expected_at,
+        });
+        if pool.pending_maturity.len() > MAX_PENDING_MATURITY {
+            pool.pending_maturity.remove(0);
+        }
+        pool.total_yield_e8s = pool.total_yield_e8s.saturating_add(maturity);
+        set_tier_pool(tier, pool);
+        staking_audit("yield_harvest", get_canister_id(), maturity, neuron_id);
+    }
+}
+
+async fn distribute_yield_inbox() {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+
+    // Resume an unfinished distribution before opening a new one — its share
+    // of the inbox balance is already earmarked by the persisted amounts.
+    let unfinished: Option<YieldDistribution> = YIELD_DISTRIBUTIONS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .find(|d| d.status == YieldStatus::InProgress)
+    });
+    if let Some(mut dist) = unfinished {
+        if let Err(e) = settle_yield_split(&mut dist).await {
+            canister_print(&format!("yield distribution {} retry failed: {}", dist.id, e));
+        }
+        YIELD_DISTRIBUTIONS.with(|m| {
+            m.borrow_mut().insert(dist.id, dist);
+        });
+        return;
+    }
+
+    let inbox = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(YIELD_INBOX_SUBACCOUNT),
+    };
+    let balance = match call_ledger_balance(config.ledger_canister_id, inbox).await {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    if balance < YIELD_MIN_DISTRIBUTION_E8S {
+        return;
+    }
+
+    let spendable = balance - 2 * ICP_FEE_E8S;
+    let lottery_amt = spendable / 2;
+    let treasury_amt = spendable - lottery_amt;
+
+    let id = NEXT_YIELD_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    let mut dist = YieldDistribution {
+        id,
+        amount_e8s: balance,
+        lottery_amount_e8s: lottery_amt,
+        treasury_amount_e8s: treasury_amt,
+        lottery_block: None,
+        treasury_block: None,
+        status: YieldStatus::InProgress,
+        created_at: current_time(),
+        completed_at: None,
+    };
+    // Persist the journal before any transfer so a trap can't lose the plan.
+    YIELD_DISTRIBUTIONS.with(|m| {
+        m.borrow_mut().insert(id, dist.clone());
+    });
+    if let Err(e) = settle_yield_split(&mut dist).await {
+        canister_print(&format!("yield distribution {} incomplete: {}", id, e));
+    }
+    YIELD_DISTRIBUTIONS.with(|m| {
+        m.borrow_mut().insert(id, dist);
+    });
+}
+
+/// 50% → lottery prize pot, 50% → treasury. Idempotent via per-leg block
+/// indices, like `settle_burn_split`.
+async fn settle_yield_split(dist: &mut YieldDistribution) -> Result<(), String> {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+
+    if dist.lottery_block.is_none() && dist.lottery_amount_e8s > 0 {
+        let dest = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(LOTTERY_SUBACCOUNT),
+        };
+        let b = call_ledger_transfer(
+            ledger_id,
+            Some(YIELD_INBOX_SUBACCOUNT),
+            dest,
+            dist.lottery_amount_e8s,
+            Some(ICP_FEE_E8S),
+        )
+        .await
+        .map_err(|e| format!("YIELD_LOTTERY_XFER: {}", e))?;
+        dist.lottery_block = Some(b);
+        // Persist the leg immediately — a panic before the caller's insert
+        // must never lose a completed transfer (double-pay risk).
+        YIELD_DISTRIBUTIONS.with(|m| {
+            m.borrow_mut().insert(dist.id, dist.clone());
+        });
+    }
+
+    if dist.treasury_block.is_none() && dist.treasury_amount_e8s > 0 {
+        let dest = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(TREASURY_SUBACCOUNT),
+        };
+        let b = call_ledger_transfer(
+            ledger_id,
+            Some(YIELD_INBOX_SUBACCOUNT),
+            dest,
+            dist.treasury_amount_e8s,
+            Some(ICP_FEE_E8S),
+        )
+        .await
+        .map_err(|e| format!("YIELD_TREASURY_XFER: {}", e))?;
+        dist.treasury_block = Some(b);
+        YIELD_DISTRIBUTIONS.with(|m| {
+            m.borrow_mut().insert(dist.id, dist.clone());
+        });
+    }
+
+    // Both legs done: close out and retire pending-maturity entries whose
+    // mint window has passed.
+    let now = current_time();
+    dist.status = YieldStatus::Done;
+    dist.completed_at = Some(now);
+    for tier in StakeTier::all() {
+        let mut pool = tier_pool(tier);
+        let before = pool.pending_maturity.len();
+        pool.pending_maturity.retain(|m| m.expected_at > now);
+        if pool.pending_maturity.len() != before {
+            set_tier_pool(tier, pool);
+        }
+    }
+    let distributed = dist
+        .lottery_amount_e8s
+        .saturating_add(dist.treasury_amount_e8s);
+    staking_audit("yield_distribution", get_canister_id(), distributed, dist.id);
+    Ok(())
+}
+
+// ── Queries ──
+
+#[ic_cdk::query]
+fn get_my_stake() -> UserStakeInfo {
+    let caller = get_caller();
+    let mut tiers = Vec::new();
+    let mut total = 0u64;
+    let mut weight = 0u64;
+    for tier in StakeTier::all() {
+        if let Some(s) = STAKES.with(|m| m.borrow().get(&stake_key(tier, caller))) {
+            let w = s.amount_e8s.saturating_mul(tier.weight_multiplier());
+            tiers.push(UserTierStake {
+                tier,
+                amount_e8s: s.amount_e8s,
+                weight_e8s: w,
+                staked_at: s.staked_at,
+                last_action_at: s.last_action_at,
+            });
+            total = total.saturating_add(s.amount_e8s);
+            weight = weight.saturating_add(w);
+        }
+    }
+    UserStakeInfo {
+        tiers,
+        total_staked_e8s: total,
+        total_weight_e8s: weight,
+    }
+}
+
+#[ic_cdk::query]
+fn get_staking_pool_info() -> StakingPoolInfo {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ticket_base = config.lottery_tickets_per_day;
+    let mut pools = Vec::new();
+    let mut total_staked = 0u64;
+    let mut total_yield = 0u64;
+    for tier in StakeTier::all() {
+        let pool = tier_pool(tier);
+        let staker_count = STAKES.with(|m| {
+            m.borrow()
+                .iter()
+                .filter(|e| e.key().tier == tier.idx())
+                .count() as u64
+        });
+        total_staked = total_staked.saturating_add(pool.total_staked_e8s);
+        total_yield = total_yield.saturating_add(pool.total_yield_e8s);
+        pools.push(TierPoolInfo {
+            tier,
+            dissolve_delay_secs: tier.dissolve_delay_secs(),
+            weight_multiplier: tier.weight_multiplier(),
+            daily_tickets: ticket_base.saturating_mul(tier.weight_multiplier()),
+            neuron_id: pool.neuron_id,
+            total_staked_e8s: pool.total_staked_e8s,
+            staker_count,
+            bootstrap: pool.bootstrap,
+            pending_refresh_e8s: pool.pending_refresh_e8s,
+            pending_maturity: pool.pending_maturity,
+            total_yield_e8s: pool.total_yield_e8s,
+        });
+    }
+    StakingPoolInfo {
+        pools,
+        total_staked_e8s: total_staked,
+        min_stake_e8s: config.min_stake_e8s,
+        min_unstake_e8s: config.min_unstake_e8s,
+        total_yield_e8s: total_yield,
+    }
+}
+
+#[ic_cdk::query]
+fn list_my_pending_unstakes() -> Vec<PendingUnstake> {
+    let caller = get_caller();
+    PENDING_UNSTAKES.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|u| u.user == caller)
+            .collect()
+    })
+}
+
+#[ic_cdk::query]
+fn get_my_lossless_votes() -> Vec<LosslessVote> {
+    let caller = get_caller();
+    LOSSLESS_VOTES.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|v| v.principal == caller)
+            .collect()
+    })
+}
+
+#[ic_cdk::query]
+fn list_yield_distributions() -> Vec<YieldDistribution> {
+    YIELD_DISTRIBUTIONS.with(|m| m.borrow().iter().map(|e| e.value()).collect())
+}
+
+// ── Admin & dev ──
+
+/// Admin: tune the staking parameters. Pass null to leave a value unchanged.
+/// (Dissolve delays are fixed per tier — 6 months / 1 year / 2 years — and
+/// not configurable.)
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_staking_config(
+    min_stake_e8s: Option<u64>,
+    min_unstake_e8s: Option<u64>,
+    maturity_threshold_e8s: Option<u64>,
+) -> Result<(), String> {
+    CONFIG.with(|cell| {
+        let mut config = cell.borrow().get().clone();
+        if let Some(m) = min_stake_e8s {
+            if m == 0 {
+                return Err("INVALID_MIN_STAKE".to_string());
+            }
+            config.min_stake_e8s = m;
+        }
+        if let Some(m) = min_unstake_e8s {
+            if m < ONE_ICP_E8S + ICP_FEE_E8S {
+                return Err("INVALID_MIN_UNSTAKE".to_string());
+            }
+            config.min_unstake_e8s = m;
+        }
+        if let Some(m) = maturity_threshold_e8s {
+            if m < 105_000_000 {
+                return Err("INVALID_MATURITY_THRESHOLD".to_string());
+            }
+            config.maturity_threshold_e8s = m;
+        }
+        cell.borrow_mut().set(config);
+        Ok(())
+    })
+}
+
+fn require_local_dev() -> Result<(), String> {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    if !config.is_local
+        || config.ledger_canister_id == Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
+    {
+        return Err("DEV_ONLY".to_string());
+    }
+    Ok(())
+}
+
+/// Local-dev: run one staking sweep pass immediately (instead of waiting for
+/// the 5-minute timer).
+#[ic_cdk::update]
+async fn dev_run_staking_sweep() -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    staking_sweep().await;
+    Ok(())
+}
+
+/// Local-dev: make a pending unstake disbursable right now (clears both the
+/// record's ETA and the mock neuron's dissolve clock).
+#[ic_cdk::update]
+fn dev_fast_forward_dissolve(unstake_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let mut unstake = PENDING_UNSTAKES
+        .with(|m| m.borrow().get(&unstake_id))
+        .ok_or("UNSTAKE_NOT_FOUND")?;
+    let now = current_time();
+    unstake.dissolve_eta = now;
+    PENDING_UNSTAKES.with(|m| {
+        m.borrow_mut().insert(unstake_id, unstake.clone());
+    });
+    MOCK_GOV.with(|g| {
+        if let Some(n) = g.borrow_mut().neurons.get_mut(&unstake.split_neuron_id) {
+            n.dissolve_eta = now;
+        }
+    });
+    Ok(())
+}
+
+/// Local-dev: credit simulated maturity to one tier's mock pool neuron so
+/// the yield harvest + distribution can be exercised end-to-end.
+#[ic_cdk::update]
+fn dev_add_mock_maturity(amount_e8s: u64, tier: StakeTier) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let pool = tier_pool(tier);
+    let neuron_id = pool.neuron_id.ok_or("POOL_NOT_READY")?;
+    MOCK_GOV.with(|g| {
+        let mut g = g.borrow_mut();
+        let neuron = g
+            .neurons
+            .get_mut(&neuron_id)
+            .ok_or_else(|| "MOCK_NEURON_NOT_FOUND".to_string())?;
+        neuron.maturity_e8s = neuron.maturity_e8s.saturating_add(amount_e8s);
+        Ok(())
+    })
+}
+
+// ==========================================
+// 14. Lossless Lottery (Powerball-style) + Payout History
+// ==========================================
+//
+// Every signed-in user collects tickets daily (admin-tunable, default 10).
+// Draws copy the American Powerball: jackpot odds of 1 in 292,201,338 per
+// ticket, three draws a week (Mon/Wed/Sat nights US Eastern — fixed here as
+// the corresponding Tue/Thu/Sun 03:00 UTC instants). Tickets accumulate
+// across draws until someone wins, then the round restarts. The prize pool is
+// the staking-yield lottery pot (LOTTERY_SUBACCOUNT): a winner takes 80%, the
+// remaining 20% seeds the next round. Feature-flagged via FLAG_LOSSLESS_LOTTERY
+// (ships dark). Payout history records every ICP/token payout the site makes
+// to a user (lottery wins, unstake disbursements, upvote shares, refunds).
+
+/// Powerball jackpot odds: 5-of-69 white balls + 1-of-26 red ball.
+const LOTTERY_ODDS_DENOMINATOR: u64 = 292_201_338;
+/// Winner takes 80% of the pot; 20% stays for the next drawing.
+const LOTTERY_WINNER_SHARE_PCT: u64 = 80;
+/// Draw instant within a draw day (≈ Powerball's 22:59 US Eastern the night
+/// before, expressed in UTC).
+const LOTTERY_DRAW_HOUR_UTC: u64 = 3;
+const SECS_PER_DAY: u64 = 86_400;
+/// Keep the most recent draws only (3/week — ~3 years of history).
+const MAX_LOTTERY_DRAWS_KEPT: u64 = 500;
+/// Cap a single payout-history response.
+const MAX_PAYOUTS_RETURNED: usize = 200;
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LotteryState {
+    /// Bumps by one each time a jackpot is actually won; ticket entries from
+    /// older rounds are dead and lazily reset on the user's next claim.
+    pub round: u64,
+    /// Tickets issued in the current round (kept in lockstep with claims).
+    pub total_tickets: u64,
+    /// Nanosecond timestamp of the next scheduled draw (0 = not yet scheduled).
+    pub next_draw_at: u64,
+    pub draws_held: u64,
+    pub last_winner: Option<Principal>,
+    pub last_win_at: Option<u64>,
+    /// Lifetime ICP e8s actually paid out to winners (net of the ledger fee).
+    pub total_paid_e8s: u64,
+}
+
+impl Default for LotteryState {
+    fn default() -> Self {
+        LotteryState {
+            round: 1,
+            total_tickets: 0,
+            next_draw_at: 0,
+            draws_held: 0,
+            last_winner: None,
+            last_win_at: None,
+            total_paid_e8s: 0,
+        }
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TicketEntry {
+    pub round: u64,
+    pub count: u64,
+    /// UTC epoch-day of the most recent claim (one claim per day).
+    pub last_claim_day: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum DrawStatus {
+    /// A winner was drawn but the prize transfer hasn't succeeded yet; the
+    /// 5-minute timer retries until it lands. Tickets are already reset.
+    PayoutPending,
+    Done,
+}
+
+/// Journal for one drawing — persisted before the prize transfer so a trap
+/// can't lose (or double-pay) a win. Same idempotency pattern as
+/// `settle_burn_split` / `settle_yield_split`.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LotteryDraw {
+    pub id: u64,
+    pub round: u64,
+    pub drawn_at: u64,
+    pub total_tickets: u64,
+    /// Lottery-pot balance at draw time.
+    pub pot_e8s: u64,
+    /// The random index in [0, LOTTERY_ODDS_DENOMINATOR); a ticket wins when
+    /// this lands below `total_tickets`.
+    pub winning_ticket: Option<u64>,
+    pub winner: Option<Principal>,
+    /// Gross 80% prize (the winner nets this minus one ledger fee).
+    pub prize_e8s: u64,
+    pub payout_block: Option<u64>,
+    pub status: DrawStatus,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayoutType {
+    LotteryWin,
+    UnstakeDisbursement,
+    IdeaUpvoteShare,
+    CommitmentRefund,
+    /// 25% of a settled burn, split among the top pool neurons' owners.
+    PoolReward,
+}
+
+/// One payout the site made to a user, in the token's smallest unit. Drives
+/// the "Payout history" page.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Payout {
+    pub id: u64,
+    pub user: Principal,
+    pub payout_type: PayoutType,
+    pub token: IdeaToken,
+    pub amount: u64,
+    pub created_at: u64,
+    /// Source record id (draw id, unstake id, upvote id, proposal id).
+    pub ref_id: u64,
+}
+
+/// Everything the Lottery page needs in one call (update — it reads the pot
+/// balance from the ledger).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LotteryInfo {
+    pub enabled: bool,
+    pub round: u64,
+    pub next_draw_at: u64,
+    pub total_tickets: u64,
+    pub my_tickets: u64,
+    pub claimed_today: bool,
+    /// Whether the caller holds any stake (the eligibility gate).
+    pub eligible: bool,
+    /// Base daily grant for a 6-month staker (admin-tunable).
+    pub tickets_per_day: u64,
+    /// The caller's actual daily grant across their staked tiers (0 = not
+    /// staked / not eligible).
+    pub my_daily_tickets: u64,
+    pub pot_e8s: u64,
+    pub odds_denominator: u64,
+    pub draws_held: u64,
+    pub last_winner: Option<Principal>,
+    pub last_win_at: Option<u64>,
+    pub total_paid_e8s: u64,
+}
+
+impl_storable!(LotteryState);
+impl_storable!(TicketEntry);
+impl_storable!(LotteryDraw);
+impl_storable!(Payout);
+
+thread_local! {
+    // Memory IDs 26–31 (mini golf) and 32–33 (AI reviewer) are reserved by
+    // their plan docs — the lottery starts at 34.
+    static LOTTERY_TICKETS: RefCell<StableBTreeMap<Principal, TicketEntry, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(34))))
+    });
+
+    static LOTTERY_STATE: RefCell<StableCell<LotteryState, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(35)), LotteryState::default()))
+    });
+
+    static LOTTERY_DRAWS: RefCell<StableBTreeMap<u64, LotteryDraw, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(36))))
+    });
+
+    static NEXT_DRAW_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(37)), 1u64))
+    });
+
+    static PAYOUTS: RefCell<StableBTreeMap<u64, Payout, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(38))))
+    });
+
+    static NEXT_PAYOUT_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(39)), 1u64))
+    });
+
+    static LOTTERY_BUSY: RefCell<bool> = const { RefCell::new(false) };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    static TEST_MOCK_RAND: RefCell<u64> = const { RefCell::new(u64::MAX) };
+}
+
+/// Serializes draws (timer tick vs. dev trigger) the same way StakingLock
+/// serializes neuron operations.
+struct LotteryLock;
+
+impl LotteryLock {
+    fn new() -> Result<Self, String> {
+        LOTTERY_BUSY.with(|b| {
+            let mut busy = b.borrow_mut();
+            if *busy {
+                return Err("LOTTERY_BUSY".to_string());
+            }
+            *busy = true;
+            Ok(LotteryLock)
+        })
+    }
+}
+
+impl Drop for LotteryLock {
+    fn drop(&mut self) {
+        LOTTERY_BUSY.with(|b| *b.borrow_mut() = false);
+    }
+}
+
+fn lottery_state() -> LotteryState {
+    LOTTERY_STATE.with(|c| c.borrow().get().clone())
+}
+
+fn set_lottery_state(state: LotteryState) {
+    LOTTERY_STATE.with(|c| {
+        c.borrow_mut().set(state);
+    });
+}
+
+fn require_lottery_enabled() -> Result<(), String> {
+    if !feature_enabled(FLAG_LOSSLESS_LOTTERY) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+/// Next draw instant strictly after `now_nanos`. Draw days are Tue/Thu/Sun in
+/// UTC (= Powerball's Mon/Wed/Sat nights US Eastern), at 03:00 UTC.
+fn next_draw_after(now_nanos: u64) -> u64 {
+    let today = now_nanos / 1_000_000_000 / SECS_PER_DAY;
+    for offset in 0..=7 {
+        let day = today + offset;
+        // 1970-01-01 was a Thursday, so (day + 4) % 7 gives 0 = Sunday.
+        let dow = (day + 4) % 7;
+        if matches!(dow, 0 | 2 | 4) {
+            let t = (day * SECS_PER_DAY + LOTTERY_DRAW_HOUR_UTC * 3600) * 1_000_000_000;
+            if t > now_nanos {
+                return t;
+            }
+        }
+    }
+    // Unreachable (a draw day always occurs within the next 7 days), but
+    // never trap inside the timer.
+    now_nanos + 2 * SECS_PER_DAY * 1_000_000_000
+}
+
+fn record_payout(user: Principal, payout_type: PayoutType, token: IdeaToken, amount: u64, ref_id: u64) {
+    let id = NEXT_PAYOUT_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    PAYOUTS.with(|m| {
+        m.borrow_mut().insert(id, Payout {
+            id,
+            user,
+            payout_type,
+            token,
+            amount,
+            created_at: current_time(),
+            ref_id,
+        });
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn lottery_random_u64() -> Result<u64, String> {
+    let response: Result<(Vec<u8>,), _> =
+        ic_cdk::call(Principal::management_canister(), "raw_rand", ()).await;
+    match response {
+        Ok((bytes,)) if bytes.len() >= 8 => {
+            Ok(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
+        }
+        Ok(_) => Err("RAW_RAND_TOO_SHORT".to_string()),
+        Err((code, msg)) => Err(format!("raw_rand failed (code {:?}): {}", code, msg)),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn lottery_random_u64() -> Result<u64, String> {
+    Ok(TEST_MOCK_RAND.with(|c| *c.borrow()))
+}
+
+/// Uniform owner lookup for a winning ticket index within the current round:
+/// tickets are implicitly ordered by the stable map's principal order.
+fn find_ticket_owner(round: u64, index: u64) -> Option<Principal> {
+    LOTTERY_TICKETS.with(|m| {
+        let mut cumulative = 0u64;
+        for entry in m.borrow().iter() {
+            let t = entry.value();
+            if t.round != round {
+                continue;
+            }
+            cumulative = cumulative.saturating_add(t.count);
+            if index < cumulative {
+                return Some(*entry.key());
+            }
+        }
+        None
+    })
+}
+
+/// Timer hook: retry an unfinished prize payout first, then hold a draw once
+/// the scheduled instant passes.
+async fn lottery_draw_check() {
+    if !feature_enabled(FLAG_LOSSLESS_LOTTERY) {
+        return;
+    }
+    let _lock = match LotteryLock::new() {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+
+    let pending: Option<LotteryDraw> = LOTTERY_DRAWS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .find(|d| d.status == DrawStatus::PayoutPending)
+    });
+    if let Some(mut draw) = pending {
+        if let Err(e) = settle_lottery_payout(&mut draw).await {
+            canister_print(&format!("lottery draw {} payout retry failed: {}", draw.id, e));
+        }
+        LOTTERY_DRAWS.with(|m| {
+            m.borrow_mut().insert(draw.id, draw);
+        });
+        return;
+    }
+
+    let mut state = lottery_state();
+    let now = current_time();
+    if state.next_draw_at == 0 {
+        state.next_draw_at = next_draw_after(now);
+        set_lottery_state(state);
+        return;
+    }
+    if now < state.next_draw_at {
+        return;
+    }
+    run_lottery_draw(None).await;
+}
+
+/// Hold one drawing. `forced_winning_ticket` is the local-dev override; live
+/// draws take 8 bytes from `raw_rand`. The schedule is advanced and persisted
+/// BEFORE any await so a failure can never double-draw the same slot.
+async fn run_lottery_draw(forced_winning_ticket: Option<u64>) {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let now = current_time();
+    let mut state = lottery_state();
+
+    state.next_draw_at = next_draw_after(now.max(state.next_draw_at));
+    state.draws_held += 1;
+    set_lottery_state(state.clone());
+
+    let winning_ticket = match forced_winning_ticket {
+        Some(t) => t,
+        None => match lottery_random_u64().await {
+            // Modulo bias over 2^64 is ~1e-11 of the denominator — negligible.
+            Ok(r) => r % LOTTERY_ODDS_DENOMINATOR,
+            Err(e) => {
+                canister_print(&format!("lottery draw skipped, no randomness: {}", e));
+                return;
+            }
+        },
+    };
+
+    let pot_account = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(LOTTERY_SUBACCOUNT),
+    };
+    let pot_e8s = call_ledger_balance(config.ledger_canister_id, pot_account)
+        .await
+        .unwrap_or(0);
+
+    // A win needs a hit ticket AND a prize big enough to actually transfer —
+    // otherwise the drawing rolls over (tickets keep accumulating).
+    let prize_e8s = pot_e8s.saturating_mul(LOTTERY_WINNER_SHARE_PCT) / 100;
+    let winner = if winning_ticket < state.total_tickets && prize_e8s > ICP_FEE_E8S {
+        find_ticket_owner(state.round, winning_ticket)
+    } else {
+        None
+    };
+
+    let id = NEXT_DRAW_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    let mut draw = LotteryDraw {
+        id,
+        round: state.round,
+        drawn_at: now,
+        total_tickets: state.total_tickets,
+        pot_e8s,
+        winning_ticket: Some(winning_ticket),
+        winner,
+        prize_e8s: if winner.is_some() { prize_e8s } else { 0 },
+        payout_block: None,
+        status: if winner.is_some() { DrawStatus::PayoutPending } else { DrawStatus::Done },
+    };
+    LOTTERY_DRAWS.with(|m| {
+        m.borrow_mut().insert(id, draw.clone());
+    });
+
+    if let Some(winner) = winner {
+        // The win is final the moment the draw record persists: restart the
+        // round (tickets reset) regardless of when the transfer lands.
+        let mut state = lottery_state();
+        state.round += 1;
+        state.total_tickets = 0;
+        state.last_winner = Some(winner);
+        state.last_win_at = Some(now);
+        set_lottery_state(state);
+
+        if let Err(e) = settle_lottery_payout(&mut draw).await {
+            canister_print(&format!("lottery draw {} payout pending: {}", id, e));
+        }
+        LOTTERY_DRAWS.with(|m| {
+            m.borrow_mut().insert(id, draw);
+        });
+    }
+
+    // Prune ancient draws so the history map stays bounded.
+    LOTTERY_DRAWS.with(|m| {
+        let mut m = m.borrow_mut();
+        while m.len() > MAX_LOTTERY_DRAWS_KEPT {
+            let oldest = m.iter().next().map(|e| *e.key());
+            match oldest {
+                Some(k) => {
+                    m.remove(&k);
+                }
+                None => break,
+            }
+        }
+    });
+}
+
+/// Transfer 80% of the pot (minus one ledger fee) to the winner. Idempotent:
+/// the persisted block index makes a retry skip the transfer.
+async fn settle_lottery_payout(draw: &mut LotteryDraw) -> Result<(), String> {
+    let winner = draw.winner.ok_or("NO_WINNER")?;
+    let net_prize = draw.prize_e8s.saturating_sub(ICP_FEE_E8S);
+    if draw.payout_block.is_none() {
+        let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+        let dest = LedgerAccount { owner: winner, subaccount: None };
+        let b = call_ledger_transfer(
+            ledger_id,
+            Some(LOTTERY_SUBACCOUNT),
+            dest,
+            net_prize,
+            Some(ICP_FEE_E8S),
+        )
+        .await
+        .map_err(|e| format!("LOTTERY_PRIZE_XFER: {}", e))?;
+        draw.payout_block = Some(b);
+        // Persist the block index immediately — a panic before the caller's
+        // insert must never let a retry re-pay the prize.
+        LOTTERY_DRAWS.with(|m| {
+            m.borrow_mut().insert(draw.id, draw.clone());
+        });
+    }
+    draw.status = DrawStatus::Done;
+
+    let mut state = lottery_state();
+    state.total_paid_e8s = state.total_paid_e8s.saturating_add(net_prize);
+    set_lottery_state(state);
+    record_payout(winner, PayoutType::LotteryWin, IdeaToken::ICP, net_prize, draw.id);
+    staking_audit("lottery_win", winner, net_prize, draw.id);
+    Ok(())
+}
+
+// ── User endpoints ──
+
+/// Tickets the user collects per login day: the base grant × the term
+/// multiplier, summed over every tier they hold a stake in (6mo = 1×,
+/// 1y = 2×, 2y = 4× — i.e. 5/10/20 at the default base of 5). Zero when
+/// not staked: staking is the lottery eligibility gate.
+fn user_daily_tickets(user: Principal) -> u64 {
+    let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
+    StakeTier::all().iter().fold(0u64, |acc, &tier| {
+        let staked = STAKES
+            .with(|m| m.borrow().get(&stake_key(tier, user)))
+            .map(|s| s.amount_e8s > 0)
+            .unwrap_or(false);
+        if staked {
+            acc.saturating_add(base.saturating_mul(tier.weight_multiplier()))
+        } else {
+            acc
+        }
+    })
+}
+
+/// Credit today's tickets (once per UTC day). Requires an active stake —
+/// the grant scales with the staked tiers (see `user_daily_tickets`). The
+/// frontend calls this on login / page load; returns the caller's
+/// current-round ticket count.
+#[ic_cdk::update]
+fn claim_daily_tickets() -> Result<u64, String> {
+    require_authenticated()?;
+    require_lottery_enabled()?;
+    let caller = get_caller();
+    let now = current_time();
+    let today = now / 1_000_000_000 / SECS_PER_DAY;
+    let per_day = user_daily_tickets(caller);
+    if per_day == 0 {
+        return Err("NOT_STAKED".to_string());
+    }
+
+    let mut state = lottery_state();
+    let mut entry = LOTTERY_TICKETS
+        .with(|m| m.borrow().get(&caller))
+        .unwrap_or(TicketEntry { round: state.round, count: 0, last_claim_day: 0 });
+    if entry.round != state.round {
+        // Stale tickets from a finished round die here.
+        entry = TicketEntry { round: state.round, count: 0, last_claim_day: entry.last_claim_day };
+    }
+    if entry.last_claim_day >= today {
+        return Err("ALREADY_CLAIMED_TODAY".to_string());
+    }
+    entry.count = entry.count.saturating_add(per_day);
+    entry.last_claim_day = today;
+    state.total_tickets = state.total_tickets.saturating_add(per_day);
+    if state.next_draw_at == 0 {
+        state.next_draw_at = next_draw_after(now);
+    }
+    LOTTERY_TICKETS.with(|m| {
+        m.borrow_mut().insert(caller, entry.clone());
+    });
+    set_lottery_state(state);
+    Ok(entry.count)
+}
+
+/// Update (not query): reads the live pot balance from the ledger. Safe for
+/// anonymous callers — `my_tickets` is simply 0.
+#[ic_cdk::update]
+async fn get_lottery_info() -> LotteryInfo {
+    let caller = get_caller();
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let enabled = feature_enabled(FLAG_LOSSLESS_LOTTERY);
+    let state = lottery_state();
+    let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
+
+    let pot_e8s = if enabled {
+        let pot_account = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(LOTTERY_SUBACCOUNT),
+        };
+        call_ledger_balance(config.ledger_canister_id, pot_account)
+            .await
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let entry = LOTTERY_TICKETS.with(|m| m.borrow().get(&caller));
+    let (my_tickets, claimed_today) = match entry {
+        Some(t) => (
+            if t.round == state.round { t.count } else { 0 },
+            t.last_claim_day >= today,
+        ),
+        None => (0, false),
+    };
+    let my_daily_tickets = user_daily_tickets(caller);
+
+    LotteryInfo {
+        enabled,
+        round: state.round,
+        next_draw_at: state.next_draw_at,
+        total_tickets: state.total_tickets,
+        my_tickets,
+        claimed_today,
+        eligible: my_daily_tickets > 0,
+        tickets_per_day: config.lottery_tickets_per_day,
+        my_daily_tickets,
+        pot_e8s,
+        odds_denominator: LOTTERY_ODDS_DENOMINATOR,
+        draws_held: state.draws_held,
+        last_winner: state.last_winner,
+        last_win_at: state.last_win_at,
+        total_paid_e8s: state.total_paid_e8s,
+    }
+}
+
+/// Most recent drawings, newest first (capped at 50).
+#[ic_cdk::query]
+fn list_lottery_draws() -> Vec<LotteryDraw> {
+    LOTTERY_DRAWS.with(|m| {
+        m.borrow().iter().rev().take(50).map(|e| e.value()).collect()
+    })
+}
+
+/// The caller's payout history, newest first (capped).
+#[ic_cdk::query]
+fn get_my_payouts() -> Vec<Payout> {
+    let caller = get_caller();
+    PAYOUTS.with(|m| {
+        m.borrow()
+            .iter()
+            .rev()
+            .filter(|e| e.value().user == caller)
+            .take(MAX_PAYOUTS_RETURNED)
+            .map(|e| e.value())
+            .collect()
+    })
+}
+
+// ── Admin & dev ──
+
+/// Admin: tune how many tickets a daily login credits.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_lottery_config(tickets_per_day: Option<u64>) -> Result<(), String> {
+    CONFIG.with(|cell| {
+        let mut config = cell.borrow().get().clone();
+        if let Some(t) = tickets_per_day {
+            if !(1..=10_000).contains(&t) {
+                return Err("INVALID_TICKETS_PER_DAY".to_string());
+            }
+            config.lottery_tickets_per_day = t;
+        }
+        cell.borrow_mut().set(config);
+        Ok(())
+    })
+}
+
+/// Local-dev: hold a drawing immediately. `force_win` rigs the winning ticket
+/// to index 0 so the full payout path can be exercised without 1-in-292M luck.
+#[ic_cdk::update]
+async fn dev_run_lottery_draw(force_win: bool) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    require_lottery_enabled()?;
+    let _lock = LotteryLock::new()?;
+    if force_win && lottery_state().total_tickets == 0 {
+        return Err("NO_TICKETS".to_string());
+    }
+    run_lottery_draw(if force_win { Some(0) } else { None }).await;
+    Ok(())
+}
+
 ic_cdk::export_candid!();
 
 #[cfg(test)]
@@ -4724,6 +7168,8 @@ mod tests {
             vote_executed_at: None,
             first_stance: Some(Stance::Adopt),
             pool_distributed: false,
+            lossless_adopt_e8s: 0,
+            lossless_reject_e8s: 0,
         }
     }
 
@@ -4889,6 +7335,10 @@ mod tests {
             min_upvote_icp_e8s: None,
             min_upvote_ckbtc_e8s: None,
             min_upvote_cketh_wei: None,
+            min_stake_e8s: default_min_stake_e8s(),
+            min_unstake_e8s: default_min_unstake_e8s(),
+            maturity_threshold_e8s: default_maturity_threshold_e8s(),
+            lottery_tickets_per_day: default_lottery_tickets_per_day(),
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -4918,6 +7368,8 @@ mod tests {
             vote_executed_at: Some(1_749_000_000_000_000_000),
             first_stance: Some(Stance::Adopt),
             pool_distributed: false,
+            lossless_adopt_e8s: 0,
+            lossless_reject_e8s: 0,
         };
         let bytes = proposal.to_bytes();
         let decoded = Proposal::from_bytes(bytes);
@@ -5118,6 +7570,10 @@ mod tests {
                 min_upvote_icp_e8s: None,
                 min_upvote_ckbtc_e8s: None,
                 min_upvote_cketh_wei: None,
+                min_stake_e8s: default_min_stake_e8s(),
+                min_unstake_e8s: default_min_unstake_e8s(),
+                maturity_threshold_e8s: default_maturity_threshold_e8s(),
+                lottery_tickets_per_day: default_lottery_tickets_per_day(),
             }
         };
         let mainnet = Config {
@@ -5171,6 +7627,7 @@ mod tests {
             controller: Some(Principal::anonymous()),
             hot_keys: vec![Principal::management_canister()],
             cached_neuron_stake_e8s: 100_000_000,
+            maturity_e8s_equivalent: 0,
             voting_power: 100_000_000,
             followees: vec![(
                 TOPIC_GOVERNANCE,
@@ -5197,6 +7654,7 @@ mod tests {
             controller: Some(Principal::anonymous()),
             hot_keys: vec![Principal::anonymous()],
             cached_neuron_stake_e8s: 100_000_000,
+            maturity_e8s_equivalent: 0,
             voting_power: 100_000_000,
             followees: vec![(
                 TOPIC_GOVERNANCE,
@@ -5522,6 +7980,7 @@ mod tests {
             controller: None,
             hot_keys: vec![],
             cached_neuron_stake_e8s: 0,
+            maturity_e8s_equivalent: 0,
             voting_power: 50_000_000_000,
             followees: vec![],
         };
@@ -5894,6 +8353,8 @@ mod tests {
             total_burned_e8s: Some(100_000_000_000),
             first_stance: Some(Stance::Adopt),
             pool_distributed: false,
+            lossless_adopt_e8s: 0,
+            lossless_reject_e8s: 0,
         };
         PROPOSALS.with(|map| map.borrow_mut().insert(12345, p));
 
@@ -6026,6 +8487,7 @@ mod tests {
             id: Some(NeuronId { id: 2222 }),
             controller: Some(Principal::from_slice(&[22; 29])),
             cached_neuron_stake_e8s: 25_000_000_000,
+            maturity_e8s_equivalent: 0,
             voting_power: 25_000_000_000,
             hot_keys: vec![get_canister_id()],
             followees: vec![(
@@ -6044,6 +8506,7 @@ mod tests {
             id: Some(NeuronId { id: 3333 }),
             controller: Some(Principal::from_slice(&[33; 29])),
             cached_neuron_stake_e8s: 30_000_000_000,
+            maturity_e8s_equivalent: 0,
             voting_power: 30_000_000_000,
             hot_keys: vec![get_canister_id()],
             followees: vec![], // no follow
@@ -6080,6 +8543,7 @@ mod tests {
             id: Some(NeuronId { id: 3333 }),
             controller: Some(Principal::from_slice(&[33; 29])),
             cached_neuron_stake_e8s: 30_000_000_000,
+            maturity_e8s_equivalent: 0,
             voting_power: 30_000_000_000,
             hot_keys: vec![get_canister_id()],
             followees: vec![(
@@ -6255,6 +8719,10 @@ mod tests {
             min_upvote_icp_e8s: None,
             min_upvote_ckbtc_e8s: None,
             min_upvote_cketh_wei: None,
+            min_stake_e8s: default_min_stake_e8s(),
+            min_unstake_e8s: default_min_unstake_e8s(),
+            maturity_threshold_e8s: default_maturity_threshold_e8s(),
+            lottery_tickets_per_day: default_lottery_tickets_per_day(),
         }
     }
 
@@ -6729,5 +9197,1593 @@ mod tests {
             "IDEA_NOT_FOUND"
         );
     }
-}
 
+    // ── Lossless Voting (pooled staking) ────────────────────────────────────────
+
+    /// Local config with a non-mainnet ledger so the dev helpers work and the
+    /// stake transfer takes the mock (MOCK_STAKE_SUBACCOUNT) path.
+    fn install_staking_test_config() {
+        let mut config = test_config(true);
+        config.ledger_canister_id = p("a5dhi-k7777-77775-aaabq-cai");
+        CONFIG.with(|cell| {
+            cell.borrow_mut().set(config);
+        });
+    }
+
+    #[test]
+    fn test_staking_storable_roundtrips() {
+        let pool = StakingPool {
+            neuron_id: Some(42),
+            nonce: 7,
+            total_staked_e8s: 123,
+            bootstrap: StakingBootstrap::Ready,
+            pending_refresh_e8s: 5,
+            pending_maturity: vec![MaturityDisbursement {
+                amount_e8s: 1,
+                initiated_at: 2,
+                expected_at: 3,
+            }],
+            total_yield_e8s: 9,
+        };
+        let decoded = StakingPool::from_bytes(pool.to_bytes());
+        assert_eq!(decoded.neuron_id, Some(42));
+        assert_eq!(decoded.bootstrap, StakingBootstrap::Ready);
+        assert_eq!(decoded.pending_maturity.len(), 1);
+
+        let unstake = PendingUnstake {
+            id: 1,
+            user: p("2vxsx-fae"),
+            tier: StakeTier::OneYear,
+            amount_e8s: 100,
+            split_neuron_id: 990_002,
+            status: UnstakeStatus::Dissolving,
+            created_at: 1,
+            dissolve_eta: 2,
+            disburse_block: None,
+            settled_at: None,
+        };
+        let decoded = PendingUnstake::from_bytes(unstake.to_bytes());
+        assert_eq!(decoded.status, UnstakeStatus::Dissolving);
+        assert_eq!(decoded.tier, StakeTier::OneYear);
+
+        let vote = LosslessVote {
+            proposal_id: 9,
+            principal: p("2vxsx-fae"),
+            stance: Stance::Reject,
+            weight_e8s: 55,
+            cast_at: 1,
+        };
+        let decoded = LosslessVote::from_bytes(vote.to_bytes());
+        assert_eq!(decoded.weight_e8s, 55);
+
+        let dist = YieldDistribution {
+            id: 3,
+            amount_e8s: 1_000_000,
+            lottery_amount_e8s: 490_000,
+            treasury_amount_e8s: 490_000,
+            lottery_block: None,
+            treasury_block: Some(11),
+            status: YieldStatus::InProgress,
+            created_at: 1,
+            completed_at: None,
+        };
+        let decoded = YieldDistribution::from_bytes(dist.to_bytes());
+        assert_eq!(decoded.treasury_block, Some(11));
+        assert_eq!(decoded.status, YieldStatus::InProgress);
+    }
+
+    #[test]
+    fn test_stake_tier_terms_and_multipliers() {
+        assert_eq!(StakeTier::SixMonths.dissolve_delay_secs(), 15_778_800);
+        assert_eq!(StakeTier::OneYear.dissolve_delay_secs(), 31_557_600);
+        assert_eq!(StakeTier::TwoYears.dissolve_delay_secs(), 63_115_200);
+        // Weight (and ticket) multipliers are proportional to the term.
+        assert_eq!(StakeTier::SixMonths.weight_multiplier(), 1);
+        assert_eq!(StakeTier::OneYear.weight_multiplier(), 2);
+        assert_eq!(StakeTier::TwoYears.weight_multiplier(), 4);
+    }
+
+    #[test]
+    fn test_neuron_staking_subaccount_deterministic() {
+        let c = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let a = neuron_staking_subaccount(c, 7);
+        let b = neuron_staking_subaccount(c, 7);
+        let other_nonce = neuron_staking_subaccount(c, 8);
+        let other_controller = neuron_staking_subaccount(p("2vxsx-fae"), 7);
+        assert_eq!(a, b);
+        assert_ne!(a, other_nonce);
+        assert_ne!(a, other_controller);
+        // 28-byte governance account-id hash, distinct from the 32-byte form.
+        let h = account_id_hash28(c, &[0u8; 32]);
+        assert_eq!(h.len(), 28);
+        assert_eq!(&account_id_bytes(c, &[0u8; 32])[4..], &h[..]);
+    }
+
+    #[tokio::test]
+    async fn test_stake_credits_share_and_bootstraps_neuron() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(10_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // First stake below 1 ICP is rejected even though min_stake is 0.1.
+        assert_eq!(
+            stake(50_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            "BELOW_MINIMUM"
+        );
+
+        stake(200_000_000, StakeTier::SixMonths).await.unwrap();
+        let pool = tier_pool(StakeTier::SixMonths);
+        assert_eq!(pool.total_staked_e8s, 200_000_000);
+        assert_eq!(pool.pending_refresh_e8s, 0, "claim ran inline");
+        assert_eq!(pool.bootstrap, StakingBootstrap::Ready);
+        let neuron_id = pool.neuron_id.expect("neuron created");
+        assert!(neuron_id > MOCK_NEURON_ID_BASE);
+        assert_eq!(
+            MOCK_GOV.with(|g| g.borrow().neurons.get(&neuron_id).unwrap().stake_e8s),
+            200_000_000
+        );
+        // The mock neuron's dissolve delay matches the tier's term.
+        assert_eq!(
+            MOCK_GOV.with(|g| g.borrow().neurons.get(&neuron_id).unwrap().delay_secs),
+            StakeTier::SixMonths.dissolve_delay_secs()
+        );
+
+        // Second stake from another user: min is now 0.1 ICP and tops up the
+        // same tier neuron.
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_caller(bob);
+        assert_eq!(
+            stake(5_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            "BELOW_MINIMUM"
+        );
+        stake(10_000_000, StakeTier::SixMonths).await.unwrap();
+        let pool = tier_pool(StakeTier::SixMonths);
+        assert_eq!(pool.total_staked_e8s, 210_000_000);
+        assert_eq!(pool.neuron_id, Some(neuron_id), "one pooled neuron per tier");
+        assert_eq!(
+            MOCK_GOV.with(|g| g.borrow().neurons.get(&neuron_id).unwrap().stake_e8s),
+            210_000_000
+        );
+        assert_eq!(
+            STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
+            200_000_000
+        );
+        assert_eq!(
+            STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, bob)).unwrap().amount_e8s),
+            10_000_000
+        );
+
+        // A different tier gets its own neuron (first stake ≥ 1 ICP again).
+        assert_eq!(
+            stake(10_000_000, StakeTier::TwoYears).await.unwrap_err(),
+            "BELOW_MINIMUM"
+        );
+        stake(100_000_000, StakeTier::TwoYears).await.unwrap();
+        let pool_2y = tier_pool(StakeTier::TwoYears);
+        let neuron_2y = pool_2y.neuron_id.expect("2y neuron created");
+        assert_ne!(neuron_2y, neuron_id, "tiers never share a neuron");
+        assert_eq!(
+            MOCK_GOV.with(|g| g.borrow().neurons.get(&neuron_2y).unwrap().delay_secs),
+            StakeTier::TwoYears.dissolve_delay_secs()
+        );
+        // 6-month pool untouched by the 2-year stake.
+        assert_eq!(tier_pool(StakeTier::SixMonths).total_staked_e8s, 210_000_000);
+
+        // Insufficient escrow is rejected before any state change.
+        set_mock_ledger_balance(0);
+        assert_eq!(
+            stake(10_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            "INSUFFICIENT_DEPOSIT"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stake_bootstrap_resumes_via_sweep() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(10_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // Make the claim fail: the share is still credited and the refresh
+        // stays pending for the sweep.
+        set_mock_manage_neuron(Some(Err("governance unavailable".to_string())));
+        stake(150_000_000, StakeTier::OneYear).await.unwrap();
+        let pool = tier_pool(StakeTier::OneYear);
+        assert_eq!(pool.total_staked_e8s, 150_000_000);
+        assert_eq!(pool.pending_refresh_e8s, 150_000_000);
+        assert_eq!(pool.bootstrap, StakingBootstrap::NotStarted);
+        assert!(pool.neuron_id.is_none());
+
+        // Unstake is blocked until the pool is ready.
+        assert_eq!(
+            unstake(110_000_000, StakeTier::OneYear).await.unwrap_err(),
+            "POOL_NOT_READY"
+        );
+
+        // Governance comes back: the sweep repairs claim + delay + follows.
+        set_mock_manage_neuron(None);
+        staking_sweep().await;
+        let pool = tier_pool(StakeTier::OneYear);
+        assert_eq!(pool.pending_refresh_e8s, 0);
+        assert_eq!(pool.bootstrap, StakingBootstrap::Ready);
+        assert!(pool.neuron_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_unstake_validation_and_dissolve_flow() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap(); // 5 ICP
+
+        // Validation gauntlet (tier must match the stake's tier, too).
+        assert_eq!(
+            unstake(600_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            "EXCEEDS_STAKE"
+        );
+        assert_eq!(
+            unstake(50_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            "BELOW_MINIMUM"
+        );
+        // 5 − 4.2 = 0.8 ICP remainder < 1 ICP pool floor.
+        assert_eq!(
+            unstake(420_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            "POOL_FLOOR"
+        );
+        // No stake in a different tier.
+        assert_eq!(
+            unstake(150_000_000, StakeTier::TwoYears).await.unwrap_err(),
+            "POOL_NOT_READY"
+        );
+
+        let id = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        let pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(pending.status, UnstakeStatus::Dissolving);
+        assert_eq!(pending.amount_e8s, 150_000_000);
+        assert_eq!(pending.tier, StakeTier::SixMonths);
+        // The mock dissolve clock runs the tier's full 6-month term.
+        let child_eta = MOCK_GOV.with(|g| {
+            g.borrow().neurons.get(&pending.split_neuron_id).unwrap().dissolve_eta
+        });
+        assert_eq!(
+            child_eta,
+            current_time() + StakeTier::SixMonths.dissolve_delay_secs() * 1_000_000_000
+        );
+        assert_eq!(
+            STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
+            350_000_000
+        );
+        assert_eq!(tier_pool(StakeTier::SixMonths).total_staked_e8s, 350_000_000);
+        // The split child holds amount − split fee in the mock governance.
+        assert_eq!(
+            MOCK_GOV.with(|g| g
+                .borrow()
+                .neurons
+                .get(&pending.split_neuron_id)
+                .unwrap()
+                .stake_e8s),
+            150_000_000 - ICP_FEE_E8S
+        );
+
+        // Not dissolved yet → the sweep leaves it pending.
+        staking_sweep().await;
+        let pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(pending.status, UnstakeStatus::Dissolving);
+        assert!(pending.disburse_block.is_none());
+
+        // Fast-forward the dissolve and sweep again → disbursed.
+        dev_fast_forward_dissolve(id).unwrap();
+        staking_sweep().await;
+        let pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(pending.status, UnstakeStatus::Disbursed);
+        assert!(pending.disburse_block.is_some());
+        assert!(pending.settled_at.is_some());
+        // The mock split neuron is gone after disburse.
+        assert!(MOCK_GOV.with(|g| !g.borrow().neurons.contains_key(&pending.split_neuron_id)));
+
+        // Unstaking the full remainder is allowed only down to the pool floor.
+        assert_eq!(
+            unstake(350_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            "POOL_FLOOR"
+        );
+        assert!(unstake(250_000_000, StakeTier::SixMonths).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_lossless_vote_weight_and_immutability() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        let pid = 555_001u64;
+        PROPOSALS.with(|m| {
+            m.borrow_mut()
+                .insert(pid, sample_proposal(pid, "open", 200_000_000, 0));
+        });
+        // sample_proposal pre-sets first_stance — clear it to test the
+        // first-lossless-vote tie-break path.
+        PROPOSALS.with(|m| {
+            let mut prop = m.borrow().get(&pid).unwrap();
+            prop.first_stance = None;
+            m.borrow_mut().insert(pid, prop);
+        });
+
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // No stake → no vote.
+        set_mock_caller(bob);
+        assert_eq!(
+            cast_lossless_vote(pid, Stance::Adopt).unwrap_err(),
+            "NO_STAKE"
+        );
+
+        // Alice: 3 ICP in the 6-month tier → weight 3 ICP (1× multiplier).
+        set_mock_caller(alice);
+        stake(300_000_000, StakeTier::SixMonths).await.unwrap();
+        cast_lossless_vote(pid, Stance::Reject).unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.lossless_reject_e8s, 300_000_000);
+        assert_eq!(prop.lossless_adopt_e8s, 0);
+        assert_eq!(prop.first_stance, Some(Stance::Reject));
+        // The burn threshold is untouched.
+        assert_eq!(prop.total_committed_e8s, 0);
+        assert_eq!(prop.status, "open");
+
+        // One immutable vote per user per proposal.
+        assert_eq!(
+            cast_lossless_vote(pid, Stance::Adopt).unwrap_err(),
+            "ALREADY_VOTED"
+        );
+
+        // Weight was snapshotted: staking more does not retro-apply.
+        stake(100_000_000, StakeTier::SixMonths).await.unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.lossless_reject_e8s, 300_000_000);
+
+        // Bob: only 1 ICP, but in the 2-year tier → weight 4 ICP (4×). Term
+        // multipliers let a smaller, longer stake outvote a bigger short one.
+        set_mock_caller(bob);
+        stake(100_000_000, StakeTier::TwoYears).await.unwrap();
+        assert_eq!(user_voting_weight(bob), 400_000_000);
+        cast_lossless_vote(pid, Stance::Adopt).unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.lossless_adopt_e8s, 400_000_000);
+
+        // Combined-pot decision: lossless weight can flip the direction even
+        // though the burn pots alone would say otherwise.
+        let vote = decide_vote_choice(
+            prop.adopt_pot_e8s.saturating_add(prop.lossless_adopt_e8s),
+            prop.reject_pot_e8s.saturating_add(prop.lossless_reject_e8s),
+            prop.first_stance.clone(),
+        );
+        assert_eq!(vote, 1, "400M adopt vs 300M reject → adopt");
+    }
+
+    #[tokio::test]
+    async fn test_lossless_vote_closed_proposals() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(200_000_000, StakeTier::SixMonths).await.unwrap();
+
+        assert_eq!(
+            cast_lossless_vote(404_404, Stance::Adopt).unwrap_err(),
+            "PROPOSAL_NOT_FOUND"
+        );
+
+        let pid = 555_002u64;
+        PROPOSALS.with(|m| {
+            m.borrow_mut()
+                .insert(pid, sample_proposal(pid, "voted", 1, 1));
+        });
+        assert_eq!(
+            cast_lossless_vote(pid, Stance::Adopt).unwrap_err(),
+            "VOTING_CLOSED"
+        );
+
+        // Within the 1-hour cutoff window → closed.
+        let pid2 = 555_003u64;
+        let mut near = sample_proposal(pid2, "open", 1, 0);
+        near.deadline = current_time() + 1_000_000_000; // 1s from "now"
+        PROPOSALS.with(|m| {
+            m.borrow_mut().insert(pid2, near);
+        });
+        assert_eq!(
+            cast_lossless_vote(pid2, Stance::Adopt).unwrap_err(),
+            "VOTING_CLOSED"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_yield_harvest_and_distribution_split() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(200_000_000, StakeTier::SixMonths).await.unwrap();
+        stake(200_000_000, StakeTier::TwoYears).await.unwrap();
+
+        // Below the threshold: nothing happens.
+        dev_add_mock_maturity(50_000_000, StakeTier::SixMonths).unwrap();
+        harvest_staking_maturity().await;
+        assert!(tier_pool(StakeTier::SixMonths).pending_maturity.is_empty());
+
+        // Cross the 1.05 ICP threshold on BOTH tiers: each neuron's maturity
+        // is harvested into the same shared inbox.
+        dev_add_mock_maturity(60_000_000, StakeTier::SixMonths).unwrap();
+        dev_add_mock_maturity(110_000_000, StakeTier::TwoYears).unwrap();
+        harvest_staking_maturity().await;
+        let pool_6m = tier_pool(StakeTier::SixMonths);
+        let pool_2y = tier_pool(StakeTier::TwoYears);
+        assert_eq!(pool_6m.pending_maturity.len(), 1);
+        assert_eq!(pool_6m.pending_maturity[0].amount_e8s, 110_000_000);
+        assert_eq!(pool_6m.total_yield_e8s, 110_000_000);
+        assert_eq!(pool_2y.pending_maturity.len(), 1);
+        assert_eq!(pool_2y.total_yield_e8s, 110_000_000);
+
+        // Distribute: 50% lottery pot / 50% treasury, single shared pot.
+        set_mock_ledger_balance(220_000_000);
+        distribute_yield_inbox().await;
+        let dists = list_yield_distributions();
+        assert_eq!(dists.len(), 1);
+        let d = &dists[0];
+        let spendable = 220_000_000 - 2 * ICP_FEE_E8S;
+        assert_eq!(d.lottery_amount_e8s, spendable / 2);
+        assert_eq!(d.treasury_amount_e8s, spendable - spendable / 2);
+        assert_eq!(d.lottery_amount_e8s + d.treasury_amount_e8s, spendable);
+        assert_eq!(d.status, YieldStatus::Done);
+
+        assert!(
+            tier_pool(StakeTier::SixMonths).pending_maturity.is_empty(),
+            "retired after arrival"
+        );
+        assert!(tier_pool(StakeTier::TwoYears).pending_maturity.is_empty());
+        // Pool info aggregates the lifetime yield across tiers.
+        assert_eq!(get_staking_pool_info().total_yield_e8s, 220_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_yield_saga_idempotent_retry() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(10_000_000);
+        set_mock_ledger_transfer(Err("ledger down".to_string()));
+
+        // Open a distribution whose first transfer fails: journal persists
+        // with no completed legs.
+        distribute_yield_inbox().await;
+        let d = YIELD_DISTRIBUTIONS.with(|m| m.borrow().get(&1)).unwrap();
+        assert_eq!(d.status, YieldStatus::InProgress);
+        assert!(d.lottery_block.is_none());
+
+        // Pretend the lottery leg already completed in an earlier attempt;
+        // with the ledger still down, only the treasury leg should be
+        // attempted — and a retry must NOT re-run the completed transfer.
+        let mut d = d;
+        d.lottery_block = Some(77);
+        YIELD_DISTRIBUTIONS.with(|m| {
+            m.borrow_mut().insert(1, d);
+        });
+        distribute_yield_inbox().await; // resumes the in-progress journal
+        let d = YIELD_DISTRIBUTIONS.with(|m| m.borrow().get(&1)).unwrap();
+        assert_eq!(d.lottery_block, Some(77), "completed leg untouched");
+        assert_eq!(d.status, YieldStatus::InProgress, "treasury leg still failing");
+
+        // Ledger recovers: the retry finishes only the missing leg.
+        set_mock_ledger_transfer(Ok(99));
+        distribute_yield_inbox().await;
+        let d = YIELD_DISTRIBUTIONS.with(|m| m.borrow().get(&1)).unwrap();
+        assert_eq!(d.lottery_block, Some(77));
+        assert_eq!(d.treasury_block, Some(99));
+        assert_eq!(d.status, YieldStatus::Done);
+
+        // No second distribution was opened while one was in progress.
+        assert_eq!(list_yield_distributions().len(), 1);
+    }
+
+    #[test]
+    fn test_admin_set_staking_config_validation() {
+        install_staking_test_config();
+        assert_eq!(
+            admin_set_staking_config(Some(0), None, None).unwrap_err(),
+            "INVALID_MIN_STAKE"
+        );
+        assert_eq!(
+            admin_set_staking_config(None, Some(ONE_ICP_E8S), None).unwrap_err(),
+            "INVALID_MIN_UNSTAKE"
+        );
+        assert_eq!(
+            admin_set_staking_config(None, None, Some(1)).unwrap_err(),
+            "INVALID_MATURITY_THRESHOLD"
+        );
+        admin_set_staking_config(Some(20_000_000), None, None).unwrap();
+        let config = CONFIG.with(|c| c.borrow().get().clone());
+        assert_eq!(config.min_stake_e8s, 20_000_000);
+    }
+
+    // ── Lossless lottery ────────────────────────────────────────────────────
+
+    fn enable_lottery() {
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1);
+        });
+    }
+
+    /// Seed a stake record directly (lottery tests don't exercise the full
+    /// stake flow — that's covered by the staking tests).
+    fn seed_stake(tier: StakeTier, user: Principal, amount_e8s: u64) {
+        STAKES.with(|m| {
+            m.borrow_mut().insert(
+                stake_key(tier, user),
+                UserStake { amount_e8s, staked_at: 1, last_action_at: 1 },
+            );
+        });
+    }
+
+    #[test]
+    fn test_next_draw_after_powerball_cadence() {
+        // The mocked clock (1_700_000_000s) is Tuesday 2023-11-14 22:13 UTC —
+        // a draw day, but past 03:00, so the next draw is Thursday 03:00.
+        let now = 1_700_000_000_000_000_000u64;
+        let thu = (19_677 * SECS_PER_DAY + 3 * 3600) * 1_000_000_000;
+        assert_eq!(next_draw_after(now), thu);
+        // From the Thursday draw instant itself, strictly next is Sunday.
+        let sun = (19_680 * SECS_PER_DAY + 3 * 3600) * 1_000_000_000;
+        assert_eq!(next_draw_after(thu), sun);
+        // Early on a draw day (Tue 02:00) the same day's 03:00 draw is next.
+        let tue_2am = (19_675 * SECS_PER_DAY + 2 * 3600) * 1_000_000_000;
+        assert_eq!(next_draw_after(tue_2am), (19_675 * SECS_PER_DAY + 3 * 3600) * 1_000_000_000);
+    }
+
+    #[test]
+    fn test_claim_daily_tickets_once_per_day_and_round_reset() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+
+        // Flag is OFF by default — the lottery ships dark.
+        assert_eq!(claim_daily_tickets().unwrap_err(), "FEATURE_DISABLED");
+        enable_lottery();
+
+        // Staking is the eligibility gate: no stake → no tickets.
+        assert_eq!(claim_daily_tickets().unwrap_err(), "NOT_STAKED");
+
+        // 6-month staker: base grant × 1 = 5/day.
+        seed_stake(StakeTier::SixMonths, alice, 100_000_000);
+        assert_eq!(user_daily_tickets(alice), 5);
+        assert_eq!(claim_daily_tickets().unwrap(), 5);
+        let state = lottery_state();
+        assert_eq!(state.total_tickets, 5);
+        assert!(state.next_draw_at > 0, "first claim schedules the draw");
+        assert_eq!(claim_daily_tickets().unwrap_err(), "ALREADY_CLAIMED_TODAY");
+
+        // Bob holds 1y + 2y stakes: (2 + 4) × base = 30/day.
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_caller(bob);
+        seed_stake(StakeTier::OneYear, bob, 100_000_000);
+        seed_stake(StakeTier::TwoYears, bob, 100_000_000);
+        assert_eq!(user_daily_tickets(bob), 30);
+        assert_eq!(claim_daily_tickets().unwrap(), 30);
+        assert_eq!(lottery_state().total_tickets, 35);
+
+        // Simulate a win: round restarts, old tickets die lazily.
+        let mut state = lottery_state();
+        state.round += 1;
+        state.total_tickets = 0;
+        set_lottery_state(state);
+
+        // Same-day reclaim is still blocked (the daily grant was consumed).
+        assert_eq!(claim_daily_tickets().unwrap_err(), "ALREADY_CLAIMED_TODAY");
+
+        // Next day: the stale entry resets to the new round, count starts over.
+        let today = 1_700_000_000 / SECS_PER_DAY;
+        LOTTERY_TICKETS.with(|m| {
+            let mut e = m.borrow().get(&bob).unwrap();
+            e.last_claim_day = today - 1;
+            m.borrow_mut().insert(bob, e);
+        });
+        assert_eq!(claim_daily_tickets().unwrap(), 30, "count reset, not 60");
+        let e = LOTTERY_TICKETS.with(|m| m.borrow().get(&bob).unwrap());
+        assert_eq!(e.round, 2);
+        assert_eq!(lottery_state().total_tickets, 30);
+
+        // Admin retunes the daily grant.
+        assert_eq!(
+            admin_set_lottery_config(Some(0)).unwrap_err(),
+            "INVALID_TICKETS_PER_DAY"
+        );
+        admin_set_lottery_config(Some(25)).unwrap();
+        assert_eq!(
+            CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day),
+            25
+        );
+    }
+
+    #[test]
+    fn test_find_ticket_owner_round_scoped() {
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        LOTTERY_TICKETS.with(|m| {
+            let mut m = m.borrow_mut();
+            m.insert(alice, TicketEntry { round: 1, count: 5, last_claim_day: 0 });
+            m.insert(bob, TicketEntry { round: 2, count: 3, last_claim_day: 0 });
+        });
+        // Round 2 only sees bob's 3 tickets, regardless of map order.
+        assert_eq!(find_ticket_owner(2, 0), Some(bob));
+        assert_eq!(find_ticket_owner(2, 2), Some(bob));
+        assert_eq!(find_ticket_owner(2, 3), None);
+        // Round 1 only sees alice's 5.
+        assert_eq!(find_ticket_owner(1, 4), Some(alice));
+        assert_eq!(find_ticket_owner(1, 5), None);
+    }
+
+    #[tokio::test]
+    async fn test_lottery_draw_pays_winner_and_resets_round() {
+        install_staking_test_config();
+        enable_lottery();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        seed_stake(StakeTier::SixMonths, alice, 100_000_000);
+        claim_daily_tickets().unwrap();
+        set_mock_ledger_balance(1_000_000_000); // 10 ICP pot
+        set_mock_ledger_transfer(Ok(7));
+
+        run_lottery_draw(Some(0)).await;
+
+        let draw = LOTTERY_DRAWS.with(|m| m.borrow().get(&1)).unwrap();
+        assert_eq!(draw.status, DrawStatus::Done);
+        assert_eq!(draw.winner, Some(alice));
+        assert_eq!(draw.prize_e8s, 800_000_000, "winner takes 80%");
+        assert_eq!(draw.payout_block, Some(7));
+        assert_eq!(draw.total_tickets, 5);
+
+        let state = lottery_state();
+        assert_eq!(state.round, 2, "round restarts after a win");
+        assert_eq!(state.total_tickets, 0);
+        assert_eq!(state.last_winner, Some(alice));
+        assert_eq!(state.draws_held, 1);
+        assert_eq!(state.total_paid_e8s, 800_000_000 - ICP_FEE_E8S);
+
+        let payouts: Vec<Payout> =
+            PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+        assert_eq!(payouts.len(), 1);
+        assert_eq!(payouts[0].user, alice);
+        assert_eq!(payouts[0].payout_type, PayoutType::LotteryWin);
+        assert_eq!(payouts[0].amount, 800_000_000 - ICP_FEE_E8S);
+        // get_my_payouts is caller-scoped.
+        assert_eq!(get_my_payouts().len(), 1);
+        set_mock_caller(p("ryjl3-tyaaa-aaaaa-aaaba-cai"));
+        assert_eq!(get_my_payouts().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_lottery_draw_no_winner_rolls_over() {
+        install_staking_test_config();
+        enable_lottery();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        seed_stake(StakeTier::SixMonths, alice, 100_000_000);
+        claim_daily_tickets().unwrap();
+        set_mock_ledger_balance(1_000_000_000);
+        set_mock_ledger_transfer(Ok(7));
+
+        // Winning index way above the 5 issued tickets: nobody wins.
+        run_lottery_draw(Some(999_999)).await;
+
+        let draw = LOTTERY_DRAWS.with(|m| m.borrow().get(&1)).unwrap();
+        assert_eq!(draw.status, DrawStatus::Done);
+        assert_eq!(draw.winner, None);
+        assert_eq!(draw.prize_e8s, 0);
+
+        let state = lottery_state();
+        assert_eq!(state.round, 1, "no win — round keeps going");
+        assert_eq!(state.total_tickets, 5, "tickets carry to the next draw");
+        assert_eq!(state.draws_held, 1);
+        assert!(state.next_draw_at > 1_700_000_000_000_000_000);
+        assert!(PAYOUTS.with(|m| m.borrow().is_empty()));
+    }
+
+    #[tokio::test]
+    async fn test_lottery_payout_retry_is_idempotent() {
+        install_staking_test_config();
+        enable_lottery();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        seed_stake(StakeTier::SixMonths, alice, 100_000_000);
+        claim_daily_tickets().unwrap();
+        set_mock_ledger_balance(1_000_000_000);
+        set_mock_ledger_transfer(Err("LEDGER_DOWN".to_string()));
+
+        run_lottery_draw(Some(0)).await;
+
+        let draw = LOTTERY_DRAWS.with(|m| m.borrow().get(&1)).unwrap();
+        assert_eq!(draw.status, DrawStatus::PayoutPending);
+        assert_eq!(draw.payout_block, None);
+        // The win itself is final even though the transfer failed.
+        assert_eq!(lottery_state().round, 2);
+        assert!(PAYOUTS.with(|m| m.borrow().is_empty()), "no payout recorded yet");
+
+        // Ledger recovers; the next timer tick settles the pending payout.
+        set_mock_ledger_transfer(Ok(9));
+        lottery_draw_check().await;
+
+        let draw = LOTTERY_DRAWS.with(|m| m.borrow().get(&1)).unwrap();
+        assert_eq!(draw.status, DrawStatus::Done);
+        assert_eq!(draw.payout_block, Some(9));
+        let payouts: Vec<Payout> =
+            PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+        assert_eq!(payouts.len(), 1, "paid exactly once");
+        assert_eq!(lottery_state().total_paid_e8s, 800_000_000 - ICP_FEE_E8S);
+
+        // A second tick finds nothing pending and doesn't double-pay.
+        lottery_draw_check().await;
+        assert_eq!(
+            PAYOUTS.with(|m| m.borrow().len()),
+            1
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // Value-transfer exhaustive coverage (review hardening, 2026-06-10):
+    // the full burn/commit lifecycle, settlement splits, refunds, retries,
+    // pool rewards/registration, admin endpoints and dev guards — all against
+    // the mocked ledger so every branch that moves ICP is exercised natively.
+    // ════════════════════════════════════════════════════════════════════
+
+    fn follow_as(user: Principal) {
+        set_mock_caller(user);
+        confirm_follow().unwrap();
+    }
+
+    fn open_proposal(pid: u64, threshold: u64) {
+        PROPOSALS.with(|m| {
+            m.borrow_mut().insert(pid, sample_proposal(pid, "open", threshold, 0));
+        });
+        // sample_proposal pre-fills pots/first_stance; zero them for a clean slate.
+        PROPOSALS.with(|m| {
+            let mut p = m.borrow().get(&pid).unwrap();
+            p.adopt_pot_e8s = 0;
+            p.first_stance = None;
+            m.borrow_mut().insert(pid, p);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_commit_validation_gauntlet() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let pid = 700_001u64;
+        open_proposal(pid, 300_000_000);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // Must hold a registered, following neuron first.
+        set_mock_caller(alice);
+        assert_eq!(commit(pid, Stance::Adopt, 200_000_000).await.unwrap_err(), "NEURON_NOT_REGISTERED");
+        USER_NEURONS.with(|m| {
+            m.borrow_mut().insert(alice, UserNeuronState {
+                neuron_id: 7, is_following: false, verified_at: 1, cached_stake_e8s: 0,
+            });
+        });
+        assert_eq!(commit(pid, Stance::Adopt, 200_000_000).await.unwrap_err(), "NOT_FOLLOWING");
+        follow_as(alice);
+
+        // Amount bounds.
+        assert_eq!(commit(pid, Stance::Adopt, MIN_COMMIT_E8S - 1).await.unwrap_err(), "BELOW_MINIMUM");
+        assert_eq!(commit(pid, Stance::Adopt, MAX_COMMIT_E8S + 1).await.unwrap_err(), "EXCEEDS_GLOBAL_CAP");
+
+        // Proposal must exist and be open.
+        assert_eq!(commit(999_999, Stance::Adopt, 200_000_000).await.unwrap_err(), "PROPOSAL_NOT_FOUND");
+        PROPOSALS.with(|m| {
+            m.borrow_mut().insert(700_002, sample_proposal(700_002, "voted", 1, 1));
+        });
+        assert_eq!(commit(700_002, Stance::Adopt, 200_000_000).await.unwrap_err(), "COMMITMENT_CLOSED");
+
+        // Escrow must hold amount + 540_000 (protocol fee + 4 ledger fees).
+        set_mock_ledger_balance(200_000_000);
+        assert_eq!(commit(pid, Stance::Adopt, 200_000_000).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
+        set_mock_ledger_balance(200_540_000);
+
+        // Success: fee charged, pot credited, commitment journaled.
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.adopt_pot_e8s, 200_000_000);
+        assert_eq!(prop.total_committed_e8s, 200_000_000);
+        assert_eq!(prop.first_stance, Some(Stance::Adopt));
+        assert_eq!(prop.status, "open", "below threshold stays open");
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.status, CommitmentStatus::Pending);
+        assert_eq!(c.amount_e8s, 200_000_000);
+        let agg = USER_AGGREGATES.with(|m| m.borrow().get(&alice)).unwrap();
+        assert_eq!(agg.total_committed_escrow, 200_000_000);
+        assert_eq!(agg.proposals_joined, 1);
+
+        // One commitment per user per proposal.
+        assert_eq!(commit(pid, Stance::Reject, 200_000_000).await.unwrap_err(), "ALREADY_COMMITTED");
+
+        // A second user crossing the threshold flips the proposal to met.
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        follow_as(bob);
+        commit(pid, Stance::Reject, 150_000_000).await.unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "met");
+        assert_eq!(prop.reject_pot_e8s, 150_000_000);
+        assert_eq!(prop.first_stance, Some(Stance::Adopt), "first stance is sticky");
+    }
+
+    #[tokio::test]
+    async fn test_commit_deadline_cutoff_window() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        let pid = 700_010u64;
+        let mut near = sample_proposal(pid, "open", 1_000_000_000, 0);
+        near.deadline = current_time() + 1_000; // deep inside the 1h cutoff
+        PROPOSALS.with(|m| { m.borrow_mut().insert(pid, near); });
+        assert_eq!(commit(pid, Stance::Adopt, 200_000_000).await.unwrap_err(), "COMMITMENT_CLOSED");
+    }
+
+    #[tokio::test]
+    async fn test_add_to_commitment_flow() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        let pid = 700_020u64;
+        open_proposal(pid, 500_000_000);
+
+        assert_eq!(add_to_commitment(pid, 100_000_000).await.unwrap_err(), "NO_EXISTING_COMMITMENT");
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+
+        assert_eq!(add_to_commitment(pid, MIN_COMMIT_E8S - 1).await.unwrap_err(), "BELOW_MINIMUM");
+
+        // Escrow must cover the NEW total + the 30k settlement reserve.
+        set_mock_ledger_balance(250_000_000);
+        assert_eq!(add_to_commitment(pid, 100_000_000).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
+        set_mock_ledger_balance(300_030_000);
+        add_to_commitment(pid, 100_000_000).await.unwrap();
+
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.amount_e8s, 300_000_000);
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.adopt_pot_e8s, 300_000_000);
+        assert_eq!(prop.total_committed_e8s, 300_000_000);
+        assert_eq!(prop.status, "open");
+
+        // Top up across the threshold: flips to met.
+        set_mock_ledger_balance(100_000_000_000);
+        add_to_commitment(pid, 200_000_000).await.unwrap();
+        assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "met");
+    }
+
+    #[tokio::test]
+    async fn test_cutoff_voted_burns_and_splits() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(11));
+        let pid = 700_030u64;
+        open_proposal(pid, 200_000_000);
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap(); // meets threshold
+
+        process_proposal_cutoff(pid).await.unwrap();
+
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "settled");
+        assert_eq!(prop.total_burned_e8s, Some(200_000_000));
+        assert!(prop.vote_executed_at.is_some());
+        assert!(prop.pool_distributed, "reward distribution ran (no members → no-op)");
+
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.status, CommitmentStatus::Burned);
+        assert!(c.treasury_block.is_some() && c.cmc_block_index.is_some() && c.frontend_cmc_block.is_some());
+
+        // The vote record reflects the adopt majority.
+        let vote = VOTES.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(vote.vote, Vote::Yes);
+        assert_eq!(vote.icp_burned_e8s, 200_000_000);
+
+        // Aggregates moved from escrow to burned.
+        let agg = USER_AGGREGATES.with(|m| m.borrow().get(&alice)).unwrap();
+        assert_eq!(agg.total_committed_escrow, 0);
+        assert_eq!(agg.total_burned, 200_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_cutoff_unmet_refunds_commitments() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(3));
+        let pid = 700_040u64;
+        open_proposal(pid, 10_000_000_000); // unreachable threshold
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+
+        process_proposal_cutoff(pid).await.unwrap();
+
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "abstained");
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.status, CommitmentStatus::Returned, "threshold unmet → money back");
+        // Refund lands in the payout history.
+        let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+        assert!(payouts.iter().any(|po| po.user == alice
+            && po.payout_type == PayoutType::CommitmentRefund
+            && po.amount == 200_000_000));
+    }
+
+    #[tokio::test]
+    async fn test_cutoff_vote_failure_never_burns() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        let pid = 700_050u64;
+        open_proposal(pid, 200_000_000);
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+
+        // F-102: the NNS rejects the vote → commitments MUST be refunded,
+        // never burned, no matter that the threshold was met.
+        set_mock_nns_vote(Err("governance rejected".to_string()));
+        process_proposal_cutoff(pid).await.unwrap();
+
+        // The transient "failed" status is finalized to "abstained" once the
+        // refunds settle — the key invariant is NO vote record and NO burn.
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "abstained");
+        assert!(VOTES.with(|m| m.borrow().get(&pid)).is_none(), "no vote record");
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.status, CommitmentStatus::Returned);
+    }
+
+    #[tokio::test]
+    async fn test_failed_burn_settlement_is_retried_idempotently() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        let pid = 700_060u64;
+        open_proposal(pid, 200_000_000);
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+
+        // Ledger dies before settlement: the commitment parks as FailedBurn.
+        set_mock_ledger_transfer(Err("ledger down".to_string()));
+        process_proposal_cutoff(pid).await.unwrap();
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.status, CommitmentStatus::FailedBurn);
+        assert!(c.treasury_block.is_none());
+
+        // Simulate a partially-completed earlier attempt: treasury leg done.
+        let mut c2 = c.clone();
+        c2.treasury_block = Some(70);
+        COMMITMENTS.with(|m| { m.borrow_mut().insert(key.clone(), c2); });
+
+        // Ledger recovers: the retry completes ONLY the missing legs.
+        set_mock_ledger_transfer(Ok(71));
+        retry_failed_settlements().await;
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.status, CommitmentStatus::Burned);
+        assert_eq!(c.treasury_block, Some(70), "completed leg never re-runs");
+        assert_eq!(c.cmc_block_index, Some(71));
+        assert_eq!(c.frontend_cmc_block, Some(71));
+    }
+
+    #[tokio::test]
+    async fn test_failed_refund_is_retried() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        let pid = 700_070u64;
+        open_proposal(pid, 10_000_000_000);
+        commit(pid, Stance::Reject, 200_000_000).await.unwrap();
+
+        set_mock_ledger_transfer(Err("ledger down".to_string()));
+        process_proposal_cutoff(pid).await.unwrap();
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        assert_eq!(
+            COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap().status,
+            CommitmentStatus::FailedRefund
+        );
+
+        set_mock_ledger_transfer(Ok(5));
+        retry_failed_settlements().await;
+        assert_eq!(
+            COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap().status,
+            CommitmentStatus::Returned
+        );
+    }
+
+    #[tokio::test]
+    async fn test_distribute_pool_rewards_pays_top_members_once() {
+        install_staking_test_config();
+        let m1 = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let m2 = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        let pid = 700_080u64;
+        let mut prop = sample_proposal(pid, "settled", 1, 0);
+        prop.total_burned_e8s = Some(400_000_000); // pool share = 100M
+        prop.pool_distributed = false;
+        PROPOSALS.with(|m| { m.borrow_mut().insert(pid, prop); });
+
+        for (i, owner) in [(1u64, m1), (2u64, m2)] {
+            POOL_NEURONS.with(|m| {
+                m.borrow_mut().insert(i, PoolNeuron {
+                    neuron_id: i,
+                    registered_by: owner,
+                    voting_power: 1_000 * i,
+                    status: PoolStatus::Active,
+                    created_at: 1,
+                    activated_at: Some(1),
+                    treasury_block: None,
+                    backend_cmc_block: None,
+                    frontend_cmc_block: None,
+                });
+            });
+        }
+        set_mock_ledger_transfer(Ok(8));
+
+        distribute_pool_rewards(pid).await.unwrap();
+        assert!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().pool_distributed);
+        // 100M / 2 members − ledger fee each, recorded as PoolReward payouts.
+        let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+        let rewards: Vec<&Payout> = payouts.iter().filter(|po| po.payout_type == PayoutType::PoolReward).collect();
+        assert_eq!(rewards.len(), 2);
+        assert!(rewards.iter().all(|po| po.amount == 50_000_000 - 10_000));
+
+        // Second call is a no-op (idempotent guard).
+        distribute_pool_rewards(pid).await.unwrap();
+        let count = PAYOUTS.with(|m| m.borrow().iter()
+            .filter(|e| e.value().payout_type == PayoutType::PoolReward).count());
+        assert_eq!(count, 2, "never double-pays");
+    }
+
+    #[tokio::test]
+    async fn test_pool_draft_finalize_cancel_refund() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        create_pool_draft(8_000_001).await.unwrap();
+        // First-come binding: someone else cannot claim the same neuron id.
+        set_mock_caller(bob);
+        assert_eq!(create_pool_draft(8_000_001).await.unwrap_err(), "ALREADY_REGISTERED");
+
+        // Owner finalizes: fee split executes, neuron activates.
+        set_mock_caller(alice);
+        finalize_pool_registration(8_000_001).await.unwrap();
+        let pn = POOL_NEURONS.with(|m| m.borrow().get(&8_000_001)).unwrap();
+        assert_eq!(pn.status, PoolStatus::Active);
+        assert!(pn.treasury_block.is_some());
+
+        // Cancel only works on drafts.
+        assert!(cancel_pool_draft(8_000_001).is_err());
+        create_pool_draft(8_000_002).await.unwrap();
+        cancel_pool_draft(8_000_002).unwrap();
+        assert!(POOL_NEURONS.with(|m| m.borrow().get(&8_000_002)).is_none());
+
+        // Registration escrow refund: balance above one fee comes back.
+        refund_registration().await.unwrap();
+        set_mock_ledger_balance(5_000);
+        assert_eq!(refund_registration().await.unwrap_err(), "NOTHING_TO_REFUND");
+    }
+
+    #[test]
+    fn test_admin_endpoint_validation() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+
+        // add/remove admin.
+        assert!(add_admin(Principal::anonymous()).is_err());
+        add_admin(alice).unwrap();
+        assert!(CONFIG.with(|c| c.borrow().get().admins.contains(&alice)));
+        add_admin(alice).unwrap(); // idempotent
+        assert_eq!(CONFIG.with(|c| c.borrow().get().admins.len()), 1);
+        assert_eq!(remove_admin(alice).unwrap_err(), "Cannot remove the last admin");
+
+        // Deadline: must clear the 1h cutoff window.
+        let pid = 700_090u64;
+        PROPOSALS.with(|m| { m.borrow_mut().insert(pid, sample_proposal(pid, "open", 1, 0)); });
+        assert_eq!(admin_set_proposal_deadline(pid, 0).unwrap_err(), "INVALID_DEADLINE");
+        assert_eq!(
+            admin_set_proposal_deadline(pid, current_time()).unwrap_err(),
+            "DEADLINE_BELOW_CUTOFF"
+        );
+        let good = current_time() + 2 * CUTOFF_NANOS;
+        admin_set_proposal_deadline(pid, good).unwrap();
+        assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().deadline, good);
+        assert!(admin_set_proposal_deadline(999_999_999, good).is_err());
+
+        // Threshold: bounds + live open/met recompute.
+        assert_eq!(admin_set_default_threshold(1).unwrap_err(), "THRESHOLD_BELOW_MIN_COMMIT");
+        assert_eq!(
+            admin_set_default_threshold(MAX_COMMIT_E8S + 1).unwrap_err(),
+            "THRESHOLD_ABOVE_MAX"
+        );
+        let pid2 = 700_091u64;
+        PROPOSALS.with(|m| {
+            m.borrow_mut().insert(pid2, sample_proposal(pid2, "open", 500_000_000, 300_000_000));
+        });
+        admin_set_default_threshold(250_000_000).unwrap();
+        let p2 = PROPOSALS.with(|m| m.borrow().get(&pid2)).unwrap();
+        assert_eq!(p2.threshold_e8s, 250_000_000);
+        assert_eq!(p2.status, "met", "lowering the bar flips it to met");
+
+        // Frontend canister + pool fee.
+        assert!(admin_set_frontend_canister(Principal::anonymous()).is_err());
+        admin_set_frontend_canister(alice).unwrap();
+        assert_eq!(CONFIG.with(|c| c.borrow().get().frontend_canister_id), Some(alice));
+        assert!(admin_set_pool_fee(0).is_err());
+        admin_set_pool_fee(42).unwrap();
+        assert_eq!(CONFIG.with(|c| c.borrow().get().pool_initiation_fee_e8s), 42);
+    }
+
+    #[tokio::test]
+    async fn test_admin_withdraw_treasury_and_lottery_admin() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_ledger_transfer(Ok(2));
+        admin_withdraw_treasury(alice, 1_000_000).await.unwrap();
+        set_mock_ledger_transfer(Err("ledger down".to_string()));
+        assert!(admin_withdraw_treasury(alice, 1_000_000).await.is_err());
+
+        // Lottery base grant bounds.
+        assert_eq!(admin_set_lottery_config(Some(10_001)).unwrap_err(), "INVALID_TICKETS_PER_DAY");
+        admin_set_lottery_config(None).unwrap(); // no-op accepted
+    }
+
+    #[tokio::test]
+    async fn test_dev_endpoint_guards_block_mainnet_shape() {
+        // Mainnet-shaped config: is_local = false AND canonical ICP ledger.
+        CONFIG.with(|cell| { cell.borrow_mut().set(test_config(false)); });
+        set_mock_caller(p("rrkah-fqaaa-aaaaa-aaaaq-cai"));
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        assert!(dev_faucet().await.is_err());
+        assert!(dev_faucet_token(IdeaToken::ICP).await.is_err());
+        assert!(dev_seed_pool_neuron(1, 1).is_err());
+        assert_eq!(dev_run_staking_sweep().await.unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_fast_forward_dissolve(1).unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_add_mock_maturity(1, StakeTier::SixMonths).unwrap_err(), "DEV_ONLY");
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1); });
+        assert_eq!(dev_run_lottery_draw(false).await.unwrap_err(), "DEV_ONLY");
+
+        // is_local=true but the ledger is still the canonical mainnet one
+        // (mis-wired config) — faucets must STILL refuse.
+        CONFIG.with(|cell| { cell.borrow_mut().set(test_config(true)); });
+        assert!(dev_faucet().await.is_err());
+        assert!(dev_seed_pool_neuron(1, 1).is_err());
+
+        // Properly local (test ledger): faucet works.
+        install_staking_test_config();
+        dev_faucet().await.unwrap();
+        dev_seed_pool_neuron(9_000_001, 77).unwrap();
+        assert!(POOL_NEURONS.with(|m| m.borrow().get(&9_000_001)).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_lottery_info_states() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(500_000_000);
+
+        // Flag off: dark — no pot reads, nothing enabled.
+        let info = get_lottery_info().await;
+        assert!(!info.enabled);
+        assert_eq!(info.pot_e8s, 0);
+        assert!(!info.eligible);
+
+        // Flag on, not staked: eligible=false, grant 0.
+        enable_lottery();
+        let info = get_lottery_info().await;
+        assert!(info.enabled);
+        assert_eq!(info.pot_e8s, 500_000_000);
+        assert!(!info.eligible);
+        assert_eq!(info.my_daily_tickets, 0);
+
+        // Staked in two tiers: grant = base × (1 + 4).
+        seed_stake(StakeTier::SixMonths, alice, 100_000_000);
+        seed_stake(StakeTier::TwoYears, alice, 100_000_000);
+        let info = get_lottery_info().await;
+        assert!(info.eligible);
+        assert_eq!(info.my_daily_tickets, 25);
+        assert_eq!(info.odds_denominator, LOTTERY_ODDS_DENOMINATOR);
+    }
+
+    #[test]
+    fn test_eligibility_tiers_and_queries() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+
+        set_mock_caller(Principal::anonymous());
+        assert_eq!(get_eligibility().tier, 0);
+
+        set_mock_caller(alice);
+        assert_eq!(get_eligibility().tier, 1, "signed in, not following");
+        confirm_follow().unwrap();
+        assert_eq!(get_eligibility().tier, 2, "following, no commits");
+        USER_AGGREGATES.with(|m| {
+            m.borrow_mut().insert(alice, UserAggregates {
+                total_committed_escrow: 5, total_burned: 0, proposals_joined: 1,
+            });
+        });
+        let e = get_eligibility();
+        assert_eq!(e.tier, 3);
+        assert!(e.following && e.has_committed && e.authenticated);
+
+        // Deposit address helpers shape-check.
+        let acc = get_deposit_address(1);
+        assert_eq!(acc.owner, get_canister_id());
+        assert!(acc.subaccount.is_some());
+        let reg = get_registration_address();
+        assert_ne!(reg.subaccount, acc.subaccount);
+        let stake_acc = get_stake_deposit_address();
+        assert_ne!(stake_acc.subaccount, reg.subaccount);
+    }
+
+    #[test]
+    fn test_global_stats_and_audit_log_paging() {
+        install_staking_test_config();
+        PROPOSALS.with(|m| {
+            m.borrow_mut().insert(1, sample_proposal(1, "open", 10, 7));
+            m.borrow_mut().insert(2, sample_proposal(2, "met", 10, 12));
+            m.borrow_mut().insert(3, sample_proposal(3, "settled", 10, 12));
+        });
+        VOTES.with(|m| {
+            m.borrow_mut().insert(3, VoteRecord {
+                proposal_id: 3, vote: Vote::Yes, icp_burned_e8s: 12,
+                decided_at: 1, nns_outcome: None,
+            });
+        });
+        let stats = get_global_stats();
+        assert_eq!(stats.tvl_e8s, 19, "open + met escrow only");
+        assert_eq!(stats.total_burned_e8s, 12);
+        assert_eq!(stats.votes_cast, 1);
+
+        for i in 0..5u64 {
+            staking_audit("unit_test", p("2vxsx-fae"), i, i);
+        }
+        let page = get_audit_log(0, 2);
+        assert_eq!(page.len(), 2);
+        let rest = get_audit_log(2, 1_000_000);
+        assert!(rest.len() >= 3, "limit is capped, not rejected");
+        assert!(get_audit_log(1_000_000_000, 10).is_empty());
+
+        // list_active filters terminal statuses.
+        assert_eq!(list_active_proposals().len(), 2);
+        assert!(list_all_proposals().len() >= 3);
+        assert!(get_proposal(3).is_some());
+        assert!(get_proposal(404_404_404).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unstake_disbursement_records_payout() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap();
+        let id = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        dev_fast_forward_dissolve(id).unwrap();
+        staking_sweep().await;
+        let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+        assert!(payouts.iter().any(|po| po.user == alice
+            && po.payout_type == PayoutType::UnstakeDisbursement
+            && po.amount == 150_000_000));
+    }
+
+    #[test]
+    fn test_notify_top_up_endpoint_and_flags() {
+        install_staking_test_config();
+        let res = notify_top_up(NotifyTopUpArgs {
+            canister_id: get_canister_id(),
+            block_index: candid::Nat::from(1u64),
+        });
+        assert!(matches!(res, NotifyTopUpResult::Ok(_)), "local always acks");
+        CONFIG.with(|cell| { cell.borrow_mut().set(test_config(false)); });
+        let res = notify_top_up(NotifyTopUpArgs {
+            canister_id: get_canister_id(),
+            block_index: candid::Nat::from(1u64),
+        });
+        assert!(matches!(res, NotifyTopUpResult::Err(NotifyError::TransactionNotFound)));
+
+        // Flag-key validation.
+        assert_eq!(admin_set_feature_flag("BAD KEY".to_string(), true).unwrap_err(), "INVALID_FLAG_KEY");
+        assert_eq!(admin_set_feature_flag("".to_string(), true).unwrap_err(), "INVALID_FLAG_KEY");
+        admin_set_feature_flag("future_feature".to_string(), true).unwrap();
+        assert!(feature_enabled("future_feature"));
+    }
+
+
+    #[test]
+    fn test_seed_mocks_populate_once() {
+        install_staking_test_config();
+        assert!(PROPOSALS.with(|m| m.borrow().is_empty()));
+        seed_mock_proposals();
+        let n = PROPOSALS.with(|m| m.borrow().len());
+        assert!(n > 0, "local dev gets mock proposals");
+        seed_mock_proposals();
+        assert_eq!(PROPOSALS.with(|m| m.borrow().len()), n, "seeding is idempotent");
+
+        seed_mock_ideas();
+        let i = IDEAS.with(|m| m.borrow().len());
+        assert!(i > 0);
+        seed_mock_ideas();
+        assert_eq!(IDEAS.with(|m| m.borrow().len()), i);
+    }
+
+    #[tokio::test]
+    async fn test_proposal_sync_sweep_processes_due_proposals() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // A met proposal whose deadline is inside the cutoff window.
+        let pid = 710_001u64;
+        open_proposal(pid, 100_000_000);
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+        PROPOSALS.with(|m| {
+            let mut prop = m.borrow().get(&pid).unwrap();
+            prop.deadline = current_time() + 1_000;
+            m.borrow_mut().insert(pid, prop);
+        });
+
+        // A settled proposal with rewards still undistributed.
+        let pid2 = 710_002u64;
+        let mut settled = sample_proposal(pid2, "settled", 1, 0);
+        settled.total_burned_e8s = Some(0);
+        settled.pool_distributed = false;
+        PROPOSALS.with(|m| { m.borrow_mut().insert(pid2, settled); });
+
+        proposal_sync_sweep().await;
+
+        assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "settled");
+        assert!(PROPOSALS.with(|m| m.borrow().get(&pid2)).unwrap().pool_distributed);
+    }
+
+    #[tokio::test]
+    async fn test_cycle_topup_two_phase() {
+        install_staking_test_config();
+
+        // Healthy cycles: nothing moves.
+        set_mock_cycles(10_000_000_000_000);
+        set_mock_ledger_balance(50_000_000_000);
+        set_mock_ledger_transfer(Err("must not be called".to_string()));
+        cycle_topup_check().await;
+        assert!(LAST_TOPUP_BLOCK.with(|c| c.borrow().is_none()));
+
+        // Low cycles + funded treasury: Phase A transfers, Phase B notifies
+        // (host mock acks), and the block clears for the next evaluation.
+        set_mock_cycles(1_000_000_000_000);
+        set_mock_ledger_transfer(Ok(31));
+        cycle_topup_check().await;
+        assert!(LAST_TOPUP_BLOCK.with(|c| c.borrow().is_none()), "cleared after success");
+
+        // Low cycles but a dust treasury: skipped entirely.
+        set_mock_ledger_balance(1_000);
+        set_mock_ledger_transfer(Err("must not be called".to_string()));
+        cycle_topup_check().await;
+        assert!(LAST_TOPUP_BLOCK.with(|c| c.borrow().is_none()));
+        assert!(get_cycle_balance() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_admin_trigger_sweep_runs_all_passes() {
+        install_staking_test_config();
+        set_mock_ledger_balance(0);
+        set_mock_ledger_transfer(Ok(1));
+        admin_trigger_sweep().await.unwrap();
+    }
+
+    #[test]
+    fn test_admin_token_ledger_and_min_upvote() {
+        install_staking_test_config();
+        let ledger = p("aaaaa-aa");
+
+        assert_eq!(admin_set_token_ledger(IdeaToken::CkBTC, Principal::anonymous()).unwrap_err(), "INVALID_LEDGER");
+        assert_eq!(admin_set_token_ledger(IdeaToken::ICP, ledger).unwrap_err(), "ICP_LEDGER_FIXED");
+        admin_set_token_ledger(IdeaToken::CkBTC, ledger).unwrap();
+        admin_set_token_ledger(IdeaToken::CkETH, ledger).unwrap();
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        assert_eq!(cfg.ckbtc_ledger_canister_id, Some(ledger));
+        assert_eq!(cfg.cketh_ledger_canister_id, Some(ledger));
+
+        // Mainnet pins the canonical ledgers — overrides rejected.
+        CONFIG.with(|cell| { cell.borrow_mut().set(test_config(false)); });
+        assert_eq!(admin_set_token_ledger(IdeaToken::CkBTC, ledger).unwrap_err(), "MAINNET_LEDGERS_PINNED");
+        let resolved = token_ledger(IdeaToken::CkBTC, &CONFIG.with(|c| c.borrow().get().clone()));
+        assert_eq!(resolved, Principal::from_text(MAINNET_CKBTC_LEDGER).unwrap());
+
+        assert_eq!(admin_set_min_upvote(IdeaToken::ICP, 0).unwrap_err(), "INVALID_MINIMUM");
+        assert_eq!(admin_set_min_upvote(IdeaToken::ICP, MAX_UPVOTE_UNITS + 1).unwrap_err(), "INVALID_MINIMUM");
+        admin_set_min_upvote(IdeaToken::CkETH, 42).unwrap();
+        assert_eq!(CONFIG.with(|c| c.borrow().get().min_upvote_cketh_wei), Some(42));
+    }
+
+    #[tokio::test]
+    async fn test_dev_faucet_token_local_happy_path() {
+        install_staking_test_config();
+        set_mock_caller(p("rrkah-fqaaa-aaaaa-aaaaq-cai"));
+        set_mock_ledger_transfer(Ok(1));
+        for token in [IdeaToken::ICP, IdeaToken::CkBTC, IdeaToken::CkETH] {
+            dev_faucet_token(token).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_finalize_pool_registration_rejections() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        assert_eq!(finalize_pool_registration(8_100_000).await.unwrap_err(), "NO_DRAFT");
+        create_pool_draft(8_100_001).await.unwrap();
+        set_mock_caller(bob);
+        assert_eq!(finalize_pool_registration(8_100_001).await.unwrap_err(), "NO_DRAFT");
+        set_mock_caller(alice);
+        finalize_pool_registration(8_100_001).await.unwrap();
+        // Already active → no double registration.
+        assert_eq!(finalize_pool_registration(8_100_001).await.unwrap_err(), "NO_DRAFT");
+
+        // Pool info reflects the active membership.
+        let info = get_pool_info();
+        assert!(info.active_count >= 1);
+        set_mock_caller(alice);
+        assert!(get_my_pool_neuron().is_some());
+
+        // Unregister deactivates (the record is kept as Inactive so it can
+        // re-finalize later without paying the fee again).
+        unregister_leader_neuron(8_100_001).unwrap();
+        assert_eq!(
+            POOL_NEURONS.with(|m| m.borrow().get(&8_100_001)).unwrap().status,
+            PoolStatus::Inactive
+        );
+        assert_eq!(unregister_leader_neuron(8_100_001).unwrap_err(), "INVALID_STATE");
+    }
+
+    #[tokio::test]
+    async fn test_caller_scoped_queries_roundtrip() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // Commitments query.
+        let pid = 720_001u64;
+        open_proposal(pid, 1_000_000_000);
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+        let mine = get_my_commitments();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].amount_e8s, 200_000_000);
+
+        // Stake + pending unstakes + lossless votes queries.
+        stake(300_000_000, StakeTier::OneYear).await.unwrap();
+        let my = get_my_stake();
+        assert_eq!(my.total_staked_e8s, 300_000_000);
+        assert_eq!(my.total_weight_e8s, 600_000_000);
+        assert_eq!(my.tiers.len(), 1);
+        let _uid = unstake(150_000_000, StakeTier::OneYear).await.unwrap();
+        assert_eq!(list_my_pending_unstakes().len(), 1);
+        cast_lossless_vote(pid, Stance::Adopt).unwrap();
+        assert_eq!(get_my_lossless_votes().len(), 1);
+
+        // Vote history.
+        VOTES.with(|m| {
+            m.borrow_mut().insert(pid, VoteRecord {
+                proposal_id: pid, vote: Vote::Yes, icp_burned_e8s: 1,
+                decided_at: 1, nns_outcome: None,
+            });
+        });
+        assert!(!list_vote_history().is_empty());
+
+        // Board info reflects local ledger fallbacks.
+        let info = get_idea_board_info();
+        assert!(info.enabled);
+        assert_eq!(info.post_fee_e8s, IDEA_POST_FEE_E8S);
+
+        // require_admin: rejected for non-admins, accepted once added.
+        assert!(require_admin().is_err());
+        CONFIG.with(|cell| {
+            let mut cfg = cell.borrow().get().clone();
+            cfg.admins.push(alice);
+            cell.borrow_mut().set(cfg);
+        });
+        assert!(require_admin().is_ok());
+
+        // Per-target deposit addresses are distinct.
+        let a = get_idea_deposit_address(1);
+        let b = get_project_deposit_address(1);
+        assert_ne!(a.subaccount, b.subaccount);
+        let id_text = get_caller_principal();
+        assert_eq!(id_text, alice);
+    }
+
+    #[tokio::test]
+    async fn test_unstake_split_done_recovers_via_sweep() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap();
+
+        // Make StartDissolving fail at unstake time: the record parks as
+        // SplitDone (split itself succeeded via the mock fallback).
+        set_mock_manage_neuron(Some(Err("gov down".to_string())));
+        // gov_split also goes through manage_neuron → it would fail too, so
+        // run the split first with gov up, then…
+        set_mock_manage_neuron(None);
+        let id = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        let mut pu = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
+        // Force the SplitDone state to exercise the sweep recovery branch.
+        pu.status = UnstakeStatus::SplitDone;
+        PENDING_UNSTAKES.with(|m| { m.borrow_mut().insert(id, pu); });
+
+        staking_sweep().await;
+        let pu = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(pu.status, UnstakeStatus::Dissolving, "sweep restarts the dissolve");
+        assert!(pu.dissolve_eta >= current_time() + StakeTier::SixMonths.dissolve_delay_secs() * 1_000_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_dev_lottery_draw_local_real_odds() {
+        install_staking_test_config();
+        enable_lottery();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        seed_stake(StakeTier::SixMonths, alice, 100_000_000);
+        claim_daily_tickets().unwrap();
+        set_mock_ledger_balance(1_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // force_win=false runs the real-odds path off the mocked entropy
+        // (u64::MAX % denominator ≫ 5 tickets → rolls over).
+        dev_run_lottery_draw(false).await.unwrap();
+        let draw = LOTTERY_DRAWS.with(|m| m.borrow().get(&1)).unwrap();
+        assert_eq!(draw.winner, None);
+        assert_eq!(list_lottery_draws().len(), 1);
+
+        // force_win without tickets in a fresh round errors cleanly.
+        LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice); });
+        let mut st = lottery_state();
+        st.total_tickets = 0;
+        set_lottery_state(st);
+        assert_eq!(dev_run_lottery_draw(true).await.unwrap_err(), "NO_TICKETS");
+    }
+
+}

@@ -1,0 +1,3 @@
+The lossless lottery.  all users on the platform are eligible to when the lossless lottery which is a copy of the american powerball system in odds & draw cadence.  users are given 10 tickets for every day they log in.  users keep their tickets until someone on the platform wins after which time the system restarts. the tickets distributed per day should be under the admin control and the lottery should be feature flagged. make a separate page for the drawing that shows the user all the necessary information. next draw, prize pool, and their tickets.  win there is a winner 80% of the prize pool goes to the winner 20% goes to the next drawing.
+
+Users should get a history of payouts page.  that list payouts from the sight from the different types of payouts offered.

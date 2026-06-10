@@ -70,12 +70,12 @@ mocked `aiReviews` map + `AIPanel` component that already exist in the UI.
    retries the *generation only* — the paid ticket is always honored,
    funds are never charged twice.
 
-## 1. Data model (`lib.rs` — memory IDs 24–25; 0–17 in use, 18–23 reserved by the Burn Putt plan)
+## 1. Data model (`lib.rs` — memory IDs 32–33; 0–25 in use (19–25 = lossless staking, shipped 2026-06-10), 26–31 reserved by the Burn Putt plan)
 
 ```rust
 pub enum AiReviewStatus { PendingPayment, Generating, Ready, FailedGeneration }
 
-pub struct AiReview {                       // AI_REVIEWS: Map<u64 /*nns id*/, AiReview> (mem 24)
+pub struct AiReview {                       // AI_REVIEWS: Map<u64 /*nns id*/, AiReview> (mem 32)
     pub nns_proposal_id: u64,
     pub generation: u32,                    // bumps on every regeneration
     pub status: AiReviewStatus,
@@ -93,7 +93,7 @@ pub struct AiReview {                       // AI_REVIEWS: Map<u64 /*nns id*/, A
     pub frontend_cmc_block: Option<u64>,
 }
 
-// AI_REVIEW_VOTES: Map<(u64 /*nns id*/, u32 /*generation*/, Principal), u8 /*1=up,0=down*/> (mem 25)
+// AI_REVIEW_VOTES: Map<(u64 /*nns id*/, u32 /*generation*/, Principal), u8 /*1=up,0=down*/> (mem 33)
 ```
 
 `Config`: fresh default `ai_price_e8s = 300_000_000`; new

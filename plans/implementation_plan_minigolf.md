@@ -80,7 +80,7 @@ original name ("Burn Putt", working title).
    treasury is a separate, later decision (it raises the anti-cheat bar to
    "Phase 2 mandatory" and adds payout/abuse design).
 
-## 1. Data model (`lib.rs` — memory IDs 18–23; 0–17 in use)
+## 1. Data model (`lib.rs` — memory IDs 26–31; 0–25 in use (18 = IDEA_VIEWS, 19–25 = lossless staking, shipped 2026-06-10))
 
 ### `Config` additions
 ```rust
@@ -90,7 +90,7 @@ original name ("Burn Putt", working title).
 Admin setters: `admin_set_golf_fee(e8s)` (reject 0), 
 `admin_set_golf_course(version_hash, holes_count, par_total)`.
 
-### `GolfRound` — `GOLF_ROUNDS: StableBTreeMap<u64, GolfRound>` (mem 18) + `NEXT_ROUND_ID` cell (mem 19)
+### `GolfRound` — `GOLF_ROUNDS: StableBTreeMap<u64, GolfRound>` (mem 26) + `NEXT_ROUND_ID` cell (mem 27)
 ```rust
 pub struct GolfRound {
     pub id: u64,
@@ -111,13 +111,13 @@ pub struct GolfRound {
 }
 ```
 
-### `GolfShot` log — `GOLF_SHOTS: StableBTreeMap<(u64 /*round*/, u32 /*seq*/), GolfShot>` (mem 20)
+### `GolfShot` log — `GOLF_SHOTS: StableBTreeMap<(u64 /*round*/, u32 /*seq*/), GolfShot>` (mem 28)
 ```rust
 pub struct GolfShot { pub hole: u8, pub angle_mrad: i32, pub power: u16 }
 ```
 Bounded: ≤ 9 holes × 12 strokes = 108 shots/round.
 
-### Leaderboards — `GOLF_BEST: StableBTreeMap<LeaderKey, BestScore>` (mem 21)
+### Leaderboards — `GOLF_BEST: StableBTreeMap<LeaderKey, BestScore>` (mem 29)
 ```rust
 pub struct LeaderKey { pub kind: u8 /*0=weekly,1=monthly*/, pub period_id: u32, pub player: Principal }
 pub struct BestScore { pub total_strokes: u32, pub submitted_at: u64, pub round_id: u64, pub course_version: [u8; 32] }
