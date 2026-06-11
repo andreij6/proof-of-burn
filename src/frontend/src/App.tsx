@@ -1553,6 +1553,101 @@ export default function App() {
     );
   };
 
+  // Shared side-navigation body — identical in the persistent desktop sidebar
+  // and the mobile drawer. `onNavigate` closes the mobile drawer (no-op on
+  // desktop). Navigation up top; Community + Account pinned to the bottom.
+  const renderDrawerBody = (onNavigate?: () => void) => (
+    <>
+      <div className="col" style={{ gap: 8, width: '100%', marginBottom: 32 }}>
+        <Eyebrow style={{ marginBottom: 6 }}>Navigation</Eyebrow>
+        {renderNavLinks(onNavigate)}
+      </div>
+
+      <div className="col" style={{ gap: 8, width: '100%', marginTop: 'auto' }}>
+        <Eyebrow style={{ marginBottom: 6 }}>Community</Eyebrow>
+        <a
+          href={DISCORD_INVITE} target="_blank" rel="noreferrer"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 9, textDecoration: 'none',
+            color: 'var(--fg)', fontSize: 13.5, fontWeight: 500, marginBottom: 8,
+            padding: '0 0 0 2px',
+          }}
+        >
+          <DiscordMark size={17} color="#5865F2" /> Join the ICP Dapp Factory
+        </a>
+
+        <Eyebrow style={{ marginBottom: 6 }}>Account</Eyebrow>
+
+        <Btn
+          variant="ghost"
+          style={{ justifyContent: 'flex-start', width: '100%', height: 38, marginBottom: 8 }}
+          onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+        >
+          <Icon name="spark" size={14} />
+          Theme: {theme.toUpperCase()}
+        </Btn>
+
+        {!principal || principal.isAnonymous() ? (
+          <Btn
+            variant="primary"
+            style={{ width: '100%', height: 40 }}
+            onClick={() => { handleLogin(); onNavigate?.(); }}
+            disabled={isSigningIn}
+          >
+            {isSigningIn ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="key" size={14} stroke="var(--char-950)" />}
+            {isSigningIn ? " Opening II…" : " Sign in with Internet Identity"}
+          </Btn>
+        ) : (
+          <div className="col" style={{ gap: 12, width: '100%' }}>
+            {/* Wallet info */}
+            <div className="col" style={{
+              padding: '12px 14px', borderRadius: 8,
+              border: '1px solid var(--border)', background: 'var(--bg)'
+            }}>
+              <span className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Principal</span>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(principal.toString()); setHotkeyCopied(true); setTimeout(() => setHotkeyCopied(false), 2000); }}
+                  className="row"
+                  style={{ gap: 4, background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
+                >
+                  <span className="mono" style={{ fontSize: 12, color: 'var(--fg)' }}>
+                    {formatPrincipal(principal)}
+                  </span>
+                  <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--fg-3)"} />
+                </button>
+              </span>
+              <span className="row" style={{ justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Holdings</span>
+                <span className="mono" style={{ fontSize: 13, color: 'var(--sprout)', fontWeight: 600 }}>
+                  {fmtICP(holdings)} ICP
+                </span>
+              </span>
+            </div>
+
+            {/* Wallet Actions */}
+            <div className="row" style={{ gap: 8, width: '100%' }}>
+              <Btn
+                variant="primary"
+                style={{ flex: 1, height: 38 }}
+                onClick={() => { setIsWalletOpen(true); setWithdrawError(null); setWithdrawSuccess(false); onNavigate?.(); }}
+              >
+                <Icon name="wallet" size={14} stroke="var(--char-950)" /> Wallet
+              </Btn>
+              <Btn
+                variant="danger"
+                style={{ flex: 1, height: 38 }}
+                onClick={() => { handleLogout(); onNavigate?.(); }}
+              >
+                <Icon name="x" size={14} stroke="var(--ember)" /> Sign out
+              </Btn>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+
   // Partition proposals into three display buckets
   const ACTIVE_STATUSES = new Set([
     CommitmentStatus.Pending, CommitmentStatus.ThresholdMet,
@@ -1810,29 +1905,10 @@ export default function App() {
         {/* Persistent navigation drawer — always open on desktop; the mobile
             drawer (overlay) carries the same links below 900px. */}
         <aside className="hide-mobile col" style={{
-          width: 200, flexShrink: 0, gap: 6, padding: '14px 10px',
+          width: 248, flexShrink: 0, gap: 0, padding: '18px 16px',
           borderRight: '1px solid var(--border)', overflowY: 'auto',
         }}>
-          <Eyebrow style={{ marginBottom: 4, paddingLeft: 8 }}>Navigation</Eyebrow>
-          {renderNavLinks()}
-
-          {/* Community — ICP Dapp Factory */}
-          <div style={{ marginTop: 'auto', paddingTop: 12 }}>
-            <a
-              href={DISCORD_INVITE} target="_blank" rel="noreferrer"
-              title="Join the ICP Dapp Factory community on Discord"
-              style={{
-                display: 'flex', alignItems: 'center', gap: 8, textDecoration: 'none',
-                color: 'var(--fg-2)', fontSize: 12.5, fontWeight: 500,
-                padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)',
-              }}
-            >
-              <DiscordMark size={16} color="#5865F2" /> Join the community
-            </a>
-            <span style={{ display: 'block', fontSize: 10.5, color: 'var(--fg-3)', paddingLeft: 10, marginTop: 4 }}>
-              ICP Dapp Factory
-            </span>
-          </div>
+          {renderDrawerBody()}
         </aside>
 
         {/* Content column */}
@@ -4212,95 +4288,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* Drawer Navigation Links */}
-        <div className="col" style={{ gap: 8, width: '100%', marginBottom: 32 }}>
-          <Eyebrow style={{ marginBottom: 6 }}>Navigation</Eyebrow>
-          {renderNavLinks(() => setMobileMenuOpen(false))}
-        </div>
-
-        {/* Drawer Identity & Wallet */}
-        <div className="col" style={{ gap: 8, width: '100%', marginTop: 'auto' }}>
-          <Eyebrow style={{ marginBottom: 6 }}>Community</Eyebrow>
-          <a
-            href={DISCORD_INVITE} target="_blank" rel="noreferrer"
-            style={{
-              display: 'flex', alignItems: 'center', gap: 9, textDecoration: 'none',
-              color: 'var(--fg)', fontSize: 13.5, fontWeight: 500, marginBottom: 8,
-              padding: '0 0 0 2px',
-            }}
-          >
-            <DiscordMark size={17} color="#5865F2" /> Join the ICP Dapp Factory
-          </a>
-
-          <Eyebrow style={{ marginBottom: 6 }}>Account</Eyebrow>
-
-          <Btn
-            variant="ghost"
-            style={{ justifyContent: 'flex-start', width: '100%', height: 38, marginBottom: 8 }}
-            onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-          >
-            <Icon name="spark" size={14} />
-            Theme: {theme.toUpperCase()}
-          </Btn>
-
-          {!principal || principal.isAnonymous() ? (
-            <Btn
-              variant="primary"
-              style={{ width: '100%', height: 40 }}
-              onClick={() => { handleLogin(); setMobileMenuOpen(false); }}
-              disabled={isSigningIn}
-            >
-              {isSigningIn ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="key" size={14} stroke="var(--char-950)" />}
-              {isSigningIn ? " Opening II…" : " Sign in with Internet Identity"}
-            </Btn>
-          ) : (
-            <div className="col" style={{ gap: 12, width: '100%' }}>
-              {/* Wallet info */}
-              <div className="col" style={{
-                padding: '12px 14px', borderRadius: 8,
-                border: '1px solid var(--border)', background: 'var(--bg)'
-              }}>
-                <span className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Principal</span>
-                  <button
-                    onClick={() => { navigator.clipboard.writeText(principal.toString()); setHotkeyCopied(true); setTimeout(() => setHotkeyCopied(false), 2000); }}
-                    className="row"
-                    style={{ gap: 4, background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}
-                  >
-                    <span className="mono" style={{ fontSize: 12, color: 'var(--fg)' }}>
-                      {formatPrincipal(principal)}
-                    </span>
-                    <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--fg-3)"} />
-                  </button>
-                </span>
-                <span className="row" style={{ justifyContent: 'space-between' }}>
-                  <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Holdings</span>
-                  <span className="mono" style={{ fontSize: 13, color: 'var(--sprout)', fontWeight: 600 }}>
-                    {fmtICP(holdings)} ICP
-                  </span>
-                </span>
-              </div>
-
-              {/* Wallet Actions */}
-              <div className="row" style={{ gap: 8, width: '100%' }}>
-                <Btn
-                  variant="primary"
-                  style={{ flex: 1, height: 38 }}
-                  onClick={() => { setIsWalletOpen(true); setWithdrawError(null); setWithdrawSuccess(false); setMobileMenuOpen(false); }}
-                >
-                  <Icon name="wallet" size={14} stroke="var(--char-950)" /> Wallet
-                </Btn>
-                <Btn
-                  variant="danger"
-                  style={{ flex: 1, height: 38 }}
-                  onClick={() => { handleLogout(); setMobileMenuOpen(false); }}
-                >
-                  <Icon name="x" size={14} stroke="var(--ember)" /> Sign out
-                </Btn>
-              </div>
-            </div>
-          )}
-        </div>
+        {renderDrawerBody(() => setMobileMenuOpen(false))}
       </div>
     </div>
   );
