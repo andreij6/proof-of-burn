@@ -6065,17 +6065,19 @@ async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
 
 // ── Lossless voting ──
 
-/// Cast a free vote with the caller's staked weight. Standalone — no burn
-/// required. Adds to the balance of power that decides the NNS vote direction;
-/// never counts toward the proposal's burn threshold. One immutable vote per
-/// user per proposal; the weight is snapshotted at cast time.
+/// Cast a free vote with the caller's staked weight. NO ICP moves and nothing
+/// is escrowed — this only bumps the proposal's staked-weight tallies. It
+/// therefore has nothing to refund at settlement: the cutoff path only
+/// settles burned COMMITMENTS, never LOSSLESS_VOTES. The weight joins the
+/// adopt/reject balance of power AND can carry the proposal to its threshold;
+/// one immutable vote per user per proposal, snapshotted at cast time.
 #[ic_cdk::update]
 fn cast_lossless_vote(proposal_id: u64, stance: Stance) -> Result<(), String> {
     require_authenticated()?;
     require_lossless_enabled()?;
     let caller = get_caller();
 
-    // Weight is proportional to stake × term: 6mo = 1×, 1y = 2×, 2y = 4×.
+    // Weight = total staked ICP ÷ 10 (see staked_voting_power).
     let weight = user_voting_weight(caller);
     if weight == 0 {
         return Err("NO_STAKE".to_string());
@@ -11498,6 +11500,192 @@ mod tests {
         assert_eq!(prop.total_burned_e8s, Some(0));
         let vote = VOTES.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(vote.vote, Vote::Yes, "staked adopt majority carried it");
+    }
+
+
+    #[tokio::test]
+    async fn test_staked_vote_moves_no_icp_and_has_nothing_to_refund() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(300_000_000, StakeTier::SixMonths).await.unwrap(); // 0.3 VP
+
+        let pid = 760_001u64;
+        open_proposal(pid, 10_000_000_000); // unreachable threshold → will miss
+
+        // From here ANY ledger transfer would be a bug for a staked voter:
+        // make every transfer fail so a stray one surfaces loudly.
+        set_mock_ledger_transfer(Err("staked votes must not move ICP".to_string()));
+        cast_lossless_vote(pid, Stance::Adopt).unwrap();
+
+        // No escrow / commitment exists for the staked voter.
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        assert!(COMMITMENTS.with(|m| m.borrow().get(&key)).is_none());
+
+        // Settlement of a missed proposal: nothing to refund, no transfer
+        // attempted (the Err mock is never hit), no payout recorded.
+        process_proposal_cutoff(pid).await.unwrap();
+        assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "abstained");
+        assert!(PAYOUTS.with(|m| m.borrow().is_empty()), "staked voters get nothing back");
+        // The immutable vote record persists though it moved zero ICP.
+        assert_eq!(get_my_lossless_votes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_staked_vote_then_burn_commit_same_proposal() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        follow_as(alice);
+        stake(1_000_000_000, StakeTier::SixMonths).await.unwrap(); // 10 ICP → 1 VP
+
+        let pid = 760_002u64;
+        open_proposal(pid, 500_000_000); // 5 ICP threshold
+
+        // 1) Free staked ADOPT first (1 ICP of weight; below threshold).
+        cast_lossless_vote(pid, Stance::Adopt).unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.lossless_adopt_e8s, 100_000_000);
+        assert_eq!(prop.total_committed_e8s, 0);
+        assert_eq!(prop.status, "open");
+
+        // 2) Then burn-commit ADOPT with wallet ICP — a separate escrow,
+        //    independent of the staked tally.
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.adopt_pot_e8s, 200_000_000, "burn pot independent of staked tally");
+        assert_eq!(prop.lossless_adopt_e8s, 100_000_000, "staked tally unchanged by the burn");
+        assert_eq!(prop.total_committed_e8s, 200_000_000);
+
+        // 3) Add more burn after the initial commitment → crosses threshold.
+        add_to_commitment(pid, 300_000_000).await.unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.total_committed_e8s, 500_000_000);
+        assert_eq!(prop.lossless_adopt_e8s, 100_000_000, "top-up doesn't touch staked tally");
+        assert_eq!(prop.status, "met");
+
+        // Settle: the burn is spent; the staked vote moved nothing and is
+        // NOT refunded — the user keeps both records, only the burn settles.
+        process_proposal_cutoff(pid).await.unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "settled");
+        assert_eq!(prop.total_burned_e8s, Some(500_000_000));
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        assert_eq!(
+            COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap().status,
+            CommitmentStatus::Burned
+        );
+        assert_eq!(get_my_lossless_votes().len(), 1, "staked vote record retained");
+        let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+        assert!(
+            payouts.iter().all(|po| po.payout_type != PayoutType::CommitmentRefund),
+            "a settled burn is not refunded, and the staked side never had escrow"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_burn_then_staked_vote_opposite_stances_both_tally() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        follow_as(alice);
+        stake(2_000_000_000, StakeTier::SixMonths).await.unwrap(); // 20 ICP → 2 VP
+
+        let pid = 760_005u64;
+        open_proposal(pid, 1_000_000_000); // 10 ICP threshold
+
+        // Burn ADOPT then cast a staked REJECT — a user is free to hedge.
+        // The two land on opposite sides of the balance of power.
+        commit(pid, Stance::Adopt, 300_000_000).await.unwrap();
+        cast_lossless_vote(pid, Stance::Reject).unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.adopt_pot_e8s, 300_000_000);
+        assert_eq!(prop.lossless_reject_e8s, 200_000_000);
+        // first_stance is the burn ADOPT (it came first).
+        assert_eq!(prop.first_stance, Some(Stance::Adopt));
+        // Threshold not met (burn 3 ICP, staked 2 ICP — neither path reaches 10).
+        assert_eq!(prop.status, "open");
+    }
+
+    #[tokio::test]
+    async fn test_unmet_refunds_burners_not_staked_voters() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(7));
+
+        // Alice burns 2 ICP.
+        follow_as(alice);
+        let pid = 760_003u64;
+        open_proposal(pid, 10_000_000_000); // unreachable threshold
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+
+        // Bob stakes and casts a free staked vote — no escrow.
+        set_mock_caller(bob);
+        stake(500_000_000, StakeTier::OneYear).await.unwrap();
+        cast_lossless_vote(pid, Stance::Reject).unwrap();
+
+        process_proposal_cutoff(pid).await.unwrap();
+
+        // Alice's burn is refunded; bob has nothing to refund.
+        let akey = CommitmentKey { proposal_id: pid, principal: alice };
+        assert_eq!(
+            COMMITMENTS.with(|m| m.borrow().get(&akey)).unwrap().status,
+            CommitmentStatus::Returned
+        );
+        let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+        assert_eq!(
+            payouts.iter().filter(|po| po.payout_type == PayoutType::CommitmentRefund).count(),
+            1,
+            "exactly one refund — the burner's"
+        );
+        assert!(payouts.iter().all(|po| po.user != bob), "staked voter gets no payout");
+        let bkey = CommitmentKey { proposal_id: pid, principal: bob };
+        assert!(
+            COMMITMENTS.with(|m| m.borrow().get(&bkey)).is_none(),
+            "no escrow ever existed for the staked voter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lossless_first_vote_sets_tiebreak_stance() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        set_mock_caller(alice);
+        stake(1_000_000_000, StakeTier::SixMonths).await.unwrap(); // 1 VP
+        let pid = 760_004u64;
+        open_proposal(pid, 50_000_000); // 0.5 ICP threshold
+        cast_lossless_vote(pid, Stance::Reject).unwrap(); // first stance = reject
+
+        set_mock_caller(bob);
+        stake(1_000_000_000, StakeTier::OneYear).await.unwrap(); // 1 VP
+        cast_lossless_vote(pid, Stance::Adopt).unwrap();
+
+        // 1 VP adopt vs 1 VP reject → exact tie; first stance (reject) wins.
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "met");
+        assert_eq!(prop.first_stance, Some(Stance::Reject));
+        process_proposal_cutoff(pid).await.unwrap();
+        let vote = VOTES.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(vote.vote, Vote::No, "tie broken by first stance = reject");
+        // Pure staked settlement: nothing burned, nothing refunded.
+        assert_eq!(prop_burned(pid), 0);
+        assert!(PAYOUTS.with(|m| m.borrow().is_empty()));
+    }
+
+    fn prop_burned(pid: u64) -> u64 {
+        PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().total_burned_e8s.unwrap_or(0)
     }
 
 }
