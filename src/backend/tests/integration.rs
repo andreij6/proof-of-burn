@@ -2017,8 +2017,8 @@ fn test_lossless_vote_integration() {
     let res: UnitResult = decode_one(&reply).unwrap();
     assert!(matches!(res, UnitResult::Err(ref e) if e == "NO_STAKE"), "{:?}", res);
 
-    // Stake 2 ICP in the 2-year tier → the vote carries 2 ICP of weight
-    // (voting power is 1:1 with the staked amount).
+    // Stake 2 ICP in the 2-year tier → the vote carries 0.2 ICP of weight
+    // (voting power = staked ICP ÷ 10).
     let res = do_stake_as(&env, env.user, 200_000_000, StakeTier::TwoYears);
     assert!(matches!(res, UnitResult::Ok), "stake failed: {:?}", res);
     let reply = env
@@ -2034,7 +2034,7 @@ fn test_lossless_vote_integration() {
         .expect("get_proposal");
     let prop: Option<ProposalLossless> = decode_one(&reply).unwrap();
     let prop = prop.expect("proposal exists");
-    assert_eq!(prop.lossless_adopt_e8s, 200_000_000, "voting power is 1:1 with the 2 ICP staked");
+    assert_eq!(prop.lossless_adopt_e8s, 20_000_000, "2 ICP staked ÷ 10 = 0.2 ICP of weight");
     assert_eq!(prop.lossless_reject_e8s, 0);
 
     // One vote per user per proposal.

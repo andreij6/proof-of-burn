@@ -4975,6 +4975,15 @@ fn seed_mock_ideas() {
 
 const ONE_ICP_E8S: u64 = 100_000_000;
 const ICP_FEE_E8S: u64 = 10_000;
+/// Staked voting power is discounted vs. burned conviction: every 10 ICP
+/// staked equals 1 ICP of burned voting weight. (Staking risks nothing, so a
+/// staked vote carries proportionally less weight than an irreversible burn.)
+const STAKED_VP_DIVISOR: u64 = 10;
+
+/// Voting power contributed by `amount_e8s` of stake.
+fn staked_voting_power(amount_e8s: u64) -> u64 {
+    amount_e8s / STAKED_VP_DIVISOR
+}
 /// True zero-loss staking: the treasury reimburses every fee the user's
 /// stake/unstake cycle touches — the wallet→escrow deposit fee, the neuron
 /// split fee and the disburse fee (3 × 0.0001 ICP) — paid out with the
@@ -5356,15 +5365,16 @@ fn stake_key(tier: StakeTier, user: Principal) -> StakeKey {
 
 /// The caller's total voting weight: Σ stake × term multiplier over tiers.
 fn user_voting_weight(user: Principal) -> u64 {
-    // Voting power = total ICP staked across all tiers, 1:1 (no term
-    // multiplier — the term multiplier still scales lottery tickets).
-    StakeTier::all().iter().fold(0u64, |acc, &tier| {
+    // Voting power = total ICP staked ÷ 10 (10 staked ICP = 1 burned ICP of
+    // weight). The term multiplier scales lottery tickets, not voting power.
+    let total: u64 = StakeTier::all().iter().fold(0u64, |acc, &tier| {
         let amount = STAKES
             .with(|m| m.borrow().get(&stake_key(tier, user)))
             .map(|s| s.amount_e8s)
             .unwrap_or(0);
         acc.saturating_add(amount)
-    })
+    });
+    staked_voting_power(total)
 }
 
 /// True when the user holds a stake in any tier (the lottery eligibility gate).
@@ -6430,8 +6440,8 @@ fn get_my_stake() -> UserStakeInfo {
     let mut weight = 0u64;
     for tier in StakeTier::all() {
         if let Some(s) = STAKES.with(|m| m.borrow().get(&stake_key(tier, caller))) {
-            // Voting power is 1:1 with the staked amount (no term multiplier).
-            let w = s.amount_e8s;
+            // Voting power = staked ICP ÷ 10 (10 staked = 1 burned of weight).
+            let w = staked_voting_power(s.amount_e8s);
             tiers.push(UserTierStake {
                 tier,
                 amount_e8s: s.amount_e8s,
@@ -6443,10 +6453,12 @@ fn get_my_stake() -> UserStakeInfo {
             weight = weight.saturating_add(w);
         }
     }
+    let _ = weight; // per-tier sum kept for the rows; the headline total uses
+    // the same single-division formula as the cast-time weight.
     UserStakeInfo {
         tiers,
         total_staked_e8s: total,
-        total_weight_e8s: weight,
+        total_weight_e8s: staked_voting_power(total),
     }
 }
 
@@ -9933,13 +9945,13 @@ mod tests {
         stake(300_000_000, StakeTier::SixMonths).await.unwrap();
         cast_lossless_vote(pid, Stance::Reject).unwrap();
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.lossless_reject_e8s, 300_000_000);
+        assert_eq!(prop.lossless_reject_e8s, 30_000_000, "3 ICP staked ÷ 10");
         assert_eq!(prop.lossless_adopt_e8s, 0);
         assert_eq!(prop.first_stance, Some(Stance::Reject));
-        // The burn pots are untouched, but staked conviction now counts
-        // toward the threshold: 3 ICP of weight ≥ the 2 ICP threshold → met.
+        // Burn pots untouched. Staked weight = 3 ICP ÷ 10 = 0.3 ICP, below
+        // the 2 ICP threshold, so it stays open here.
         assert_eq!(prop.total_committed_e8s, 0);
-        assert_eq!(prop.status, "met");
+        assert_eq!(prop.status, "open");
 
         // One immutable vote per user per proposal.
         assert_eq!(
@@ -9950,16 +9962,16 @@ mod tests {
         // Weight was snapshotted: staking more does not retro-apply.
         stake(100_000_000, StakeTier::SixMonths).await.unwrap();
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.lossless_reject_e8s, 300_000_000);
+        assert_eq!(prop.lossless_reject_e8s, 30_000_000);
 
-        // Bob: 1 ICP in the 2-year tier → weight 1 ICP (voting power is 1:1
-        // with the staked amount; the term only scales lottery tickets).
+        // Bob: 1 ICP in the 2-year tier → weight 0.1 ICP (1 ICP ÷ 10; the
+        // term only scales lottery tickets, not voting power).
         set_mock_caller(bob);
         stake(100_000_000, StakeTier::TwoYears).await.unwrap();
-        assert_eq!(user_voting_weight(bob), 100_000_000);
+        assert_eq!(user_voting_weight(bob), 10_000_000);
         cast_lossless_vote(pid, Stance::Adopt).unwrap();
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.lossless_adopt_e8s, 100_000_000);
+        assert_eq!(prop.lossless_adopt_e8s, 10_000_000);
 
         // Combined-pot decision: lossless weight can flip the direction even
         // though the burn pots alone would say otherwise.
@@ -9968,7 +9980,7 @@ mod tests {
             prop.reject_pot_e8s.saturating_add(prop.lossless_reject_e8s),
             prop.first_stance.clone(),
         );
-        assert_eq!(vote, 2, "300M reject (alice) vs 100M adopt (bob) → reject");
+        assert_eq!(vote, 2, "30M reject (alice) vs 10M adopt (bob) → reject");
     }
 
     #[tokio::test]
@@ -11102,7 +11114,7 @@ mod tests {
         stake(300_000_000, StakeTier::OneYear).await.unwrap();
         let my = get_my_stake();
         assert_eq!(my.total_staked_e8s, 300_000_000);
-        assert_eq!(my.total_weight_e8s, 300_000_000, "voting power is 1:1 with stake");
+        assert_eq!(my.total_weight_e8s, 30_000_000, "voting power = stake ÷ 10");
         assert_eq!(my.tiers.len(), 1);
         let _uid = unstake(150_000_000, StakeTier::OneYear).await.unwrap();
         assert_eq!(list_my_pending_unstakes().len(), 1);
@@ -11459,20 +11471,20 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
 
-        // Voting power is 1:1 with stake: 3 ICP staked = 3 ICP of weight.
-        stake(300_000_000, StakeTier::TwoYears).await.unwrap();
+        // Voting power = stake ÷ 10: 30 ICP staked = 3 ICP of weight.
+        stake(3_000_000_000, StakeTier::TwoYears).await.unwrap();
 
-        // Threshold 5 ICP: a 3 ICP staked vote is NOT enough on its own.
+        // Threshold 5 ICP: 3 ICP of staked weight is NOT enough on its own.
         let pid = 740_001u64;
         open_proposal(pid, 500_000_000);
         cast_lossless_vote(pid, Stance::Adopt).unwrap();
         assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "open");
 
-        // A second staker pushes COMBINED weight (3 + 2 = 5 ICP) to the
-        // 5 ICP burn threshold → met, with zero ICP committed to burn.
+        // A second staker (20 ICP → 2 ICP weight) pushes COMBINED weight
+        // (3 + 2 = 5 ICP) to the 5 ICP threshold → met, no burn.
         let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
         set_mock_caller(bob);
-        stake(200_000_000, StakeTier::OneYear).await.unwrap();
+        stake(2_000_000_000, StakeTier::OneYear).await.unwrap();
         cast_lossless_vote(pid, Stance::Reject).unwrap();
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(prop.status, "met", "combined staked weight ≥ threshold");
