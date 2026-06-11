@@ -103,15 +103,13 @@ function BalanceOfPowerBar({ adopt, reject }: { adopt: bigint; reject: bigint })
   );
 }
 
-// Lossless staking: free adopt/reject vote with staked weight. Joins the
-// balance of power only — the burn threshold is untouched. Renders nothing
-// for users without stake; shows the cast vote once made (immutable).
-function LosslessVoteRow({ proposal, myVote, stakeE8s, voting, onVote }: {
+// Lossless staking receipt: shows the user's cast staked vote (immutable)
+// and the per-side staked-power breakdown. Voting itself happens in the
+// unified dialog — staked weight joins the balance of power AND counts
+// toward the proposal threshold.
+function LosslessVoteRow({ proposal, myVote }: {
   proposal: Proposal;
   myVote: LosslessVote | undefined;
-  stakeE8s: bigint;
-  voting: boolean;
-  onVote: (proposalId: bigint, stance: Stance) => void;
 }) {
   const hasLossless = proposal.lossless_adopt_e8s > 0n || proposal.lossless_reject_e8s > 0n;
   const breakdown = hasLossless ? (
@@ -137,43 +135,9 @@ function LosslessVoteRow({ proposal, myVote, stakeE8s, voting, onVote }: {
       </div>
     );
   }
-  const open = proposal.status === 'open' || proposal.status === 'met';
-  if (stakeE8s <= 0n || !open) {
-    return breakdown ? <div className="row" style={{ justifyContent: 'flex-end' }}>{breakdown}</div> : null;
-  }
-  return (
-    <div className="col" style={{
-      gap: 8, padding: '10px 12px', borderRadius: 8,
-      border: '1px solid color-mix(in srgb, var(--burn) 35%, var(--border))',
-      background: 'color-mix(in srgb, var(--burn-950) 55%, transparent)',
-    }}>
-      <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-        <span className="row" style={{ gap: 7, fontSize: 12, fontWeight: 600, color: 'var(--fg)' }}>
-          <Icon name="zap" size={13} stroke="var(--burn)" /> Staked vote — free, no burn
-        </span>
-        <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>
-          your power: {fmtICP(stakeE8s)} VP
-        </span>
-      </div>
-      <div className="row" style={{ gap: 8 }}>
-        <Btn
-          variant="primary" sm
-          style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
-          onClick={() => onVote(proposal.id, Stance.Adopt)} disabled={voting}
-        >
-          {voting ? <LiveDot size={7} /> : <Icon name="checkCircle" size={13} stroke="var(--sprout)" />} ADOPT
-        </Btn>
-        <Btn
-          variant="danger" sm
-          style={{ flex: 1 }}
-          onClick={() => onVote(proposal.id, Stance.Reject)} disabled={voting}
-        >
-          {voting ? <LiveDot size={7} /> : <Icon name="x" size={13} />} REJECT
-        </Btn>
-      </div>
-      {breakdown && <div className="row" style={{ justifyContent: 'flex-end' }}>{breakdown}</div>}
-    </div>
-  );
+  // Actions live in the unified vote dialog (one ADOPT/REJECT pair per
+  // card); this row only ever shows the cast receipt or the breakdown.
+  return breakdown ? <div className="row" style={{ justifyContent: 'flex-end' }}>{breakdown}</div> : null;
 }
 
 function HeatBar({ pct = 0, committed, req, met }: { pct?: number; committed?: string; req?: string; met?: boolean }) {
@@ -461,6 +425,8 @@ export default function App() {
   const [confirmProposalId, setConfirmProposalId] = useState<bigint | null>(null);
   const [confirmAmount, setConfirmAmount] = useState<string>("");
   const [confirmStance, setConfirmStance] = useState<Stance | null>(null);
+  // Vote dialog mode: free staked voting power vs. conviction burn.
+  const [voteMode, setVoteMode] = useState<'stake' | 'burn'>('burn');
 
   // Add-more modal state (top up existing commitment)
   const [isAddingMore, setIsAddingMore] = useState(false);
@@ -1173,6 +1139,10 @@ export default function App() {
     setConfirmProposalId(proposalId);
     setConfirmStance(stance);
     setConfirmAmount("");
+    // Default to the free option when the user has unused staked power.
+    const hasUnusedStake = (myStake?.total_weight_e8s ?? 0n) > 0n
+      && !myLosslessVotes.find(v => v.proposal_id === proposalId);
+    setVoteMode(hasUnusedStake ? 'stake' : 'burn');
     setIsConfirming(true);
     setTxSuccess(false);
     setTxError(null);
@@ -2249,7 +2219,6 @@ export default function App() {
                     )}
                     {openProposals.map((p, i) => {
                       const showBurn = tier >= 1;
-                      const canCommit = tier >= 2;
                       const proposalIdStr = p.id.toString();
                       const aiReview = aiReviews[proposalIdStr];
                       const aiOpen = aiOpenMap[proposalIdStr] || (aiMode === 'expanded' && i === 0);
@@ -2366,9 +2335,6 @@ export default function App() {
                                 <LosslessVoteRow
                                   proposal={p}
                                   myVote={myLosslessVotes.find(v => v.proposal_id === p.id)}
-                                  stakeE8s={myStake?.total_weight_e8s ?? 0n}
-                                  voting={losslessVoting === p.id}
-                                  onVote={handleLosslessVote}
                                 />
                                 <HeatBar pct={pct} committed={committedLabel} req={reqLabel} met={met} />
                               </div>
@@ -2384,20 +2350,7 @@ export default function App() {
                             {/* Action zone */}
                             {tier >= 1 && <div style={{ borderTop: '1px solid var(--border)' }} />}
 
-                            {tier === 1 && (
-                              <Gate hint="Follow neuron to unlock" next height={42} gating={gating}>
-                                <div className="row" style={{ gap: 8 }}>
-                                  <Btn variant="primary" sm style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }} disabled>
-                                    <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> ADOPT
-                                  </Btn>
-                                  <Btn variant="danger" sm style={{ flex: 1 }} disabled>
-                                    <Icon name="x" size={13} /> REJECT
-                                  </Btn>
-                                </div>
-                              </Gate>
-                            )}
-
-                            {canCommit && (
+                            {tier >= 1 && (
                               <div className="col" style={{ gap: 10 }}>
                                 <div className="row" style={{ gap: 8 }}>
                                   <Btn
@@ -2529,9 +2482,6 @@ export default function App() {
                             <LosslessVoteRow
                               proposal={p}
                               myVote={myLosslessVotes.find(v => v.proposal_id === p.id)}
-                              stakeE8s={myStake?.total_weight_e8s ?? 0n}
-                              voting={losslessVoting === p.id}
-                              onVote={handleLosslessVote}
                             />
                             <HeatBar pct={pct} committed={`${fmtICP(p.total_committed_e8s)} ICP`} req={met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`} met={met} />
                             <div style={{ borderTop: '1px solid var(--border)' }} />
@@ -3586,8 +3536,10 @@ export default function App() {
           }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="flame" size={18} stroke="var(--burn)" />
-                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Confirm Conviction Burn</h4>
+                <Icon name={voteMode === 'stake' ? 'zap' : 'flame'} size={18} stroke="var(--burn)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>
+                  {voteMode === 'stake' ? 'Cast Your Vote' : 'Confirm Conviction Burn'}
+                </h4>
               </span>
               {!isTransacting && (
                 <button onClick={() => setIsConfirming(false)} style={{
@@ -3645,6 +3597,96 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Mode toggle: free staked power vs conviction burn */}
+                {(() => {
+                  const weight = myStake?.total_weight_e8s ?? 0n;
+                  const alreadyVoted = confirmProposalId !== null
+                    && !!myLosslessVotes.find(v => v.proposal_id === confirmProposalId);
+                  const stakeLocked = weight <= 0n || alreadyVoted;
+                  const segBtn = (active: boolean): React.CSSProperties => ({
+                    flex: 1, padding: '9px 8px', borderRadius: 8, cursor: 'pointer',
+                    fontSize: 12.5, fontWeight: active ? 700 : 500, fontFamily: 'inherit',
+                    border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
+                    background: active ? 'var(--burn-950)' : 'transparent',
+                    color: active ? 'var(--burn)' : 'var(--fg-2)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  });
+                  return (
+                    <div className="col" style={{ gap: 6 }}>
+                      <div className="row" style={{ gap: 8 }}>
+                        <button
+                          style={{ ...segBtn(voteMode === 'stake'), opacity: stakeLocked ? 0.5 : 1 }}
+                          onClick={() => !stakeLocked && setVoteMode('stake')}
+                          title={alreadyVoted ? 'Staked vote already cast on this proposal'
+                            : weight <= 0n ? 'Stake ICP to unlock free voting power' : undefined}
+                        >
+                          <Icon name="zap" size={13} stroke={voteMode === 'stake' ? 'var(--burn)' : 'currentColor'} />
+                          Staked vote · free
+                        </button>
+                        <button
+                          style={segBtn(voteMode === 'burn')}
+                          onClick={() => setVoteMode('burn')}
+                        >
+                          <Icon name="flame" size={13} stroke={voteMode === 'burn' ? 'var(--burn)' : 'currentColor'} />
+                          Burn ICP
+                        </button>
+                      </div>
+                      {stakeLocked && (
+                        <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                          {alreadyVoted
+                            ? '⚡ Your staked vote is already cast on this proposal — burning adds extra weight.'
+                            : '⚡ Stake ICP on the Staked Voting page to unlock free votes with up to 4× weight.'}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {voteMode === 'stake' ? (
+                  <>
+                    {/* ── Staked vote: free, weight = stake × term ── */}
+                    <div className="col" style={{ gap: 8, fontSize: 13, padding: '12px 14px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
+                      <div className="row" style={{ justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--fg-2)' }}>Your voting power</span>
+                        <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(myStake?.total_weight_e8s ?? 0n)} VP</span>
+                      </div>
+                      <div className="row" style={{ justifyContent: 'space-between' }}>
+                        <span style={{ color: 'var(--fg-2)' }}>Cost</span>
+                        <span className="mono" style={{ color: 'var(--sprout)' }}>0 ICP — free</span>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
+                      ⚡ <b>One vote per proposal, weight locked at cast time.</b> Your stake never moves —
+                      the weight joins the adopt/reject balance of power AND counts toward the proposal's
+                      threshold: when combined staked votes reach the burn-ICP threshold, the proposal
+                      qualifies with zero burning.
+                    </div>
+                    {isTransacting || losslessVoting !== null ? (
+                      <div className="col" style={{ alignItems: 'center', gap: 10, padding: '8px 0' }}>
+                        <LiveDot size={8} color="var(--burn)" />
+                        <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>Casting staked vote…</span>
+                      </div>
+                    ) : (
+                      <div className="row" style={{ gap: 12 }}>
+                        <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setIsConfirming(false)}>
+                          Cancel
+                        </Btn>
+                        <Btn
+                          variant="primary"
+                          style={{ flex: 1 }}
+                          onClick={async () => {
+                            if (!confirmProposalId || !confirmStance) return;
+                            await handleLosslessVote(confirmProposalId, confirmStance);
+                            setIsConfirming(false);
+                          }}
+                        >
+                          <Icon name="zap" size={14} stroke="var(--char-950)" /> Vote {confirmStance === Stance.Adopt ? 'ADOPT' : 'REJECT'} — free
+                        </Btn>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                <>
                 {/* Amount input */}
                 <div className="col" style={{ gap: 8 }}>
                   <label style={{ fontSize: 12, color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
@@ -3717,38 +3759,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {(myStake?.total_weight_e8s ?? 0n) > 0n
-                  && confirmProposalId !== null
-                  && !myLosslessVotes.find(v => v.proposal_id === confirmProposalId) && (
-                  <div className="col" style={{
-                    gap: 8, padding: '10px 12px', borderRadius: 8,
-                    border: '1px solid color-mix(in srgb, var(--burn) 40%, var(--border))',
-                    background: 'color-mix(in srgb, var(--burn-950) 60%, transparent)',
-                  }}>
-                    <span className="row" style={{ gap: 7, fontSize: 12, color: 'var(--fg)' }}>
-                      <Icon name="zap" size={13} stroke="var(--burn)" />
-                      <b>You hold {fmtICP(myStake?.total_weight_e8s ?? 0n)} VP of staked voting power.</b>
-                    </span>
-                    <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.45 }}>
-                      It can back {confirmStance === Stance.Adopt ? 'ADOPT' : 'REJECT'} on this proposal
-                      for free — nothing burns, nothing leaves your wallet. Burning stacks extra weight on top.
-                    </span>
-                    <Btn
-                      variant="secondary" sm
-                      style={{ alignSelf: 'flex-start', border: '1px solid var(--burn)', color: 'var(--burn)' }}
-                      disabled={isTransacting || losslessVoting !== null}
-                      onClick={async () => {
-                        if (!confirmProposalId || !confirmStance) return;
-                        await handleLosslessVote(confirmProposalId, confirmStance);
-                        setIsConfirming(false);
-                      }}
-                    >
-                      {losslessVoting !== null ? <LiveDot size={7} /> : <Icon name="zap" size={13} stroke="var(--burn)" />}
-                      {' '}Cast free staked vote instead
-                    </Btn>
-                  </div>
-                )}
-
                 <div style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
                   ⚠️ <b>Commitment is final.</b> By confirming, you authorize a transfer from your wallet into a deterministic per-proposal escrow. The 0.005 ICP protocol fee is consumed immediately. If the proposal reaches threshold and the neuron votes, your committed ICP is spent — 50% to the treasury, 25% to backend-canister cycles, 25% to frontend-canister cycles. If threshold is not met, your ICP is returned (minus the 0.0001 ICP ledger fee).
                 </div>
@@ -3759,18 +3769,27 @@ export default function App() {
                     <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>{txStep}</span>
                   </div>
                 ) : (
-                  <div className="row" style={{ gap: 12 }}>
-                    <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setIsConfirming(false)}>
-                      Cancel
-                    </Btn>
-                    <Btn
-                      variant="primary"
-                      style={{ flex: 1, opacity: confirmAmount && parseFloat(confirmAmount) >= 1 ? 1 : 0.45 }}
-                      onClick={executeTransaction}
-                    >
-                      <Icon name="flame" size={14} stroke="var(--char-950)" /> Burn {confirmAmount ? `${parseFloat(confirmAmount).toFixed(1)} ICP` : "ICP"}
-                    </Btn>
+                  <div className="col" style={{ gap: 8 }}>
+                    {tier < 2 && (
+                      <span style={{ fontSize: 11.5, color: 'var(--haze)' }}>
+                        Burning needs a followed leader neuron — hit "Confirm follow" on the dashboard first.
+                      </span>
+                    )}
+                    <div className="row" style={{ gap: 12 }}>
+                      <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setIsConfirming(false)}>
+                        Cancel
+                      </Btn>
+                      <Btn
+                        variant="primary"
+                        style={{ flex: 1, opacity: tier >= 2 && confirmAmount && parseFloat(confirmAmount) >= 1 ? 1 : 0.45 }}
+                        onClick={() => { if (tier >= 2) executeTransaction(); }}
+                      >
+                        <Icon name="flame" size={14} stroke="var(--char-950)" /> Burn {confirmAmount ? `${parseFloat(confirmAmount).toFixed(1)} ICP` : "ICP"}
+                      </Btn>
+                    </div>
                   </div>
+                )}
+                </>
                 )}
               </div>
             )}

@@ -1035,7 +1035,7 @@ fn admin_set_default_threshold(new_threshold_e8s: u64) -> Result<(), String> {
             if let Some(mut p) = map.get(&id) {
                 if p.status == "open" || p.status == "met" {
                     p.threshold_e8s = new_threshold_e8s;
-                    p.status = if p.total_committed_e8s >= new_threshold_e8s {
+                    p.status = if proposal_threshold_met(&p) {
                         "met".to_string()
                     } else {
                         "open".to_string()
@@ -2480,7 +2480,7 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         .checked_add(target_e8s)
         .ok_or("POT_OVERFLOW")?;
 
-    if proposal.total_committed_e8s >= proposal.threshold_e8s {
+    if proposal_threshold_met(&proposal) {
         proposal.status = "met".to_string();
     }
 
@@ -2604,7 +2604,7 @@ async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), 
     }
     proposal.total_committed_e8s = proposal.total_committed_e8s
         .checked_add(additional_e8s).ok_or("POT_OVERFLOW")?;
-    if proposal.total_committed_e8s >= proposal.threshold_e8s {
+    if proposal_threshold_met(&proposal) {
         proposal.status = "met".to_string();
     }
     PROPOSALS.with(|map| { map.borrow_mut().insert(proposal_id, proposal); });
@@ -3085,6 +3085,15 @@ async fn cast_nns_vote(leader_id: u64, proposal_id: u64, vote_choice: i32) -> Re
     }
 }
 
+/// Threshold satisfaction: EITHER burned conviction or staked conviction can
+/// carry a proposal — it is "met" when burn commitments reach the threshold
+/// OR when the combined staked voting weight (both sides) equals/exceeds the
+/// same ICP threshold.
+fn proposal_threshold_met(p: &Proposal) -> bool {
+    let staked = p.lossless_adopt_e8s.saturating_add(p.lossless_reject_e8s);
+    p.total_committed_e8s >= p.threshold_e8s || staked >= p.threshold_e8s
+}
+
 /// NNS vote choice (1 = Yes/adopt, 2 = No/reject) from the committed pots.
 /// Majority of committed ICP wins; an exact tie is broken by the first stance
 /// committed (first vote wins); if somehow unset, defaults to No.
@@ -3108,7 +3117,7 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
         None => return Err("Proposal not found".to_string()),
     };
 
-    let met = proposal.total_committed_e8s >= proposal.threshold_e8s;
+    let met = proposal_threshold_met(&proposal);
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     // PB-123: majority of committed ICP wins; an exact tie is broken by the
     // first stance committed on this proposal (first vote wins). Lossless
@@ -6094,6 +6103,12 @@ fn cast_lossless_vote(proposal_id: u64, stance: Stance) -> Result<(), String> {
             .lossless_reject_e8s
             .checked_add(weight)
             .ok_or("POT_OVERFLOW")?;
+    }
+
+    // Staked conviction counts toward the threshold too: when the combined
+    // staked weight reaches the burn-ICP threshold the proposal is met.
+    if proposal.status == "open" && proposal_threshold_met(&proposal) {
+        proposal.status = "met".to_string();
     }
 
     LOSSLESS_VOTES.with(|m| {
@@ -9878,9 +9893,10 @@ mod tests {
         assert_eq!(prop.lossless_reject_e8s, 300_000_000);
         assert_eq!(prop.lossless_adopt_e8s, 0);
         assert_eq!(prop.first_stance, Some(Stance::Reject));
-        // The burn threshold is untouched.
+        // The burn pots are untouched, but staked conviction now counts
+        // toward the threshold: 3 ICP of weight ≥ the 2 ICP threshold → met.
         assert_eq!(prop.total_committed_e8s, 0);
-        assert_eq!(prop.status, "open");
+        assert_eq!(prop.status, "met");
 
         // One immutable vote per user per proposal.
         assert_eq!(
@@ -11389,6 +11405,44 @@ mod tests {
         assert_eq!(uv.token, IdeaToken::CkBTC);
         assert_eq!(uv.amount, 5_000);
         assert!(bobs.iter().all(|t| t.kind != "deposit"), "caller-scoped");
+    }
+
+
+    #[tokio::test]
+    async fn test_staked_weight_meets_threshold_and_settles() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // 1 ICP staked for 2 years = 4 ICP of voting power.
+        stake(100_000_000, StakeTier::TwoYears).await.unwrap();
+
+        // Threshold 5 ICP: a 4 ICP staked vote is NOT enough on its own.
+        let pid = 740_001u64;
+        open_proposal(pid, 500_000_000);
+        cast_lossless_vote(pid, Stance::Adopt).unwrap();
+        assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "open");
+
+        // A second staker pushes COMBINED weight (4 + 2 = 6 ICP) past the
+        // 5 ICP burn threshold → met, with zero ICP committed to burn.
+        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        set_mock_caller(bob);
+        stake(100_000_000, StakeTier::OneYear).await.unwrap();
+        cast_lossless_vote(pid, Stance::Reject).unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "met", "combined staked weight ≥ threshold");
+        assert_eq!(prop.total_committed_e8s, 0, "no burn needed");
+
+        // Cutoff: the vote fires on staked conviction alone. Adopt (4 ICP)
+        // beats reject (2 ICP); nothing burns because nothing was committed.
+        process_proposal_cutoff(pid).await.unwrap();
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "settled");
+        assert_eq!(prop.total_burned_e8s, Some(0));
+        let vote = VOTES.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(vote.vote, Vote::Yes, "staked adopt majority carried it");
     }
 
 }
