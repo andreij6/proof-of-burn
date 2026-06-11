@@ -33,7 +33,7 @@ import Payouts from "./Payouts";
 import Admin from "./Admin";
 import Landing from "./Landing";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
-import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal, DiscordMark, DISCORD_INVITE } from "./ui";
 
 // Inline neuron glyph (from src/assets/neuron.svg). Rendered as inline SVG rather
 // than an <img>, because Vite inlines small SVGs as data URIs and the `#` in the
@@ -1815,6 +1815,24 @@ export default function App() {
         }}>
           <Eyebrow style={{ marginBottom: 4, paddingLeft: 8 }}>Navigation</Eyebrow>
           {renderNavLinks()}
+
+          {/* Community — ICP Dapp Factory */}
+          <div style={{ marginTop: 'auto', paddingTop: 12 }}>
+            <a
+              href={DISCORD_INVITE} target="_blank" rel="noreferrer"
+              title="Join the ICP Dapp Factory community on Discord"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, textDecoration: 'none',
+                color: 'var(--fg-2)', fontSize: 12.5, fontWeight: 500,
+                padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)',
+              }}
+            >
+              <DiscordMark size={16} color="#5865F2" /> Join the community
+            </a>
+            <span style={{ display: 'block', fontSize: 10.5, color: 'var(--fg-3)', paddingLeft: 10, marginTop: 4 }}>
+              ICP Dapp Factory
+            </span>
+          </div>
         </aside>
 
         {/* Content column */}
@@ -4202,6 +4220,18 @@ export default function App() {
 
         {/* Drawer Identity & Wallet */}
         <div className="col" style={{ gap: 8, width: '100%', marginTop: 'auto' }}>
+          <Eyebrow style={{ marginBottom: 6 }}>Community</Eyebrow>
+          <a
+            href={DISCORD_INVITE} target="_blank" rel="noreferrer"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 9, textDecoration: 'none',
+              color: 'var(--fg)', fontSize: 13.5, fontWeight: 500, marginBottom: 8,
+              padding: '0 0 0 2px',
+            }}
+          >
+            <DiscordMark size={17} color="#5865F2" /> Join the ICP Dapp Factory
+          </a>
+
           <Eyebrow style={{ marginBottom: 6 }}>Account</Eyebrow>
 
           <Btn

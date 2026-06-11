@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Icon, Btn } from './ui';
+import { Icon, Btn, DiscordMark, DISCORD_INVITE } from './ui';
 
 // ==========================================
 // Landing — the value proposition as a neural transmission.
@@ -421,8 +421,39 @@ export default function Landing({ onEnter }: LandingProps) {
         <Btn variant="primary" onClick={onEnter}>
           Go to App <Icon name="chevRight" size={14} stroke="var(--char-950)" />
         </Btn>
+
+        {/* ── Community — ICP Dapp Factory ── */}
+        <div className="col" style={{
+          gap: 14, alignItems: 'center', marginTop: 40, padding: '24px 22px',
+          border: '1px solid var(--border)', borderRadius: 14,
+          background: 'color-mix(in srgb, var(--char-950) 70%, transparent)',
+          backdropFilter: 'blur(6px)', maxWidth: 460, width: '100%',
+        }}>
+          <img
+            src="/dapp-factory.png" alt="ICP Dapp Factory"
+            style={{ width: 200, maxWidth: '70%', borderRadius: 10, border: '1px solid var(--border)' }}
+          />
+          <div className="col" style={{ gap: 4, alignItems: 'center' }}>
+            <b style={{ fontFamily: 'var(--font-display)', fontSize: 18 }}>Built by the ICP Dapp Factory</b>
+            <span style={{ fontSize: 13, color: 'var(--fg-2)', textAlign: 'center', lineHeight: 1.5 }}>
+              Join the community shipping dapps on the Internet Computer — ask questions, follow
+              what's next, and help steer this one.
+            </span>
+          </div>
+          <a
+            href={DISCORD_INVITE} target="_blank" rel="noreferrer"
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 9, textDecoration: 'none',
+              background: '#5865F2', color: '#fff', fontWeight: 600, fontSize: 13.5,
+              padding: '10px 18px', borderRadius: 30,
+            }}
+          >
+            <DiscordMark size={18} color="#fff" /> Join the Discord
+          </a>
+        </div>
+
         <span style={{ fontSize: 11, color: 'var(--fg-3)', marginTop: 18 }}>
-          Cycles of Influence · runs entirely on the Internet Computer
+          Cycles of Influence · an ICP Dapp Factory build · runs entirely on the Internet Computer
         </span>
       </section>
     </div>
