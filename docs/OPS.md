@@ -178,6 +178,27 @@ Notes:
 
 ---
 
+## Local Dev Faucet
+
+`dev_faucet` pays 100 ICP from the **backend canister's own default account**
+on the local test ledger. That account is seeded by `icp.yaml`'s ledger
+`initial_balances` — but canister ids are assigned by creation order and
+**permute on a network wipe**, so after a wipe the seed can land on the
+wrong canister and the faucet runs dry
+(`InsufficientFunds { balance: … }`).
+
+Fix (the `minting` identity creates tokens, no fee):
+
+```bash
+# refill the faucet float (5,000 ICP) — use the CURRENT backend id
+icp canister call ledger icrc1_transfer '(record { to = record { owner = principal "<backend-id>" }; amount = 500_000_000_000 : nat })' -e local --identity minting
+```
+
+After any wipe also update the three `initial_balances` entries in
+`icp.yaml` to the new backend id so the next deploy seeds correctly.
+
+---
+
 ## Testing & Coverage
 
 Every value-moving path (commits, burns, refunds, sagas, pool rewards,
