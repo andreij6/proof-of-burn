@@ -659,7 +659,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
           ['board', `Ideas (${ideas.length})`],
           ['projects', `Projects (${projects.length})`],
           ['about', 'What we’re looking for'],
-        ] as const).map(([key, label]) => (
+        ] as [typeof tab, string][]).map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}

@@ -63,9 +63,11 @@ type Config = record {
   // Frontend canister topped up with the 25% cycles share (PB-125).
   frontend_canister_id : opt principal;
   pool_initiation_fee_e8s : nat64;
-  // Local-only ckBTC/ckETH test-ledger overrides (mainnet ledgers hard-pinned).
+  // Local-only ckBTC/ckETH/ckUSDC test-ledger overrides (mainnet ledgers hard-pinned).
   ckbtc_ledger_canister_id : opt principal;
   cketh_ledger_canister_id : opt principal;
+  ckusdc_ledger_canister_id : opt principal;
+  ckusdt_ledger_canister_id : opt principal;
   // Admin overrides for per-token minimum upvotes (smallest units); absent
   // values fall back to value-aligned (~$1) defaults.
   min_upvote_icp_e8s : opt nat64;
@@ -356,7 +358,7 @@ type LotteryInfo = record {
   last_win_at : opt nat64;
   total_paid_e8s : nat64;
 };
-type PayoutType = variant { LotteryWin; UnstakeDisbursement; IdeaUpvoteShare; CommitmentRefund; PoolReward };
+type PayoutType = variant { LotteryWin; UnstakeDisbursement; IdeaUpvoteShare; CommitmentRefund; PoolReward; CoFounderYield };
 // One payout the site made to a user, in the token's smallest unit.
 type Payout = record {
   id : nat64;
@@ -379,6 +381,163 @@ type TransactionRecord = record {
   amount : nat64;
   timestamp : nat64;
   ref_id : nat64;
+};
+
+// ── Dapp Explorer (paid directory listings) ──
+// Tokens accepted for Explorer listing fees ($1/day). On mainnet ckBTC/
+// ckETH/ckUSDC use their canonical ledgers; locally, admin-configured test
+// ledgers.
+type ExplorerToken = variant { ICP; CkBTC; CkETH; CkUSDC; CkUSDT };
+type DappStatus = variant { Pending; Approved };
+type DappListing = record {
+  id : nat64;
+  submitter : principal;
+  name : text;
+  url : text;
+  description : text;
+  // True for paid community submissions (badged in the UI); false for
+  // admin-curated listings.
+  community : bool;
+  status : DappStatus;
+  created_at : nat64;
+  approved_at : opt nat64;
+  // null = permanent (admin listings). Community listings expire `days`
+  // after approval and are then deleted by the sweep.
+  expires_at : opt nat64;
+  days : nat64;
+  token : opt ExplorerToken;
+  // Amount paid in `token`'s smallest unit (0 for admin listings).
+  amount_paid : nat64;
+};
+// A locked price for one caller: deposit `amount` (+ one ledger fee) on the
+// token's ledger, then call submit_dapp before `expires_at`.
+type ExplorerQuote = record {
+  token : ExplorerToken;
+  days : nat64;
+  amount : nat64;
+  // USD value of one whole token at quote time (e8s).
+  rate_usd_e8s : nat64;
+  usd_total_e8s : nat64;
+  created_at : nat64;
+  expires_at : nat64;
+};
+type ExplorerInfo = record {
+  enabled : bool;
+  icp_ledger : principal;
+  ckbtc_ledger : principal;
+  cketh_ledger : principal;
+  ckusdc_ledger : principal;
+  ckusdt_ledger : principal;
+  fee_icp_e8s : nat64;
+  fee_ckbtc_sats : nat64;
+  fee_cketh_wei : nat64;
+  fee_ckusdc_micro : nat64;
+  fee_ckusdt_micro : nat64;
+  price_per_day_usd_e8s : nat64;
+  min_days : nat64;
+  max_days : nat64;
+  quote_ttl_nanos : nat64;
+};
+type ExplorerQuoteResult = variant { Ok : ExplorerQuote; Err : text };
+// Which pay-first deposit escrow to reclaim from.
+type EscrowKind = variant { Explorer; Arcade; CoFounder };
+
+// ── Arcade (skill games, participation-gated) ──
+// Palette indices for the low-poly golfer (defaults are all 0).
+type ArcadeCharacter = record { hair : nat8; skin : nat8; outfit : nat8 };
+type ArcadeInfo = record {
+  enabled : bool;
+  // Caller may finish full rounds + submit scores (stake or vote ≤30 days old).
+  full_access : bool;
+  has_stake : bool;
+  voted_recently : bool;
+  // $1.00 in USD e8s — convert with get_arcade_customize_quote.
+  customize_fee_usd_e8s : nat64;
+  my_character : opt ArcadeCharacter;
+  hair_options : nat8;
+  skin_options : nat8;
+  outfit_options : nat8;
+};
+type ArcadeLeaderboardRow = record {
+  rank : nat32;
+  player : principal;
+  strokes : nat32;
+  millis : nat64;
+  submitted_at : nat64;
+};
+type RankResult = variant { Ok : nat32; Err : text };
+// One Mini Golf Gold hole as an admin-editable voxel layout: a 22×14
+// row-major tile grid (0 void, 1 grass, 2 wall, 3 sand, 4 water, 5..8 slope
+// N/S/E/W, 9 post), tee/cup cell coords, par, optional windmill bars.
+type ArcadeBarDef = record { cx : nat8; cy : nat8; len_cells : nat8; speed_mrad : nat32 };
+type ArcadeHoleDef = record {
+  name : text;
+  par : nat8;
+  w : nat8;
+  h : nat8;
+  cells : vec nat8;
+  tee_x : nat8;
+  tee_y : nat8;
+  cup_x : nat8;
+  cup_y : nat8;
+  bars : vec ArcadeBarDef;
+};
+type ArcadeCourseEntry = record { index : nat8; hole : ArcadeHoleDef };
+// ── Co-Founders (permanent stake — NO unstake exists, by design) ──
+type CoFounderInfo = record {
+  enabled : bool;
+  // True once any month's yield has reached close_threshold_e8s (2,000 ICP)
+  // — permanent; new members rejected, existing co-founders may still top up.
+  membership_closed : bool;
+  close_threshold_e8s : nat64;
+  // Months yielding under this (500 ICP) are restaked into the neuron.
+  restake_threshold_e8s : nat64;
+  total_restaked_e8s : nat64;
+  // The co-founder neuron; once bootstrapped it follows the primary voting
+  // neuron on all topics and votes on every NNS proposal the leader does.
+  neuron_id : opt nat64;
+  follows_primary_neuron : bool;
+  primary_neuron_id : nat64;
+  min_stake_e8s : nat64;
+  // The treasury's monthly cut: the first 1,000 ICP of each month's yield.
+  treasury_cut_e8s : nat64;
+  // Minimum pot (100 ICP) before an even split happens; below it rolls over.
+  min_distribution_e8s : nat64;
+  period_nanos : nat64;
+  cofounder_count : nat64;
+  total_staked_e8s : nat64;
+  rollover_e8s : nat64;
+  // Live share-pool balance (unclaimed shares + rollover).
+  share_pool_e8s : nat64;
+  total_yield_e8s : nat64;
+  total_distributed_e8s : nat64;
+  next_distribution_at : nat64;
+  my_staked_e8s : nat64;
+  my_claimable_e8s : nat64;
+  fee_e8s : nat64;
+};
+// One row of the public co-founder roster.
+type CoFounderPublic = record {
+  user : principal;
+  staked_e8s : nat64;
+  joined_at : nat64;
+  is_admin : bool;
+};
+// One monthly settlement — drives the yield + share-pool charts.
+type CoFounderRound = record {
+  month : nat64;
+  settled_at : nat64;
+  yield_e8s : nat64;
+  treasury_e8s : nat64;
+  // Allocated to co-founders, proportional to staked ICP.
+  distributed_e8s : nat64;
+  // Yield restaked into the neuron (months under 500 ICP).
+  restaked_e8s : nat64;
+  cofounder_count : nat64;
+  // Unclaimed shares from the previous round forfeited to the treasury.
+  expired_e8s : nat64;
+  rollover_after_e8s : nat64;
+  share_pool_after_e8s : nat64;
 };
 
 type Vote = variant { No; Yes; Abstain };
@@ -556,4 +715,94 @@ service : (InitPayload) -> {
   dev_reset_proposals : () -> (variant { Ok : nat64; Err : text });
   // Local-dev: seed mock payout history for the caller (no-op if non-empty).
   dev_seed_payouts : () -> (Result);
+  // ── Dapp Explorer (paid directory listings) ──
+  // The flag + per-token ledgers/fees + pricing constants, in one query.
+  get_explorer_info : () -> (ExplorerInfo) query;
+  // All live (approved, unexpired) listings: admin-curated first, then
+  // community listings in approval order.
+  list_dapps : () -> (vec DappListing) query;
+  // The caller's own submissions in every state (shows pending approvals).
+  list_my_dapp_submissions : () -> (vec DappListing) query;
+  // Admin: the approval queue, oldest first.
+  list_pending_dapps : () -> (vec DappListing) query;
+  // Price `days` of visibility in `token` at the live USD rate ($1/day via
+  // the XRC on mainnet) and lock that price for the caller for 15 minutes.
+  get_explorer_quote : (ExplorerToken, nat64) -> (ExplorerQuoteResult);
+  // The caller's deposit subaccount for listing fees. Fund it on the quoted
+  // token's ledger with quote.amount + one fee, then call submit_dapp.
+  get_explorer_deposit_address : () -> (LedgerAccount) query;
+  // Submit a community listing (needs a fresh matching quote + the funded
+  // deposit). Payment goes to the treasury; the listing stays hidden until
+  // an admin approves it. Rejection refunds (minus one ledger fee).
+  submit_dapp : (text, text, text, ExplorerToken, nat64) -> (IdeaIdResult);
+  // Admin: approve a pending listing — its paid window starts now.
+  admin_approve_dapp : (nat64) -> (Result);
+  // Admin: reject a pending listing — refunds from the treasury, then deletes.
+  admin_reject_dapp : (nat64) -> (Result);
+  // Admin: add a permanent curated listing (no payment, no badge, no expiry).
+  admin_add_dapp : (text, text, text) -> (IdeaIdResult);
+  // Admin: remove any listing outright (no refund).
+  admin_remove_dapp : (nat64) -> (Result);
+  // Admin: point Explorer tokens at locally deployed test ledgers (local only).
+  admin_set_explorer_ledger : (ExplorerToken, principal) -> (Result);
+  // Admin: seed/override a token's USD rate (e8s per whole token) — the only
+  // rate knob on local networks (no XRC there).
+  admin_set_usd_rate : (ExplorerToken, nat64) -> (Result);
+  // Withdraw the caller's remaining balance from one of their pay-first
+  // deposit subaccounts (stranded by an expired quote, quota, etc.).
+  // Returns the reclaimed amount in the token's smallest unit.
+  reclaim_escrow : (EscrowKind, ExplorerToken) -> (ClaimResult);
+  // ── Arcade (skill games, participation-gated) ──
+  // Flag + caller's access level + character + customization pricing.
+  get_arcade_info : () -> (ArcadeInfo) query;
+  // The caller's deposit subaccount for arcade fees. Fund it on the ICP
+  // ledger with customize_fee + 0.0001 ICP, then call customize_character.
+  get_arcade_deposit_address : () -> (LedgerAccount) query;
+  // Price the $1 customization in `token` and lock it for 15 minutes.
+  get_arcade_customize_quote : (ExplorerToken) -> (ExplorerQuoteResult);
+  // Change the golfer's look (hair/skin/outfit palette indices); costs $1,
+  // paid to the treasury in any supported token at the quoted rate.
+  customize_character : (nat8, nat8, nat8, ExplorerToken) -> (Result);
+  // Submit a finished 9-hole round (per-hole strokes + elapsed millis).
+  // Requires an active stake or a vote in the last 30 days. Keeps only the
+  // caller's best round (fewest strokes, then fastest); returns their rank.
+  submit_arcade_score : (text, nat64, vec nat8) -> (RankResult);
+  // Top 100 for one game: fewest strokes, fastest time, earliest submission.
+  get_arcade_leaderboard : (text) -> (vec ArcadeLeaderboardRow) query;
+  // On-chain hole overrides (defaults ship in the frontend; the game merges
+  // these over them at load).
+  get_arcade_course : () -> (vec ArcadeCourseEntry) query;
+  // Admin: replace one hole's voxel layout (0-based index, validated).
+  admin_set_arcade_hole : (nat8, ArcadeHoleDef) -> (Result);
+  // Admin: drop one hole's override, reverting to the built-in layout.
+  admin_reset_arcade_hole : (nat8) -> (Result);
+  // ── Co-Founders (permanent stake into the platform's 2-year neuron) ──
+  // Program stats + the caller's position (stake, claimable share, deadline).
+  get_cofounder_info : () -> (CoFounderInfo) query;
+  // Monthly settlement history, oldest first (chart data).
+  list_cofounder_rounds : () -> (vec CoFounderRound) query;
+  // The full co-founder roster, largest stake first. is_admin marks team
+  // members (rendered as the FOUNDER tag).
+  list_cofounders : () -> (vec CoFounderPublic) query;
+  // The caller's deposit subaccount. Fund with amount + 0.0001 ICP, then
+  // call cofounder_stake.
+  get_cofounder_deposit_address : () -> (LedgerAccount) query;
+  // Stake into the co-founder neuron. PERMANENT — there is no unstake
+  // method anywhere in this canister, by design.
+  cofounder_stake : (nat64) -> (Result);
+  // Claim the caller's monthly share. Unclaimed shares are forfeited to the
+  // treasury at the next monthly settlement.
+  claim_cofounder_yield : () -> (ClaimResult);
+  // Local-dev: the neuron's yield inbox (send mock yield here).
+  get_cofounder_yield_inbox_address : () -> (LedgerAccount) query;
+  // Local-dev: force a settlement now regardless of the period clock.
+  dev_run_cofounder_settlement : () -> (Result);
+  // Local-dev: jump the page to a preset state (0 fresh/open, 1 open with
+  // members + history + claimable, 2 membership closed). Visual only.
+  dev_set_cofounder_preset : (nat8) -> (Result);
+  // ── Social profile ──
+  // Set (empty text clears) the caller's X/Twitter handle (no @, 1–15 chars
+  // [A-Za-z0-9_]). Used for proposal-sharing social features.
+  set_twitter_handle : (text) -> (Result);
+  get_my_twitter_handle : () -> (opt text) query;
 }

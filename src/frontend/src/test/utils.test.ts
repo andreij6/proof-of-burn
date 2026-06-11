@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isValidAccountId } from '../App';
+import { isValidAccountId, pageFromHash, PAGE_PATH } from '../App';
 
 // ── Formatting helpers (duplicated here to avoid import-cycle with App.tsx) ──
 
@@ -334,6 +334,31 @@ describe('PB-114 proposal partitioning', () => {
 
   it('settled proposal with no personal commitment → History', () => {
     expect(bucketOf({ id: 9n, status: 'voted' }, [])).toBe('history');
+  });
+});
+
+describe('pageFromHash (shareable URL routing)', () => {
+  it('maps every page path back to its page', () => {
+    for (const [pageKey, path] of Object.entries(PAGE_PATH)) {
+      if (pageKey === 'landing') continue;
+      expect(pageFromHash(`#${path}`)).toBe(pageKey);
+    }
+  });
+  it('resolves the bare root to the landing page', () => {
+    expect(pageFromHash('')).toBe('landing');
+    expect(pageFromHash('#')).toBe('landing');
+    expect(pageFromHash('#/')).toBe('landing');
+  });
+  it('routes shared proposal deep links to the dashboard', () => {
+    expect(pageFromHash('#proposal-138512')).toBe('dashboard');
+  });
+  it('returns null for unknown hashes', () => {
+    expect(pageFromHash('#/nope')).toBeNull();
+    expect(pageFromHash('#garbage')).toBeNull();
+  });
+  it('tolerates a missing leading slash', () => {
+    expect(pageFromHash('#staking')).toBe('staking');
+    expect(pageFromHash('#/staking')).toBe('staking');
   });
 });
 

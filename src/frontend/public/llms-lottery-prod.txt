@@ -1,4 +1,4 @@
-# Cycles of Influence — Lossless Lottery: CLI & Agent Integration (Mainnet)
+# Caldera — Lossless Lottery: CLI & Agent Integration (Mainnet)
 
 Instructions for AI agents and scheduled scripts to play the lossless lottery
 with the `icp` CLI: check state, claim the daily ticket grant, and track

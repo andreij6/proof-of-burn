@@ -18,14 +18,14 @@ interface LandingProps {
 const SECTIONS = [
   {
     icon: 'flame',
-    eyebrow: 'NNS Voting',
+    eyebrow: 'Voting',
     title: 'Burn ICP. Move the vote.',
     body: 'Commit ICP behind adopt or reject on live NNS proposals. The heavier side steers the community leader neuron. The vote lands — the pot burns into cycles and treasury. The threshold misses — every e8 comes straight back.',
     chips: ['1 ICP minimum', 'majority steers the neuron', 'full refund on a miss'],
   },
   {
     icon: 'zap',
-    eyebrow: 'Staked Voting',
+    eyebrow: 'Staking',
     title: 'Lock time. Multiply your voice.',
     body: 'Stake into 6-month, 1-year or 2-year pooled neurons. Voting power is your staked ICP ÷ 10 (10 staked = 1 burned of weight), longer terms earn more lottery tickets, and the treasury pays every transfer fee. Commit X, get X back. Zero loss, literally.',
     chips: ['10 staked ICP = 1 VP', 'principal never spent', 'treasury pays the fees'],
@@ -232,7 +232,7 @@ export default function Landing({ onEnter }: LandingProps) {
         background: 'linear-gradient(color-mix(in srgb, var(--char-950) 88%, transparent), transparent)',
       }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 15 }}>
-          <Icon name="flame" size={16} stroke="var(--burn)" /> Cycles of Influence
+          <Icon name="flame" size={16} stroke="var(--burn)" /> Caldera
         </span>
         <Btn variant="primary" sm onClick={onEnter}>
           Go to App <Icon name="chevRight" size={13} stroke="var(--char-950)" />
@@ -453,7 +453,7 @@ export default function Landing({ onEnter }: LandingProps) {
         </div>
 
         <span style={{ fontSize: 11, color: 'var(--fg-3)', marginTop: 18 }}>
-          Cycles of Influence · an ICP Dapp Factory build · runs entirely on the Internet Computer
+          Caldera · an ICP Dapp Factory build · runs entirely on the Internet Computer
         </span>
       </section>
     </div>

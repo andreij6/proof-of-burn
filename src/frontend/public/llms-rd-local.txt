@@ -1,7 +1,7 @@
-# Cycles of Influence — Community R&D Board: CLI & Agent Integration (Local Development)
+# Caldera — Community R&D Board: CLI & Agent Integration (Local Development)
 
 This document provides instructions for AI agents and developer scripts to
-interact with the **Community R&D board** of the Cycles of Influence dapp
+interact with the **Community R&D board** of the Caldera dapp
 using the `icp` CLI: read ideas, post ideas, upvote ideas with funds, and
 fund official projects.
 

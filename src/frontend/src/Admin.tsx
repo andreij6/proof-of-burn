@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Config, FeatureFlag } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Btn, LiveDot, fmtICP } from "./ui";
+import CourseEditor from "./arcade/CourseEditor";
 
 // ==========================================
 // Admin console — every protocol dial in one place (admins only), plus the
@@ -295,6 +296,19 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           jackpot — this control exists only here. (Admins hold no tickets, so you can never win
           your own deposit back.)
         </span>
+      </div>
+
+      {/* ── Arcade course editor ── */}
+      <div className="col" style={{ ...card, gap: 10 }}>
+        <span className="row" style={{ gap: 8 }}>
+          <Icon name="gamepad" size={13} stroke="var(--burn)" />
+          <Eyebrow>Mini Golf Gold — course editor</Eyebrow>
+        </span>
+        <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+          Repaint any hole's voxel layout cell by cell. Saving stores the layout on-chain and
+          replaces the built-in hole for every player immediately; Reset reverts to the built-in.
+        </span>
+        <CourseEditor actor={actor} />
       </div>
 
       {/* ── How it works ── */}

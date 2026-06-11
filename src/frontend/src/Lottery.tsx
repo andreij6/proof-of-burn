@@ -244,7 +244,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
           ) : info && !info.eligible ? (
             <div className="col" style={{ gap: 8, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Staking is the entry ticket: stake ICP on the Staked Voting page to start
+                Staking is the entry ticket: stake ICP on the Staking page to start
                 collecting 5 / 10 / 20 free tickets a day (6-month / 1-year / 2-year terms).
               </span>
               <Chip tone="muted"><Icon name="zap" size={11} /> Not staked yet</Chip>

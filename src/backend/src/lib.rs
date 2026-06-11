@@ -355,6 +355,10 @@ pub struct Config {
     pub ckbtc_ledger_canister_id: Option<Principal>,
     #[serde(default)]
     pub cketh_ledger_canister_id: Option<Principal>,
+    #[serde(default)]
+    pub ckusdc_ledger_canister_id: Option<Principal>,
+    #[serde(default)]
+    pub ckusdt_ledger_canister_id: Option<Principal>,
     /// Admin overrides for the per-token minimum upvote (smallest units).
     /// `None` falls back to the value-aligned defaults; retune via
     /// `admin_set_min_upvote` as exchange rates drift.
@@ -538,6 +542,8 @@ thread_local! {
             pool_initiation_fee_e8s: 12_500_000_000, // 125 ICP
             ckbtc_ledger_canister_id: None,
             cketh_ledger_canister_id: None,
+            ckusdc_ledger_canister_id: None,
+            ckusdt_ledger_canister_id: None,
             min_upvote_icp_e8s: None,
             min_upvote_ckbtc_e8s: None,
             min_upvote_cketh_wei: None,
@@ -709,6 +715,8 @@ fn init(payload: InitPayload) {
         pool_initiation_fee_e8s: 12_500_000_000, // 125 ICP
         ckbtc_ledger_canister_id: None, // local: set via admin_set_token_ledger
         cketh_ledger_canister_id: None,
+        ckusdc_ledger_canister_id: None, // local: set via admin_set_explorer_ledger
+        ckusdt_ledger_canister_id: None,
         min_upvote_icp_e8s: None,
         min_upvote_ckbtc_e8s: None,
         min_upvote_cketh_wei: None,
@@ -729,6 +737,9 @@ fn init(payload: InitPayload) {
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
     }
+    // Real directory content (idGeek, Liquidium), not mocks — seeded on every
+    // network when the Explorer is empty.
+    seed_default_dapps();
     // Populate the leader-neuron stats (real on mainnet, mock on local).
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
     recompute_pool_info();
@@ -746,6 +757,7 @@ fn post_upgrade() {
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
     }
+    seed_default_dapps();
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
     recompute_pool_info();
     setup_timers();
@@ -1088,8 +1100,10 @@ async fn admin_trigger_sweep() -> Result<(), String> {
     retry_failed_upvotes().await;
     retry_failed_fundings().await;
     delete_expired_ideas();
+    delete_expired_dapps();
     cycle_topup_check().await;
     staking_sweep().await;
+    cofounder_settlement_check().await;
     Ok(())
 }
 
@@ -3500,9 +3514,11 @@ fn setup_timers() {
         retry_failed_upvotes().await;
         retry_failed_fundings().await;
         delete_expired_ideas();
+        delete_expired_dapps();
         cycle_topup_check().await;
         staking_sweep().await;
         lottery_draw_check().await;
+        cofounder_settlement_check().await;
     });
 }
 
@@ -3668,8 +3684,11 @@ pub const FLAG_LOSSLESS_VOTING: &str = "lossless_voting";
 /// Lossless lottery (Powerball-style draws over the staking-yield lottery
 /// pot). Ships dark — default OFF until an admin flips it on.
 pub const FLAG_LOSSLESS_LOTTERY: &str = "lossless_lottery";
-const KNOWN_FEATURE_FLAGS: [&str; 3] =
-    [FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY];
+pub const FLAG_EXPLORER: &str = "dapp_explorer";
+pub const FLAG_ARCADE: &str = "arcade";
+pub const FLAG_COFOUNDERS: &str = "cofounders";
+const KNOWN_FEATURE_FLAGS: [&str; 6] =
+    [FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER, FLAG_ARCADE, FLAG_COFOUNDERS];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
 const MAX_FLAG_KEY_LEN: usize = 64;
@@ -3877,6 +3896,12 @@ fn feature_default(key: &str) -> bool {
         // Money-moving and unproven on mainnet — ships dark until an admin
         // enables it (see docs/OPS.md § "Lossless Lottery").
         FLAG_LOSSLESS_LOTTERY => false,
+        FLAG_EXPLORER => true,
+        // Ships dark like the lottery — flips on locally via deploy-local.sh,
+        // on mainnet via the admin flag panel after a playtest.
+        FLAG_ARCADE => false,
+        // Irreversible money-moving — ships dark until the owner enables it.
+        FLAG_COFOUNDERS => false,
         _ => false,
     }
 }
@@ -6732,6 +6757,8 @@ pub enum PayoutType {
     CommitmentRefund,
     /// 25% of a settled burn, split among the top pool neurons' owners.
     PoolReward,
+    /// A claimed monthly Co-Founder yield share.
+    CoFounderYield,
 }
 
 /// One payout the site made to a user, in the token's smallest unit. Drives
@@ -7538,6 +7565,2366 @@ fn dev_reset_proposals() -> Result<u64, String> {
     Ok(PROPOSALS.with(|m| m.borrow().len()))
 }
 
+// ==========================================
+// 16. Dapp Explorer (paid directory listings)
+// ==========================================
+//
+// A public 3×3 directory of ICP-ecosystem dapps. Admins curate permanent
+// listings for free; anyone else pays $1 (USD) per day of visibility — 1 to
+// 3650 days — in ICP, ckBTC, ckETH or ckUSDC. USD conversion comes from the
+// Exchange Rate Canister (XRC) on mainnet (ckUSDC is pinned at $1); locally
+// it falls back to admin-tunable static rates. Community listings stay
+// hidden until an admin approves them; a rejection refunds the payment from
+// the treasury (minus one ledger fee).
+
+const MAINNET_CKUSDC_LEDGER: &str = "xevnm-gaaaa-aaaar-qafnq-cai";
+const MAINNET_CKUSDT_LEDGER: &str = "cngnf-vqaaa-aaaar-qag4q-cai";
+/// Exchange Rate Canister (mainnet system canister).
+const XRC_CANISTER: &str = "uf6dk-hyaaa-aaaaq-qaaaq-cai";
+/// Cycles each XRC call must carry.
+const XRC_CALL_CYCLES: u128 = 1_000_000_000;
+
+/// $1.00 per day of visibility, expressed in USD e8s (8 decimals).
+const EXPLORER_PRICE_PER_DAY_USD_E8S: u64 = 100_000_000;
+const USD_E8S_PER_USD: u64 = 100_000_000;
+const EXPLORER_MIN_DAYS: u64 = 1;
+const EXPLORER_MAX_DAYS: u64 = 3650;
+const MAX_DAPPS: u64 = 500;
+const MAX_PENDING_DAPPS_PER_USER: usize = 3;
+/// A quoted price is honoured for 15 minutes — long enough to deposit, short
+/// enough that a rate move can't be gamed.
+const EXPLORER_QUOTE_TTL_NANOS: u64 = 15 * 60 * 1_000_000_000;
+/// Cached XRC rates refresh after 10 minutes.
+const EXPLORER_RATE_TTL_NANOS: u64 = 10 * 60 * 1_000_000_000;
+const MAX_DAPP_NAME_LEN: usize = 60;
+const MAX_DAPP_URL_LEN: usize = 300;
+const MAX_DAPP_DESC_LEN: usize = 280;
+const DAY_NANOS: u64 = 86_400 * 1_000_000_000;
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplorerToken {
+    ICP,
+    CkBTC,
+    CkETH,
+    CkUSDC,
+    CkUSDT,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DappStatus {
+    /// Community submission awaiting admin review — never shown publicly.
+    Pending,
+    Approved,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct DappListing {
+    pub id: u64,
+    pub submitter: Principal,
+    pub name: String,
+    pub url: String,
+    pub description: String,
+    /// True for paid community submissions (badged in the UI); false for
+    /// admin-curated listings.
+    pub community: bool,
+    pub status: DappStatus,
+    pub created_at: u64,
+    pub approved_at: Option<u64>,
+    /// None = permanent (admin listings). Community listings expire
+    /// `days` after approval and are then deleted by the sweep.
+    pub expires_at: Option<u64>,
+    pub days: u64,
+    pub token: Option<ExplorerToken>,
+    /// Amount paid in `token`'s smallest unit (0 for admin listings).
+    pub amount_paid: u64,
+}
+
+/// A locked price for one caller: deposit `amount` (+ one ledger fee) on the
+/// token's ledger, then call `submit_dapp` before `expires_at`.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ExplorerQuote {
+    pub token: ExplorerToken,
+    pub days: u64,
+    pub amount: u64,
+    /// USD value of one whole token at quote time (e8s).
+    pub rate_usd_e8s: u64,
+    pub usd_total_e8s: u64,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// Everything the Explorer UI needs in one query.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ExplorerInfo {
+    pub enabled: bool,
+    pub icp_ledger: Principal,
+    pub ckbtc_ledger: Principal,
+    pub cketh_ledger: Principal,
+    pub ckusdc_ledger: Principal,
+    pub ckusdt_ledger: Principal,
+    pub fee_icp_e8s: u64,
+    pub fee_ckbtc_sats: u64,
+    pub fee_cketh_wei: u64,
+    pub fee_ckusdc_micro: u64,
+    pub fee_ckusdt_micro: u64,
+    pub price_per_day_usd_e8s: u64,
+    pub min_days: u64,
+    pub max_days: u64,
+    pub quote_ttl_nanos: u64,
+}
+
+impl_storable!(DappListing);
+impl_storable!(ExplorerQuote);
+
+thread_local! {
+    static DAPPS: RefCell<StableBTreeMap<u64, DappListing, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(40))))
+    });
+
+    static NEXT_DAPP_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(41)), 1u64))
+    });
+
+    static EXPLORER_QUOTES: RefCell<StableBTreeMap<Principal, ExplorerQuote, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(42))))
+    });
+
+    // Transient USD-rate cache [(rate_e8s, fetched_at); one slot per token].
+    // Heap-only on purpose: rates are refetched after an upgrade.
+    static EXPLORER_USD_RATES: RefCell<[(u64, u64); 5]> = const { RefCell::new([(0, 0); 5]) };
+}
+
+fn require_explorer_enabled() -> Result<(), String> {
+    if !feature_enabled(FLAG_EXPLORER) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+fn explorer_token_index(token: ExplorerToken) -> usize {
+    match token {
+        ExplorerToken::ICP => 0,
+        ExplorerToken::CkBTC => 1,
+        ExplorerToken::CkETH => 2,
+        ExplorerToken::CkUSDC => 3,
+        ExplorerToken::CkUSDT => 4,
+    }
+}
+
+fn explorer_token_decimals(token: ExplorerToken) -> u32 {
+    match token {
+        ExplorerToken::ICP | ExplorerToken::CkBTC => 8,
+        ExplorerToken::CkETH => 18,
+        ExplorerToken::CkUSDC | ExplorerToken::CkUSDT => 6,
+    }
+}
+
+/// Underlying-asset symbol the XRC quotes (chain-key tokens track 1:1).
+fn explorer_xrc_symbol(token: ExplorerToken) -> &'static str {
+    match token {
+        ExplorerToken::ICP => "ICP",
+        ExplorerToken::CkBTC => "BTC",
+        ExplorerToken::CkETH => "ETH",
+        ExplorerToken::CkUSDC => "USDC",
+        ExplorerToken::CkUSDT => "USDT",
+    }
+}
+
+/// Static fallback rates for local dev / before the first XRC fetch —
+/// same approximate June-2026 levels as the idea-board minimums.
+fn default_usd_rate_e8s(token: ExplorerToken) -> u64 {
+    match token {
+        ExplorerToken::ICP => 500_000_000,            // $5
+        ExplorerToken::CkBTC => 10_000_000_000_000,   // $100k
+        ExplorerToken::CkETH => 300_000_000_000,      // $3k
+        ExplorerToken::CkUSDC | ExplorerToken::CkUSDT => USD_E8S_PER_USD, // $1
+    }
+}
+
+/// Per-token ledger — ICP/ckBTC/ckETH delegate to the idea-board resolution
+/// (mainnet hard-pinned, local overrides); ckUSDC mirrors that pattern.
+fn explorer_token_ledger(token: ExplorerToken, config: &Config) -> Principal {
+    match token {
+        ExplorerToken::ICP => token_ledger(IdeaToken::ICP, config),
+        ExplorerToken::CkBTC => token_ledger(IdeaToken::CkBTC, config),
+        ExplorerToken::CkETH => token_ledger(IdeaToken::CkETH, config),
+        ExplorerToken::CkUSDC => {
+            if config.is_local {
+                config.ckusdc_ledger_canister_id.unwrap_or(config.ledger_canister_id)
+            } else {
+                Principal::from_text(MAINNET_CKUSDC_LEDGER).unwrap()
+            }
+        }
+        ExplorerToken::CkUSDT => {
+            if config.is_local {
+                config.ckusdt_ledger_canister_id.unwrap_or(config.ledger_canister_id)
+            } else {
+                Principal::from_text(MAINNET_CKUSDT_LEDGER).unwrap()
+            }
+        }
+    }
+}
+
+fn explorer_token_fee(token: ExplorerToken, config: &Config) -> u64 {
+    match token {
+        ExplorerToken::ICP => token_fee(IdeaToken::ICP, config),
+        ExplorerToken::CkBTC => token_fee(IdeaToken::CkBTC, config),
+        ExplorerToken::CkETH => token_fee(IdeaToken::CkETH, config),
+        // Canonical ckUSDC/ckUSDT fee is 0.01 (10_000 micro); the ICP test
+        // ledger fallback charges the same 10_000 (in e8s) — one value fits.
+        ExplorerToken::CkUSDC | ExplorerToken::CkUSDT => 10_000,
+    }
+}
+
+/// Caller-bound deposit subaccount for Explorer listing fees. Domain-
+/// separated from the proposal and idea escrows.
+fn derive_explorer_subaccount(user: &Principal) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_explorer_v1");
+    hasher.update(user.as_slice());
+    let result = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&result);
+    sub
+}
+
+fn validate_dapp_text(name: &str, url: &str, description: &str) -> Result<(), String> {
+    if name.is_empty() || name.chars().count() > MAX_DAPP_NAME_LEN {
+        return Err("INVALID_NAME".to_string());
+    }
+    if description.is_empty() || description.chars().count() > MAX_DAPP_DESC_LEN {
+        return Err("INVALID_DESCRIPTION".to_string());
+    }
+    if url.len() > MAX_DAPP_URL_LEN
+        || !url.starts_with("https://")
+        || url.len() <= "https://".len()
+        || url.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err("INVALID_URL".to_string());
+    }
+    Ok(())
+}
+
+/// days × $1/day converted into the token's smallest unit at `rate_usd_e8s`
+/// (USD per whole token). Returns (token amount, USD total in e8s).
+fn explorer_quote_amount(days: u64, rate_usd_e8s: u64, decimals: u32) -> Result<(u64, u64), String> {
+    if !(EXPLORER_MIN_DAYS..=EXPLORER_MAX_DAYS).contains(&days) {
+        return Err("INVALID_DAYS".to_string());
+    }
+    if rate_usd_e8s == 0 {
+        return Err("RATE_UNAVAILABLE".to_string());
+    }
+    let usd_total = (days as u128) * (EXPLORER_PRICE_PER_DAY_USD_E8S as u128);
+    let scale = 10u128.pow(decimals);
+    let amount = usd_total.saturating_mul(scale) / (rate_usd_e8s as u128);
+    let amount = u64::try_from(amount).map_err(|_| "AMOUNT_OVERFLOW".to_string())?;
+    if amount == 0 {
+        return Err("AMOUNT_TOO_SMALL".to_string());
+    }
+    Ok((amount, usd_total as u64))
+}
+
+// ── XRC plumbing (wasm only; unit tests use the static fallback rates) ──
+
+#[cfg(target_arch = "wasm32")]
+mod xrc {
+    use super::*;
+
+    #[derive(CandidType, Deserialize)]
+    pub struct Asset {
+        pub symbol: String,
+        pub class: AssetClass,
+    }
+
+    #[derive(CandidType, Deserialize)]
+    pub enum AssetClass {
+        Cryptocurrency,
+        FiatCurrency,
+    }
+
+    #[derive(CandidType, Deserialize)]
+    pub struct GetExchangeRateRequest {
+        pub base_asset: Asset,
+        pub quote_asset: Asset,
+        pub timestamp: Option<u64>,
+    }
+
+    /// Width-subtyped: the wire record carries more fields; candid drops them.
+    #[derive(CandidType, Deserialize)]
+    pub struct ExchangeRateMetadata {
+        pub decimals: u32,
+    }
+
+    #[derive(CandidType, Deserialize)]
+    pub struct ExchangeRate {
+        pub rate: u64,
+        pub metadata: ExchangeRateMetadata,
+    }
+
+    #[derive(CandidType, Deserialize, Debug)]
+    pub enum ExchangeRateError {
+        AnonymousPrincipalNotAllowed,
+        Pending,
+        CryptoBaseAssetNotFound,
+        CryptoQuoteAssetNotFound,
+        StablecoinRateNotFound,
+        StablecoinRateTooFewRates,
+        StablecoinRateZeroRate,
+        ForexInvalidTimestamp,
+        ForexBaseAssetNotFound,
+        ForexQuoteAssetNotFound,
+        ForexAssetsNotFound,
+        RateLimited,
+        NotEnoughCycles,
+        FailedToAcceptCycles,
+        InconsistentRatesReceived,
+        Other { code: u32, description: String },
+    }
+
+    #[derive(CandidType, Deserialize)]
+    pub enum GetExchangeRateResult {
+        Ok(ExchangeRate),
+        Err(ExchangeRateError),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_xrc_usd_rate_e8s(symbol: &str) -> Result<u64, String> {
+    let canister = Principal::from_text(XRC_CANISTER).unwrap();
+    let req = xrc::GetExchangeRateRequest {
+        base_asset: xrc::Asset {
+            symbol: symbol.to_string(),
+            class: xrc::AssetClass::Cryptocurrency,
+        },
+        quote_asset: xrc::Asset {
+            symbol: "USD".to_string(),
+            class: xrc::AssetClass::FiatCurrency,
+        },
+        timestamp: None,
+    };
+    let response: Result<(xrc::GetExchangeRateResult,), _> =
+        ic_cdk::api::call::call_with_payment128(canister, "get_exchange_rate", (req,), XRC_CALL_CYCLES).await;
+    match response {
+        Ok((xrc::GetExchangeRateResult::Ok(rate),)) => {
+            let denom = 10u128
+                .checked_pow(rate.metadata.decimals)
+                .ok_or_else(|| "XRC_DECIMALS_OVERFLOW".to_string())?;
+            let e8s = (rate.rate as u128).saturating_mul(USD_E8S_PER_USD as u128) / denom;
+            let e8s = u64::try_from(e8s).map_err(|_| "XRC_RATE_OVERFLOW".to_string())?;
+            if e8s == 0 {
+                return Err("XRC_ZERO_RATE".to_string());
+            }
+            Ok(e8s)
+        }
+        Ok((xrc::GetExchangeRateResult::Err(err),)) => Err(format!("XRC_ERROR: {:?}", err)),
+        Err((code, msg)) => Err(format!("XRC call failed (code {:?}): {}", code, msg)),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_xrc_usd_rate_e8s(_symbol: &str) -> Result<u64, String> {
+    Err("XRC unavailable off-chain".to_string())
+}
+
+/// Current USD value (e8s) of one whole token. ckUSDC is pinned at $1.
+/// Local (and unit tests): cached admin-set rate, else the static default —
+/// never a remote call. Mainnet: 10-min-TTL cache over the XRC; a fetch
+/// failure falls back to the stale cached value when one exists.
+async fn explorer_usd_rate_e8s(token: ExplorerToken, config: &Config) -> Result<u64, String> {
+    if token == ExplorerToken::CkUSDC || token == ExplorerToken::CkUSDT {
+        return Ok(USD_E8S_PER_USD);
+    }
+    let idx = explorer_token_index(token);
+    let now = current_time();
+    let (cached_rate, cached_at) = EXPLORER_USD_RATES.with(|r| r.borrow()[idx]);
+    if config.is_local || !cfg!(target_arch = "wasm32") {
+        return Ok(if cached_rate > 0 { cached_rate } else { default_usd_rate_e8s(token) });
+    }
+    if cached_rate > 0 && now < cached_at.saturating_add(EXPLORER_RATE_TTL_NANOS) {
+        return Ok(cached_rate);
+    }
+    match fetch_xrc_usd_rate_e8s(explorer_xrc_symbol(token)).await {
+        Ok(rate) => {
+            EXPLORER_USD_RATES.with(|r| r.borrow_mut()[idx] = (rate, now));
+            Ok(rate)
+        }
+        Err(e) => {
+            if cached_rate > 0 {
+                Ok(cached_rate)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn dapp_is_live(d: &DappListing, now: u64) -> bool {
+    d.status == DappStatus::Approved && d.expires_at.map(|x| now <= x).unwrap_or(true)
+}
+
+/// Sweep pass: drop approved community listings whose paid window has lapsed.
+fn delete_expired_dapps() {
+    let now = current_time();
+    let expired: Vec<u64> = DAPPS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| {
+                let d = e.value();
+                matches!(d.expires_at, Some(x) if now > x)
+            })
+            .map(|e| *e.key())
+            .collect()
+    });
+    DAPPS.with(|m| {
+        let mut m = m.borrow_mut();
+        for id in expired {
+            m.remove(&id);
+        }
+    });
+}
+
+fn next_dapp_id() -> u64 {
+    NEXT_DAPP_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    })
+}
+
+fn log_dapp_event(event_type: &str, dapp_id: u64, user: Principal, amount: u64) {
+    let entry = AuditLogEntry {
+        timestamp: current_time(),
+        event_type: event_type.to_string(),
+        proposal_id: dapp_id,
+        user,
+        amount_e8s: amount,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&entry);
+    });
+}
+
+/// First two admin-curated cards. Real ecosystem content (not local mocks),
+/// so this seeds on every network when the directory is empty.
+fn seed_default_dapps() {
+    let already_seeded = DAPPS.with(|m| !m.borrow().is_empty());
+    if already_seeded {
+        return;
+    }
+    let owner = CONFIG.with(|c| {
+        c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
+    });
+    let now = current_time();
+    let samples: [(&str, &str, &str); 2] = [
+        (
+            "idGeek 2.0",
+            "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
+            "Secure, automated and decentralized marketplace for buying and selling Internet Identities with their linked assets — including SNS neurons — executed entirely by smart contracts on the Internet Computer.",
+        ),
+        (
+            "Liquidium",
+            "https://liquidium.fi/",
+            "Cross-chain lending protocol: supply Bitcoin and borrow stablecoins without selling your holdings. Chain Fusion collateral across chains, auto-compounded yield for lenders, no lock-ups, fully non-custodial.",
+        ),
+    ];
+    for (name, url, description) in samples {
+        let id = next_dapp_id();
+        DAPPS.with(|m| {
+            m.borrow_mut().insert(id, DappListing {
+                id,
+                submitter: owner,
+                name: name.to_string(),
+                url: url.to_string(),
+                description: description.to_string(),
+                community: false,
+                status: DappStatus::Approved,
+                created_at: now,
+                approved_at: Some(now),
+                expires_at: None,
+                days: 0,
+                token: None,
+                amount_paid: 0,
+            });
+        });
+    }
+}
+
+#[ic_cdk::query]
+fn get_explorer_info() -> ExplorerInfo {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    ExplorerInfo {
+        enabled: feature_enabled(FLAG_EXPLORER),
+        icp_ledger: explorer_token_ledger(ExplorerToken::ICP, &config),
+        ckbtc_ledger: explorer_token_ledger(ExplorerToken::CkBTC, &config),
+        cketh_ledger: explorer_token_ledger(ExplorerToken::CkETH, &config),
+        ckusdc_ledger: explorer_token_ledger(ExplorerToken::CkUSDC, &config),
+        ckusdt_ledger: explorer_token_ledger(ExplorerToken::CkUSDT, &config),
+        fee_icp_e8s: explorer_token_fee(ExplorerToken::ICP, &config),
+        fee_ckbtc_sats: explorer_token_fee(ExplorerToken::CkBTC, &config),
+        fee_cketh_wei: explorer_token_fee(ExplorerToken::CkETH, &config),
+        fee_ckusdc_micro: explorer_token_fee(ExplorerToken::CkUSDC, &config),
+        fee_ckusdt_micro: explorer_token_fee(ExplorerToken::CkUSDT, &config),
+        price_per_day_usd_e8s: EXPLORER_PRICE_PER_DAY_USD_E8S,
+        min_days: EXPLORER_MIN_DAYS,
+        max_days: EXPLORER_MAX_DAYS,
+        quote_ttl_nanos: EXPLORER_QUOTE_TTL_NANOS,
+    }
+}
+
+/// All live (approved, unexpired) listings: admin-curated first in curation
+/// order, then community listings in approval order.
+#[ic_cdk::query]
+fn list_dapps() -> Vec<DappListing> {
+    let now = current_time();
+    let mut dapps: Vec<DappListing> = DAPPS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|d| dapp_is_live(d, now))
+            .collect()
+    });
+    dapps.sort_by_key(|d| (d.community, d.approved_at.unwrap_or(d.created_at), d.id));
+    dapps
+}
+
+/// The caller's own submissions in every state — lets the UI show "pending
+/// admin approval" and time remaining.
+#[ic_cdk::query]
+fn list_my_dapp_submissions() -> Vec<DappListing> {
+    let caller = get_caller();
+    let mut dapps: Vec<DappListing> = DAPPS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|d| d.community && d.submitter == caller)
+            .collect()
+    });
+    dapps.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    dapps
+}
+
+/// Admin: the approval queue, oldest first.
+#[ic_cdk::query(guard = "require_admin")]
+fn list_pending_dapps() -> Vec<DappListing> {
+    let mut dapps: Vec<DappListing> = DAPPS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|d| d.status == DappStatus::Pending)
+            .collect()
+    });
+    dapps.sort_by_key(|d| (d.created_at, d.id));
+    dapps
+}
+
+/// The caller's deposit account for Explorer listing fees. Fund it on the
+/// quoted token's ledger with `quote.amount` + one transfer fee, then call
+/// `submit_dapp`.
+#[ic_cdk::query]
+fn get_explorer_deposit_address() -> LedgerAccount {
+    let caller = get_caller();
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(derive_explorer_subaccount(&caller)),
+    }
+}
+
+/// Price `days` of visibility in `token` at the live USD rate and lock that
+/// price for the caller for 15 minutes. An update (not a query) because the
+/// mainnet path may refresh the rate via the XRC.
+#[ic_cdk::update]
+async fn get_explorer_quote(token: ExplorerToken, days: u64) -> Result<ExplorerQuote, String> {
+    require_authenticated()?;
+    require_explorer_enabled()?;
+    let caller = get_caller();
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let rate = explorer_usd_rate_e8s(token, &config).await?;
+    let (amount, usd_total_e8s) = explorer_quote_amount(days, rate, explorer_token_decimals(token))?;
+    let now = current_time();
+    let quote = ExplorerQuote {
+        token,
+        days,
+        amount,
+        rate_usd_e8s: rate,
+        usd_total_e8s,
+        created_at: now,
+        expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
+    };
+    EXPLORER_QUOTES.with(|m| {
+        m.borrow_mut().insert(caller, quote.clone());
+    });
+    Ok(quote)
+}
+
+/// Submit a community listing. Requires a fresh quote for the same token +
+/// days (get_explorer_quote) and the quoted amount (+ one ledger fee)
+/// deposited on get_explorer_deposit_address. The payment moves to the
+/// treasury immediately; the listing stays Pending — invisible to the
+/// public — until an admin approves it. Rejection refunds from the treasury.
+#[ic_cdk::update]
+async fn submit_dapp(
+    name: String,
+    url: String,
+    description: String,
+    token: ExplorerToken,
+    days: u64,
+) -> Result<u64, String> {
+    require_authenticated()?;
+    require_explorer_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let name = name.trim().to_string();
+    let url = url.trim().to_string();
+    let description = description.trim().to_string();
+    validate_dapp_text(&name, &url, &description)?;
+    if !(EXPLORER_MIN_DAYS..=EXPLORER_MAX_DAYS).contains(&days) {
+        return Err("INVALID_DAYS".to_string());
+    }
+
+    let quota_err = DAPPS.with(|m| {
+        let m = m.borrow();
+        if m.len() >= MAX_DAPPS {
+            return Some("DAPP_QUOTA_REACHED");
+        }
+        let pending_by_caller = m
+            .iter()
+            .filter(|e| {
+                let d = e.value();
+                d.submitter == caller && d.status == DappStatus::Pending
+            })
+            .count();
+        if pending_by_caller >= MAX_PENDING_DAPPS_PER_USER {
+            return Some("TOO_MANY_PENDING_DAPPS");
+        }
+        None
+    });
+    if let Some(e) = quota_err {
+        return Err(e.to_string());
+    }
+
+    // The stored quote locks the price so a rate move between depositing and
+    // submitting can't invalidate the payment.
+    let now = current_time();
+    let quote = EXPLORER_QUOTES
+        .with(|m| m.borrow().get(&caller))
+        .ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.token != token || quote.days != days {
+        return Err("QUOTE_MISMATCH".to_string());
+    }
+    if now > quote.expires_at {
+        return Err("QUOTE_EXPIRED".to_string());
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    let sub = derive_explorer_subaccount(&caller);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    if balance < quote.amount.saturating_add(fee) {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+    let treasury_dest = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
+        .await
+        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
+
+    let id = next_dapp_id();
+    DAPPS.with(|m| {
+        m.borrow_mut().insert(id, DappListing {
+            id,
+            submitter: caller,
+            name,
+            url,
+            description,
+            community: true,
+            status: DappStatus::Pending,
+            created_at: now,
+            approved_at: None,
+            expires_at: None, // set when an admin approves
+            days,
+            token: Some(token),
+            amount_paid: quote.amount,
+        });
+    });
+    EXPLORER_QUOTES.with(|m| {
+        m.borrow_mut().remove(&caller);
+    });
+    log_dapp_event("dapp_submit", id, caller, quote.amount);
+    Ok(id)
+}
+
+/// Admin: approve a pending community listing. Its paid `days` window starts
+/// now.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_approve_dapp(id: u64) -> Result<(), String> {
+    let now = current_time();
+    DAPPS.with(|m| {
+        let mut m = m.borrow_mut();
+        let mut d = m.get(&id).ok_or_else(|| "DAPP_NOT_FOUND".to_string())?;
+        if d.status != DappStatus::Pending {
+            return Err("NOT_PENDING".to_string());
+        }
+        d.status = DappStatus::Approved;
+        d.approved_at = Some(now);
+        d.expires_at = Some(now.saturating_add(d.days.saturating_mul(DAY_NANOS)));
+        m.insert(id, d);
+        Ok(())
+    })?;
+    log_dapp_event("dapp_approve", id, get_caller(), 0);
+    Ok(())
+}
+
+/// Admin: reject a pending community listing. The payment is refunded from
+/// the treasury (minus one ledger fee), then the listing is deleted.
+/// The listing is REMOVED before the refund transfer (and restored if it
+/// fails) so a concurrent second reject — or an interleaved approve — can't
+/// refund the same payment twice across the await (review 2026-06-11).
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_reject_dapp(id: u64) -> Result<(), String> {
+    let listing = DAPPS
+        .with(|m| m.borrow().get(&id))
+        .ok_or_else(|| "DAPP_NOT_FOUND".to_string())?;
+    if listing.status != DappStatus::Pending {
+        return Err("NOT_PENDING".to_string());
+    }
+    // Claim the listing before any await: concurrent callers now see
+    // DAPP_NOT_FOUND instead of double-refunding.
+    DAPPS.with(|m| {
+        m.borrow_mut().remove(&id);
+    });
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    if let Some(token) = listing.token {
+        let fee = explorer_token_fee(token, &config);
+        let refund = listing.amount_paid.saturating_sub(fee);
+        if refund > 0 {
+            let ledger_id = explorer_token_ledger(token, &config);
+            let dest = LedgerAccount { owner: listing.submitter, subaccount: None };
+            if let Err(e) = call_ledger_transfer(ledger_id, Some(TREASURY_SUBACCOUNT), dest, refund, Some(fee)).await {
+                // Refund failed — put the listing back so the reject can be
+                // retried (nothing has been paid out).
+                DAPPS.with(|m| {
+                    m.borrow_mut().insert(id, listing.clone());
+                });
+                return Err(format!("REFUND_FAILED: {}", e));
+            }
+        }
+    }
+    log_dapp_event("dapp_reject", id, listing.submitter, listing.amount_paid);
+    Ok(())
+}
+
+/// Admin: add a permanent curated listing (no payment, no badge, no expiry).
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_add_dapp(name: String, url: String, description: String) -> Result<u64, String> {
+    let name = name.trim().to_string();
+    let url = url.trim().to_string();
+    let description = description.trim().to_string();
+    validate_dapp_text(&name, &url, &description)?;
+    let at_quota = DAPPS.with(|m| m.borrow().len() >= MAX_DAPPS);
+    if at_quota {
+        return Err("DAPP_QUOTA_REACHED".to_string());
+    }
+    let now = current_time();
+    let id = next_dapp_id();
+    let caller = get_caller();
+    DAPPS.with(|m| {
+        m.borrow_mut().insert(id, DappListing {
+            id,
+            submitter: caller,
+            name,
+            url,
+            description,
+            community: false,
+            status: DappStatus::Approved,
+            created_at: now,
+            approved_at: Some(now),
+            expires_at: None,
+            days: 0,
+            token: None,
+            amount_paid: 0,
+        });
+    });
+    log_dapp_event("dapp_admin_add", id, caller, 0);
+    Ok(id)
+}
+
+/// Admin: remove any listing outright (no refund — use admin_reject_dapp for
+/// pending submissions that should get their payment back).
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_remove_dapp(id: u64) -> Result<(), String> {
+    let existed = DAPPS.with(|m| m.borrow_mut().remove(&id)).is_some();
+    if !existed {
+        return Err("DAPP_NOT_FOUND".to_string());
+    }
+    log_dapp_event("dapp_remove", id, get_caller(), 0);
+    Ok(())
+}
+
+/// Admin: point ckUSDC (or the other tokens) at locally deployed test
+/// ledgers. Local-only — mainnet ledgers are hard-pinned.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_explorer_ledger(token: ExplorerToken, ledger: Principal) -> Result<(), String> {
+    if ledger == Principal::anonymous() {
+        return Err("INVALID_LEDGER".to_string());
+    }
+    CONFIG.with(|cell| {
+        let mut cfg = cell.borrow().get().clone();
+        if !cfg.is_local {
+            return Err("MAINNET_LEDGERS_PINNED".to_string());
+        }
+        match token {
+            ExplorerToken::ICP => return Err("ICP_LEDGER_FIXED".to_string()),
+            ExplorerToken::CkBTC => cfg.ckbtc_ledger_canister_id = Some(ledger),
+            ExplorerToken::CkETH => cfg.cketh_ledger_canister_id = Some(ledger),
+            ExplorerToken::CkUSDC => cfg.ckusdc_ledger_canister_id = Some(ledger),
+            ExplorerToken::CkUSDT => cfg.ckusdt_ledger_canister_id = Some(ledger),
+        }
+        cell.borrow_mut().set(cfg);
+        Ok(())
+    })
+}
+
+/// Which pay-first deposit escrow to reclaim from.
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug)]
+pub enum EscrowKind {
+    Explorer,
+    Arcade,
+    CoFounder,
+}
+
+/// Withdraw the caller's remaining balance from one of their pay-first
+/// deposit subaccounts (Explorer listing / Arcade customization / Co-Founder
+/// stake). These accounts are funded right before a paid action; if that
+/// action then fails — expired quote, listing quota, closed membership — the
+/// deposit would otherwise be stranded with no recovery path (review
+/// 2026-06-11). Only ever touches the caller's own derived subaccount, and
+/// the shared CallerGuard makes it mutually exclusive with the paid actions.
+/// Deliberately NOT feature-flag-gated: stranded funds must stay recoverable
+/// even after a kill switch.
+#[ic_cdk::update]
+async fn reclaim_escrow(kind: EscrowKind, token: ExplorerToken) -> Result<u64, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    let sub = match kind {
+        EscrowKind::Explorer => derive_explorer_subaccount(&caller),
+        EscrowKind::Arcade => derive_arcade_subaccount(&caller),
+        EscrowKind::CoFounder => derive_cofounder_subaccount(&caller),
+    };
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    if balance <= fee {
+        return Err("NOTHING_TO_RECLAIM".to_string());
+    }
+    let amount = balance - fee;
+    let dest = LedgerAccount { owner: caller, subaccount: None };
+    call_ledger_transfer(ledger_id, Some(sub), dest, amount, Some(fee))
+        .await
+        .map_err(|e| format!("RECLAIM_FAILED: {}", e))?;
+    let entry = AuditLogEntry {
+        timestamp: current_time(),
+        event_type: "escrow_reclaim".to_string(),
+        proposal_id: 0,
+        user: caller,
+        amount_e8s: amount,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&entry);
+    });
+    Ok(amount)
+}
+
+/// Admin: seed/override a token's USD rate (e8s per whole token). The local
+/// network has no XRC so this is the only knob there; on mainnet it acts as
+/// an emergency seed that the next successful XRC refresh overwrites.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_usd_rate(token: ExplorerToken, rate_usd_e8s: u64) -> Result<(), String> {
+    if rate_usd_e8s == 0 {
+        return Err("INVALID_RATE".to_string());
+    }
+    let idx = explorer_token_index(token);
+    let now = current_time();
+    EXPLORER_USD_RATES.with(|r| r.borrow_mut()[idx] = (rate_usd_e8s, now));
+    Ok(())
+}
+
+// ==========================================
+// 17. Arcade (skill games, participation-gated)
+// ==========================================
+//
+// A section of one-player skill games — first title: "Mini Golf Gold", a
+// 9-hole mini golf game. Playing is free, but it's a reward for protocol
+// participation: everyone signed-in may play hole 1; finishing a round (and
+// landing on the leaderboard) requires an active stake OR a vote cast in the
+// last 30 days. Each game keys its own all-time leaderboard (`game` string)
+// so future titles — and a cross-game combined board — slot in without a
+// migration. Ranking: fewest total strokes, ties broken by fastest time.
+// The low-poly golfer is customizable (hair / skin / outfit palettes) for a
+// $1 fee per change, payable in any supported token, paid to the treasury.
+
+/// $1 (USD e8s) per character change — payable in any supported token at
+/// the live oracle rate (stables pinned at $1).
+const ARCADE_CUSTOMIZE_FEE_USD_E8S: u64 = 100_000_000;
+/// "Voted recently" window for full access.
+const ARCADE_VOTE_WINDOW_NANOS: u64 = 30 * DAY_NANOS;
+const ARCADE_GAME_MINIGOLF: &str = "minigolf";
+const MINIGOLF_HOLES: usize = 9;
+const MINIGOLF_MAX_STROKES_PER_HOLE: u8 = 12;
+/// Wall-clock sanity bounds for a submitted round.
+const MINIGOLF_MIN_MILLIS: u64 = 20_000; // nobody putts 9 holes in <20 s
+const MINIGOLF_MAX_MILLIS: u64 = 2 * 60 * 60 * 1000; // 2 h
+const ARCADE_LEADERBOARD_LIMIT: usize = 100;
+// Palette sizes — the frontend mirrors these (index = palette entry).
+const CHARACTER_HAIR_OPTIONS: u8 = 6;
+const CHARACTER_SKIN_OPTIONS: u8 = 6;
+const CHARACTER_OUTFIT_OPTIONS: u8 = 8;
+
+/// Palette indices for the low-poly golfer (defaults are all 0).
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArcadeCharacter {
+    pub hair: u8,
+    pub skin: u8,
+    pub outfit: u8,
+}
+
+/// One leaderboard slot per (game, player) — insert-if-better keeps only the
+/// player's best round.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArcadeScoreKey {
+    pub game: String,
+    pub player: Principal,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ArcadeScore {
+    pub game: String,
+    pub player: Principal,
+    pub strokes: u32,
+    pub millis: u64,
+    pub per_hole: Vec<u8>,
+    pub submitted_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ArcadeLeaderboardRow {
+    pub rank: u32,
+    pub player: Principal,
+    pub strokes: u32,
+    pub millis: u64,
+    pub submitted_at: u64,
+}
+
+/// Everything the Arcade UI needs in one caller-aware query.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ArcadeInfo {
+    pub enabled: bool,
+    /// Caller may finish full rounds + submit scores (stake or recent vote).
+    pub full_access: bool,
+    pub has_stake: bool,
+    pub voted_recently: bool,
+    /// $1.00 in USD e8s — convert with get_arcade_customize_quote.
+    pub customize_fee_usd_e8s: u64,
+    pub my_character: Option<ArcadeCharacter>,
+    pub hair_options: u8,
+    pub skin_options: u8,
+    pub outfit_options: u8,
+}
+
+impl_storable!(ArcadeCharacter);
+impl_storable!(ArcadeScoreKey);
+impl_storable!(ArcadeScore);
+
+thread_local! {
+    static ARCADE_SCORES: RefCell<StableBTreeMap<ArcadeScoreKey, ArcadeScore, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(43))))
+    });
+
+    static ARCADE_CHARACTERS: RefCell<StableBTreeMap<Principal, ArcadeCharacter, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(44))))
+    });
+
+    // Locked $1 customization quotes per caller (same shape as Explorer
+    // quotes; days is always 1 here).
+    static ARCADE_QUOTES: RefCell<StableBTreeMap<Principal, ExplorerQuote, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(50))))
+    });
+}
+
+fn require_arcade_enabled() -> Result<(), String> {
+    if !feature_enabled(FLAG_ARCADE) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+/// Full access = active stake in any tier OR a vote (staked or burn commit)
+/// within the last 30 days. Everyone else is limited to hole 1.
+fn arcade_access(user: Principal) -> (bool, bool) {
+    let has_stake = user_has_stake(user);
+    if has_stake {
+        // Access is already decided — skip the full-history scans below
+        // (they grow with every vote/commit ever made; see
+        // house-keeping/review-2026-06-11.md for the indexed follow-up).
+        return (true, false);
+    }
+    let cutoff = current_time().saturating_sub(ARCADE_VOTE_WINDOW_NANOS);
+    let voted_recently = LOSSLESS_VOTES.with(|m| {
+        m.borrow().iter().any(|e| {
+            let v = e.value();
+            v.principal == user && v.cast_at >= cutoff
+        })
+    }) || COMMITMENTS.with(|m| {
+        m.borrow().iter().any(|e| {
+            let c = e.value();
+            c.principal == user && c.created_at >= cutoff
+        })
+    });
+    (has_stake, voted_recently)
+}
+
+/// True when `a` beats `b`: fewer strokes, ties broken by faster time, then
+/// by earlier submission.
+fn arcade_score_beats(a: (u32, u64, u64), b: (u32, u64, u64)) -> bool {
+    a < b
+}
+
+/// Caller-bound deposit subaccount for arcade fees (character customization).
+fn derive_arcade_subaccount(user: &Principal) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_arcade_v1");
+    hasher.update(user.as_slice());
+    let result = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&result);
+    sub
+}
+
+#[ic_cdk::query]
+fn get_arcade_info() -> ArcadeInfo {
+    let caller = get_caller();
+    let (has_stake, voted_recently) = if caller == Principal::anonymous() {
+        (false, false)
+    } else {
+        arcade_access(caller)
+    };
+    ArcadeInfo {
+        enabled: feature_enabled(FLAG_ARCADE),
+        full_access: has_stake || voted_recently,
+        has_stake,
+        voted_recently,
+        customize_fee_usd_e8s: ARCADE_CUSTOMIZE_FEE_USD_E8S,
+        my_character: ARCADE_CHARACTERS.with(|m| m.borrow().get(&caller)),
+        hair_options: CHARACTER_HAIR_OPTIONS,
+        skin_options: CHARACTER_SKIN_OPTIONS,
+        outfit_options: CHARACTER_OUTFIT_OPTIONS,
+    }
+}
+
+/// The caller's deposit account for arcade fees. Fund it on the ICP ledger
+/// with `customize_fee + 0.0001 ICP`, then call `customize_character`.
+#[ic_cdk::query]
+fn get_arcade_deposit_address() -> LedgerAccount {
+    let caller = get_caller();
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(derive_arcade_subaccount(&caller)),
+    }
+}
+
+/// Price the $1 customization in `token` at the live oracle rate and lock
+/// it for the caller for 15 minutes (same pattern as Explorer quotes).
+#[ic_cdk::update]
+async fn get_arcade_customize_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
+    require_authenticated()?;
+    require_arcade_enabled()?;
+    let caller = get_caller();
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let rate = explorer_usd_rate_e8s(token, &config).await?;
+    // 1 "day" at $1/day == exactly $1 — reuse the Explorer conversion.
+    let (amount, usd_total_e8s) = explorer_quote_amount(1, rate, explorer_token_decimals(token))?;
+    let now = current_time();
+    let quote = ExplorerQuote {
+        token,
+        days: 1,
+        amount,
+        rate_usd_e8s: rate,
+        usd_total_e8s,
+        created_at: now,
+        expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
+    };
+    ARCADE_QUOTES.with(|m| {
+        m.borrow_mut().insert(caller, quote.clone());
+    });
+    Ok(quote)
+}
+
+/// Change the golfer's look (palette indices) for $1, paid in any supported
+/// token (ICP / ckBTC / ckETH / ckUSDC / ckUSDT) at the quoted rate.
+#[ic_cdk::update]
+async fn customize_character(hair: u8, skin: u8, outfit: u8, token: ExplorerToken) -> Result<(), String> {
+    require_authenticated()?;
+    require_arcade_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    if hair >= CHARACTER_HAIR_OPTIONS || skin >= CHARACTER_SKIN_OPTIONS || outfit >= CHARACTER_OUTFIT_OPTIONS {
+        return Err("INVALID_CHARACTER_OPTION".to_string());
+    }
+    let now = current_time();
+    let quote = ARCADE_QUOTES
+        .with(|m| m.borrow().get(&caller))
+        .ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.token != token {
+        return Err("QUOTE_MISMATCH".to_string());
+    }
+    if now > quote.expires_at {
+        return Err("QUOTE_EXPIRED".to_string());
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    let sub = derive_arcade_subaccount(&caller);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    if balance < quote.amount.saturating_add(fee) {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+    let treasury_dest = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
+        .await
+        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
+
+    ARCADE_CHARACTERS.with(|m| {
+        m.borrow_mut().insert(caller, ArcadeCharacter { hair, skin, outfit });
+    });
+    ARCADE_QUOTES.with(|m| {
+        m.borrow_mut().remove(&caller);
+    });
+
+    let entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "arcade_customize".to_string(),
+        proposal_id: 0,
+        user: caller,
+        amount_e8s: quote.amount,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&entry);
+    });
+    Ok(())
+}
+
+/// Submit a finished round. Requires full access (the hole-1 preview can't
+/// produce a 9-hole score). Insert-if-better per (game, player); returns the
+/// caller's resulting 1-based rank on that game's board.
+#[ic_cdk::update]
+fn submit_arcade_score(game: String, millis: u64, per_hole: Vec<u8>) -> Result<u32, String> {
+    require_authenticated()?;
+    require_arcade_enabled()?;
+    let caller = get_caller();
+
+    if game != ARCADE_GAME_MINIGOLF {
+        return Err("UNKNOWN_GAME".to_string());
+    }
+    let (has_stake, voted_recently) = arcade_access(caller);
+    if !has_stake && !voted_recently {
+        return Err("PARTICIPATION_REQUIRED".to_string());
+    }
+    if per_hole.len() != MINIGOLF_HOLES {
+        return Err("INVALID_HOLE_COUNT".to_string());
+    }
+    if per_hole.iter().any(|&s| s == 0 || s > MINIGOLF_MAX_STROKES_PER_HOLE) {
+        return Err("INVALID_STROKES".to_string());
+    }
+    if !(MINIGOLF_MIN_MILLIS..=MINIGOLF_MAX_MILLIS).contains(&millis) {
+        return Err("INVALID_TIME".to_string());
+    }
+    let strokes: u32 = per_hole.iter().map(|&s| s as u32).sum();
+
+    let now = current_time();
+    let key = ArcadeScoreKey { game: game.clone(), player: caller };
+    // The caller's best after this submission — tracked here so the rank
+    // computation below doesn't re-read the row it just wrote.
+    let (improved, best) = ARCADE_SCORES.with(|m| {
+        let mut m = m.borrow_mut();
+        let prev = m.get(&key).map(|p| (p.strokes, p.millis, p.submitted_at));
+        let keep_new = match prev {
+            Some(p) => arcade_score_beats((strokes, millis, now), p),
+            None => true,
+        };
+        if keep_new {
+            m.insert(key.clone(), ArcadeScore {
+                game: game.clone(),
+                player: caller,
+                strokes,
+                millis,
+                per_hole,
+                submitted_at: now,
+            });
+        }
+        (keep_new, if keep_new { (strokes, millis, now) } else { prev.unwrap() })
+    });
+
+    if improved {
+        let entry = AuditLogEntry {
+            timestamp: now,
+            event_type: "arcade_score".to_string(),
+            proposal_id: strokes as u64,
+            user: caller,
+            amount_e8s: 0,
+        };
+        AUDIT_LOG.with(|log| {
+            let _ = log.borrow_mut().append(&entry);
+        });
+    }
+
+    // Current rank (count of entries that beat the caller's best, +1).
+    let rank = ARCADE_SCORES.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| {
+                let s = e.value();
+                s.game == game && arcade_score_beats((s.strokes, s.millis, s.submitted_at), best)
+            })
+            .count() as u32
+            + 1
+    });
+    Ok(rank)
+}
+
+// ── Course editor (admin-built voxel hole layouts) ──
+//
+// Mini Golf Gold holes are 22×14 tile grids ("voxels" — each cell renders as
+// a flat-shaded cube). The 9 defaults ship in the frontend; admins can
+// override any hole from the Admin console (admin_set_arcade_hole). The game
+// merges on-chain overrides over the built-ins at load, so an edited hole is
+// live for every player immediately and survives upgrades.
+
+const ARCADE_GRID_W: u8 = 22;
+const ARCADE_GRID_H: u8 = 14;
+/// Cell palette: 0 void, 1 grass, 2 wall, 3 sand, 4 water, 5..8 slope
+/// (N/S/E/W), 9 post. Mirrored by the frontend engine.
+const ARCADE_MAX_CELL: u8 = 9;
+const ARCADE_WALKABLE: [u8; 5] = [1, 5, 6, 7, 8];
+const MAX_ARCADE_BARS: usize = 2;
+const MAX_ARCADE_HOLE_NAME: usize = 40;
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ArcadeBarDef {
+    /// Pivot cell (grid coords).
+    pub cx: u8,
+    pub cy: u8,
+    pub len_cells: u8,
+    /// Angular speed, milliradians per second.
+    pub speed_mrad: u32,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ArcadeHoleDef {
+    pub name: String,
+    pub par: u8,
+    pub w: u8,
+    pub h: u8,
+    /// Row-major cell types, w×h entries.
+    pub cells: Vec<u8>,
+    pub tee_x: u8,
+    pub tee_y: u8,
+    pub cup_x: u8,
+    pub cup_y: u8,
+    pub bars: Vec<ArcadeBarDef>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ArcadeCourseEntry {
+    pub index: u8,
+    pub hole: ArcadeHoleDef,
+}
+
+impl_storable!(ArcadeHoleDef);
+
+thread_local! {
+    static ARCADE_COURSE: RefCell<StableBTreeMap<u8, ArcadeHoleDef, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(45))))
+    });
+}
+
+fn validate_arcade_hole(hole: &ArcadeHoleDef) -> Result<(), String> {
+    if hole.name.is_empty() || hole.name.chars().count() > MAX_ARCADE_HOLE_NAME {
+        return Err("INVALID_HOLE_NAME".to_string());
+    }
+    if !(2..=6).contains(&hole.par) {
+        return Err("INVALID_PAR".to_string());
+    }
+    if hole.w != ARCADE_GRID_W || hole.h != ARCADE_GRID_H {
+        return Err("INVALID_GRID_SIZE".to_string());
+    }
+    if hole.cells.len() != (hole.w as usize) * (hole.h as usize) {
+        return Err("INVALID_CELL_COUNT".to_string());
+    }
+    if hole.cells.iter().any(|&c| c > ARCADE_MAX_CELL) {
+        return Err("INVALID_CELL_TYPE".to_string());
+    }
+    let cell_at = |x: u8, y: u8| hole.cells[(y as usize) * (hole.w as usize) + (x as usize)];
+    for (x, y, label) in [(hole.tee_x, hole.tee_y, "TEE"), (hole.cup_x, hole.cup_y, "CUP")] {
+        if x >= hole.w || y >= hole.h {
+            return Err(format!("{}_OUT_OF_BOUNDS", label));
+        }
+        if !ARCADE_WALKABLE.contains(&cell_at(x, y)) {
+            return Err(format!("{}_NOT_ON_GREEN", label));
+        }
+    }
+    if hole.tee_x == hole.cup_x && hole.tee_y == hole.cup_y {
+        return Err("TEE_EQUALS_CUP".to_string());
+    }
+    if hole.bars.len() > MAX_ARCADE_BARS {
+        return Err("TOO_MANY_BARS".to_string());
+    }
+    for bar in &hole.bars {
+        if bar.cx >= hole.w || bar.cy >= hole.h || bar.len_cells == 0 || bar.len_cells > 6 || bar.speed_mrad > 10_000 {
+            return Err("INVALID_BAR".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// On-chain hole overrides (built-in defaults live in the frontend; only
+/// admin-edited holes are stored). Public so the game can merge at load.
+#[ic_cdk::query]
+fn get_arcade_course() -> Vec<ArcadeCourseEntry> {
+    ARCADE_COURSE.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| ArcadeCourseEntry { index: *e.key(), hole: e.value() })
+            .collect()
+    })
+}
+
+/// Admin: replace one hole's voxel layout (0-based index). Validated so a
+/// typo can't ship an unplayable grid.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_arcade_hole(index: u8, hole: ArcadeHoleDef) -> Result<(), String> {
+    if index as usize >= MINIGOLF_HOLES {
+        return Err("INVALID_HOLE_INDEX".to_string());
+    }
+    validate_arcade_hole(&hole)?;
+    ARCADE_COURSE.with(|m| {
+        m.borrow_mut().insert(index, hole);
+    });
+    log_dapp_event("arcade_hole_edit", index as u64, get_caller(), 0);
+    Ok(())
+}
+
+/// Admin: drop one hole's override, reverting it to the built-in layout.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_reset_arcade_hole(index: u8) -> Result<(), String> {
+    let existed = ARCADE_COURSE.with(|m| m.borrow_mut().remove(&index)).is_some();
+    if !existed {
+        return Err("NO_OVERRIDE".to_string());
+    }
+    log_dapp_event("arcade_hole_reset", index as u64, get_caller(), 0);
+    Ok(())
+}
+
+/// Top 100 for one game: fewest strokes, fastest time, earliest submission.
+#[ic_cdk::query]
+fn get_arcade_leaderboard(game: String) -> Vec<ArcadeLeaderboardRow> {
+    let mut scores: Vec<ArcadeScore> = ARCADE_SCORES.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|s| s.game == game)
+            .collect()
+    });
+    scores.sort_by_key(|s| (s.strokes, s.millis, s.submitted_at));
+    scores
+        .into_iter()
+        .take(ARCADE_LEADERBOARD_LIMIT)
+        .enumerate()
+        .map(|(i, s)| ArcadeLeaderboardRow {
+            rank: i as u32 + 1,
+            player: s.player,
+            strokes: s.strokes,
+            millis: s.millis,
+            submitted_at: s.submitted_at,
+        })
+        .collect()
+}
+
+// ==========================================
+// 18. Co-Founders (permanent stake, monthly yield shares)
+// ==========================================
+//
+// Co-founders stake ICP into a single platform-owned 2-year neuron.
+// THE STAKE IS PERMANENT — there is deliberately NO unstake method anywhere
+// in this section, and the UI states it in bold before anyone commits.
+//
+// Every ~month (30-day periods) the neuron's collected yield is settled:
+//   • a month that yields under 500 ICP is restaked into the neuron in
+//     full — nothing pays out, the principal compounds for everyone;
+//   • otherwise the first 1,000 ICP of the month's yield goes to the
+//     treasury (a 500–1,000 ICP month is entirely treasury's);
+//   • the excess above 1,000 ICP joins the share pool and is split across
+//     all co-founders IN PROPORTION TO THEIR STAKED ICP — but only when at
+//     least 100 ICP is available to split; otherwise the pool rolls over
+//     to the next month;
+//   • a co-founder must claim their share before the NEXT monthly
+//     settlement — unclaimed shares are forfeited to the treasury then.
+
+/// 1,000 ICP — the treasury's monthly cut comes first.
+const COFOUNDER_TREASURY_CUT_E8S: u64 = 100_000_000_000;
+/// 2,000 ICP — once a settled month's yield reaches this, membership closes
+/// PERMANENTLY: no new co-founders, ever. Existing co-founders can still top
+/// up at any time.
+const COFOUNDER_CLOSE_YIELD_E8S: u64 = 200_000_000_000;
+/// 500 ICP — a month that yields less than this is restaked into the neuron
+/// (compounding everyone's future yield) instead of being paid out at all.
+const COFOUNDER_RESTAKE_BELOW_E8S: u64 = 50_000_000_000;
+/// 2 years — the co-founder neuron's dissolve delay.
+const COFOUNDER_DISSOLVE_SECS: u32 = 63_115_200;
+/// 100 ICP — minimum distributable pot; below this it rolls over.
+const COFOUNDER_MIN_DISTRIBUTION_E8S: u64 = 10_000_000_000;
+/// 1 ICP minimum buy-in.
+const MIN_COFOUNDER_STAKE_E8S: u64 = 100_000_000;
+/// Settlement period: 30-day months indexed from the Unix epoch.
+const COFOUNDER_PERIOD_NANOS: u64 = 30 * DAY_NANOS;
+const MAX_COFOUNDERS: u64 = 10_000;
+
+/// The platform neuron's stake account (locally a plain subaccount; mainnet
+/// integration will pin a real 2-year neuron — same canary path as staking).
+const COFOUNDER_NEURON_SUBACCOUNT: [u8; 32] = [5u8; 32];
+/// Where neuron yield lands between settlements.
+const COFOUNDER_YIELD_SUBACCOUNT: [u8; 32] = [6u8; 32];
+/// Allocated-but-unclaimed shares + rollover live here.
+const COFOUNDER_SHARE_POOL_SUBACCOUNT: [u8; 32] = [7u8; 32];
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CoFounder {
+    pub user: Principal,
+    pub staked_e8s: u64,
+    pub joined_at: u64,
+    pub last_stake_at: u64,
+    /// Current unclaimed share (e8s). Zeroed (→ treasury) at each settlement.
+    pub claimable_e8s: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CoFounderState {
+    pub total_staked_e8s: u64,
+    /// Pool e8s carried forward because a month's pot was under 100 ICP.
+    pub rollover_e8s: u64,
+    /// Last settled 30-day period index (epoch-based).
+    pub last_processed_month: u64,
+    pub total_yield_e8s: u64,
+    pub total_distributed_e8s: u64,
+    pub total_expired_e8s: u64,
+    /// Latched true the first time a month's yield reaches 2,000 ICP —
+    /// membership never reopens (existing co-founders may still top up).
+    #[serde(default)]
+    pub membership_closed: bool,
+    /// ── Neuron bootstrap (same lifecycle as the staking tiers) ──
+    /// Claim nonce, fixed at the first stake.
+    #[serde(default)]
+    pub nonce: u64,
+    #[serde(default)]
+    pub neuron_id: Option<u64>,
+    /// Stake (and restaked yield) not yet claimed/refreshed into the neuron.
+    #[serde(default)]
+    pub pending_refresh_e8s: u64,
+    /// 0 NotStarted → 1 Claimed → 2 DelaySet → 3 Ready (following the
+    /// primary voting neuron on all topics — it votes on NNS proposals).
+    #[serde(default)]
+    pub bootstrap: u8,
+    /// Lifetime yield restaked into the neuron (sub-500-ICP months).
+    #[serde(default)]
+    pub total_restaked_e8s: u64,
+    /// In-flight settlement journal (None when no settlement is mid-run).
+    #[serde(default)]
+    pub pending_job: Option<CoFounderJob>,
+}
+
+/// Settlement journal: the month's amounts are computed ONCE from the inbox
+/// snapshot and each ledger leg is flagged as it lands, so a retry resumes
+/// where it failed instead of re-routing the remaining balance — re-routing
+/// double-dipped the treasury's 1,000 ICP cut and could mis-restake the
+/// co-founders' pot (review 2026-06-11). Unclaimed shares are also zeroed
+/// synchronously at job creation, which closes the window where a claim
+/// landing mid-settlement double-spent the share pool.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CoFounderJob {
+    pub month: u64,
+    pub started_at: u64,
+    pub yield_e8s: u64,
+    pub expired_e8s: u64,
+    pub restake_e8s: u64,
+    pub treasury_cut_e8s: u64,
+    pub excess_net_e8s: u64,
+    pub expired_done: bool,
+    pub restake_done: bool,
+    pub cut_done: bool,
+    pub pool_done: bool,
+}
+
+/// One monthly settlement — drives the yield + share-pool charts.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CoFounderRound {
+    pub month: u64,
+    pub settled_at: u64,
+    pub yield_e8s: u64,
+    pub treasury_e8s: u64,
+    /// Total allocated to co-founders this round (proportional to stake).
+    pub distributed_e8s: u64,
+    /// Yield restaked into the neuron (months under 500 ICP).
+    #[serde(default)]
+    pub restaked_e8s: u64,
+    pub cofounder_count: u64,
+    /// Unclaimed shares from the PREVIOUS round forfeited to the treasury.
+    pub expired_e8s: u64,
+    pub rollover_after_e8s: u64,
+    /// Share-pool balance after this settlement (unclaimed + rollover).
+    pub share_pool_after_e8s: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CoFounderInfo {
+    pub enabled: bool,
+    /// True once any month's yield has reached `close_threshold_e8s` —
+    /// permanently; new members are rejected, existing ones may top up.
+    pub membership_closed: bool,
+    pub close_threshold_e8s: u64,
+    /// Months yielding under this are restaked into the neuron.
+    pub restake_threshold_e8s: u64,
+    pub total_restaked_e8s: u64,
+    /// The co-founder neuron (None until the first claim lands).
+    pub neuron_id: Option<u64>,
+    /// True once the neuron follows the primary voting neuron on all topics
+    /// (bootstrap Ready) — it then votes on every NNS proposal the leader does.
+    pub follows_primary_neuron: bool,
+    pub primary_neuron_id: u64,
+    pub min_stake_e8s: u64,
+    pub treasury_cut_e8s: u64,
+    pub min_distribution_e8s: u64,
+    pub period_nanos: u64,
+    pub cofounder_count: u64,
+    pub total_staked_e8s: u64,
+    pub rollover_e8s: u64,
+    /// Live share-pool ledger balance (unclaimed shares + rollover).
+    pub share_pool_e8s: u64,
+    pub total_yield_e8s: u64,
+    pub total_distributed_e8s: u64,
+    /// Nanosecond timestamp when the next settlement can run.
+    pub next_distribution_at: u64,
+    pub my_staked_e8s: u64,
+    pub my_claimable_e8s: u64,
+    pub fee_e8s: u64,
+}
+
+impl_storable!(CoFounder);
+impl_storable!(CoFounderState);
+impl_storable!(CoFounderRound);
+
+thread_local! {
+    static COFOUNDERS: RefCell<StableBTreeMap<Principal, CoFounder, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(46))))
+    });
+
+    static COFOUNDER_STATE: RefCell<StableCell<CoFounderState, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(47)), CoFounderState {
+            total_staked_e8s: 0,
+            rollover_e8s: 0,
+            last_processed_month: 0,
+            total_yield_e8s: 0,
+            total_distributed_e8s: 0,
+            total_expired_e8s: 0,
+            membership_closed: false,
+            nonce: 0,
+            neuron_id: None,
+            pending_refresh_e8s: 0,
+            bootstrap: 0,
+            total_restaked_e8s: 0,
+            pending_job: None,
+        }))
+    });
+
+    static COFOUNDER_ROUNDS: RefCell<StableBTreeMap<u64, CoFounderRound, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(48))))
+    });
+}
+
+fn require_cofounders_enabled() -> Result<(), String> {
+    if !feature_enabled(FLAG_COFOUNDERS) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+fn cofounder_month(now: u64) -> u64 {
+    now / COFOUNDER_PERIOD_NANOS
+}
+
+fn derive_cofounder_subaccount(user: &Principal) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_cofounder_v1");
+    hasher.update(user.as_slice());
+    let result = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&result);
+    sub
+}
+
+/// Pure month routing (unit-tested): where does this month's yield go?
+/// Returns (restaked, treasury_cut, excess_net).
+/// • Under 500 ICP: the whole month is restaked into the neuron — it
+///   compounds everyone's future yield instead of paying out.
+/// • Otherwise the first 1,000 ICP is the treasury's and the excess (net of
+///   the one ledger fee burned moving it into the share pool — found by
+///   local e2e) feeds the distribution pot.
+fn cofounder_route_yield(yield_e8s: u64, fee: u64) -> (u64, u64, u64) {
+    if yield_e8s < COFOUNDER_RESTAKE_BELOW_E8S {
+        return (yield_e8s, 0, 0);
+    }
+    let treasury_cut = yield_e8s.min(COFOUNDER_TREASURY_CUT_E8S);
+    let excess = yield_e8s.saturating_sub(treasury_cut);
+    let excess_net = if excess > fee { excess - fee } else { 0 };
+    (0, treasury_cut, excess_net)
+}
+
+/// Pure pot allocation (unit-tested): split `pot` across co-founders in
+/// proportion to their staked ICP. Returns the per-founder shares and the
+/// integer-division dust left over. Pots under 100 ICP allocate nothing.
+fn cofounder_allocate(pot: u64, stakes: &[(Principal, u64)]) -> (Vec<(Principal, u64)>, u64) {
+    let total: u128 = stakes.iter().map(|(_, s)| *s as u128).sum();
+    if total == 0 || pot < COFOUNDER_MIN_DISTRIBUTION_E8S {
+        return (Vec::new(), pot);
+    }
+    let mut shares = Vec::with_capacity(stakes.len());
+    let mut allocated: u64 = 0;
+    for (user, stake) in stakes {
+        let share = ((pot as u128) * (*stake as u128) / total) as u64;
+        if share > 0 {
+            shares.push((*user, share));
+            allocated = allocated.saturating_add(share);
+        }
+    }
+    (shares, pot - allocated)
+}
+
+#[ic_cdk::query]
+fn get_cofounder_info() -> CoFounderInfo {
+    let caller = get_caller();
+    let state = COFOUNDER_STATE.with(|c| c.borrow().get().clone());
+    let me = COFOUNDERS.with(|m| m.borrow().get(&caller));
+    let unclaimed: u64 = COFOUNDERS.with(|m| {
+        m.borrow().iter().map(|e| e.value().claimable_e8s).sum()
+    });
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    CoFounderInfo {
+        enabled: feature_enabled(FLAG_COFOUNDERS),
+        membership_closed: state.membership_closed,
+        close_threshold_e8s: COFOUNDER_CLOSE_YIELD_E8S,
+        restake_threshold_e8s: COFOUNDER_RESTAKE_BELOW_E8S,
+        total_restaked_e8s: state.total_restaked_e8s,
+        neuron_id: state.neuron_id,
+        follows_primary_neuron: state.bootstrap >= 3,
+        primary_neuron_id: config.primary_neuron_id,
+        min_stake_e8s: MIN_COFOUNDER_STAKE_E8S,
+        treasury_cut_e8s: COFOUNDER_TREASURY_CUT_E8S,
+        min_distribution_e8s: COFOUNDER_MIN_DISTRIBUTION_E8S,
+        period_nanos: COFOUNDER_PERIOD_NANOS,
+        cofounder_count: COFOUNDERS.with(|m| m.borrow().len()),
+        total_staked_e8s: state.total_staked_e8s,
+        rollover_e8s: state.rollover_e8s,
+        share_pool_e8s: state.rollover_e8s.saturating_add(unclaimed),
+        total_yield_e8s: state.total_yield_e8s,
+        total_distributed_e8s: state.total_distributed_e8s,
+        next_distribution_at: (state.last_processed_month + 1) * COFOUNDER_PERIOD_NANOS,
+        my_staked_e8s: me.as_ref().map(|c| c.staked_e8s).unwrap_or(0),
+        my_claimable_e8s: me.as_ref().map(|c| c.claimable_e8s).unwrap_or(0),
+        fee_e8s: 10_000,
+    }
+}
+
+/// One row of the public co-founder roster.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CoFounderPublic {
+    pub user: Principal,
+    pub staked_e8s: u64,
+    pub joined_at: u64,
+    /// True when this co-founder is a platform admin — rendered as the
+    /// "FOUNDER" tag (the team has its own ICP locked in the same neuron).
+    pub is_admin: bool,
+}
+
+/// The full co-founder roster, largest stake first.
+#[ic_cdk::query]
+fn list_cofounders() -> Vec<CoFounderPublic> {
+    let admins = CONFIG.with(|c| c.borrow().get().admins.clone());
+    let mut roster: Vec<CoFounderPublic> = COFOUNDERS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| {
+                let c = e.value();
+                CoFounderPublic {
+                    user: c.user,
+                    staked_e8s: c.staked_e8s,
+                    joined_at: c.joined_at,
+                    is_admin: admins.contains(&c.user),
+                }
+            })
+            .collect()
+    });
+    roster.sort_by(|a, b| b.staked_e8s.cmp(&a.staked_e8s).then(a.joined_at.cmp(&b.joined_at)));
+    roster
+}
+
+/// Settlement history, oldest first (chart data: yield per month + share
+/// pool balance after each settlement).
+#[ic_cdk::query]
+fn list_cofounder_rounds() -> Vec<CoFounderRound> {
+    let mut rounds: Vec<CoFounderRound> =
+        COFOUNDER_ROUNDS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+    rounds.sort_by_key(|r| r.month);
+    rounds
+}
+
+/// The caller's deposit account for becoming (or topping up as) a
+/// co-founder. Fund it with `amount + 0.0001 ICP`, then call
+/// `cofounder_stake(amount)`.
+#[ic_cdk::query]
+fn get_cofounder_deposit_address() -> LedgerAccount {
+    let caller = get_caller();
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(derive_cofounder_subaccount(&caller)),
+    }
+}
+
+/// Stake into the platform's 2-year co-founder neuron. PERMANENT: there is
+/// no unstake path, by design — the principal can never be withdrawn.
+#[ic_cdk::update]
+async fn cofounder_stake(amount_e8s: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_cofounders_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    if amount_e8s < MIN_COFOUNDER_STAKE_E8S {
+        return Err("BELOW_MIN_STAKE".to_string());
+    }
+    let is_member = COFOUNDERS.with(|m| m.borrow().get(&caller).is_some());
+    // Once a month's yield has hit 2,000 ICP, the founders' table is full —
+    // forever. Existing co-founders may still top up at any time.
+    if !is_member {
+        let closed = COFOUNDER_STATE.with(|c| c.borrow().get().membership_closed);
+        if closed {
+            return Err("MEMBERSHIP_CLOSED".to_string());
+        }
+        let at_quota = COFOUNDERS.with(|m| m.borrow().len() >= MAX_COFOUNDERS);
+        if at_quota {
+            return Err("COFOUNDER_QUOTA_REACHED".to_string());
+        }
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+    let sub = derive_cofounder_subaccount(&caller);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    // checked_add: a hostile amount near u64::MAX must not wrap past the
+    // deposit check (house pattern — same as upvote_idea).
+    let required = amount_e8s.checked_add(10_000).ok_or("INVALID_AMOUNT")?;
+    if balance < required {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+
+    // Fix the claim nonce at the very first stake — the governance staking
+    // account derives from it (offset +9 keeps clear of the tier nonces).
+    let nonce = COFOUNDER_STATE.with(|c| {
+        let mut s = c.borrow().get().clone();
+        if s.nonce == 0 {
+            s.nonce = current_time() + 9;
+            c.borrow_mut().set(s.clone());
+        }
+        s.nonce
+    });
+
+    // Escrow → the neuron's stake. Mainnet: legacy transfer with memo ==
+    // nonce to the governance staking account (claimable). Local: park in
+    // the co-founder neuron subaccount (mock governance claims from there).
+    if config.is_local || cfg!(not(target_arch = "wasm32")) {
+        let neuron_dest = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(COFOUNDER_NEURON_SUBACCOUNT),
+        };
+        call_ledger_transfer(ledger_id, Some(sub), neuron_dest, amount_e8s, Some(10_000))
+            .await
+            .map_err(|e| format!("STAKE_TRANSFER_FAILED: {}", e))?;
+    } else {
+        let gov = Principal::from_text(NNS_GOVERNANCE_ID).unwrap();
+        let staking_sub = neuron_staking_subaccount(get_canister_id(), nonce);
+        call_ledger_legacy_transfer(
+            ledger_id,
+            Some(sub),
+            account_id_bytes(gov, &staking_sub),
+            amount_e8s,
+            10_000,
+            nonce,
+        )
+        .await
+        .map_err(|e| format!("STAKE_TRANSFER_FAILED: {}", e))?;
+    }
+
+    let now = current_time();
+    COFOUNDERS.with(|m| {
+        let mut m = m.borrow_mut();
+        let mut entry = m.get(&caller).unwrap_or(CoFounder {
+            user: caller,
+            staked_e8s: 0,
+            joined_at: now,
+            last_stake_at: now,
+            claimable_e8s: 0,
+        });
+        entry.staked_e8s = entry.staked_e8s.saturating_add(amount_e8s);
+        entry.last_stake_at = now;
+        m.insert(caller, entry);
+    });
+    COFOUNDER_STATE.with(|c| {
+        let mut s = c.borrow().get().clone();
+        s.total_staked_e8s = s.total_staked_e8s.saturating_add(amount_e8s);
+        s.pending_refresh_e8s = s.pending_refresh_e8s.saturating_add(amount_e8s);
+        // The very first stake anchors the settlement clock to "now" so the
+        // first month isn't instantly due.
+        if s.last_processed_month == 0 {
+            s.last_processed_month = cofounder_month(now);
+        }
+        c.borrow_mut().set(s);
+    });
+
+    let entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "cofounder_stake".to_string(),
+        proposal_id: 0,
+        user: caller,
+        amount_e8s,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&entry);
+    });
+
+    // Best-effort claim + bootstrap (dissolve delay, follow the primary
+    // voting neuron); the sweep repairs any failure.
+    if let Err(e) = advance_cofounder_bootstrap().await {
+        canister_print(&format!("cofounder_stake: bootstrap deferred to sweep: {}", e));
+    }
+    Ok(())
+}
+
+/// Drive the co-founder neuron's state machine: claim/refresh pending stake,
+/// then (once) set the 2-year dissolve delay, go public, and FOLLOW THE
+/// PRIMARY VOTING NEURON on all topics — from then on it votes on every NNS
+/// proposal the leader votes on. Mirrors `advance_tier_bootstrap`.
+async fn advance_cofounder_bootstrap() -> Result<(), String> {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let mut state = COFOUNDER_STATE.with(|c| c.borrow().get().clone());
+
+    if state.pending_refresh_e8s > 0 && state.nonce != 0 {
+        let id = gov_claim_or_refresh(state.nonce, state.pending_refresh_e8s, state.neuron_id).await?;
+        state.pending_refresh_e8s = 0;
+        if state.neuron_id.is_none() {
+            state.neuron_id = Some(id);
+            state.bootstrap = 1; // Claimed
+        }
+        COFOUNDER_STATE.with(|c| { c.borrow_mut().set(state.clone()); });
+    }
+
+    let neuron_id = match state.neuron_id {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    if state.bootstrap == 1 {
+        gov_increase_dissolve_delay(neuron_id, COFOUNDER_DISSOLVE_SECS).await?;
+        state.bootstrap = 2; // DelaySet
+        COFOUNDER_STATE.with(|c| { c.borrow_mut().set(state.clone()); });
+    }
+    if state.bootstrap == 2 {
+        gov_set_visibility(neuron_id).await?;
+        gov_follow_all_topics(neuron_id, config.primary_neuron_id).await?;
+        state.bootstrap = 3; // Ready — following the primary neuron
+        COFOUNDER_STATE.with(|c| { c.borrow_mut().set(state.clone()); });
+    }
+    Ok(())
+}
+
+/// Claim the caller's current monthly share. Shares not claimed before the
+/// next settlement are forfeited to the treasury.
+#[ic_cdk::update]
+async fn claim_cofounder_yield() -> Result<u64, String> {
+    require_authenticated()?;
+    require_cofounders_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let claimable = COFOUNDERS
+        .with(|m| m.borrow().get(&caller))
+        .map(|c| c.claimable_e8s)
+        .unwrap_or(0);
+    if claimable <= 10_000 {
+        return Err("NOTHING_TO_CLAIM".to_string());
+    }
+    // Zero the share BEFORE the transfer (no double-claim across await); on
+    // transfer failure it is restored.
+    COFOUNDERS.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(mut c) = m.get(&caller) {
+            c.claimable_e8s = 0;
+            m.insert(caller, c);
+        }
+    });
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let net = claimable - 10_000;
+    let dest = LedgerAccount { owner: caller, subaccount: None };
+    let transfer = call_ledger_transfer(
+        config.ledger_canister_id,
+        Some(COFOUNDER_SHARE_POOL_SUBACCOUNT),
+        dest,
+        net,
+        Some(10_000),
+    )
+    .await;
+    if let Err(e) = transfer {
+        COFOUNDERS.with(|m| {
+            let mut m = m.borrow_mut();
+            if let Some(mut c) = m.get(&caller) {
+                c.claimable_e8s = claimable;
+                m.insert(caller, c);
+            }
+        });
+        return Err(format!("CLAIM_TRANSFER_FAILED: {}", e));
+    }
+    record_payout(caller, PayoutType::CoFounderYield, IdeaToken::ICP, net, 0);
+    let entry = AuditLogEntry {
+        timestamp: current_time(),
+        event_type: "cofounder_claim".to_string(),
+        proposal_id: 0,
+        user: caller,
+        amount_e8s: net,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&entry);
+    });
+    Ok(net)
+}
+
+/// Run (or resume) one monthly settlement: expire unclaimed shares →
+/// treasury, route the month's yield (<500 restake / 1,000 cut / excess →
+/// pot), then split the pot in proportion to stake. All amounts are
+/// journaled in CoFounderState.pending_job before any transfer, and every
+/// completed leg is flagged, so a retry after a failed transfer resumes
+/// exactly where it stopped — it never re-reads the inbox and re-routes.
+async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = config.ledger_canister_id;
+    let fee = 10_000u64;
+    let canister = get_canister_id();
+    let treasury = LedgerAccount { owner: canister, subaccount: Some(TREASURY_SUBACCOUNT) };
+
+    // 0. Load the in-flight job, or open a new one from the inbox snapshot.
+    let mut job = match COFOUNDER_STATE.with(|c| c.borrow().get().pending_job.clone()) {
+        Some(job) => job,
+        None => {
+            let inbox = LedgerAccount { owner: canister, subaccount: Some(COFOUNDER_YIELD_SUBACCOUNT) };
+            let yield_e8s = call_ledger_balance(ledger_id, inbox).await?;
+            let (restaked, treasury_cut, excess_net) = cofounder_route_yield(yield_e8s, fee);
+            // Snapshot + zero the expiring shares in ONE synchronous block:
+            // from this instant claims return NOTHING_TO_CLAIM, so a claim
+            // racing the settlement can't double-spend the share pool.
+            let expired = COFOUNDERS.with(|m| {
+                let mut m = m.borrow_mut();
+                let keys: Vec<Principal> = m.iter().map(|e| *e.key()).collect();
+                let mut total = 0u64;
+                for k in keys {
+                    if let Some(mut c) = m.get(&k) {
+                        if c.claimable_e8s > 0 {
+                            total = total.saturating_add(c.claimable_e8s);
+                            c.claimable_e8s = 0;
+                            m.insert(k, c);
+                        }
+                    }
+                }
+                total
+            });
+            let job = CoFounderJob {
+                month: cofounder_month(now),
+                started_at: now,
+                yield_e8s,
+                expired_e8s: expired,
+                restake_e8s: restaked,
+                treasury_cut_e8s: treasury_cut,
+                excess_net_e8s: excess_net,
+                expired_done: false,
+                restake_done: false,
+                cut_done: false,
+                pool_done: false,
+            };
+            COFOUNDER_STATE.with(|c| {
+                let mut s = c.borrow().get().clone();
+                s.pending_job = Some(job.clone());
+                c.borrow_mut().set(s);
+            });
+            job
+        }
+    };
+    let persist_job = |job: &CoFounderJob| {
+        COFOUNDER_STATE.with(|c| {
+            let mut s = c.borrow().get().clone();
+            s.pending_job = Some(job.clone());
+            c.borrow_mut().set(s);
+        });
+    };
+
+    // 1. Forfeit the expired shares (share pool → treasury).
+    if !job.expired_done {
+        if job.expired_e8s > 0 {
+            let pool_acc = LedgerAccount { owner: canister, subaccount: Some(COFOUNDER_SHARE_POOL_SUBACCOUNT) };
+            let pool_balance = call_ledger_balance(ledger_id, pool_acc).await?;
+            let amt = job.expired_e8s.min(pool_balance).saturating_sub(fee);
+            if amt > 0 {
+                call_ledger_transfer(ledger_id, Some(COFOUNDER_SHARE_POOL_SUBACCOUNT), treasury.clone(), amt, Some(fee))
+                    .await
+                    .map_err(|e| format!("EXPIRE_TRANSFER_FAILED: {}", e))?;
+            }
+        }
+        job.expired_done = true;
+        persist_job(&job);
+    }
+
+    // 2. Route the month's yield: restake (<500), treasury cut, pot excess.
+    if !job.restake_done {
+        if job.restake_e8s > fee {
+            let neuron_acc = LedgerAccount { owner: canister, subaccount: Some(COFOUNDER_NEURON_SUBACCOUNT) };
+            call_ledger_transfer(ledger_id, Some(COFOUNDER_YIELD_SUBACCOUNT), neuron_acc, job.restake_e8s - fee, Some(fee))
+                .await
+                .map_err(|e| format!("RESTAKE_TRANSFER_FAILED: {}", e))?;
+        }
+        job.restake_done = true;
+        persist_job(&job);
+    }
+    if !job.cut_done {
+        if job.treasury_cut_e8s > fee {
+            call_ledger_transfer(ledger_id, Some(COFOUNDER_YIELD_SUBACCOUNT), treasury, job.treasury_cut_e8s - fee, Some(fee))
+                .await
+                .map_err(|e| format!("TREASURY_CUT_FAILED: {}", e))?;
+        }
+        job.cut_done = true;
+        persist_job(&job);
+    }
+    if !job.pool_done {
+        if job.excess_net_e8s > 0 {
+            let pool = LedgerAccount { owner: canister, subaccount: Some(COFOUNDER_SHARE_POOL_SUBACCOUNT) };
+            call_ledger_transfer(ledger_id, Some(COFOUNDER_YIELD_SUBACCOUNT), pool, job.excess_net_e8s, Some(fee))
+                .await
+                .map_err(|e| format!("POOL_TRANSFER_FAILED: {}", e))?;
+        }
+        job.pool_done = true;
+        persist_job(&job);
+    }
+
+    // 3. Finalize (runs exactly once — the job is cleared at the end):
+    // allocate shares in proportion to each co-founder's staked ICP.
+    let state = COFOUNDER_STATE.with(|c| c.borrow().get().clone());
+    let n = COFOUNDERS.with(|m| m.borrow().len());
+    let pot = job.excess_net_e8s.saturating_add(state.rollover_e8s);
+    let stakes: Vec<(Principal, u64)> = COFOUNDERS.with(|m| {
+        m.borrow().iter().map(|e| (*e.key(), e.value().staked_e8s)).collect()
+    });
+    let (shares, new_rollover) = cofounder_allocate(pot, &stakes);
+    let allocated: u64 = shares.iter().map(|(_, s)| *s).sum();
+    COFOUNDERS.with(|m| {
+        let mut m = m.borrow_mut();
+        for (user, share) in &shares {
+            if let Some(mut c) = m.get(user) {
+                c.claimable_e8s = *share;
+                m.insert(*user, c);
+            }
+        }
+    });
+
+    // 4. Persist the round + state and close the job.
+    let month = job.month;
+    let yield_e8s = job.yield_e8s;
+    let unclaimed_now: u64 = COFOUNDERS.with(|m| m.borrow().iter().map(|e| e.value().claimable_e8s).sum());
+    COFOUNDER_ROUNDS.with(|m| {
+        m.borrow_mut().insert(month, CoFounderRound {
+            month,
+            settled_at: now,
+            yield_e8s,
+            treasury_e8s: job.treasury_cut_e8s,
+            distributed_e8s: allocated,
+            restaked_e8s: job.restake_e8s,
+            cofounder_count: n,
+            expired_e8s: job.expired_e8s,
+            rollover_after_e8s: new_rollover,
+            share_pool_after_e8s: new_rollover.saturating_add(unclaimed_now),
+        });
+    });
+    let newly_closed = !state.membership_closed && yield_e8s >= COFOUNDER_CLOSE_YIELD_E8S;
+    COFOUNDER_STATE.with(|c| {
+        let mut s = c.borrow().get().clone();
+        s.rollover_e8s = new_rollover;
+        s.last_processed_month = month.max(s.last_processed_month);
+        s.total_yield_e8s = s.total_yield_e8s.saturating_add(yield_e8s);
+        s.total_distributed_e8s = s.total_distributed_e8s.saturating_add(allocated);
+        s.total_expired_e8s = s.total_expired_e8s.saturating_add(job.expired_e8s);
+        if job.restake_e8s > 0 {
+            s.total_restaked_e8s = s.total_restaked_e8s.saturating_add(job.restake_e8s);
+            // Restaked yield must be claim/refreshed into the neuron too.
+            s.pending_refresh_e8s = s.pending_refresh_e8s.saturating_add(job.restake_e8s.saturating_sub(fee));
+        }
+        if newly_closed {
+            s.membership_closed = true;
+        }
+        s.pending_job = None;
+        c.borrow_mut().set(s);
+    });
+    if newly_closed {
+        let entry = AuditLogEntry {
+            timestamp: now,
+            event_type: "cofounder_membership_closed".to_string(),
+            proposal_id: month,
+            user: get_canister_id(),
+            amount_e8s: yield_e8s,
+        };
+        AUDIT_LOG.with(|log| {
+            let _ = log.borrow_mut().append(&entry);
+        });
+    }
+    let entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "cofounder_settlement".to_string(),
+        proposal_id: month,
+        user: get_canister_id(),
+        amount_e8s: yield_e8s,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&entry);
+    });
+    Ok(())
+}
+
+/// Sweep hook: settle once whenever a new 30-day period has started (no-op
+/// until the first co-founder exists).
+async fn cofounder_settlement_check() {
+    if !feature_enabled(FLAG_COFOUNDERS) {
+        return;
+    }
+    let has_members = COFOUNDERS.with(|m| !m.borrow().is_empty());
+    if !has_members {
+        return;
+    }
+    // Repair the neuron bootstrap (claim restaked yield, follow the leader).
+    if let Err(e) = advance_cofounder_bootstrap().await {
+        canister_print(&format!("cofounder bootstrap retry failed: {}", e));
+    }
+    let now = current_time();
+    let state = COFOUNDER_STATE.with(|c| c.borrow().get().clone());
+    // Run when a new period starts, and ALSO whenever a journaled settlement
+    // is mid-flight (a leg failed) so it resumes promptly.
+    if cofounder_month(now) > state.last_processed_month || state.pending_job.is_some() {
+        if let Err(e) = cofounder_run_settlement(now).await {
+            canister_print(&format!("cofounder settlement failed (will retry next sweep): {}", e));
+        }
+    }
+}
+
+/// Local-dev: where to send mock yield (the neuron's maturity inbox).
+#[ic_cdk::query]
+fn get_cofounder_yield_inbox_address() -> LedgerAccount {
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(COFOUNDER_YIELD_SUBACCOUNT),
+    }
+}
+
+/// Local-dev: force a settlement now regardless of the period clock.
+#[ic_cdk::update]
+async fn dev_run_cofounder_settlement() -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    cofounder_run_settlement(current_time()).await
+}
+
+/// Local-dev: jump the page to a significant preset state (VISUAL ONLY —
+/// model state is rewritten, ledger balances are not, so claims won't pay).
+/// 0 = fresh & open (empty everything), 1 = open with members + a varied
+/// 6-month history + a claimable share for the caller, 2 = membership
+/// closed (same history plus the 2,000+ ICP month that latched it).
+#[ic_cdk::update]
+fn dev_set_cofounder_preset(preset: u8) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    if preset > 2 {
+        return Err("UNKNOWN_PRESET".to_string());
+    }
+    let caller = get_caller();
+    let now = current_time();
+    let month_now = cofounder_month(now);
+    const ICP_E8S: u64 = 100_000_000;
+
+    // Wipe model state.
+    let members: Vec<Principal> = COFOUNDERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    COFOUNDERS.with(|m| { let mut m = m.borrow_mut(); for k in members { m.remove(&k); } });
+    let months: Vec<u64> = COFOUNDER_ROUNDS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    COFOUNDER_ROUNDS.with(|m| { let mut m = m.borrow_mut(); for k in months { m.remove(&k); } });
+    let mut state = CoFounderState {
+        total_staked_e8s: 0,
+        rollover_e8s: 0,
+        last_processed_month: month_now,
+        total_yield_e8s: 0,
+        total_distributed_e8s: 0,
+        total_expired_e8s: 0,
+        membership_closed: false,
+        nonce: 0,
+        neuron_id: None,
+        pending_refresh_e8s: 0,
+        bootstrap: 0,
+        total_restaked_e8s: 0,
+        pending_job: None,
+    };
+
+    if preset >= 1 {
+        // Members: the caller + three fixtures with varied stakes.
+        let fixtures = [
+            (caller, 500 * ICP_E8S, 0u64),
+            (Principal::from_text("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe").unwrap(), 1200 * ICP_E8S, 1),
+            (Principal::from_text("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae").unwrap(), 250 * ICP_E8S, 2),
+            (Principal::from_text("i3ptn-w5i4d-zwvvn-kxgy4-zkx5d-ukatp-3jbje-vtb6d-y5zmj-kpj33-xae").unwrap(), 50 * ICP_E8S, 3),
+        ];
+        let total: u64 = fixtures.iter().map(|(_, s, _)| *s).sum();
+        for (user, staked, months_ago) in fixtures {
+            COFOUNDERS.with(|m| {
+                m.borrow_mut().insert(user, CoFounder {
+                    user,
+                    staked_e8s: staked,
+                    joined_at: now.saturating_sub((months_ago + 2) * COFOUNDER_PERIOD_NANOS),
+                    last_stake_at: now.saturating_sub(months_ago * COFOUNDER_PERIOD_NANOS),
+                    // The caller gets a juicy unclaimed share to exercise Claim.
+                    claimable_e8s: if user == caller { 75 * ICP_E8S } else { 0 },
+                });
+            });
+        }
+        state.total_staked_e8s = total;
+        state.rollover_e8s = 42 * ICP_E8S;
+        state.neuron_id = Some(990_001);
+        state.bootstrap = 3; // Ready — following the primary neuron
+        state.nonce = 7;
+
+        // Six months of varied history: restake, treasury-only, payouts…
+        let mk = |months_ago: u64, yield_icp: u64, treasury: u64, dist: u64, restake: u64, expired: u64, roll: u64| CoFounderRound {
+            month: month_now.saturating_sub(months_ago),
+            settled_at: now.saturating_sub(months_ago * COFOUNDER_PERIOD_NANOS),
+            yield_e8s: yield_icp * ICP_E8S,
+            treasury_e8s: treasury * ICP_E8S,
+            distributed_e8s: dist * ICP_E8S,
+            restaked_e8s: restake * ICP_E8S,
+            cofounder_count: 4,
+            expired_e8s: expired * ICP_E8S,
+            rollover_after_e8s: roll * ICP_E8S,
+            share_pool_after_e8s: (roll + dist / 2) * ICP_E8S,
+        };
+        let mut rounds = vec![
+            mk(5, 320, 0, 0, 320, 0, 0),       // quiet month → fully restaked
+            mk(4, 700, 700, 0, 0, 0, 0),       // mid band → all treasury
+            mk(3, 1250, 1000, 250, 0, 0, 0),   // first payout month
+            mk(2, 480, 0, 0, 480, 0, 0),       // restaked again
+            mk(1, 1800, 1000, 758, 0, 120, 42),// big month + an expired share
+        ];
+        if preset == 2 {
+            rounds.push(mk(0, 2400, 1000, 1358, 0, 0, 84)); // the month that closed the table
+            state.membership_closed = true;
+        }
+        state.total_yield_e8s = rounds.iter().map(|r| r.yield_e8s).sum();
+        state.total_distributed_e8s = rounds.iter().map(|r| r.distributed_e8s).sum();
+        state.total_restaked_e8s = rounds.iter().map(|r| r.restaked_e8s).sum();
+        state.total_expired_e8s = rounds.iter().map(|r| r.expired_e8s).sum();
+        COFOUNDER_ROUNDS.with(|m| {
+            let mut m = m.borrow_mut();
+            for r in rounds {
+                m.insert(r.month, r);
+            }
+        });
+    }
+
+    COFOUNDER_STATE.with(|c| { c.borrow_mut().set(state); });
+    Ok(())
+}
+
+// ==========================================
+// 19. Social profile (Twitter/X handle)
+// ==========================================
+//
+// Users attach their X handle on the Profile page; the dapp uses it for
+// social features around proposal sharing. Stored bare (no leading @).
+
+thread_local! {
+    static TWITTER_HANDLES: RefCell<StableBTreeMap<Principal, String, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(49))))
+    });
+}
+
+fn valid_twitter_handle(h: &str) -> bool {
+    (1..=15).contains(&h.len()) && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Set (or clear, with an empty string) the caller's X handle. A leading @
+/// is stripped; X's own rules apply (1–15 chars, [A-Za-z0-9_]).
+#[ic_cdk::update]
+fn set_twitter_handle(handle: String) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let handle = handle.trim().trim_start_matches('@').to_string();
+    if handle.is_empty() {
+        TWITTER_HANDLES.with(|m| { m.borrow_mut().remove(&caller); });
+        return Ok(());
+    }
+    if !valid_twitter_handle(&handle) {
+        return Err("INVALID_HANDLE".to_string());
+    }
+    TWITTER_HANDLES.with(|m| { m.borrow_mut().insert(caller, handle); });
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_my_twitter_handle() -> Option<String> {
+    TWITTER_HANDLES.with(|m| m.borrow().get(&get_caller()))
+}
+
 ic_cdk::export_candid!();
 
 #[cfg(test)]
@@ -7746,6 +10133,8 @@ mod tests {
             pool_initiation_fee_e8s: 12_500_000_000,
             ckbtc_ledger_canister_id: None,
             cketh_ledger_canister_id: None,
+            ckusdc_ledger_canister_id: None,
+            ckusdt_ledger_canister_id: None,
             min_upvote_icp_e8s: None,
             min_upvote_ckbtc_e8s: None,
             min_upvote_cketh_wei: None,
@@ -7981,6 +10370,8 @@ mod tests {
                 pool_initiation_fee_e8s: 0,
                 ckbtc_ledger_canister_id: None,
                 cketh_ledger_canister_id: None,
+                ckusdc_ledger_canister_id: None,
+            ckusdt_ledger_canister_id: None,
                 min_upvote_icp_e8s: None,
                 min_upvote_ckbtc_e8s: None,
                 min_upvote_cketh_wei: None,
@@ -9118,6 +11509,699 @@ mod tests {
         assert_eq!(decoded.poster_block, None);
     }
 
+    // ── Dapp Explorer ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_explorer_quote_amount_math() {
+        // ICP at $5: 1 day = $1 = 0.2 ICP.
+        assert_eq!(explorer_quote_amount(1, 500_000_000, 8).unwrap(), (20_000_000, 100_000_000));
+        // ckUSDC at $1: 3650 days = $3650 = 3650 ckUSDC (6 decimals).
+        assert_eq!(
+            explorer_quote_amount(3650, USD_E8S_PER_USD, 6).unwrap(),
+            (3_650_000_000, 365_000_000_000)
+        );
+        // ckETH at $3k: 1 day ≈ 0.000333… ckETH in wei.
+        let (wei, _) = explorer_quote_amount(1, 300_000_000_000, 18).unwrap();
+        assert_eq!(wei, 333_333_333_333_333);
+        // Bounds.
+        assert!(explorer_quote_amount(0, 500_000_000, 8).is_err());
+        assert!(explorer_quote_amount(3651, 500_000_000, 8).is_err());
+        assert!(explorer_quote_amount(1, 0, 8).is_err());
+    }
+
+    #[test]
+    fn test_validate_dapp_text() {
+        assert!(validate_dapp_text("My Dapp", "https://example.com", "A fine dapp.").is_ok());
+        assert!(validate_dapp_text("", "https://example.com", "d").is_err());
+        assert!(validate_dapp_text(&"x".repeat(61), "https://example.com", "d").is_err());
+        assert!(validate_dapp_text("n", "http://example.com", "d").is_err(), "https only");
+        assert!(validate_dapp_text("n", "https://", "d").is_err(), "host required");
+        assert!(validate_dapp_text("n", "https://exa mple.com", "d").is_err(), "no whitespace");
+        assert!(validate_dapp_text("n", "https://example.com", "").is_err());
+        assert!(validate_dapp_text("n", "https://example.com", &"x".repeat(281)).is_err());
+    }
+
+    #[test]
+    fn test_seed_default_dapps_idempotent_and_listed_first() {
+        clear_dapps();
+        seed_default_dapps();
+        seed_default_dapps(); // no-op on a non-empty directory
+        let listed = list_dapps();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, "idGeek 2.0");
+        assert_eq!(listed[1].name, "Liquidium");
+        assert!(listed.iter().all(|d| !d.community && d.expires_at.is_none()));
+    }
+
+    #[tokio::test]
+    async fn test_submit_dapp_full_flow_and_approval_gating() {
+        clear_dapps();
+        let user = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
+        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
+        let mut cfg = test_config(true);
+        cfg.admins = vec![admin];
+        CONFIG.with(|c| { c.borrow_mut().set(cfg); });
+        set_mock_caller(user);
+
+        // No quote yet → submit refused.
+        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "NO_QUOTE");
+
+        // Quote 30 days in ICP at the local default rate ($5): $30 = 6 ICP.
+        let quote = get_explorer_quote(ExplorerToken::ICP, 30).await.unwrap();
+        assert_eq!(quote.amount, 600_000_000);
+        assert_eq!(quote.usd_total_e8s, 3_000_000_000);
+
+        // Token/days must match the quote.
+        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::CkBTC, 30)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "QUOTE_MISMATCH");
+
+        // Underfunded escrow refused; funded escrow accepted.
+        set_mock_ledger_balance(quote.amount); // missing the fee
+        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "INSUFFICIENT_DEPOSIT");
+        set_mock_ledger_balance(quote.amount + 10_000);
+        set_mock_ledger_transfer(Ok(7));
+        let id = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30)
+            .await
+            .unwrap();
+
+        // Pending: hidden from the public list, visible to the submitter,
+        // queued for the admin.
+        assert!(list_dapps().iter().all(|d| d.id != id));
+        assert_eq!(list_my_dapp_submissions().len(), 1);
+        assert_eq!(list_my_dapp_submissions()[0].status, DappStatus::Pending);
+        // The quote is consumed — a second submit needs a new one.
+        let err = submit_dapp("E".into(), "https://e.app".into(), "desc".into(), ExplorerToken::ICP, 30)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "NO_QUOTE");
+
+        // Approval makes it public with the paid window applied, badged.
+        set_mock_caller(admin);
+        admin_approve_dapp(id).unwrap();
+        let listed = list_dapps();
+        let mine = listed.iter().find(|d| d.id == id).expect("approved listing is public");
+        assert!(mine.community, "community submissions carry the badge flag");
+        let expires = mine.expires_at.expect("paid listings expire");
+        assert_eq!(expires - mine.approved_at.unwrap(), 30 * DAY_NANOS);
+        assert_eq!(admin_approve_dapp(id).unwrap_err(), "NOT_PENDING");
+        clear_dapps();
+    }
+
+    #[tokio::test]
+    async fn test_reject_dapp_refunds_and_deletes() {
+        clear_dapps();
+        let user = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_caller(user);
+        let quote = get_explorer_quote(ExplorerToken::CkUSDC, 5).await.unwrap();
+        assert_eq!(quote.amount, 5_000_000); // $5 at 6 decimals
+        set_mock_ledger_balance(quote.amount + 10_000);
+        set_mock_ledger_transfer(Ok(1));
+        let id = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::CkUSDC, 5)
+            .await
+            .unwrap();
+
+        // A failed refund keeps the listing for a retry.
+        set_mock_ledger_transfer(Err("ledger down".into()));
+        assert!(admin_reject_dapp(id).await.is_err());
+        assert_eq!(list_pending_dapps().len(), 1);
+
+        set_mock_ledger_transfer(Ok(2));
+        admin_reject_dapp(id).await.unwrap();
+        assert!(DAPPS.with(|m| m.borrow().get(&id)).is_none());
+        clear_dapps();
+    }
+
+    #[test]
+    fn test_expired_dapps_hidden_and_swept() {
+        clear_dapps();
+        let now = current_time();
+        let id = next_dapp_id();
+        DAPPS.with(|m| {
+            m.borrow_mut().insert(id, DappListing {
+                id,
+                submitter: p("2vxsx-fae"),
+                name: "Old".into(),
+                url: "https://old.app".into(),
+                description: "d".into(),
+                community: true,
+                status: DappStatus::Approved,
+                created_at: now.saturating_sub(2 * DAY_NANOS),
+                approved_at: Some(now.saturating_sub(2 * DAY_NANOS)),
+                expires_at: Some(now.saturating_sub(DAY_NANOS)),
+                days: 1,
+                token: Some(ExplorerToken::ICP),
+                amount_paid: 20_000_000,
+            });
+        });
+        assert!(list_dapps().is_empty(), "expired listings never render");
+        delete_expired_dapps();
+        assert!(DAPPS.with(|m| m.borrow().get(&id)).is_none(), "sweep deletes them");
+    }
+
+    // ── Arcade ─────────────────────────────────────────────────────────────
+
+    fn enable_arcade_flag() {
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE.to_string(), 1); });
+    }
+
+    fn clear_arcade() {
+        let keys: Vec<ArcadeScoreKey> = ARCADE_SCORES.with(|m| m.borrow().iter().map(|e| e.key().clone()).collect());
+        ARCADE_SCORES.with(|m| { let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
+        let chars: Vec<Principal> = ARCADE_CHARACTERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        ARCADE_CHARACTERS.with(|m| { let mut m = m.borrow_mut(); for k in chars { m.remove(&k); } });
+        let quotes: Vec<Principal> = ARCADE_QUOTES.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        ARCADE_QUOTES.with(|m| { let mut m = m.borrow_mut(); for k in quotes { m.remove(&k); } });
+    }
+
+    #[test]
+    fn test_arcade_access_gate() {
+        let nobody = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
+        let staker = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
+        let voter = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
+        let now = current_time();
+
+        assert_eq!(arcade_access(nobody), (false, false), "no stake, no vote → hole 1 only");
+
+        STAKES.with(|m| {
+            m.borrow_mut().insert(
+                StakeKey { tier: 0, user: staker },
+                UserStake { amount_e8s: 100_000_000, staked_at: now, last_action_at: now },
+            );
+        });
+        let (has_stake, _) = arcade_access(staker);
+        assert!(has_stake, "any active stake unlocks the full round");
+
+        // A vote inside the 30-day window counts; an older one doesn't.
+        LOSSLESS_VOTES.with(|m| {
+            m.borrow_mut().insert(
+                CommitmentKey { proposal_id: 901, principal: voter },
+                LosslessVote { proposal_id: 901, principal: voter, stance: Stance::Adopt, weight_e8s: 1, cast_at: now },
+            );
+        });
+        assert_eq!(arcade_access(voter).1, true, "fresh staked vote unlocks");
+        LOSSLESS_VOTES.with(|m| {
+            m.borrow_mut().insert(
+                CommitmentKey { proposal_id: 901, principal: voter },
+                LosslessVote { proposal_id: 901, principal: voter, stance: Stance::Adopt, weight_e8s: 1, cast_at: now.saturating_sub(31 * DAY_NANOS) },
+            );
+        });
+        assert_eq!(arcade_access(voter).1, false, "31-day-old vote does not");
+
+        // Cleanup so other tests see a clean slate.
+        STAKES.with(|m| { m.borrow_mut().remove(&StakeKey { tier: 0, user: staker }); });
+        LOSSLESS_VOTES.with(|m| { m.borrow_mut().remove(&CommitmentKey { proposal_id: 901, principal: voter }); });
+    }
+
+    #[test]
+    fn test_submit_arcade_score_gating_and_ranking() {
+        clear_arcade();
+        enable_arcade_flag();
+        let now = current_time();
+        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+
+        // Ineligible players can't land on the leaderboard.
+        set_mock_caller(alice);
+        let err = submit_arcade_score("minigolf".into(), 120_000, vec![3; 9]).unwrap_err();
+        assert_eq!(err, "PARTICIPATION_REQUIRED");
+
+        // Stake both players in.
+        for u in [alice, bob] {
+            STAKES.with(|m| {
+                m.borrow_mut().insert(
+                    StakeKey { tier: 0, user: u },
+                    UserStake { amount_e8s: 100_000_000, staked_at: now, last_action_at: now },
+                );
+            });
+        }
+
+        // Validation: game key, hole count, stroke bounds, time bounds.
+        assert_eq!(submit_arcade_score("pacman".into(), 120_000, vec![3; 9]).unwrap_err(), "UNKNOWN_GAME");
+        assert_eq!(submit_arcade_score("minigolf".into(), 120_000, vec![3; 8]).unwrap_err(), "INVALID_HOLE_COUNT");
+        assert_eq!(submit_arcade_score("minigolf".into(), 120_000, vec![0; 9]).unwrap_err(), "INVALID_STROKES");
+        assert_eq!(submit_arcade_score("minigolf".into(), 120_000, vec![13; 9]).unwrap_err(), "INVALID_STROKES");
+        assert_eq!(submit_arcade_score("minigolf".into(), 1_000, vec![3; 9]).unwrap_err(), "INVALID_TIME");
+
+        // Alice: 27 strokes. Bob: 27 strokes but faster → rank 1 on time tiebreak.
+        assert_eq!(submit_arcade_score("minigolf".into(), 200_000, vec![3; 9]).unwrap(), 1);
+        set_mock_caller(bob);
+        assert_eq!(submit_arcade_score("minigolf".into(), 150_000, vec![3; 9]).unwrap(), 1);
+
+        // Worse later round doesn't overwrite Bob's best.
+        assert_eq!(submit_arcade_score("minigolf".into(), 100_000, vec![4; 9]).unwrap(), 1);
+        let board = get_arcade_leaderboard("minigolf".into());
+        assert_eq!(board.len(), 2);
+        assert_eq!(board[0].player, bob);
+        assert_eq!(board[0].strokes, 27);
+        assert_eq!(board[0].millis, 150_000);
+        assert_eq!(board[1].player, alice);
+
+        // A genuinely better round (fewer strokes) replaces and re-ranks.
+        set_mock_caller(alice);
+        assert_eq!(submit_arcade_score("minigolf".into(), 300_000, vec![2; 9]).unwrap(), 1);
+        let board = get_arcade_leaderboard("minigolf".into());
+        assert_eq!(board[0].player, alice);
+        assert_eq!(board[0].strokes, 18);
+
+        for u in [alice, bob] {
+            STAKES.with(|m| { m.borrow_mut().remove(&StakeKey { tier: 0, user: u }); });
+        }
+        clear_arcade();
+    }
+
+    // ── Co-Founders ────────────────────────────────────────────────────────
+
+    fn clear_cofounders() {
+        let keys: Vec<Principal> = COFOUNDERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        COFOUNDERS.with(|m| { let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
+        let months: Vec<u64> = COFOUNDER_ROUNDS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        COFOUNDER_ROUNDS.with(|m| { let mut m = m.borrow_mut(); for k in months { m.remove(&k); } });
+        COFOUNDER_STATE.with(|c| {
+            c.borrow_mut().set(CoFounderState {
+                total_staked_e8s: 0, rollover_e8s: 0, last_processed_month: 0,
+                total_yield_e8s: 0, total_distributed_e8s: 0, total_expired_e8s: 0,
+                membership_closed: false, nonce: 0, neuron_id: None,
+                pending_refresh_e8s: 0, bootstrap: 0, total_restaked_e8s: 0,
+                pending_job: None,
+            });
+        });
+    }
+
+    fn enable_cofounders_flag() {
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_COFOUNDERS.to_string(), 1); });
+    }
+
+    const ICP: u64 = 100_000_000;
+
+    #[test]
+    fn test_cofounder_route_yield_rules() {
+        // Under 500 ICP: the whole month restakes into the neuron.
+        assert_eq!(cofounder_route_yield(499 * ICP, 0), (499 * ICP, 0, 0));
+        assert_eq!(cofounder_route_yield(1, 0), (1, 0, 0));
+        // 500..1,000: all treasury, nothing to the pot.
+        assert_eq!(cofounder_route_yield(500 * ICP, 0), (0, 500 * ICP, 0));
+        assert_eq!(cofounder_route_yield(999 * ICP, 0), (0, 999 * ICP, 0));
+        assert_eq!(cofounder_route_yield(1000 * ICP, 0), (0, 1000 * ICP, 0));
+        // Above 1,000: treasury keeps 1,000, the excess feeds the pot.
+        assert_eq!(cofounder_route_yield(1150 * ICP, 0), (0, 1000 * ICP, 150 * ICP));
+        // The pot is net of the ledger fee burned moving it into the pool —
+        // otherwise the final claim is one fee short (caught by local e2e).
+        assert_eq!(cofounder_route_yield(1200 * ICP, 10_000), (0, 1000 * ICP, 200 * ICP - 10_000));
+        // Excess at or below one fee doesn't move.
+        assert_eq!(cofounder_route_yield(1000 * ICP + 9_000, 10_000), (0, 1000 * ICP, 0));
+    }
+
+    #[test]
+    fn test_cofounder_allocate_is_proportional_to_stake() {
+        let a = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let b = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
+        // 10 vs 30 staked → 25% / 75% of the pot.
+        let stakes = vec![(a, 10 * ICP), (b, 30 * ICP)];
+        let (shares, dust) = cofounder_allocate(200 * ICP, &stakes);
+        assert_eq!(shares, vec![(a, 50 * ICP), (b, 150 * ICP)]);
+        assert_eq!(dust, 0);
+        // Pots under 100 ICP allocate nothing — everything rolls over.
+        let (none, roll) = cofounder_allocate(99 * ICP, &stakes);
+        assert!(none.is_empty());
+        assert_eq!(roll, 99 * ICP);
+        // Integer dust stays in the pool.
+        let stakes3 = vec![(a, 1 * ICP), (b, 2 * ICP)];
+        let (shares3, dust3) = cofounder_allocate(100 * ICP + 1, &stakes3);
+        let total: u64 = shares3.iter().map(|(_, s)| *s).sum();
+        assert_eq!(total + dust3, 100 * ICP + 1);
+        assert!(shares3[1].1 == shares3[0].1 * 2 || shares3[1].1 == shares3[0].1 * 2 + 1);
+        // No stake → nothing allocated.
+        assert_eq!(cofounder_allocate(500 * ICP, &[]).0.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cofounder_stake_is_permanent_and_validated() {
+        clear_cofounders();
+        enable_cofounders_flag();
+        let user = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_caller(user);
+
+        // Below the 1 ICP minimum.
+        assert_eq!(cofounder_stake(ICP - 1).await.unwrap_err(), "BELOW_MIN_STAKE");
+        // Underfunded escrow.
+        set_mock_ledger_balance(2 * ICP); // needs 2 ICP + fee
+        assert_eq!(cofounder_stake(2 * ICP).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
+        // Funded: stake lands and accumulates.
+        set_mock_ledger_balance(2 * ICP + 10_000);
+        set_mock_ledger_transfer(Ok(1));
+        cofounder_stake(2 * ICP).await.unwrap();
+        cofounder_stake(2 * ICP).await.unwrap();
+        let info = get_cofounder_info();
+        assert_eq!(info.my_staked_e8s, 4 * ICP);
+        assert_eq!(info.cofounder_count, 1);
+        assert_eq!(info.total_staked_e8s, 4 * ICP);
+        // The settlement clock anchored to "now" — next run is a month out.
+        assert!(info.next_distribution_at > current_time());
+        clear_cofounders();
+    }
+
+    #[tokio::test]
+    async fn test_cofounder_settlement_allocates_claims_and_expires() {
+        clear_cofounders();
+        enable_cofounders_flag();
+        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_ledger_transfer(Ok(1));
+        // Alice stakes 10, Bob 30 → shares must be 25% / 75%.
+        set_mock_caller(alice);
+        set_mock_ledger_balance(10 * ICP + 10_000);
+        cofounder_stake(10 * ICP).await.unwrap();
+        set_mock_caller(bob);
+        set_mock_ledger_balance(30 * ICP + 10_000);
+        cofounder_stake(30 * ICP).await.unwrap();
+
+        // The neuron bootstraps and follows the primary voting neuron.
+        let info = get_cofounder_info();
+        assert!(info.neuron_id.is_some(), "neuron claimed at first stake");
+        assert!(info.follows_primary_neuron, "follows the leader on all topics");
+
+        // Month 1: 1,200 ICP yield in the inbox → 1,000 treasury; the 200
+        // excess (net of one pool-transfer fee) splits 25/75 by stake.
+        let pot = 200 * ICP - 10_000;
+        let alice_share = pot / 4;
+        let bob_share = (pot as u128 * 3 / 4) as u64;
+        set_mock_ledger_balance(1200 * ICP); // inbox balance read
+        cofounder_run_settlement(current_time()).await.unwrap();
+        set_mock_caller(alice);
+        assert_eq!(get_cofounder_info().my_claimable_e8s, alice_share);
+        set_mock_caller(bob);
+        assert_eq!(get_cofounder_info().my_claimable_e8s, bob_share);
+        let rounds = list_cofounder_rounds();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].yield_e8s, 1200 * ICP);
+        assert_eq!(rounds[0].treasury_e8s, 1000 * ICP);
+        assert_eq!(rounds[0].distributed_e8s, alice_share + bob_share);
+        assert_eq!(rounds[0].restaked_e8s, 0);
+        assert_eq!(rounds[0].cofounder_count, 2);
+
+        // Alice claims; Bob doesn't.
+        set_mock_caller(alice);
+        let net = claim_cofounder_yield().await.unwrap();
+        assert_eq!(net, alice_share - 10_000);
+        assert_eq!(claim_cofounder_yield().await.unwrap_err(), "NOTHING_TO_CLAIM");
+
+        // Month 2 settles with low yield (50 ICP — under 500, so the whole
+        // month RESTAKES into the neuron) and Bob's unclaimed share is
+        // forfeited to the treasury.
+        set_mock_ledger_balance(50 * ICP);
+        cofounder_run_settlement(current_time() + COFOUNDER_PERIOD_NANOS).await.unwrap();
+        set_mock_caller(bob);
+        assert_eq!(get_cofounder_info().my_claimable_e8s, 0, "unclaimed share expired");
+        let rounds = list_cofounder_rounds();
+        assert_eq!(rounds.len(), 2);
+        let r2 = rounds.iter().find(|r| r.expired_e8s > 0).expect("expiry recorded");
+        assert_eq!(r2.expired_e8s, bob_share);
+        assert_eq!(r2.treasury_e8s, 0, "sub-500 months pay the treasury nothing");
+        assert_eq!(r2.restaked_e8s, 50 * ICP, "sub-500 months compound into the neuron");
+        assert_eq!(r2.distributed_e8s, 0);
+        assert_eq!(get_cofounder_info().total_restaked_e8s, 50 * ICP);
+
+        // Month 3: 700 ICP — between the thresholds → all treasury.
+        set_mock_ledger_balance(700 * ICP);
+        cofounder_run_settlement(current_time() + 2 * COFOUNDER_PERIOD_NANOS).await.unwrap();
+        let rounds = list_cofounder_rounds();
+        let r3 = rounds.iter().find(|r| r.treasury_e8s == 700 * ICP).expect("mid-band month");
+        assert_eq!(r3.restaked_e8s, 0);
+        assert_eq!(r3.distributed_e8s, 0);
+        clear_cofounders();
+    }
+
+    #[tokio::test]
+    async fn test_cofounder_settlement_resumes_journal_without_rerouting() {
+        clear_cofounders();
+        enable_cofounders_flag();
+        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_ledger_transfer(Ok(1));
+        set_mock_caller(alice);
+        set_mock_ledger_balance(10 * ICP + 10_000);
+        cofounder_stake(10 * ICP).await.unwrap();
+        set_mock_caller(bob);
+        set_mock_ledger_balance(30 * ICP + 10_000);
+        cofounder_stake(30 * ICP).await.unwrap();
+
+        // A 1,600 ICP month whose treasury-cut transfer fails mid-flight.
+        set_mock_ledger_balance(1600 * ICP);
+        set_mock_ledger_transfer(Err("ledger down".into()));
+        assert!(cofounder_run_settlement(current_time()).await.is_err());
+        let job = COFOUNDER_STATE.with(|c| c.borrow().get().pending_job.clone()).expect("journal persisted");
+        assert_eq!(job.yield_e8s, 1600 * ICP);
+        assert_eq!(job.treasury_cut_e8s, 1000 * ICP);
+        assert_eq!(job.excess_net_e8s, 600 * ICP - 10_000);
+        assert!(job.expired_done && job.restake_done && !job.cut_done);
+
+        // Resume with the inbox apparently drained (the pre-fix code re-read
+        // it and re-routed, double-dipping the treasury): the journal's
+        // amounts must be used instead.
+        set_mock_ledger_balance(0);
+        set_mock_ledger_transfer(Ok(2));
+        cofounder_run_settlement(current_time()).await.unwrap();
+        assert!(COFOUNDER_STATE.with(|c| c.borrow().get().pending_job.is_none()), "journal closed");
+        let rounds = list_cofounder_rounds();
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].yield_e8s, 1600 * ICP, "original month, not the re-read remainder");
+        assert_eq!(rounds[0].treasury_e8s, 1000 * ICP, "cut taken exactly once");
+        assert_eq!(rounds[0].restaked_e8s, 0, "remainder NOT mis-restaked");
+        let pot = 600 * ICP - 10_000;
+        assert_eq!(rounds[0].distributed_e8s, pot / 4 + (pot as u128 * 3 / 4) as u64);
+
+        // Once a settlement opens, prior claims are already expired: a claim
+        // racing the next month's settlement gets NOTHING_TO_CLAIM instead
+        // of double-spending the share pool.
+        set_mock_ledger_balance(50 * ICP);
+        set_mock_ledger_transfer(Err("ledger down".into()));
+        assert!(cofounder_run_settlement(current_time() + COFOUNDER_PERIOD_NANOS).await.is_err());
+        set_mock_caller(alice);
+        assert_eq!(claim_cofounder_yield().await.unwrap_err(), "NOTHING_TO_CLAIM");
+        set_mock_ledger_transfer(Ok(3));
+        cofounder_run_settlement(current_time() + COFOUNDER_PERIOD_NANOS).await.unwrap();
+        let rounds = list_cofounder_rounds();
+        let r2 = rounds.iter().find(|r| r.expired_e8s > 0).expect("expiry recorded");
+        assert_eq!(r2.expired_e8s, pot / 4 + (pot as u128 * 3 / 4) as u64);
+        clear_cofounders();
+    }
+
+    #[tokio::test]
+    async fn test_reclaim_escrow_returns_stranded_deposits() {
+        let user = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_caller(user);
+        // Nothing deposited → nothing to reclaim.
+        set_mock_ledger_balance(0);
+        assert_eq!(reclaim_escrow(EscrowKind::Explorer, ExplorerToken::ICP).await.unwrap_err(), "NOTHING_TO_RECLAIM");
+        // A stranded 5 ICP deposit (e.g. quote expired) comes back minus one fee.
+        set_mock_ledger_balance(5 * ICP);
+        set_mock_ledger_transfer(Ok(9));
+        assert_eq!(reclaim_escrow(EscrowKind::Explorer, ExplorerToken::ICP).await.unwrap(), 5 * ICP - 10_000);
+        assert_eq!(reclaim_escrow(EscrowKind::Arcade, ExplorerToken::CkUSDT).await.unwrap(), 5 * ICP - 10_000);
+        assert_eq!(reclaim_escrow(EscrowKind::CoFounder, ExplorerToken::ICP).await.unwrap(), 5 * ICP - 10_000);
+    }
+
+    #[tokio::test]
+    async fn test_cofounder_membership_closes_at_2000_yield_but_topups_continue() {
+        clear_cofounders();
+        enable_cofounders_flag();
+        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_ledger_transfer(Ok(1));
+        set_mock_caller(alice);
+        set_mock_ledger_balance(5 * ICP + 10_000);
+        cofounder_stake(5 * ICP).await.unwrap();
+
+        // A 1,999 ICP month keeps the doors open.
+        set_mock_ledger_balance(1999 * ICP);
+        cofounder_run_settlement(current_time()).await.unwrap();
+        assert!(!get_cofounder_info().membership_closed);
+
+        // A 2,000 ICP month latches the table shut — permanently.
+        set_mock_ledger_balance(2000 * ICP);
+        cofounder_run_settlement(current_time() + COFOUNDER_PERIOD_NANOS).await.unwrap();
+        assert!(get_cofounder_info().membership_closed);
+
+        // New members are turned away…
+        set_mock_caller(bob);
+        set_mock_ledger_balance(5 * ICP + 10_000);
+        assert_eq!(cofounder_stake(5 * ICP).await.unwrap_err(), "MEMBERSHIP_CLOSED");
+        // …even after a later low-yield month (the latch never reopens).
+        set_mock_ledger_balance(10 * ICP);
+        cofounder_run_settlement(current_time() + 2 * COFOUNDER_PERIOD_NANOS).await.unwrap();
+        set_mock_caller(bob);
+        set_mock_ledger_balance(5 * ICP + 10_000);
+        assert_eq!(cofounder_stake(5 * ICP).await.unwrap_err(), "MEMBERSHIP_CLOSED");
+
+        // …but an existing co-founder can always add more.
+        set_mock_caller(alice);
+        set_mock_ledger_balance(3 * ICP + 10_000);
+        cofounder_stake(3 * ICP).await.unwrap();
+        assert_eq!(get_cofounder_info().my_staked_e8s, 8 * ICP);
+        assert_eq!(get_cofounder_info().cofounder_count, 1);
+        clear_cofounders();
+    }
+
+    #[test]
+    fn test_twitter_handle_set_validate_clear() {
+        let user = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        set_mock_caller(user);
+        // Leading @ and whitespace are normalised away.
+        set_twitter_handle("  @icp_builder ".into()).unwrap();
+        assert_eq!(get_my_twitter_handle(), Some("icp_builder".to_string()));
+        // X's rules: 1–15 chars, alphanumeric + underscore only.
+        assert_eq!(set_twitter_handle("way_too_long_for_twitter".into()).unwrap_err(), "INVALID_HANDLE");
+        assert_eq!(set_twitter_handle("bad-dash".into()).unwrap_err(), "INVALID_HANDLE");
+        assert_eq!(set_twitter_handle("has space".into()).unwrap_err(), "INVALID_HANDLE");
+        // Failed updates leave the old handle in place.
+        assert_eq!(get_my_twitter_handle(), Some("icp_builder".to_string()));
+        // Empty clears it.
+        set_twitter_handle("".into()).unwrap();
+        assert_eq!(get_my_twitter_handle(), None);
+    }
+
+    fn valid_test_hole() -> ArcadeHoleDef {
+        // 22×14 all-grass field ringed by wall cells.
+        let (w, h) = (22u8, 14u8);
+        let mut cells = vec![1u8; (w as usize) * (h as usize)];
+        for x in 0..w as usize {
+            cells[x] = 2;
+            cells[(h as usize - 1) * w as usize + x] = 2;
+        }
+        for y in 0..h as usize {
+            cells[y * w as usize] = 2;
+            cells[y * w as usize + w as usize - 1] = 2;
+        }
+        ArcadeHoleDef {
+            name: "Test Hole".into(),
+            par: 3,
+            w, h, cells,
+            tee_x: 10, tee_y: 11,
+            cup_x: 10, cup_y: 2,
+            bars: vec![],
+        }
+    }
+
+    #[test]
+    fn test_arcade_course_editor_validation_and_roundtrip() {
+        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
+        let mut cfg = test_config(true);
+        cfg.admins = vec![admin];
+        CONFIG.with(|c| { c.borrow_mut().set(cfg); });
+        set_mock_caller(admin);
+
+        // Reject the obviously broken layouts.
+        assert_eq!(admin_set_arcade_hole(9, valid_test_hole()).unwrap_err(), "INVALID_HOLE_INDEX");
+        let mut bad = valid_test_hole();
+        bad.par = 7;
+        assert_eq!(admin_set_arcade_hole(0, bad).unwrap_err(), "INVALID_PAR");
+        let mut bad = valid_test_hole();
+        bad.cells.pop();
+        assert_eq!(admin_set_arcade_hole(0, bad).unwrap_err(), "INVALID_CELL_COUNT");
+        let mut bad = valid_test_hole();
+        bad.cells[30] = 10;
+        assert_eq!(admin_set_arcade_hole(0, bad).unwrap_err(), "INVALID_CELL_TYPE");
+        let mut bad = valid_test_hole();
+        bad.tee_x = 0; // on the wall ring
+        bad.tee_y = 0;
+        assert_eq!(admin_set_arcade_hole(0, bad).unwrap_err(), "TEE_NOT_ON_GREEN");
+        let mut bad = valid_test_hole();
+        bad.cup_x = bad.tee_x;
+        bad.cup_y = bad.tee_y;
+        assert_eq!(admin_set_arcade_hole(0, bad).unwrap_err(), "TEE_EQUALS_CUP");
+        let mut bad = valid_test_hole();
+        bad.bars = vec![ArcadeBarDef { cx: 30, cy: 7, len_cells: 3, speed_mrad: 1900 }];
+        assert_eq!(admin_set_arcade_hole(0, bad).unwrap_err(), "INVALID_BAR");
+
+        // A valid hole persists, lists, and resets.
+        let mut hole = valid_test_hole();
+        hole.bars = vec![ArcadeBarDef { cx: 11, cy: 7, len_cells: 3, speed_mrad: 1900 }];
+        admin_set_arcade_hole(3, hole).unwrap();
+        let course = get_arcade_course();
+        assert_eq!(course.len(), 1);
+        assert_eq!(course[0].index, 3);
+        assert_eq!(course[0].hole.name, "Test Hole");
+        assert_eq!(course[0].hole.bars.len(), 1);
+        admin_reset_arcade_hole(3).unwrap();
+        assert!(get_arcade_course().is_empty());
+        assert_eq!(admin_reset_arcade_hole(3).unwrap_err(), "NO_OVERRIDE");
+    }
+
+    #[tokio::test]
+    async fn test_customize_character_payment_and_palette() {
+        clear_arcade();
+        enable_arcade_flag();
+        let user = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_caller(user);
+
+        // Palette indices are bounds-checked.
+        assert_eq!(customize_character(6, 0, 0, ExplorerToken::ICP).await.unwrap_err(), "INVALID_CHARACTER_OPTION");
+        assert_eq!(customize_character(0, 6, 0, ExplorerToken::ICP).await.unwrap_err(), "INVALID_CHARACTER_OPTION");
+        assert_eq!(customize_character(0, 0, 8, ExplorerToken::ICP).await.unwrap_err(), "INVALID_CHARACTER_OPTION");
+
+        // A fresh matching quote is required.
+        assert_eq!(customize_character(2, 3, 4, ExplorerToken::ICP).await.unwrap_err(), "NO_QUOTE");
+
+        // $1 in ICP at the local default rate ($5/ICP) = 0.2 ICP.
+        let quote = get_arcade_customize_quote(ExplorerToken::ICP).await.unwrap();
+        assert_eq!(quote.amount, 20_000_000);
+        assert_eq!(quote.usd_total_e8s, ARCADE_CUSTOMIZE_FEE_USD_E8S);
+        assert_eq!(customize_character(2, 3, 4, ExplorerToken::CkBTC).await.unwrap_err(), "QUOTE_MISMATCH");
+
+        // Underfunded escrow refused.
+        set_mock_ledger_balance(quote.amount); // missing the fee
+        assert_eq!(customize_character(2, 3, 4, ExplorerToken::ICP).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
+        assert!(ARCADE_CHARACTERS.with(|m| m.borrow().get(&user)).is_none());
+
+        // Funded: $1 of ICP moves to the treasury and the look persists.
+        set_mock_ledger_balance(quote.amount + 10_000);
+        set_mock_ledger_transfer(Ok(5));
+        customize_character(2, 3, 4, ExplorerToken::ICP).await.unwrap();
+        let c = ARCADE_CHARACTERS.with(|m| m.borrow().get(&user)).unwrap();
+        assert_eq!((c.hair, c.skin, c.outfit), (2, 3, 4));
+        // The quote is consumed.
+        assert_eq!(customize_character(1, 1, 1, ExplorerToken::ICP).await.unwrap_err(), "NO_QUOTE");
+
+        // Stables are pinned at $1 — 1 ckUSDT == 1_000_000 micro.
+        let usdt = get_arcade_customize_quote(ExplorerToken::CkUSDT).await.unwrap();
+        assert_eq!(usdt.amount, 1_000_000);
+        assert_eq!(usdt.rate_usd_e8s, USD_E8S_PER_USD);
+        clear_arcade();
+    }
+
+    fn clear_dapps() {
+        let ids: Vec<u64> = DAPPS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        DAPPS.with(|m| {
+            let mut m = m.borrow_mut();
+            for id in ids {
+                m.remove(&id);
+            }
+        });
+        EXPLORER_QUOTES.with(|m| {
+            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys {
+                m.remove(&k);
+            }
+        });
+    }
+
     fn test_config(is_local: bool) -> Config {
         Config {
             primary_neuron_id: 1,
@@ -9130,6 +12214,8 @@ mod tests {
             pool_initiation_fee_e8s: 12_500_000_000,
             ckbtc_ledger_canister_id: None,
             cketh_ledger_canister_id: None,
+            ckusdc_ledger_canister_id: None,
+            ckusdt_ledger_canister_id: None,
             min_upvote_icp_e8s: None,
             min_upvote_ckbtc_e8s: None,
             min_upvote_cketh_wei: None,

@@ -1,7 +1,7 @@
-# Cycles of Influence (COI) CLI & Agent Integration (Production Mainnet)
+# Caldera CLI & Agent Integration (Production Mainnet)
 
 This document provides instructions for AI agents and developer scripts to
-interact with the mainnet Cycles of Influence canisters using the `icp` CLI.
+interact with the mainnet Caldera canisters using the `icp` CLI.
 
 
 ## Canister Identifiers (Production)
@@ -64,7 +64,7 @@ brew install icp-cli
 ---
 
 ## 3. Confirm following the Primary Neuron
-To vote and commit ICP, you must follow the Cycles of Influence primary
+To vote and commit ICP, you must follow the Caldera primary
 neuron (`17802688826615984104`) on the NNS. Since the app cannot directly
 verify neuron ownership on-chain, you must self-attest that you are
 following by calling `confirm_follow`:

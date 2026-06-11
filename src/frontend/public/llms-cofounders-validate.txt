@@ -1,0 +1,104 @@
+# Co-Founders Program — Independent Validation Skill (for AI agents)
+
+You are auditing the **Co-Founders** feature of Caldera (an ICP
+dapp). Money is locked PERMANENTLY in this program, so trust must be earned
+by verification, not promised. Your job: pull the source, map every
+advertised rule to the exact code that implements it, run the test suite,
+and report whether the implementation matches the advertisement. Do not take
+this document's word for anything — it only tells you where to look.
+
+## 0. Get the code
+
+```
+git clone https://github.com/icp-dapp-factory/proof-of-burn   # or the repo URL you were given
+cd proof-of-burn
+```
+
+All program logic lives in ONE file: `src/backend/src/lib.rs`, section
+"18. Co-Founders". The candid interface is `src/backend/backend.did`. The UI
+making the claims is `src/frontend/src/CoFounders.tsx`.
+
+## 1. The advertised rules → where each one must be enforced
+
+Verify EACH rule by reading the named function. Quote the code in your
+report. If a rule is not enforced where stated, flag it loudly.
+
+R1. **Stakes are permanent — no unstake exists.**
+    - `grep -n "unstake" src/backend/src/lib.rs` — every hit must belong to
+      the separate lossless-staking feature (`unstake(amount, tier)` on
+      STAKES/tier pools), NONE may touch `COFOUNDERS`, `CoFounder`, or the
+      co-founder subaccounts.
+    - `grep -n "cofounder" src/backend/backend.did` — confirm the public
+      interface has stake/claim/info/rounds methods only; no withdraw.
+
+R2. **Stake goes into a 2-year neuron that follows the primary voting
+    neuron (so it votes on NNS proposals).**
+    - `advance_cofounder_bootstrap()`: claim via `gov_claim_or_refresh`,
+      then `gov_increase_dissolve_delay(neuron_id, COFOUNDER_DISSOLVE_SECS)`
+      (must equal 63_115_200 s = 2 years), then
+      `gov_follow_all_topics(neuron_id, config.primary_neuron_id)`.
+    - `gov_follow_all_topics` must cover the catch-all topic AND the
+      governance + SNS topics it excludes.
+
+R3. **Monthly yield routing** — `cofounder_route_yield(yield, fee)`:
+    - yield < 500 ICP (`COFOUNDER_RESTAKE_BELOW_E8S` = 50_000_000_000 e8s)
+      → ENTIRE month restaked into the neuron (nothing to treasury, nothing
+      to co-founders). Check the restake transfer + `pending_refresh_e8s`
+      bump in `cofounder_run_settlement`.
+    - otherwise the first 1,000 ICP (`COFOUNDER_TREASURY_CUT_E8S`) → treasury;
+      a 500–1,000 ICP month is entirely treasury's.
+    - only the excess above 1,000 ICP reaches the co-founder pot.
+
+R4. **Distribution is proportional to staked ICP** —
+    `cofounder_allocate(pot, stakes)`: share_i = pot × stake_i / total_stake
+    (u128 math, integer dust rolls over). NOT an even split.
+
+R5. **Minimum 100 ICP to distribute** (`COFOUNDER_MIN_DISTRIBUTION_E8S`):
+    smaller pots roll over (`rollover_e8s`) to the next month.
+
+R6. **Claims expire at the next settlement** — in `cofounder_run_settlement`,
+    step 1: unclaimed `claimable_e8s` is transferred to the treasury and
+    zeroed BEFORE the new month is processed. Verify transfer-before-zero
+    ordering (a failed transfer must leave entitlements intact for retry).
+
+R7. **Membership closes permanently at 2,000 ICP/month yield**
+    (`COFOUNDER_CLOSE_YIELD_E8S`): `membership_closed` latches in
+    `cofounder_run_settlement` and is checked in `cofounder_stake` for
+    NON-members only — existing co-founders may top up after closure.
+    Confirm nothing ever sets `membership_closed = false`.
+
+R8. **Settlement cadence**: 30-day epoch periods
+    (`COFOUNDER_PERIOD_NANOS`, `cofounder_month()`), driven by the sweep
+    timer (`cofounder_settlement_check` in `setup_timers`).
+
+## 2. Run the proofs
+
+```
+cargo test -p backend --lib cofounder
+```
+Expected: at least these tests pass —
+`test_cofounder_route_yield_rules` (R3),
+`test_cofounder_allocate_is_proportional_to_stake` (R4, R5),
+`test_cofounder_settlement_allocates_claims_and_expires` (R3, R4, R6),
+`test_cofounder_membership_closes_at_2000_yield_but_topups_continue` (R7),
+`test_cofounder_stake_is_permanent_and_validated` (R1, R2 bootstrap).
+Then run the full suite (`cargo test -p backend`) and report any failure.
+
+## 3. Optional live verification (local network)
+
+If a local deployment is available (see `scripts/deploy-local.sh`):
+1. `icp canister call backend get_cofounder_info '()' --query -e local` —
+   check `follows_primary_neuron`, `membership_closed`, thresholds.
+2. Stake via `get_cofounder_deposit_address` + ledger transfer +
+   `cofounder_stake`, mint mock yield from the `minting` identity to
+   `get_cofounder_yield_inbox_address`, then
+   `dev_run_cofounder_settlement` (local-only) and confirm the round in
+   `list_cofounder_rounds` matches R3/R4 arithmetic exactly.
+
+## 4. Report format
+
+For each rule R1–R8: VERIFIED (with file:line + the decisive code quote) or
+VIOLATION (with what the code actually does). Finish with: the test-suite
+result, any rule whose enforcement depends on un-deployed/mainnet-only code
+paths (e.g. real NNS neuron creation vs the local mock), and an overall
+verdict: does the deployed logic match what the Co-Founders page advertises?

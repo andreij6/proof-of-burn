@@ -4,9 +4,10 @@
 #
 # What it does (idempotent — safe to re-run):
 #   1. Verifies the local managed network is reachable (starts it if not).
-#   2. Installs the three ICRC test ledgers ONCE (ledger / ckbtc-ledger /
-#      cketh-ledger). Ledgers are NEVER upgraded: their icp.yaml args are an
-#      `Init` variant and an upgrade traps ("Cannot upgrade ... Init argument").
+#   2. Installs the four ICRC test ledgers ONCE (ledger / ckbtc-ledger /
+#      cketh-ledger / ckusdc-ledger). Ledgers are NEVER upgraded: their
+#      icp.yaml args are an `Init` variant and an upgrade traps
+#      ("Cannot upgrade ... Init argument").
 #   3. Deploys/upgrades backend + frontend (asset sync included).
 #   4. Sanity-checks that the backend's configured ICP ledger id matches the
 #      actual ledger canister (ids permute after a network wipe — see
@@ -50,7 +51,7 @@ if ! canister_exists backend && ! icp canister status frontend -e "$ENV" >/dev/n
 fi
 
 # ── 2. Ledgers: install once, never upgrade ─────────────────────────────────
-for L in ledger ckbtc-ledger cketh-ledger; do
+for L in ledger ckbtc-ledger cketh-ledger ckusdc-ledger ckusdt-ledger; do
   if canister_exists "$L"; then
     ok "$L already installed ($(canister_id "$L")) — skipping (ledgers are never upgraded)"
   else
@@ -70,6 +71,8 @@ FRONTEND_ID=$(canister_id frontend)
 LEDGER_ID=$(canister_id ledger)
 CKBTC_ID=$(canister_id ckbtc-ledger)
 CKETH_ID=$(canister_id cketh-ledger)
+CKUSDC_ID=$(canister_id ckusdc-ledger)
+CKUSDT_ID=$(canister_id ckusdt-ledger)
 
 # ── 4. Ledger-id sanity check (catches post-wipe id permutation) ────────────
 CFG_LEDGER=$(icp canister call backend get_config '()' --query -e "$ENV" \
@@ -86,7 +89,14 @@ ok "Backend ledger wiring verified ($LEDGER_ID)"
 # ── 5. Wire local ckBTC/ckETH ledgers (idempotent admin calls) ───────────────
 icp canister call backend admin_set_token_ledger "(variant { CkBTC }, principal \"$CKBTC_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 icp canister call backend admin_set_token_ledger "(variant { CkETH }, principal \"$CKETH_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-ok "Token ledgers wired (ckBTC=$CKBTC_ID, ckETH=$CKETH_ID)"
+icp canister call backend admin_set_explorer_ledger "(variant { CkUSDC }, principal \"$CKUSDC_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+icp canister call backend admin_set_explorer_ledger "(variant { CkUSDT }, principal \"$CKUSDT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+ok "Token ledgers wired (ckBTC=$CKBTC_ID, ckETH=$CKETH_ID, ckUSDC=$CKUSDC_ID, ckUSDT=$CKUSDT_ID)"
+
+# The arcade + co-founders ship dark (flags default OFF) — on for local testing.
+icp canister call backend admin_set_feature_flag '("arcade", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+icp canister call backend admin_set_feature_flag '("cofounders", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+ok "Arcade + Co-Founders flags enabled (local)"
 
 # ── 6. Mock data (only seeds what is missing) ────────────────────────────────
 # 6a. Proposals + sample ideas auto-seed in init/post_upgrade when empty.
@@ -99,10 +109,10 @@ if icp canister call backend list_projects '()' --query -e "$ENV" | grep -q 'id 
 else
   note "Seeding 2 sample projects…"
   icp canister call backend admin_add_project \
-    '("Burn Dashboard v1", "A public dashboard ranking dapps by cycles burned, updated daily on-chain.", "Pull cycle-consumption metrics per canister, normalise by subnet, surface a verifiable burn ranking.", 50_000_000_000 : nat64, 5_000_000 : nat64, 1_000_000_000_000_000_000 : nat64)' \
+    '("Burn Dashboard v1", "A public dashboard ranking dapps by cycles burned, updated daily on-chain.", "Pull cycle-consumption metrics per canister, normalise by subnet, surface a verifiable burn ranking.", 50_000_000_000 : nat64, 5_000_000 : nat64, 1_000_000_000_000_000_000 : nat64, true, true, true)' \
     -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
   icp canister call backend admin_add_project \
-    '("ckBTC Tipping Widget", "An embeddable tip button for ICP dapps that routes a fee share to the treasury.", "ICRC-1 tips with a 2% protocol fee converted to cycles via the CMC — every tip burns ICP.", 25_000_000_000 : nat64, 2_500_000 : nat64, 0 : nat64)' \
+    '("ckBTC Tipping Widget", "An embeddable tip button for ICP dapps that routes a fee share to the treasury.", "ICRC-1 tips with a 2% protocol fee converted to cycles via the CMC — every tip burns ICP.", 25_000_000_000 : nat64, 2_500_000 : nat64, 0 : nat64, true, true, false)' \
     -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
   ok "Seeded 2 sample projects"
 fi
@@ -128,6 +138,8 @@ echo "   Backend:       $BACKEND_ID"
 echo "   ICP ledger:    $LEDGER_ID"
 echo "   ckBTC ledger:  $CKBTC_ID"
 echo "   ckETH ledger:  $CKETH_ID"
+echo "   ckUSDC ledger: $CKUSDC_ID"
+echo "   ckUSDT ledger: $CKUSDT_ID"
 echo "   Feature flags: $(icp canister call backend list_feature_flags '()' --query -e "$ENV" | tr -d '\n' | sed 's/  */ /g')"
 echo "   Faucets: in-app tweak panel, or:"
 echo "     icp canister call backend dev_faucet_token '(variant { ICP })' -e local --identity <id>"

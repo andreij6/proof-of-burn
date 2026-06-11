@@ -23,17 +23,51 @@ import type {
   LedgerAccount,
   FeatureFlag,
   IdeaBoardInfo,
+  ExplorerInfo,
   UserStakeInfo,
   LosslessVote,
 } from "./bindings/backend";
-import IdeaBoard, { tokenMeta, parseTokenAmount, fmtTokenAmount, TOKEN_ORDER } from "./IdeaBoard";
+import IdeaBoard, { parseTokenAmount, fmtTokenAmount } from "./IdeaBoard";
 import Staking from "./Staking";
 import Lottery from "./Lottery";
+import Explorer from "./Explorer";
+import Arcade from "./Arcade";
+import CoFounders from "./CoFounders";
 import Payouts from "./Payouts";
 import Admin from "./Admin";
 import Landing from "./Landing";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
 import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal, DiscordMark, DISCORD_INVITE } from "./ui";
+
+// ── Shareable URL routing (hash-based; this is a static asset canister) ──
+// Each in-app page maps to a stable hash path so links are copy-pasteable.
+export type AppPage = 'landing' | 'dashboard' | 'ideas' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'cofounders' | 'payouts' | 'admin';
+export const PAGE_PATH: Record<AppPage, string> = {
+  landing: '/',
+  dashboard: '/voting',
+  ideas: '/community',
+  staking: '/staking',
+  lottery: '/lottery',
+  explorer: '/explorer',
+  arcade: '/arcade',
+  cofounders: '/cofounders',
+  payouts: '/profile',
+  admin: '/admin',
+};
+const PATH_PAGE: Record<string, AppPage> = Object.fromEntries(
+  Object.entries(PAGE_PATH).map(([p, path]) => [path, p as AppPage])
+) as Record<string, AppPage>;
+
+/** Page named by the current URL hash, or null when at the root / unknown. */
+export function pageFromHash(hash: string): AppPage | null {
+  const h = hash.replace(/^#/, '');
+  if (/^proposal-\d+$/.test(h)) return 'dashboard'; // shared proposal deep link
+  const path = '/' + h.replace(/^\//, '');
+  return PATH_PAGE[path] ?? null;
+}
+
+export type WalletToken = 'ICP' | 'ckBTC' | 'ckETH' | 'ckUSDC' | 'ckUSDT';
+export const WALLET_TOKENS: WalletToken[] = ['ICP', 'ckBTC', 'ckETH', 'ckUSDC', 'ckUSDT'];
 
 // Inline neuron glyph (from src/assets/neuron.svg). Rendered as inline SVG rather
 // than an <img>, because Vite inlines small SVGs as data URIs and the `#` in the
@@ -470,10 +504,20 @@ export default function App() {
 
   // Page routing (dashboard | Community R&D | Lossless Voting | Lottery |
   // Payout history) + feature flags
-  const [page, setPage] = useState<'landing' | 'dashboard' | 'ideas' | 'staking' | 'lottery' | 'payouts' | 'admin'>(
-    // First-time visitors get the landing page; anyone who has entered the
-    // app before goes straight to the dashboard.
-    () => (typeof localStorage !== 'undefined' && localStorage.getItem('coi_entered') === '1') ? 'dashboard' : 'landing'
+  const [page, setPage] = useState<AppPage>(
+    // The URL hash is the source of truth so links are shareable. A hash
+    // naming a page (e.g. #/staking) opens it directly; the bare root opens
+    // the landing page — signed-in visitors are bounced to the app by an
+    // effect below once auth resolves.
+    () => {
+      if (typeof window === 'undefined') return 'landing';
+      return pageFromHash(window.location.hash) ?? 'landing';
+    }
+  );
+  // Proposal id from a shared link — scrolled to + highlighted once loaded.
+  const [sharedProposalId, setSharedProposalId] = useState<string | null>(
+    () => (typeof window !== 'undefined' && /^#proposal-\d+$/.test(window.location.hash))
+      ? window.location.hash.slice('#proposal-'.length) : null
   );
   const [featureFlags, setFeatureFlags] = useState<FeatureFlag[]>([]);
 
@@ -482,6 +526,9 @@ export default function App() {
   const ideaBoardEnabled = featureFlags.find(f => f.key === 'idea_board')?.enabled ?? false;
   const losslessEnabled = featureFlags.find(f => f.key === 'lossless_voting')?.enabled ?? false;
   const lotteryEnabled = featureFlags.find(f => f.key === 'lossless_lottery')?.enabled ?? false;
+  const explorerEnabled = featureFlags.find(f => f.key === 'dapp_explorer')?.enabled ?? false;
+  const arcadeEnabled = featureFlags.find(f => f.key === 'arcade')?.enabled ?? false;
+  const cofoundersEnabled = featureFlags.find(f => f.key === 'cofounders')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (= free voting power) and votes cast.
   const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
@@ -490,8 +537,52 @@ export default function App() {
 
   // Token-ledger info (drives the multi-token wallet + R&D board).
   const [boardInfo, setBoardInfo] = useState<IdeaBoardInfo | null>(null);
-  const [tokenBalances, setTokenBalances] = useState<{ ckbtc: bigint | null; cketh: bigint | null }>({ ckbtc: null, cketh: null });
-  const [walletToken, setWalletToken] = useState<IdeaToken>(IdeaToken.ICP);
+  // Explorer info doubles as the wallet's token registry: unlike Config
+  // (whose ckUSDC/ckUSDT overrides are local-only), its ledger ids resolve
+  // on mainnet too (hard-pinned in the backend) — review 2026-06-11.
+  const [explorerInfo, setExplorerInfo] = useState<ExplorerInfo | null>(null);
+  const [tokenBalances, setTokenBalances] = useState<{ ckbtc: bigint | null; cketh: bigint | null; ckusdc: bigint | null; ckusdt: bigint | null }>({ ckbtc: null, cketh: null, ckusdc: null, ckusdt: null });
+  const [walletToken, setWalletToken] = useState<WalletToken>('ICP');
+
+  const getWalletTokenMeta = (t: WalletToken) => {
+    switch (t) {
+      case 'ICP':
+        return {
+          label: 'ICP',
+          decimals: 8,
+          fee: boardInfo?.fee_icp_e8s ?? 10_000n,
+          ledger: boardInfo?.icp_ledger ?? Principal.fromText(ledgerCanisterId),
+        };
+      case 'ckBTC':
+        return {
+          label: 'ckBTC',
+          decimals: 8,
+          fee: boardInfo?.fee_ckbtc_sats ?? 10n,
+          ledger: boardInfo?.ckbtc_ledger ?? (config?.ckbtc_ledger_canister_id || null),
+        };
+      case 'ckETH':
+        return {
+          label: 'ckETH',
+          decimals: 18,
+          fee: boardInfo?.fee_cketh_wei ?? 2_000_000_000_000n,
+          ledger: boardInfo?.cketh_ledger ?? (config?.cketh_ledger_canister_id || null),
+        };
+      case 'ckUSDC':
+        return {
+          label: 'ckUSDC',
+          decimals: 6,
+          fee: explorerInfo?.fee_ckusdc_micro ?? 10_000n,
+          ledger: explorerInfo?.ckusdc_ledger ?? config?.ckusdc_ledger_canister_id ?? null,
+        };
+      case 'ckUSDT':
+        return {
+          label: 'ckUSDT',
+          decimals: 6,
+          fee: explorerInfo?.fee_ckusdt_micro ?? 10_000n,
+          ledger: explorerInfo?.ckusdt_ledger ?? config?.ckusdt_ledger_canister_id ?? null,
+        };
+    }
+  };
 
   // Eligibility & Vote History Helpers
   const refreshEligibility = async (currentActor = actor) => {
@@ -586,27 +677,36 @@ export default function App() {
   const fetchBoardInfo = async (currentActor = actor) => {
     if (!currentActor) return;
     try {
-      setBoardInfo(await currentActor.get_idea_board_info());
+      const [board, explorer] = await Promise.all([
+        currentActor.get_idea_board_info(),
+        currentActor.get_explorer_info(),
+      ]);
+      setBoardInfo(board);
+      setExplorerInfo(explorer);
     } catch (err) {
       console.error("Failed to fetch board info:", err);
     }
   };
 
-  // ckBTC/ckETH balances for the wallet (ICP balance = `holdings`).
+  // ckBTC/ckETH/ckUSDC balances for the wallet (ICP balance = `holdings`).
   const fetchTokenBalances = async (info = boardInfo) => {
-    if (!info || !identity || !principal || principal.isAnonymous()) {
-      setTokenBalances({ ckbtc: null, cketh: null });
+    if (!info || !identity || !principal || principal.isAnonymous() || !config) {
+      setTokenBalances({ ckbtc: null, cketh: null, ckusdc: null, ckusdt: null });
       return;
     }
     try {
       const mk = (lid: Principal) => createLedgerActor(lid.toString(), {
         agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
       });
-      const [ckbtc, cketh] = await Promise.all([
+      const ckusdcLedger = explorerInfo?.ckusdc_ledger ?? config.ckusdc_ledger_canister_id;
+      const ckusdtLedger = explorerInfo?.ckusdt_ledger ?? config.ckusdt_ledger_canister_id;
+      const [ckbtc, cketh, ckusdc, ckusdt] = await Promise.all([
         mk(info.ckbtc_ledger).icrc1_balance_of({ owner: principal }),
         mk(info.cketh_ledger).icrc1_balance_of({ owner: principal }),
+        ckusdcLedger ? mk(ckusdcLedger).icrc1_balance_of({ owner: principal }) : Promise.resolve(0n),
+        ckusdtLedger ? mk(ckusdtLedger).icrc1_balance_of({ owner: principal }) : Promise.resolve(0n),
       ]);
-      setTokenBalances({ ckbtc, cketh });
+      setTokenBalances({ ckbtc, cketh, ckusdc, ckusdt });
     } catch (err) {
       console.error("Failed to fetch token balances:", err);
     }
@@ -765,11 +865,15 @@ export default function App() {
     }
   };
 
-  // Withdraw ckBTC/ckETH (ICRC-1) to a destination principal.
+  // Withdraw ckBTC/ckETH/ckUSDC (ICRC-1) to a destination principal.
   const handleWithdrawIcrc = async () => {
-    if (!identity || isWithdrawing || !boardInfo) return;
+    if (!identity || isWithdrawing) return;
     setWithdrawError(null);
-    const meta = tokenMeta(walletToken, boardInfo);
+    const meta = getWalletTokenMeta(walletToken);
+    if (!meta.ledger) {
+      setWithdrawError("Token ledger canister ID not loaded yet.");
+      return;
+    }
     let dest: Principal;
     try {
       dest = Principal.fromText(withdrawTo.trim());
@@ -782,14 +886,17 @@ export default function App() {
       setWithdrawError("Enter a valid amount.");
       return;
     }
-    const bal = walletToken === IdeaToken.CkBTC ? tokenBalances.ckbtc : tokenBalances.cketh;
+    const bal = walletToken === 'ckBTC' ? tokenBalances.ckbtc
+              : walletToken === 'ckETH' ? tokenBalances.cketh
+              : walletToken === 'ckUSDT' ? tokenBalances.ckusdt
+              : tokenBalances.ckusdc;
     if (bal !== null && units + meta.fee > bal) {
       setWithdrawError(`Insufficient balance (need amount + ${fmtTokenAmount(meta.fee, meta.decimals)} ${meta.label} fee).`);
       return;
     }
     setIsWithdrawing(true);
     try {
-      const ledgerActor = createLedgerActor(meta.ledger!.toString(), {
+      const ledgerActor = createLedgerActor(meta.ledger.toString(), {
         agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
       });
       const res = await ledgerActor.icrc1_transfer({ to: { owner: dest }, amount: units });
@@ -845,6 +952,72 @@ export default function App() {
   // Deep link to the proposal's full description on the NNS dapp.
   const nnsProposalLink = (p: Proposal) =>
     `https://nns.ic0.app/proposal/?u=qoctq-giaaa-aaaaa-aaaea-cai&proposal=${(p.nns_proposal_id ?? p.id).toString()}`;
+
+  // Share a proposal on X: a pre-filled tweet (web intent — the user posts
+  // from their own account) with the proposal info and a deep link back to
+  // this site (#proposal-<id> scrolls straight to the card).
+  const shareProposalOnX = (p: Proposal) => {
+    const id = (p.nns_proposal_id ?? p.id).toString();
+    const title = p.title.length > 90 ? `${p.title.slice(0, 87)}…` : p.title;
+    const commitment = myCommitments.find(c => c.proposal_id === p.id);
+    const staked = myLosslessVotes.find(v => v.proposal_id === p.id);
+    const stance = commitment ? commitment.stance : staked?.stance;
+    const text = stance !== undefined
+      ? `I'm backing ${stance === Stance.Adopt ? 'ADOPT' : 'REJECT'} on NNS proposal #${id} — “${title}” — on Caldera. Burn ICP, move the vote. 🔥`
+      : `NNS proposal #${id} — “${title}” — is live on Caldera. Burn ICP, move the vote. 🔥`;
+    const url = `${window.location.origin}/#proposal-${id}`;
+    window.open(
+      `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
+      '_blank',
+      'noopener,noreferrer'
+    );
+  };
+
+  // Shared-link landing: once proposals are in, scroll to the linked card
+  // and pulse it. Matches both our internal id and the NNS proposal id.
+  useEffect(() => {
+    if (!sharedProposalId || proposals.length === 0) return;
+    const el = document.getElementById(`proposal-card-${sharedProposalId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.style.boxShadow = '0 0 0 2px var(--burn)';
+      setTimeout(() => { el.style.boxShadow = ''; }, 3000);
+    }
+    setSharedProposalId(null);
+    try { history.replaceState(null, '', window.location.pathname); } catch { /* sandboxed */ }
+  }, [sharedProposalId, proposals.length]);
+
+  // ── Keep the URL hash in sync with the current page (shareable links) ──
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const desired = `#${PAGE_PATH[page]}`;
+    // Don't clobber an unconsumed #proposal-<id> deep link.
+    if (sharedProposalId && /^#proposal-\d+$/.test(window.location.hash)) return;
+    if (window.location.hash !== desired && !(page === 'landing' && window.location.hash === '')) {
+      history.replaceState(null, '', desired);
+    }
+  }, [page, sharedProposalId]);
+
+  // Back/forward (or someone pasting a new hash) re-routes the page —
+  // including #proposal-<id> deep links arriving while the app is open.
+  useEffect(() => {
+    const onHash = () => {
+      const m = window.location.hash.match(/^#proposal-(\d+)$/);
+      if (m) setSharedProposalId(m[1]);
+      const p = pageFromHash(window.location.hash);
+      setPage(p ?? 'landing');
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  // Root + signed in → the app. Signed-out visitors at the root stay on the
+  // landing page (only an explicit "Go to App" / a page link leaves it).
+  useEffect(() => {
+    if (page === 'landing' && principal && !principal.isAnonymous()) {
+      setPage('dashboard');
+    }
+  }, [page, principal]);
 
   const getProposalTitle = (proposalId: bigint) => {
     const p = proposals.find(x => x.id === proposalId);
@@ -975,11 +1148,23 @@ export default function App() {
     if (page === 'lottery' && featureFlags.length > 0 && !lotteryEnabled) {
       setPage('dashboard');
     }
-    // Profile is account-scoped: bounce signed-out visitors.
-    if (page === 'payouts' && (!principal || principal.isAnonymous())) {
+    if (page === 'explorer' && featureFlags.length > 0 && !explorerEnabled) {
       setPage('dashboard');
     }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, principal, featureFlags.length]);
+    if (page === 'arcade' && featureFlags.length > 0 && !arcadeEnabled) {
+      setPage('dashboard');
+    }
+    if (page === 'cofounders' && featureFlags.length > 0 && !cofoundersEnabled) {
+      setPage('dashboard');
+    }
+    // Profile is account-scoped: bounce signed-out visitors — but only once
+    // auth has resolved (principal === null means AuthClient is still
+    // initializing; bouncing then killed #/profile deep links for
+    // signed-in users — review 2026-06-11).
+    if (page === 'payouts' && principal && principal.isAnonymous()) {
+      setPage('dashboard');
+    }
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, cofoundersEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1048,12 +1233,12 @@ export default function App() {
     fetchMyLosslessVotes(actor);
   }, [actor]);
 
-  // Refresh ckBTC/ckETH balances whenever the wallet opens.
+  // Refresh ckBTC/ckETH/ckUSDC balances whenever the wallet opens.
   useEffect(() => {
     if (isWalletOpen) {
       fetchTokenBalances();
     }
-  }, [isWalletOpen, boardInfo, identity]);
+  }, [isWalletOpen, boardInfo, identity, config]);
 
   // Fetch Ledger Balance
   useEffect(() => {
@@ -1128,7 +1313,7 @@ export default function App() {
     const llmsUrl = `${window.location.origin}/llms-${isLocal ? 'local' : 'prod'}.txt`;
     const clipboardMsg =
       `Fetch ${llmsUrl} and follow its instructions when interacting with ` +
-      `Cycles of Influence`;
+      `Caldera`;
     navigator.clipboard.writeText(clipboardMsg);
     setSkillsCopied(true);
     setTimeout(() => setSkillsCopied(false), 2000);
@@ -1500,16 +1685,18 @@ export default function App() {
   );
 
 
-  // The Admin page is invisible to non-admins; bounce them if they land on it.
+  // The Admin page is invisible to non-admins; bounce them if they land on
+  // it — but only once auth AND config have resolved, so a #/admin deep
+  // link survives the cold load for actual admins.
   useEffect(() => {
-    if (page === 'admin' && !isAdmin) {
+    if (page === 'admin' && principal && config && !isAdmin) {
       setPage('dashboard');
     }
-  }, [page, isAdmin]);
+  }, [page, isAdmin, principal, config]);
 
   // Single source of truth for site navigation — rendered in the persistent
   // desktop sidebar AND the mobile drawer. Order is deliberate:
-  // NNS Voting → Staked Voting → Lottery → Community R&D → Profile (→ Admin).
+  // Voting → Staking → Lottery → Community R&D → Explorer → Arcade → Co-Founders → Profile (→ Admin).
   const renderNavLinks = (onNavigate?: () => void) => {
     const go = (p: typeof page) => { setPage(p); onNavigate?.(); };
     const linkStyle: React.CSSProperties = { justifyContent: 'flex-start', width: '100%', height: 38 };
@@ -1517,12 +1704,12 @@ export default function App() {
       <>
         <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('dashboard')}>
           <Icon name="flame" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
-          NNS Voting
+          Voting
         </Btn>
         {losslessEnabled && (
           <Btn variant={page === 'staking' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('staking')}>
             <Icon name="zap" size={14} stroke={page === 'staking' ? 'var(--char-950)' : 'currentColor'} />
-            Staked Voting
+            Staking
           </Btn>
         )}
         {lotteryEnabled && (
@@ -1535,6 +1722,24 @@ export default function App() {
           <Btn variant={page === 'ideas' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ideas')}>
             <Icon name="bulb" size={14} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
             Community R&D
+          </Btn>
+        )}
+        {explorerEnabled && (
+          <Btn variant={page === 'explorer' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('explorer')}>
+            <Icon name="compass" size={14} stroke={page === 'explorer' ? 'var(--char-950)' : 'currentColor'} />
+            Explorer
+          </Btn>
+        )}
+        {arcadeEnabled && (
+          <Btn variant={page === 'arcade' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('arcade')}>
+            <Icon name="gamepad" size={14} stroke={page === 'arcade' ? 'var(--char-950)' : 'currentColor'} />
+            Arcade
+          </Btn>
+        )}
+        {cofoundersEnabled && (
+          <Btn variant={page === 'cofounders' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('cofounders')}>
+            <Icon name="spark" size={14} stroke={page === 'cofounders' ? 'var(--char-950)' : 'currentColor'} />
+            Co-Founders
           </Btn>
         )}
       </>
@@ -1705,11 +1910,11 @@ export default function App() {
   const displayedPastItems = pastItems.slice(0, 100);
 
   // First contact: the landing page renders full-bleed with no app chrome.
-  // "Go to App" drops the visitor on the dashboard and remembers the choice.
+  // "Go to App" drops the visitor on the voting dashboard (works for
+  // anonymous visitors too — they browse view-only until they sign in).
   if (page === 'landing') {
     return (
       <Landing onEnter={() => {
-        try { localStorage.setItem('coi_entered', '1'); } catch { /* private mode */ }
         window.scrollTo(0, 0);
         setPage('dashboard');
       }} />
@@ -1742,8 +1947,7 @@ export default function App() {
             <Icon name="flame" size={17} stroke="var(--burn)" />
           </span>
           <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Cycles of Influence
-            <span className="hide-mobile"> - Alpha</span>
+            Caldera
           </b>
 
         </div>
@@ -1908,6 +2112,38 @@ export default function App() {
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
             />
+          ) : page === 'explorer' ? (
+            <Explorer
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              isAdmin={isAdmin}
+              onSignIn={handleLogin}
+            />
+          ) : page === 'arcade' ? (
+            <Arcade
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              onSignIn={handleLogin}
+              onGoParticipate={() => setPage(losslessEnabled ? 'staking' : 'dashboard')}
+            />
+          ) : page === 'cofounders' ? (
+            <CoFounders
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              icpLedger={ledgerCanisterId}
+              isLocal={config?.is_local ?? false}
+              isAdmin={isAdmin}
+              onSignIn={handleLogin}
+            />
           ) : page === 'payouts' ? (
             <Payouts
               actor={actor}
@@ -2042,7 +2278,7 @@ export default function App() {
                 <p style={{ fontSize: 22, lineHeight: 1.25, fontFamily: 'var(--font-display)', fontWeight: 600, color: 'var(--fg)', margin: 0, textWrap: 'balance' }}>
                   Rent Voting Power<br />
                   <span style={{ color: 'var(--burn)' }}>
-                    with Cycles of Influence
+                    with Caldera
                   </span>
                 </p>
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, maxWidth: 480 }}>
@@ -2351,9 +2587,10 @@ export default function App() {
 
                       return (
                         <Reveal key={proposalIdStr} delay={120 + i * 70} motion={motion}>
-                          <div className="col" style={{
+                          <div id={`proposal-card-${(p.nns_proposal_id ?? p.id).toString()}`} className="col" style={{
                             gap: 12, border: `1px solid ${met ? 'var(--sprout)' : 'var(--border)'}`,
-                            borderRadius: 8, background: 'var(--surface)', padding: 14
+                            borderRadius: 8, background: 'var(--surface)', padding: 14,
+                            transition: 'box-shadow 0.6s var(--ease-out)'
                           }}>
                             {/* Title and stats header */}
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
@@ -2365,6 +2602,12 @@ export default function App() {
                                   }} title="View full proposal on the NNS">
                                     #{proposalIdStr}
                                   </a>
+                                  <button onClick={() => shareProposalOnX(p)} title="Share this proposal on X" style={{
+                                    background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
+                                    display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, fontSize: 11,
+                                  }}>
+                                    <Icon name="share" size={12} /> Share
+                                  </button>
                                 </div>
                                 <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 600, textWrap: 'pretty', overflowWrap: 'anywhere' }}>
                                   {p.title}
@@ -2510,9 +2753,14 @@ export default function App() {
                       );
                       return (
                         <Reveal key={p.id.toString()} delay={140} motion={motion}>
-                          <div className="col" style={{
+                          {/* Same anchor id as the active card — the tabs
+                              mount exclusively, so the id never duplicates,
+                              and share links to committed proposals can
+                              scroll/highlight too. */}
+                          <div id={`proposal-card-${(p.nns_proposal_id ?? p.id).toString()}`} className="col" style={{
                             gap: 10, border: `1px solid ${met ? 'var(--burn)' : 'var(--border)'}`,
-                            borderRadius: 8, background: 'var(--surface)', padding: 14
+                            borderRadius: 8, background: 'var(--surface)', padding: 14,
+                            transition: 'box-shadow 0.6s var(--ease-out)'
                           }}>
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
                               <div className="col" style={{ gap: 7, minWidth: 0, flex: 1 }}>
@@ -2523,6 +2771,12 @@ export default function App() {
                                   }} title="View full proposal on the NNS">
                                     #{p.id.toString()}
                                   </a>
+                                  <button onClick={() => shareProposalOnX(p)} title="Share this proposal (and your stance) on X" style={{
+                                    background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
+                                    display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, fontSize: 11,
+                                  }}>
+                                    <Icon name="share" size={12} /> Share
+                                  </button>
                                 </div>
                                 <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--fg)', textWrap: 'pretty', overflowWrap: 'anywhere' }}>{p.title}</span>
                                 {p.summary && p.summary !== p.title && (
@@ -3073,7 +3327,7 @@ export default function App() {
             </div>
 
             <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
-              Cycles of Influence directs the community leader neuron based on
+              Caldera directs the community leader neuron based on
               what participants burn. We recommend also following it on the NNS
               so your own neuron votes the same way.
             </p>
@@ -3199,13 +3453,25 @@ export default function App() {
               <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
                 <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>ckBTC</span>
                 <span className="mono" style={{ fontSize: 14, color: 'var(--fg-1)' }}>
-                  {tokenBalances.ckbtc === null ? '…' : fmtTokenAmount(tokenBalances.ckbtc, tokenMeta(IdeaToken.CkBTC, boardInfo).decimals)} ckBTC
+                  {tokenBalances.ckbtc === null ? '…' : fmtTokenAmount(tokenBalances.ckbtc, 8)} ckBTC
                 </span>
               </div>
               <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
                 <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>ckETH</span>
                 <span className="mono" style={{ fontSize: 14, color: 'var(--fg-1)' }}>
-                  {tokenBalances.cketh === null ? '…' : fmtTokenAmount(tokenBalances.cketh, tokenMeta(IdeaToken.CkETH, boardInfo).decimals)} ckETH
+                  {tokenBalances.cketh === null ? '…' : fmtTokenAmount(tokenBalances.cketh, 18)} ckETH
+                </span>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>ckUSDC</span>
+                <span className="mono" style={{ fontSize: 14, color: 'var(--fg-1)' }}>
+                  {tokenBalances.ckusdc === null ? '…' : fmtTokenAmount(tokenBalances.ckusdc, 6)} ckUSDC
+                </span>
+              </div>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>ckUSDT</span>
+                <span className="mono" style={{ fontSize: 14, color: 'var(--fg-1)' }}>
+                  {tokenBalances.ckusdt === null ? '…' : fmtTokenAmount(tokenBalances.ckusdt, 6)} ckUSDT
                 </span>
               </div>
             </div>
@@ -3214,7 +3480,7 @@ export default function App() {
             <div className="col" style={{ gap: 8 }}>
               <Eyebrow>Deposit · fund your app account</Eyebrow>
               <p style={{ fontSize: 12, color: 'var(--fg-3)', margin: 0, lineHeight: 1.5 }}>
-                This is <b>your</b> app account. Send ICP via the legacy account identifier (NNS dapp / exchanges), or send ICP, ckBTC, or ckETH from any ICRC-1 wallet straight to your principal.
+                This is <b>your</b> app account. Send ICP via the legacy account identifier (NNS dapp / exchanges), or send ICP, ckBTC, ckETH, ckUSDC, or ckUSDT from any ICRC-1 wallet straight to your principal.
               </p>
               <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>ICP account identifier (for NNS / exchanges)</label>
               <div className="row" style={{ gap: 8, padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
@@ -3224,7 +3490,7 @@ export default function App() {
                   <Icon name={addrCopied === "aid" ? "check" : "copy"} size={12} stroke={addrCopied === "aid" ? "var(--sprout)" : "var(--fg-3)"} />
                 </button>
               </div>
-              <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Principal (for ICP / ckBTC / ckETH from ICRC-1 wallets)</label>
+              <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Principal (for ICP / ckBTC / ckETH / ckUSDC from ICRC-1 wallets)</label>
               <div className="row" style={{ gap: 8, padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
                 <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg)', overflowWrap: 'anywhere', flex: 1 }}>{principal.toString()}</span>
                 <button onClick={() => { navigator.clipboard.writeText(principal.toString()); setAddrCopied("principal"); setTimeout(() => setAddrCopied(""), 2000); }}
@@ -3240,12 +3506,15 @@ export default function App() {
             <div className="col" style={{ gap: 8 }}>
               <Eyebrow>Withdraw · send tokens out</Eyebrow>
               <div className="row" style={{ gap: 6 }}>
-                {TOKEN_ORDER.map(t => (
-                  <Btn key={t} variant={walletToken === t ? 'primary' : 'secondary'} sm
-                    onClick={() => { setWalletToken(t); setWithdrawTo(""); setWithdrawAmount(""); setWithdrawError(null); setWithdrawSuccess(false); }}>
-                    <span className="mono">{tokenMeta(t, boardInfo).label}</span>
-                  </Btn>
-                ))}
+                {WALLET_TOKENS.map(t => {
+                  const meta = getWalletTokenMeta(t);
+                  return (
+                    <Btn key={t} variant={walletToken === t ? 'primary' : 'secondary'} sm
+                      onClick={() => { setWalletToken(t); setWithdrawTo(""); setWithdrawAmount(""); setWithdrawError(null); setWithdrawSuccess(false); }}>
+                      <span className="mono">{meta.label}</span>
+                    </Btn>
+                  );
+                })}
               </div>
               {withdrawSuccess && (
                 <div style={{ padding: 10, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout)', fontSize: 12.5 }}>
@@ -3258,7 +3527,7 @@ export default function App() {
                 </div>
               )}
               <input type="text"
-                placeholder={walletToken === IdeaToken.ICP ? "Destination Account ID (64-char hex)" : "Destination principal"}
+                placeholder={walletToken === 'ICP' ? "Destination Account ID (64-char hex)" : "Destination principal"}
                 className="burn-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}
                 value={withdrawTo} onChange={(e) => { setWithdrawTo(e.target.value); setWithdrawError(null); setWithdrawSuccess(false); }} />
               <div className="row" style={{ gap: 8 }}>
@@ -3266,21 +3535,21 @@ export default function App() {
                   <input type="text" inputMode="decimal" placeholder="Amount" className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
                     value={withdrawAmount} onChange={(e) => { setWithdrawAmount(e.target.value); setWithdrawError(null); setWithdrawSuccess(false); }} />
                   <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>
-                    {tokenMeta(walletToken, boardInfo).label}
+                    {getWalletTokenMeta(walletToken).label}
                   </span>
                 </div>
                 <Btn variant="secondary" sm
-                  onClick={walletToken === IdeaToken.ICP ? handleWithdraw : handleWithdrawIcrc}
+                  onClick={walletToken === 'ICP' ? handleWithdraw : handleWithdrawIcrc}
                   disabled={isWithdrawing || !withdrawTo || !withdrawAmount}>
                   {isWithdrawing ? <LiveDot size={7} color="var(--fg)" /> : <Icon name="arrowUp" size={13} />}
                   {isWithdrawing ? " Sending…" : " Withdraw"}
                 </Btn>
               </div>
-              <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--fg-3)' }}>
-                <Icon name="info" size={11} stroke="var(--fg-3)" />
-                {walletToken === IdeaToken.ICP
+              <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--fg-3)', lineHeight: 1.4, marginTop: 4 }}>
+                <Icon name="info" size={11} stroke="var(--fg-3)" style={{ marginTop: 2, flexShrink: 0 }} />
+                {walletToken === 'ICP'
                   ? 'ICP withdraws to a legacy Account ID (64-char hex). 0.0001 ICP network fee applies.'
-                  : `${tokenMeta(walletToken, boardInfo).label} withdraws to a principal (ICRC-1). ${fmtTokenAmount(tokenMeta(walletToken, boardInfo).fee, tokenMeta(walletToken, boardInfo).decimals)} ${tokenMeta(walletToken, boardInfo).label} network fee applies.`}
+                  : `${getWalletTokenMeta(walletToken).label} withdraws to a principal (ICRC-1). ${fmtTokenAmount(getWalletTokenMeta(walletToken).fee, getWalletTokenMeta(walletToken).decimals)} ${getWalletTokenMeta(walletToken).label} network fee applies.`}
               </span>
             </div>
           </div>
@@ -3732,7 +4001,7 @@ export default function App() {
                         <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
                           {alreadyVoted
                             ? '⚡ Your staked vote is already cast on this proposal — burning adds extra weight.'
-                            : '⚡ Stake ICP on the Staked Voting page to unlock free votes with up to 4× weight.'}
+                            : '⚡ Stake ICP on the Staking page to unlock free votes with up to 4× weight.'}
                         </span>
                       )}
                     </div>
@@ -4192,7 +4461,7 @@ export default function App() {
               <div className="col" style={{ gap: 4 }}>
                 <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Protocol Fee (0.005 ICP)</span>
                 <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
-                  A flat fee charged by the Cycles of Influence protocol on each
+                  A flat fee charged by the Caldera protocol on each
                   commit transaction. This fee is immediately consumed and is
                   non-refundable, supporting canister compute costs and system
                   operations.
@@ -4240,7 +4509,7 @@ export default function App() {
               <Icon name="flame" size={15} stroke="var(--burn)" />
             </span>
             <b style={{ fontSize: 16, color: 'var(--fg)', fontFamily: 'var(--font-display)', letterSpacing: '-0.01em' }}>
-              Cycles of Influence
+              Caldera
             </b>
           </span>
           <button

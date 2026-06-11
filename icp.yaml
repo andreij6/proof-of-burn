@@ -47,6 +47,25 @@ canisters:
         path: src/backend/ledger.wasm.gz
     init_args: '(variant { Init = record { token_symbol = "ckETH"; token_name = "Chain-key Ethereum (local test)"; decimals = opt (18 : nat8); transfer_fee = (2_000_000_000_000 : nat); metadata = vec {}; minting_account = record { owner = principal "m4zh5-ybqlr-txnmf-v26f2-2h77i-rlufn-z33hj-wrt5i-yzav5-iab77-wae" }; initial_balances = vec { record { record { owner = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; (2_000_000_000_000_000_000 : nat) }; record { record { owner = principal "p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe" }; (2_000_000_000_000_000_000 : nat) }; record { record { owner = principal "a2cb4-hh777-77775-aaaba-cai" }; (10_000_000_000_000_000_000 : nat) } }; archive_options = record { num_blocks_to_archive = (1000 : nat64); trigger_threshold = (2000 : nat64); controller_id = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; feature_flags = opt record { icrc2 = true } } })'
 
+  # Local-only ckUSDC test ledger (6 decimals, canonical 0.01 fee) for the
+  # Dapp Explorer's paid listings.
+  - name: ckusdc-ledger
+    recipe:
+      type: "@dfinity/prebuilt@v2.0.0"
+      configuration:
+        candid: src/backend/ledger.did
+        path: src/backend/ledger.wasm.gz
+    init_args: '(variant { Init = record { token_symbol = "ckUSDC"; token_name = "Chain-key USDC (local test)"; decimals = opt (6 : nat8); transfer_fee = (10_000 : nat); metadata = vec {}; minting_account = record { owner = principal "m4zh5-ybqlr-txnmf-v26f2-2h77i-rlufn-z33hj-wrt5i-yzav5-iab77-wae" }; initial_balances = vec { record { record { owner = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; (100_000_000_000 : nat) }; record { record { owner = principal "p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe" }; (100_000_000_000 : nat) }; record { record { owner = principal "a2cb4-hh777-77775-aaaba-cai" }; (100_000_000_000 : nat) } }; archive_options = record { num_blocks_to_archive = (1000 : nat64); trigger_threshold = (2000 : nat64); controller_id = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; feature_flags = opt record { icrc2 = true } } })'
+
+  # Local-only ckUSDT test ledger (6 decimals, canonical 0.01 fee).
+  - name: ckusdt-ledger
+    recipe:
+      type: "@dfinity/prebuilt@v2.0.0"
+      configuration:
+        candid: src/backend/ledger.did
+        path: src/backend/ledger.wasm.gz
+    init_args: '(variant { Init = record { token_symbol = "ckUSDT"; token_name = "Chain-key Tether (local test)"; decimals = opt (6 : nat8); transfer_fee = (10_000 : nat); metadata = vec {}; minting_account = record { owner = principal "m4zh5-ybqlr-txnmf-v26f2-2h77i-rlufn-z33hj-wrt5i-yzav5-iab77-wae" }; initial_balances = vec { record { record { owner = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; (100_000_000_000 : nat) }; record { record { owner = principal "p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe" }; (100_000_000_000 : nat) }; record { record { owner = principal "a2cb4-hh777-77775-aaaba-cai" }; (100_000_000_000 : nat) } }; archive_options = record { num_blocks_to_archive = (1000 : nat64); trigger_threshold = (2000 : nat64); controller_id = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe" }; feature_flags = opt record { icrc2 = true } } })'
+
 networks:
   - name: local
     mode: managed
@@ -61,6 +80,8 @@ environments:
       - ledger
       - ckbtc-ledger
       - cketh-ledger
+      - ckusdc-ledger
+      - ckusdt-ledger
   - name: staging
     network: ic
     canisters:
