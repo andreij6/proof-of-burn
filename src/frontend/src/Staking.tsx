@@ -158,7 +158,7 @@ export default function Staking({
       return;
     }
     setStakeInput('');
-    setNotice(`Staked ${fmtICP(amount)} ICP for ${termLabel} — ${TIER_META[tier].mult}× voting power and ${TIER_META[tier].tickets} lottery tickets/day are live.`);
+    setNotice(`Staked ${fmtICP(amount)} ICP for ${termLabel} — ${fmtICP(amount)} voting power and ${TIER_META[tier].tickets} lottery tickets/day are live.`);
     await refresh();
     onActivity();
   });
@@ -232,7 +232,7 @@ export default function Staking({
         color: tier === t ? 'var(--burn)' : 'var(--fg-2)',
       }}
     >
-      {TIER_META[t].short} · {TIER_META[t].mult}×
+      {TIER_META[t].short}
     </button>
   );
 
@@ -247,7 +247,8 @@ export default function Staking({
         <b style={{ fontSize: 17 }}>Stake ICP. Keep it. Vote for free. Win the lottery.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 680 }}>
           Pick a term — 6 months, 1 year or 2 years. Your ICP joins that term's pooled NNS neuron,
-          your platform voting power is stake × term (1× / 2× / 4×), and staking qualifies you for
+          your platform voting power equals the ICP you stake (1:1), longer terms earn more lottery
+          tickets (5 / 10 / 20 a day), and staking qualifies you for
           the lossless lottery (5 / 10 / 20 free tickets a day). The neurons' yield funds the
           protocol — 50% lottery prize pool, 50% treasury — and you can unstake any time: your ICP
           returns to your wallet after the term's dissolve.
@@ -409,7 +410,7 @@ export default function Staking({
                   {tp ? bootstrapChip(tp.bootstrap) : <Chip tone="muted">…</Chip>}
                 </div>
                 <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].mult}× power</Chip>
+                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>1:1 voting power</Chip>
                   <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].tickets} tickets/day</Chip>
                 </div>
                 <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>

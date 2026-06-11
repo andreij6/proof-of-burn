@@ -5356,12 +5356,14 @@ fn stake_key(tier: StakeTier, user: Principal) -> StakeKey {
 
 /// The caller's total voting weight: Σ stake × term multiplier over tiers.
 fn user_voting_weight(user: Principal) -> u64 {
+    // Voting power = total ICP staked across all tiers, 1:1 (no term
+    // multiplier — the term multiplier still scales lottery tickets).
     StakeTier::all().iter().fold(0u64, |acc, &tier| {
         let amount = STAKES
             .with(|m| m.borrow().get(&stake_key(tier, user)))
             .map(|s| s.amount_e8s)
             .unwrap_or(0);
-        acc.saturating_add(amount.saturating_mul(tier.weight_multiplier()))
+        acc.saturating_add(amount)
     })
 }
 
@@ -6428,7 +6430,8 @@ fn get_my_stake() -> UserStakeInfo {
     let mut weight = 0u64;
     for tier in StakeTier::all() {
         if let Some(s) = STAKES.with(|m| m.borrow().get(&stake_key(tier, caller))) {
-            let w = s.amount_e8s.saturating_mul(tier.weight_multiplier());
+            // Voting power is 1:1 with the staked amount (no term multiplier).
+            let w = s.amount_e8s;
             tiers.push(UserTierStake {
                 tier,
                 amount_e8s: s.amount_e8s,
@@ -7479,6 +7482,46 @@ fn dev_become_admin() -> Result<(), String> {
     });
     void_current_round_tickets(caller);
     Ok(())
+}
+
+/// Local-dev: wipe the proposals and their vote/commitment journals, then
+/// reseed the mock set — so you can vote on fresh proposals again. Returns
+/// the number of proposals seeded. Never available off the local network.
+#[ic_cdk::update]
+fn dev_reset_proposals() -> Result<u64, String> {
+    require_authenticated()?;
+    require_local_dev()?;
+
+    let pids: Vec<u64> = PROPOSALS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    PROPOSALS.with(|m| {
+        let mut m = m.borrow_mut();
+        for id in &pids {
+            m.remove(id);
+        }
+    });
+    VOTES.with(|m| {
+        let mut m = m.borrow_mut();
+        for id in &pids {
+            m.remove(id);
+        }
+    });
+    let ckeys: Vec<CommitmentKey> = COMMITMENTS.with(|m| m.borrow().iter().map(|e| e.key().clone()).collect());
+    COMMITMENTS.with(|m| {
+        let mut m = m.borrow_mut();
+        for k in ckeys {
+            m.remove(&k);
+        }
+    });
+    let lkeys: Vec<CommitmentKey> = LOSSLESS_VOTES.with(|m| m.borrow().iter().map(|e| e.key().clone()).collect());
+    LOSSLESS_VOTES.with(|m| {
+        let mut m = m.borrow_mut();
+        for k in lkeys {
+            m.remove(&k);
+        }
+    });
+
+    seed_mock_proposals();
+    Ok(PROPOSALS.with(|m| m.borrow().len()))
 }
 
 ic_cdk::export_candid!();
@@ -9909,14 +9952,14 @@ mod tests {
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(prop.lossless_reject_e8s, 300_000_000);
 
-        // Bob: only 1 ICP, but in the 2-year tier → weight 4 ICP (4×). Term
-        // multipliers let a smaller, longer stake outvote a bigger short one.
+        // Bob: 1 ICP in the 2-year tier → weight 1 ICP (voting power is 1:1
+        // with the staked amount; the term only scales lottery tickets).
         set_mock_caller(bob);
         stake(100_000_000, StakeTier::TwoYears).await.unwrap();
-        assert_eq!(user_voting_weight(bob), 400_000_000);
+        assert_eq!(user_voting_weight(bob), 100_000_000);
         cast_lossless_vote(pid, Stance::Adopt).unwrap();
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.lossless_adopt_e8s, 400_000_000);
+        assert_eq!(prop.lossless_adopt_e8s, 100_000_000);
 
         // Combined-pot decision: lossless weight can flip the direction even
         // though the burn pots alone would say otherwise.
@@ -9925,7 +9968,7 @@ mod tests {
             prop.reject_pot_e8s.saturating_add(prop.lossless_reject_e8s),
             prop.first_stance.clone(),
         );
-        assert_eq!(vote, 1, "400M adopt vs 300M reject → adopt");
+        assert_eq!(vote, 2, "300M reject (alice) vs 100M adopt (bob) → reject");
     }
 
     #[tokio::test]
@@ -11059,7 +11102,7 @@ mod tests {
         stake(300_000_000, StakeTier::OneYear).await.unwrap();
         let my = get_my_stake();
         assert_eq!(my.total_staked_e8s, 300_000_000);
-        assert_eq!(my.total_weight_e8s, 600_000_000);
+        assert_eq!(my.total_weight_e8s, 300_000_000, "voting power is 1:1 with stake");
         assert_eq!(my.tiers.len(), 1);
         let _uid = unstake(150_000_000, StakeTier::OneYear).await.unwrap();
         assert_eq!(list_my_pending_unstakes().len(), 1);
@@ -11416,26 +11459,26 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
 
-        // 1 ICP staked for 2 years = 4 ICP of voting power.
-        stake(100_000_000, StakeTier::TwoYears).await.unwrap();
+        // Voting power is 1:1 with stake: 3 ICP staked = 3 ICP of weight.
+        stake(300_000_000, StakeTier::TwoYears).await.unwrap();
 
-        // Threshold 5 ICP: a 4 ICP staked vote is NOT enough on its own.
+        // Threshold 5 ICP: a 3 ICP staked vote is NOT enough on its own.
         let pid = 740_001u64;
         open_proposal(pid, 500_000_000);
         cast_lossless_vote(pid, Stance::Adopt).unwrap();
         assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "open");
 
-        // A second staker pushes COMBINED weight (4 + 2 = 6 ICP) past the
+        // A second staker pushes COMBINED weight (3 + 2 = 5 ICP) to the
         // 5 ICP burn threshold → met, with zero ICP committed to burn.
         let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
         set_mock_caller(bob);
-        stake(100_000_000, StakeTier::OneYear).await.unwrap();
+        stake(200_000_000, StakeTier::OneYear).await.unwrap();
         cast_lossless_vote(pid, Stance::Reject).unwrap();
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(prop.status, "met", "combined staked weight ≥ threshold");
         assert_eq!(prop.total_committed_e8s, 0, "no burn needed");
 
-        // Cutoff: the vote fires on staked conviction alone. Adopt (4 ICP)
+        // Cutoff: the vote fires on staked conviction alone. Adopt (3 ICP)
         // beats reject (2 ICP); nothing burns because nothing was committed.
         process_proposal_cutoff(pid).await.unwrap();
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();

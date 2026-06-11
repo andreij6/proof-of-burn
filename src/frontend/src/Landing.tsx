@@ -27,8 +27,8 @@ const SECTIONS = [
     icon: 'zap',
     eyebrow: 'Staked Voting',
     title: 'Lock time. Multiply your voice.',
-    body: 'Stake into 6-month, 1-year or 2-year pooled neurons. Voting power scales with the term — 1×, 2×, 4× — and the treasury pays every transfer fee in the cycle. Commit X, get X back. Zero loss, literally.',
-    chips: ['1× / 2× / 4× power', 'principal never spent', 'treasury pays the fees'],
+    body: 'Stake into 6-month, 1-year or 2-year pooled neurons. Voting power equals the ICP you stake, longer terms earn more lottery tickets, and the treasury pays every transfer fee. Commit X, get X back. Zero loss, literally.',
+    chips: ['voting power = ICP staked', 'principal never spent', 'treasury pays the fees'],
   },
   {
     icon: 'target',

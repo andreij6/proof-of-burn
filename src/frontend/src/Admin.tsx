@@ -322,7 +322,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
       <Section icon="zap" title="Lossless staking — three terms, one principal, zero loss">
         <Li>Three pooled NNS neurons, one per term: 6 months, 1 year, 2 years. Your ICP joins the term's neuron; your principal is never spent. Every neuron is made PUBLIC on the NNS the moment it's configured — anyone can audit it on the dashboard.</Li>
-        <Li>Platform voting power = stake × term multiplier (1× / 2× / 4×) — proportional to how long you lock. It sways the adopt/reject decision on every tracked proposal, free, vote by vote.</Li>
+        <Li>Platform voting power = the ICP you stake, 1:1 (the term length scales lottery tickets, not voting power). It sways the adopt/reject decision on every tracked proposal — free, vote by vote — and combined staked weight can carry a proposal past its threshold with zero burning.</Li>
         <Li>Unstake any time: the tier's neuron splits, the split dissolves for the full term, then the FULL amount lands back in your wallet automatically — the treasury fronts the stake-transfer fee and reimburses every cycle fee (0.0003 ICP) with the disbursement. Zero-loss means zero: commit X, get X back.</Li>
         <Li>Neuron maturity harvests once it crosses ~1.05 ICP and is split <b>50% lottery prize pot / 50% treasury</b> — all three neurons feed the same pot.</Li>
         <Li>Staking is also the lottery's eligibility gate (below).</Li>

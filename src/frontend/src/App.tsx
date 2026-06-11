@@ -1572,7 +1572,12 @@ export default function App() {
   }).sort(byNewest);
   const committedProposals = proposals.filter(p => {
     const c = myCommitments.find(m => m.proposal_id === p.id);
-    return c && ACTIVE_STATUSES.has(c.status);
+    const hasActiveCommit = c && ACTIVE_STATUSES.has(c.status);
+    // Staked votes belong here too — they're active stances on open/met
+    // proposals even when the user never burned.
+    const hasStakedVote = myLosslessVotes.some(v => v.proposal_id === p.id)
+      && (p.status === 'open' || p.status === 'met');
+    return hasActiveCommit || hasStakedVote;
   }).sort(byNewest);
   const historyProposals = proposals.filter(p => {
     const c = myCommitments.find(m => m.proposal_id === p.id);
@@ -2419,14 +2424,15 @@ export default function App() {
                     {committedProposals.length === 0 ? (
                       <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No active commitments yet.</div>
                     ) : committedProposals.map(p => {
-                      const myCommitment = myCommitments.find(c => c.proposal_id === p.id)!;
+                      const myCommitment = myCommitments.find(c => c.proposal_id === p.id);
+                      const myStakedVote = myLosslessVotes.find(v => v.proposal_id === p.id);
                       const pct = Math.floor((Number(p.total_committed_e8s) / Number(p.threshold_e8s)) * 100);
                       const met = p.status === 'met' || p.total_committed_e8s >= p.threshold_e8s;
                       const remainingNs = Number(p.deadline) - Date.now() * 1_000_000;
                       const remainingH = Math.max(0, Math.floor(remainingNs / (3600 * 1_000_000_000)));
                       const remainingD = Math.floor(remainingH / 24);
                       const deadlineStr = remainingD > 0 ? `${remainingD}d ${remainingH % 24}h` : `${remainingH}h`;
-                      const isRetrying = myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund;
+                      const isRetrying = myCommitment?.status === CommitmentStatus.FailedBurn || myCommitment?.status === CommitmentStatus.FailedRefund;
                       const flipInfo = getFlipCalculation(p.adopt_pot_e8s, p.reject_pot_e8s);
                       const flipLabel = flipInfo.toStance === 'either' ? (
                         <span style={{
@@ -2486,17 +2492,30 @@ export default function App() {
                             <HeatBar pct={pct} committed={`${fmtICP(p.total_committed_e8s)} ICP`} req={met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`} met={met} />
                             <div style={{ borderTop: '1px solid var(--border)' }} />
                             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                              <span className="row" style={{ gap: 8, fontSize: 12.5 }}>
-                                <span style={{ color: 'var(--fg-3)' }}>Your commitment</span>
-                                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtICP(myCommitment.amount_e8s)} ICP</span>
-                                <Chip tone={myCommitment.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 18, fontSize: 10.5 }}>
-                                  {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
-                                </Chip>
+                              <span className="row" style={{ gap: 8, fontSize: 12.5, flexWrap: 'wrap' }}>
+                                {myCommitment ? (
+                                  <>
+                                    <span style={{ color: 'var(--fg-3)' }}>Burned</span>
+                                    <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtICP(myCommitment.amount_e8s)} ICP</span>
+                                    <Chip tone={myCommitment.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 18, fontSize: 10.5 }}>
+                                      {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
+                                    </Chip>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span style={{ color: 'var(--fg-3)' }}>Staked vote</span>
+                                    <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtICP(myStakedVote?.weight_e8s ?? 0n)} VP</span>
+                                    <Chip tone={myStakedVote?.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 18, fontSize: 10.5 }}>
+                                      {myStakedVote?.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
+                                    </Chip>
+                                    <Chip tone="muted" style={{ height: 18, fontSize: 10 }}>free · no burn</Chip>
+                                  </>
+                                )}
                               </span>
                               {isRetrying && (
                                 <Chip tone="danger" style={{ fontSize: 11 }}><Icon name="x" size={10} /> Error — retrying</Chip>
                               )}
-                              {!isRetrying && myCommitment.status === CommitmentStatus.Pending
+                              {!isRetrying && myCommitment?.status === CommitmentStatus.Pending
                                 && (p.status === 'open' || p.status === 'met')
                                 && remainingNs > 3_600_000_000_000 && (
                                 <button
@@ -2514,7 +2533,9 @@ export default function App() {
                             </div>
                             <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
                               <Icon name="info" size={12} stroke="var(--fg-3)" />
-                              {met
+                              {!myCommitment
+                                ? 'Free staked vote — your stake never moves; it just adds weight to this proposal.'
+                                : met
                                 ? 'Threshold met — when the neuron votes, your ICP is spent (50/25/25 treasury/backend/frontend; 25/25/25/25 when pool is active).'
                                 : 'If the threshold misses, your committed ICP is returned.'}
                             </span>
@@ -2804,6 +2825,22 @@ export default function App() {
                 <Icon name="key" size={13} /> Make me admin (local only)
               </Btn>
             )}
+          </div>
+
+          {/* Reset the mock proposals so you can vote again (local only) */}
+          <div className="col" style={{ gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Mock proposals</span>
+            <Btn variant="secondary" sm onClick={async () => {
+              if (!actor) return;
+              const res = await actor.dev_reset_proposals();
+              if (res.__kind__ === "Err") { alert(`Failed: ${res.Err}`); return; }
+              await refreshAllData();
+            }}>
+              <Icon name="refresh" size={13} /> Reset proposals (vote again)
+            </Btn>
+            <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+              Wipes + reseeds the mock proposals and clears your votes/commitments on them.
+            </span>
           </div>
 
           {/* Gating Mode selector */}

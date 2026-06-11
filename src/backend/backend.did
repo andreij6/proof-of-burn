@@ -551,6 +551,9 @@ service : (InitPayload) -> {
   // Local-dev: promote the caller to admin (require_local_dev — never
   // available in production).
   dev_become_admin : () -> (Result);
+  // Local-dev: wipe + reseed the mock proposals (returns the count) so you
+  // can vote again. Clears their commitments and staked votes.
+  dev_reset_proposals : () -> (variant { Ok : nat64; Err : text });
   // Local-dev: seed mock payout history for the caller (no-op if non-empty).
   dev_seed_payouts : () -> (Result);
 }
