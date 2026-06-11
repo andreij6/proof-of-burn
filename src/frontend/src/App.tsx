@@ -122,11 +122,15 @@ function LosslessVoteRow({ proposal, myVote, stakeE8s, voting, onVote }: {
 
   if (myVote) {
     return (
-      <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-        <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-          <Icon name="zap" size={11} stroke="var(--fg-3)" /> Your staked power
-          <Chip tone={myVote.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 18, fontSize: 10.5 }}>
-            {myVote.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'} · {fmtICP(myVote.weight_e8s)} ICP
+      <div className="row" style={{
+        justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', alignItems: 'center',
+        padding: '8px 10px', borderRadius: 8,
+        border: '1px solid var(--border)', background: 'var(--bg-alt)',
+      }}>
+        <span className="row" style={{ gap: 8, fontSize: 12, color: 'var(--fg-2)' }}>
+          <Icon name="zap" size={13} stroke="var(--burn)" /> Staked vote cast
+          <Chip tone={myVote.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 19, fontSize: 11 }}>
+            {myVote.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'} · {fmtICP(myVote.weight_e8s)} VP
           </Chip>
         </span>
         {breakdown}
@@ -138,27 +142,36 @@ function LosslessVoteRow({ proposal, myVote, stakeE8s, voting, onVote }: {
     return breakdown ? <div className="row" style={{ justifyContent: 'flex-end' }}>{breakdown}</div> : null;
   }
   return (
-    <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-      <span className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-          <Icon name="zap" size={11} stroke="var(--burn)" /> Vote free with {fmtICP(stakeE8s)} voting power (stake × term)
+    <div className="col" style={{
+      gap: 8, padding: '10px 12px', borderRadius: 8,
+      border: '1px solid color-mix(in srgb, var(--burn) 35%, var(--border))',
+      background: 'color-mix(in srgb, var(--burn-950) 55%, transparent)',
+    }}>
+      <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        <span className="row" style={{ gap: 7, fontSize: 12, fontWeight: 600, color: 'var(--fg)' }}>
+          <Icon name="zap" size={13} stroke="var(--burn)" /> Staked vote — free, no burn
         </span>
+        <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>
+          your power: {fmtICP(stakeE8s)} VP
+        </span>
+      </div>
+      <div className="row" style={{ gap: 8 }}>
         <Btn
-          variant="ghost" sm
-          style={{ height: 22, fontSize: 11, color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
+          variant="primary" sm
+          style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
           onClick={() => onVote(proposal.id, Stance.Adopt)} disabled={voting}
         >
-          {voting ? <LiveDot size={6} /> : <Icon name="checkCircle" size={11} stroke="var(--sprout)" />} ADOPT
+          {voting ? <LiveDot size={7} /> : <Icon name="checkCircle" size={13} stroke="var(--sprout)" />} ADOPT
         </Btn>
         <Btn
-          variant="ghost" sm
-          style={{ height: 22, fontSize: 11, color: 'var(--ember)', border: '1px solid var(--ember)' }}
+          variant="danger" sm
+          style={{ flex: 1 }}
           onClick={() => onVote(proposal.id, Stance.Reject)} disabled={voting}
         >
-          {voting ? <LiveDot size={6} /> : <Icon name="x" size={11} stroke="var(--ember)" />} REJECT
+          {voting ? <LiveDot size={7} /> : <Icon name="x" size={13} />} REJECT
         </Btn>
-      </span>
-      {breakdown}
+      </div>
+      {breakdown && <div className="row" style={{ justifyContent: 'flex-end' }}>{breakdown}</div>}
     </div>
   );
 }
@@ -3703,6 +3716,38 @@ export default function App() {
                     </span>
                   </div>
                 </div>
+
+                {(myStake?.total_weight_e8s ?? 0n) > 0n
+                  && confirmProposalId !== null
+                  && !myLosslessVotes.find(v => v.proposal_id === confirmProposalId) && (
+                  <div className="col" style={{
+                    gap: 8, padding: '10px 12px', borderRadius: 8,
+                    border: '1px solid color-mix(in srgb, var(--burn) 40%, var(--border))',
+                    background: 'color-mix(in srgb, var(--burn-950) 60%, transparent)',
+                  }}>
+                    <span className="row" style={{ gap: 7, fontSize: 12, color: 'var(--fg)' }}>
+                      <Icon name="zap" size={13} stroke="var(--burn)" />
+                      <b>You hold {fmtICP(myStake?.total_weight_e8s ?? 0n)} VP of staked voting power.</b>
+                    </span>
+                    <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.45 }}>
+                      It can back {confirmStance === Stance.Adopt ? 'ADOPT' : 'REJECT'} on this proposal
+                      for free — nothing burns, nothing leaves your wallet. Burning stacks extra weight on top.
+                    </span>
+                    <Btn
+                      variant="secondary" sm
+                      style={{ alignSelf: 'flex-start', border: '1px solid var(--burn)', color: 'var(--burn)' }}
+                      disabled={isTransacting || losslessVoting !== null}
+                      onClick={async () => {
+                        if (!confirmProposalId || !confirmStance) return;
+                        await handleLosslessVote(confirmProposalId, confirmStance);
+                        setIsConfirming(false);
+                      }}
+                    >
+                      {losslessVoting !== null ? <LiveDot size={7} /> : <Icon name="zap" size={13} stroke="var(--burn)" />}
+                      {' '}Cast free staked vote instead
+                    </Btn>
+                  </div>
+                )}
 
                 <div style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
                   ⚠️ <b>Commitment is final.</b> By confirming, you authorize a transfer from your wallet into a deterministic per-proposal escrow. The 0.005 ICP protocol fee is consumed immediately. If the proposal reaches threshold and the neuron votes, your committed ICP is spent — 50% to the treasury, 25% to backend-canister cycles, 25% to frontend-canister cycles. If threshold is not met, your ICP is returned (minus the 0.0001 ICP ledger fee).
