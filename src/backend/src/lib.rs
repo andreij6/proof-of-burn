@@ -53,7 +53,16 @@ pub struct Neuron {
     /// yield sweep once it crosses the disburse threshold.
     #[serde(default)]
     pub maturity_e8s_equivalent: u64,
-    pub voting_power: u64,
+    /// REMOVED from governance's Neuron record (2026 periodic-confirmation
+    /// rework) — kept as opt for the local mock, which still sets it. Real
+    /// governance reports voting power via `deciding_voting_power`. Declaring
+    /// this as a required field broke EVERY get_full_neuron decode on mainnet
+    /// (maturity sweep, follow verification). NOTE: candid only tolerates a
+    /// missing record field when the Rust side is Option — serde(default) is
+    /// not honoured by the candid deserializer. Read voting power through
+    /// `neuron_voting_power()`, never these fields directly.
+    pub voting_power: Option<u64>,
+    pub deciding_voting_power: Option<u64>,
     pub followees: Vec<(i32, Followees)>,
 }
 
@@ -61,6 +70,13 @@ pub struct Neuron {
 pub enum GetFullNeuronResult {
     Ok(Neuron),
     Err(GovernanceError),
+}
+
+/// Voting power across governance versions: current governance reports it as
+/// `deciding_voting_power` (opt); the legacy `voting_power` field only exists
+/// in our local mock.
+fn neuron_voting_power(neuron: &Neuron) -> u64 {
+    neuron.deciding_voting_power.or(neuron.voting_power).unwrap_or(0)
 }
 
 fn neuron_has_hotkey(neuron: &Neuron, principal: Principal) -> bool {
@@ -313,7 +329,11 @@ fn default_min_stake_e8s() -> u64 {
 /// Minimum unstake: 1 ICP + ledger fee, so the split child neuron stays at or
 /// above the NNS minimum stake after paying the split fee.
 fn default_min_unstake_e8s() -> u64 {
-    100_010_000
+    // Exactly 1 ICP: the split fee is fronted by the treasury (the child
+    // neuron still ends up holding the full requested amount, satisfying the
+    // NNS 1-ICP neuron minimum). Was 1.0001 ICP when the fee came out of the
+    // user's stake.
+    100_000_000
 }
 
 /// Maturity level at which the yield sweep disburses (NNS floor ≈ 1.05 ICP).
@@ -949,7 +969,9 @@ async fn distribute_pool_rewards(proposal_id: u64) -> Result<(), String> {
 fn notify_top_up(args: NotifyTopUpArgs) -> NotifyTopUpResult {
     let is_local = CONFIG.with(|c| c.borrow().get().is_local);
     if !is_local {
-        NotifyTopUpResult::Err(NotifyError::TransactionNotFound)
+        NotifyTopUpResult::Err(NotifyError::InvalidTransaction(
+            "this canister is not the CMC".to_string(),
+        ))
     } else {
         NotifyTopUpResult::Ok(candid::Nat::from(12345u64))
     }
@@ -1103,7 +1125,7 @@ async fn admin_trigger_sweep() -> Result<(), String> {
     delete_expired_dapps();
     cycle_topup_check().await;
     staking_sweep().await;
-    cofounder_settlement_check().await;
+    early_adopter_settlement_check().await;
     Ok(())
 }
 
@@ -1284,14 +1306,14 @@ async fn refresh_pool_neurons() {
                     TOPIC_GOVERNANCE,
                 );
 
-                if !has_hotkey || !follows || neuron.voting_power == 0 {
+                if !has_hotkey || !follows || neuron_voting_power(&neuron) == 0 {
                     neuron_state.status = PoolStatus::Inactive;
                     canister_print(&format!(
                         "Pool neuron {} inactivated (hotkey={}, follow={})",
                         neuron_id, has_hotkey, follows
                     ));
                 } else {
-                    neuron_state.voting_power = neuron.voting_power;
+                    neuron_state.voting_power = neuron_voting_power(&neuron);
                 }
 
                 POOL_NEURONS.with(|map| {
@@ -1619,10 +1641,20 @@ pub enum SendResult {
     Err(SendError),
 }
 
+// These mirror the *real* CMC candid exactly (rs/nns/cmc/cmc.did):
+//   NotifyTopUpArg    = record { block_index : nat64; canister_id : principal }
+//   NotifyTopUpResult = variant { Ok : nat (Cycles); Err : NotifyError }
+// The first mainnet settlement (proposal 142135) trapped inside the CMC
+// because block_index was encoded as `nat` where the CMC declares `nat64`
+// (candid has no nat→nat64 subtyping), and the old NotifyError carried
+// variants the real CMC never returns (AlreadyNotified / TransactionNotFound
+// / InvalidTokenLedger) while missing real ones (Processing /
+// InvalidTransaction) — so genuine CMC errors could not even be decoded.
+// Wire compatibility is locked down by test_cmc_notify_wire_compat.
 #[derive(CandidType, Serialize, Deserialize, Debug)]
 pub struct NotifyTopUpArgs {
     pub canister_id: Principal,
-    pub block_index: candid::Nat,
+    pub block_index: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Debug)]
@@ -1634,13 +1666,12 @@ pub enum NotifyTopUpResult {
 #[derive(CandidType, Serialize, Deserialize, Debug)]
 pub enum NotifyError {
     Refunded {
-        refund_block_index: Option<candid::Nat>,
+        block_index: Option<u64>,
         reason: String,
     },
-    InvalidTokenLedger,
-    TransactionNotFound,
-    TransactionTooOld,
-    AlreadyNotified,
+    Processing,
+    TransactionTooOld(u64),
+    InvalidTransaction(String),
     Other {
         error_code: u64,
         error_message: String,
@@ -1814,6 +1845,11 @@ async fn call_ledger_legacy_transfer(
     TEST_MOCK_LEDGER_TRANSFER.with(|cell| cell.borrow().clone())
 }
 
+/// The legacy-transfer memo the CMC requires before `notify_top_up` will mint
+/// cycles: "TPUP" as a little-endian u64. Any other memo (the code used to
+/// send 0) makes the CMC refund the transfer instead of topping up.
+const MEMO_TOP_UP: u64 = 0x5055_5054;
+
 /// Move `amount_e8s` to the CMC ahead of a `notify_top_up` for `target_canister`.
 ///
 /// PB-148: on mainnet the ICP ledger's legacy `transfer` (AccountIdentifier
@@ -1846,7 +1882,7 @@ async fn call_cmc_topup_transfer(
             cmc_account_id(&target_canister),
             amount_e8s,
             fee_e8s,
-            0,
+            MEMO_TOP_UP,
         )
         .await
     }
@@ -1891,7 +1927,9 @@ fn principal_to_subaccount(p: &Principal) -> [u8; 32] {
 }
 
 /// Notify the CMC to mint cycles for `block_index` to `target`. Idempotent:
-/// `AlreadyNotified` is treated as success; `Refunded` is a hard failure.
+/// the CMC memoizes the per-block result, so re-notifying a processed block
+/// returns the original Ok. `Refunded` is a hard failure — the caller must
+/// drop its stored block index and re-transfer (see CMC_REFUNDED handling).
 #[cfg(target_arch = "wasm32")]
 async fn notify_cmc_topup(
     cmc: Principal,
@@ -1901,15 +1939,21 @@ async fn notify_cmc_topup(
 ) -> Result<(), String> {
     let args = NotifyTopUpArgs {
         canister_id: target,
-        block_index: candid::Nat::from(block_index),
+        block_index,
     };
     let res: Result<(NotifyTopUpResult,), _> =
         ic_cdk::call(cmc, "notify_top_up", (args,)).await;
     match res {
+        // The CMC memoizes the result per block, so re-notifying an
+        // already-processed block returns the original Ok — retries are
+        // naturally idempotent (no AlreadyNotified variant exists).
         Ok((NotifyTopUpResult::Ok(_),)) => Ok(()),
-        Ok((NotifyTopUpResult::Err(NotifyError::AlreadyNotified),)) => Ok(()),
-        Ok((NotifyTopUpResult::Err(NotifyError::Refunded { .. }),)) => {
-            Err("CMC_REFUNDED".to_string())
+        Ok((NotifyTopUpResult::Err(NotifyError::Refunded { reason, .. }),)) => {
+            // The CMC refused the block and sent the ICP back to the sending
+            // (sub)account. Callers must drop their stored block index so the
+            // retry re-transfers — re-notifying returns the same memoized
+            // Refunded forever.
+            Err(format!("CMC_REFUNDED: {}", reason))
         }
         Ok((NotifyTopUpResult::Err(e),)) => {
             Err(format!("CMC notify error: {:?}", e))
@@ -1941,7 +1985,7 @@ async fn notify_cmc_topup(
 /// PB-125: distribute a settled commitment's proceeds — 50% → treasury,
 /// 25% → backend cycles, 25% → frontend cycles. Idempotent via three per-step
 /// block indices on the Commitment; a retry skips completed transfers and only
-/// re-notifies the CMC (AlreadyNotified = success).
+/// re-notifies the CMC (the CMC's memoized per-block result makes that safe).
 async fn settle_burn_split(
     ledger_id: Principal,
     from_subaccount: [u8; 32],
@@ -1954,6 +1998,34 @@ async fn settle_burn_split(
     let treasury_amt = amount_e8s / 2;
     let backend_amt = amount_e8s / 4;
     let frontend_amt = amount_e8s - treasury_amt - backend_amt; // remainder ≈ 25%
+
+    // 142135 post-mortem: a CMC refund returns a leg minus the ledger fee, so
+    // a retry of this zero-slack escrow can be a few fees short of finishing.
+    // On retries (some journal leg already done) the treasury fronts any
+    // shortfall — the same fee-cover pattern the staking flow uses.
+    let is_retry = commitment.treasury_block.is_some()
+        || commitment.cmc_block_index.is_some()
+        || commitment.frontend_cmc_block.is_some();
+    if is_retry {
+        let mut required: u64 = 0;
+        if commitment.treasury_block.is_none() { required += treasury_amt + 10_000; }
+        if commitment.cmc_block_index.is_none() { required += backend_amt + 10_000; }
+        if commitment.frontend_cmc_block.is_none() { required += frontend_amt + 10_000; }
+        let escrow_account = LedgerAccount { owner: get_canister_id(), subaccount: Some(from_subaccount) };
+        let balance = call_ledger_balance(ledger_id, escrow_account.clone())
+            .await
+            .map_err(|e| format!("ESCROW_BALANCE: {}", e))?;
+        if balance < required {
+            let shortfall = required - balance;
+            call_ledger_transfer(ledger_id, Some(TREASURY_SUBACCOUNT), escrow_account, shortfall, Some(10_000))
+                .await
+                .map_err(|e| format!("TREASURY_FEE_COVER: {}", e))?;
+            canister_print(&format!(
+                "settle_burn_split: treasury covered {} e8s escrow shortfall for proposal {}",
+                shortfall, commitment.proposal_id
+            ));
+        }
+    }
 
     // 50% → treasury (held as ICP, admin-withdrawable)
     if commitment.treasury_block.is_none() {
@@ -1975,13 +2047,22 @@ async fn settle_burn_split(
         .map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
         commitment.cmc_block_index = Some(b);
     }
-    notify_cmc_topup(
+    if let Err(e) = notify_cmc_topup(
         cmc,
         get_canister_id(),
         commitment.cmc_block_index.unwrap(),
         commitment.proposal_id != 138388,
     )
-    .await?;
+    .await
+    {
+        if e.starts_with("CMC_REFUNDED") {
+            // The ICP came back to the escrow subaccount — drop the block
+            // index so the retry re-transfers (re-notifying the refused
+            // block returns the memoized Refunded forever).
+            commitment.cmc_block_index = None;
+        }
+        return Err(format!("BACKEND_CMC_NOTIFY: {}", e));
+    }
 
     // 25% → frontend cycles
     if commitment.frontend_cmc_block.is_none() {
@@ -1996,13 +2077,19 @@ async fn settle_burn_split(
         .map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
         commitment.frontend_cmc_block = Some(b);
     }
-    notify_cmc_topup(
+    if let Err(e) = notify_cmc_topup(
         cmc,
         frontend_canister_id(),
         commitment.frontend_cmc_block.unwrap(),
         commitment.proposal_id != 138388,
     )
-    .await?;
+    .await
+    {
+        if e.starts_with("CMC_REFUNDED") {
+            commitment.frontend_cmc_block = None;
+        }
+        return Err(format!("FRONTEND_CMC_NOTIFY: {}", e));
+    }
 
     Ok(())
 }
@@ -2100,7 +2187,7 @@ async fn create_pool_draft(neuron_id: u64) -> Result<(), String> {
             return Err("NOT_FOLLOWING".to_string());
         }
 
-        neuron.voting_power
+        neuron_voting_power(&neuron)
     };
 
     let now = current_time();
@@ -2179,7 +2266,7 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
             return Err("NOT_FOLLOWING".to_string());
         }
 
-        neuron.voting_power
+        neuron_voting_power(&neuron)
     };
 
     // 3. Assert registration escrow balance >= pool_initiation_fee_e8s + 30_000
@@ -2239,13 +2326,23 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
             map.borrow_mut().insert(neuron_id, neuron_state.clone());
         });
     }
-    notify_cmc_topup(
+    if let Err(e) = notify_cmc_topup(
         cmc,
         get_canister_id(),
         neuron_state.backend_cmc_block.unwrap(),
         false,
     )
-    .await?;
+    .await
+    {
+        if e.starts_with("CMC_REFUNDED") {
+            // Refund landed back in the fee subaccount — re-transfer on retry.
+            neuron_state.backend_cmc_block = None;
+            POOL_NEURONS.with(|map| {
+                map.borrow_mut().insert(neuron_id, neuron_state.clone());
+            });
+        }
+        return Err(format!("BACKEND_CMC_NOTIFY: {}", e));
+    }
 
     // Step C: 25% -> frontend cycles
     if neuron_state.frontend_cmc_block.is_none() {
@@ -2263,13 +2360,22 @@ async fn finalize_pool_registration(neuron_id: u64) -> Result<(), String> {
             map.borrow_mut().insert(neuron_id, neuron_state.clone());
         });
     }
-    notify_cmc_topup(
+    if let Err(e) = notify_cmc_topup(
         cmc,
         frontend_canister_id(),
         neuron_state.frontend_cmc_block.unwrap(),
         false,
     )
-    .await?;
+    .await
+    {
+        if e.starts_with("CMC_REFUNDED") {
+            neuron_state.frontend_cmc_block = None;
+            POOL_NEURONS.with(|map| {
+                map.borrow_mut().insert(neuron_id, neuron_state.clone());
+            });
+        }
+        return Err(format!("FRONTEND_CMC_NOTIFY: {}", e));
+    }
 
     // 5. Flip status to Active, set activated_at, recompute pool stats
     let now = current_time();
@@ -2675,6 +2781,76 @@ async fn get_treasury_balance() -> BalanceResult {
     }
 }
 
+/// The treasury's ledger account — deposit ICP here to fund it directly
+/// (admin top-ups, external donations). Not secret: it's just the backend
+/// canister plus the fixed treasury subaccount.
+#[ic_cdk::query]
+fn get_treasury_deposit_address() -> LedgerAccount {
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct NeuronFollowStatus {
+    pub label: String,
+    pub neuron_id: u64,
+    /// True when all three followed topics (catch-all, Governance,
+    /// SNS & Neurons' Fund) point at the primary neuron.
+    pub follows_primary: bool,
+    pub topics_following_primary: Vec<i32>,
+    pub error: Option<String>,
+}
+
+/// Admin diagnostic: live follow status of every platform-owned neuron
+/// (the three staking tiers + the early-adopter neuron), read from NNS
+/// governance. Answers "are our neurons actually following the primary?".
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_check_neuron_following() -> Vec<NeuronFollowStatus> {
+    let primary = CONFIG.with(|c| c.borrow().get().primary_neuron_id);
+    let mut targets: Vec<(String, u64)> = Vec::new();
+    for tier in [StakeTier::SixMonths, StakeTier::OneYear, StakeTier::TwoYears] {
+        if let Some(id) = tier_pool(tier).neuron_id {
+            targets.push((format!("staking_{:?}", tier), id));
+        }
+    }
+    if let Some(id) = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().neuron_id) {
+        targets.push(("early_adopters".to_string(), id));
+    }
+    let mut out = Vec::new();
+    for (label, neuron_id) in targets {
+        match get_full_neuron(neuron_id).await {
+            Ok(n) => {
+                let topics: Vec<i32> = n
+                    .followees
+                    .iter()
+                    .filter(|(_, f)| f.followees.iter().any(|x| x.id == primary))
+                    .map(|(t, _)| *t)
+                    .collect();
+                let follows = [TOPIC_CATCH_ALL, TOPIC_GOVERNANCE, TOPIC_SNS_AND_NEURONS_FUND]
+                    .iter()
+                    .all(|t| topics.contains(t));
+                out.push(NeuronFollowStatus {
+                    label,
+                    neuron_id,
+                    follows_primary: follows,
+                    topics_following_primary: topics,
+                    error: None,
+                });
+            }
+            Err(e) => out.push(NeuronFollowStatus {
+                label,
+                neuron_id,
+                follows_primary: false,
+                topics_following_primary: vec![],
+                error: Some(e),
+            }),
+        }
+    }
+    out
+}
+
 /// Admin: withdraw ICP from the treasury subaccount to a destination principal.
 #[ic_cdk::update(guard = "require_admin")]
 async fn admin_withdraw_treasury(to: Principal, amount_e8s: u64) -> Result<(), String> {
@@ -2773,6 +2949,7 @@ pub struct IncreaseDissolveDelay {
 #[derive(CandidType, Serialize, Clone, Debug)]
 pub enum Operation {
     StartDissolving(EmptyRecord),
+    StopDissolving(EmptyRecord),
     IncreaseDissolveDelay(IncreaseDissolveDelay),
     SetVisibility(SetVisibilityOp),
 }
@@ -2839,8 +3016,17 @@ pub enum Command {
     Configure(ConfigureCmd),
     Follow(FollowCmd),
     Split(SplitCmd),
+    Merge(MergeCmd),
     Disburse(DisburseCmd),
     DisburseMaturity(DisburseMaturityCmd),
+}
+
+/// governance.did: `Merge = record { source_neuron_id : opt NeuronId }` —
+/// the source's stake (minus the ledger fee) merges into the target neuron
+/// named by ManageNeuron.id.
+#[derive(CandidType, Serialize, Clone, Debug)]
+pub struct MergeCmd {
+    pub source_neuron_id: Option<NeuronId>,
 }
 
 #[derive(CandidType, Serialize, Clone, Debug)]
@@ -2884,6 +3070,9 @@ pub enum CommandResponse {
     Configure(EmptyRecord),
     Follow(EmptyRecord),
     Split(SpawnResponse),
+    // Decoded as an empty record — we only need success/failure, and candid
+    // skips the response's (large) unknown fields on decode.
+    Merge(EmptyRecord),
     Disburse(DisburseResponse),
     DisburseMaturity(DisburseMaturityResponse),
 }
@@ -3413,9 +3602,37 @@ async fn retry_failed_settlements() {
         if commitment.status == CommitmentStatus::FailedBurn {
             // Idempotent retry — completed split transfers are skipped (their
             // block indices are Some); only the unfinished step/notify re-runs.
-            if let Ok(()) = settle_burn_split(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
-                commitment.status = CommitmentStatus::Burned;
-                commitment.settled_at = Some(now);
+            match settle_burn_split(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
+                Ok(()) => {
+                    commitment.status = CommitmentStatus::Burned;
+                    commitment.settled_at = Some(now);
+                    // Keep the proposal's burn total honest — the sweep path
+                    // does this, but a retry-completed burn (142135) used to
+                    // leave the card showing 0 ICP burned forever.
+                    PROPOSALS.with(|map| {
+                        let existing = map.borrow().get(&proposal_id);
+                        if let Some(mut p) = existing {
+                            p.total_burned_e8s = Some(
+                                p.total_burned_e8s
+                                    .unwrap_or(0)
+                                    .saturating_add(commitment.amount_e8s),
+                            );
+                            map.borrow_mut().insert(proposal_id, p);
+                        }
+                    });
+                    canister_print(&format!(
+                        "retry_failed_settlements: burn completed for proposal {} user {}",
+                        proposal_id, user
+                    ));
+                }
+                Err(e) => {
+                    // 142135 post-mortem: this path used to fail silently,
+                    // making stuck sagas invisible in the canister logs.
+                    canister_print(&format!(
+                        "retry_failed_settlements: burn retry failed for proposal {} user {}: {}",
+                        proposal_id, user, e
+                    ));
+                }
             }
         } else if commitment.status == CommitmentStatus::FailedRefund {
             // Refund path is naturally idempotent: the user's subaccount
@@ -3433,9 +3650,17 @@ async fn retry_failed_settlements() {
                 commitment.amount_e8s,
                 Some(10_000),
             ).await;
-            if let Ok(_) = transfer_res {
-                commitment.status = CommitmentStatus::Returned;
-                commitment.settled_at = Some(now);
+            match transfer_res {
+                Ok(_) => {
+                    commitment.status = CommitmentStatus::Returned;
+                    commitment.settled_at = Some(now);
+                }
+                Err(e) => {
+                    canister_print(&format!(
+                        "retry_failed_settlements: refund retry failed for proposal {} user {}: {}",
+                        proposal_id, user, e
+                    ));
+                }
             }
         }
 
@@ -3487,16 +3712,25 @@ async fn cycle_topup_check() {
             }
         };
 
-        // Phase B: notify the CMC. Idempotent — `AlreadyNotified` is success.
-        // Any failure leaves the block index persisted so the next timer tick
-        // retries Phase B only (no double transfer).
-        if notify_cmc_topup(cmc_principal, get_canister_id(), block_index, true)
-            .await
-            .is_ok()
-        {
-            // Success — clear the persisted block index so the next sweep
-            // re-evaluates the treasury balance fresh.
-            LAST_TOPUP_BLOCK.with(|cell| *cell.borrow_mut() = None);
+        // Phase B: notify the CMC. Idempotent — the CMC memoizes the result
+        // per block, so a re-notify of a processed block returns the original
+        // Ok. Any other failure leaves the block index persisted so the next
+        // timer tick retries Phase B only (no double transfer).
+        match notify_cmc_topup(cmc_principal, get_canister_id(), block_index, true).await {
+            Ok(()) => {
+                // Success — clear the persisted block index so the next sweep
+                // re-evaluates the treasury balance fresh.
+                LAST_TOPUP_BLOCK.with(|cell| *cell.borrow_mut() = None);
+            }
+            Err(e) if e.starts_with("CMC_REFUNDED") => {
+                // The CMC refused the block and returned the ICP to the
+                // treasury subaccount — restart from Phase A next tick.
+                LAST_TOPUP_BLOCK.with(|cell| *cell.borrow_mut() = None);
+                canister_print(&format!("cycle_topup_check: CMC refunded block {}: {}", block_index, e));
+            }
+            Err(e) => {
+                canister_print(&format!("cycle_topup_check: notify failed for block {}: {}", block_index, e));
+            }
         }
     }
 }
@@ -3518,7 +3752,7 @@ fn setup_timers() {
         cycle_topup_check().await;
         staking_sweep().await;
         lottery_draw_check().await;
-        cofounder_settlement_check().await;
+        early_adopter_settlement_check().await;
     });
 }
 
@@ -3686,9 +3920,9 @@ pub const FLAG_LOSSLESS_VOTING: &str = "lossless_voting";
 pub const FLAG_LOSSLESS_LOTTERY: &str = "lossless_lottery";
 pub const FLAG_EXPLORER: &str = "dapp_explorer";
 pub const FLAG_ARCADE: &str = "arcade";
-pub const FLAG_COFOUNDERS: &str = "cofounders";
+pub const FLAG_EARLY_ADOPTERS: &str = "early_adopters";
 const KNOWN_FEATURE_FLAGS: [&str; 6] =
-    [FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER, FLAG_ARCADE, FLAG_COFOUNDERS];
+    [FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER, FLAG_ARCADE, FLAG_EARLY_ADOPTERS];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
 const MAX_FLAG_KEY_LEN: usize = 64;
@@ -3901,7 +4135,7 @@ fn feature_default(key: &str) -> bool {
         // on mainnet via the admin flag panel after a playtest.
         FLAG_ARCADE => false,
         // Irreversible money-moving — ships dark until the owner enables it.
-        FLAG_COFOUNDERS => false,
+        FLAG_EARLY_ADOPTERS => false,
         _ => false,
     }
 }
@@ -5162,6 +5396,8 @@ pub enum UnstakeStatus {
     Dissolving,
     /// ICP disbursed to the user's wallet. Terminal.
     Disbursed,
+    /// Merged back into a tier pool neuron at the user's request. Terminal.
+    Merged,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -5181,7 +5417,21 @@ pub struct PendingUnstake {
     /// Set when the refund transfer lands; the sweep retries until it does.
     #[serde(default)]
     pub fee_refund_block: Option<u64>,
+    /// Tier the dissolving neuron was merged back into (status == Merged).
+    #[serde(default)]
+    pub merged_into: Option<StakeTier>,
+    /// What the split child actually holds. Some(amount) since the treasury
+    /// started fronting the split fee (the child holds exactly the requested
+    /// amount); None for legacy unstakes where the NNS took the split fee
+    /// out of the child (child = amount − 0.0001).
+    #[serde(default)]
+    pub child_e8s: Option<u64>,
     pub settled_at: Option<u64>,
+}
+
+/// What the dissolving child neuron holds, across both unstake generations.
+fn unstake_child_e8s(p: &PendingUnstake) -> u64 {
+    p.child_e8s.unwrap_or_else(|| p.amount_e8s.saturating_sub(ICP_FEE_E8S))
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -5685,6 +5935,70 @@ fn mock_start_dissolving(neuron_id: u64) -> Result<(), String> {
     })
 }
 
+fn mock_stop_dissolving(neuron_id: u64) -> Result<(), String> {
+    MOCK_GOV.with(|g| {
+        let mut g = g.borrow_mut();
+        let neuron = g
+            .neurons
+            .get_mut(&neuron_id)
+            .ok_or_else(|| "MOCK_NEURON_NOT_FOUND".to_string())?;
+        neuron.dissolving = false;
+        neuron.dissolve_eta = 0;
+        Ok(())
+    })
+}
+
+async fn gov_stop_dissolving(neuron_id: u64) -> Result<(), String> {
+    let cmd = Command::Configure(ConfigureCmd {
+        operation: Some(Operation::StopDissolving(EmptyRecord {})),
+    });
+    match call_manage_neuron(Some(neuron_id), cmd).await? {
+        GovOutcome::Response(CommandResponse::Configure(_)) => Ok(()),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => mock_stop_dissolving(neuron_id),
+    }
+}
+
+/// Merge `source_id`'s stake into `target_id` (same controller — both ours).
+/// Governance moves the source stake minus one ledger fee into the target.
+async fn gov_merge(target_id: u64, source_id: u64) -> Result<(), String> {
+    let cmd = Command::Merge(MergeCmd {
+        source_neuron_id: Some(NeuronId { id: source_id }),
+    });
+    match call_manage_neuron(Some(target_id), cmd).await? {
+        GovOutcome::Response(CommandResponse::Merge(_)) => Ok(()),
+        GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
+        GovOutcome::LocalFallback => mock_merge(target_id, source_id),
+    }
+}
+
+fn mock_merge(target_id: u64, source_id: u64) -> Result<(), String> {
+    MOCK_GOV.with(|g| {
+        let mut g = g.borrow_mut();
+        let source_stake = {
+            let source = g
+                .neurons
+                .get_mut(&source_id)
+                .ok_or_else(|| "MOCK_NEURON_NOT_FOUND".to_string())?;
+            if source.dissolving {
+                return Err("MOCK_SOURCE_DISSOLVING".to_string());
+            }
+            let st = source.stake_e8s;
+            source.stake_e8s = 0;
+            st
+        };
+        let target = g
+            .neurons
+            .get_mut(&target_id)
+            .ok_or_else(|| "MOCK_NEURON_NOT_FOUND".to_string())?;
+        // The real NNS charges the transfer fee out of the merged amount.
+        target.stake_e8s = target
+            .stake_e8s
+            .saturating_add(source_stake.saturating_sub(ICP_FEE_E8S));
+        Ok(())
+    })
+}
+
 /// Disburse a fully-dissolved split neuron to the user's main ICP account.
 /// Governance rejects if the neuron hasn't finished dissolving — callers just
 /// retry on the next sweep tick.
@@ -5843,6 +6157,11 @@ async fn stake(amount_e8s: u64, tier: StakeTier) -> Result<(), String> {
     if amount_e8s > MAX_COMMIT_E8S {
         return Err("EXCEEDS_GLOBAL_CAP".to_string());
     }
+    // Whole-ICP only: keeps every stake, ticket grant and neuron amount an
+    // integer number of ICP (owner decision 2026-06-12).
+    if amount_e8s % ONE_ICP_E8S != 0 {
+        return Err("WHOLE_ICP_ONLY".to_string());
+    }
 
     let sub = derive_subaccount(&caller, STAKE_SEED);
     let escrow = LedgerAccount {
@@ -5994,6 +6313,55 @@ async fn advance_tier_bootstrap(tier: StakeTier) -> Result<(), String> {
 
 // ── Unstake ──
 
+/// Inject `amount` from the treasury into a tier's pool neuron: transfer to
+/// the neuron's governance staking account, then refresh so the stake lands
+/// immediately (unstake refuses to run with a refresh pending). On refresh
+/// failure the funds are parked in pending_refresh for the sweep to absorb,
+/// and the caller aborts (retryable).
+async fn fund_pool_neuron_from_treasury(
+    config: &Config,
+    pool: &mut StakingPool,
+    tier: StakeTier,
+    amount: u64,
+) -> Result<(), String> {
+    if config.is_local || cfg!(not(target_arch = "wasm32")) {
+        let dest = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(MOCK_STAKE_SUBACCOUNT),
+        };
+        call_ledger_transfer(
+            config.ledger_canister_id,
+            Some(TREASURY_SUBACCOUNT),
+            dest,
+            amount,
+            Some(ICP_FEE_E8S),
+        )
+        .await
+        .map_err(|e| format!("TREASURY_FEE_COVER: {}", e))?;
+    } else {
+        let gov = Principal::from_text(NNS_GOVERNANCE_ID).unwrap();
+        let staking_sub = neuron_staking_subaccount(get_canister_id(), pool.nonce);
+        call_ledger_legacy_transfer(
+            config.ledger_canister_id,
+            Some(TREASURY_SUBACCOUNT),
+            account_id_bytes(gov, &staking_sub),
+            amount,
+            ICP_FEE_E8S,
+            pool.nonce,
+        )
+        .await
+        .map_err(|e| format!("TREASURY_FEE_COVER: {}", e))?;
+    }
+    match gov_claim_or_refresh(pool.nonce, amount, pool.neuron_id).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            pool.pending_refresh_e8s = pool.pending_refresh_e8s.saturating_add(amount);
+            set_tier_pool(tier, pool.clone());
+            Err(format!("FEE_COVER_REFRESH_DEFERRED: {}", e))
+        }
+    }
+}
+
 /// Split `amount_e8s` off the tier's pool neuron and start dissolving it; the
 /// sweep disburses to the caller's wallet once the tier's full term passes.
 /// Returns the pending-unstake id. The user nets amount − 0.0002 ICP (split +
@@ -6026,14 +6394,24 @@ async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     if amount_e8s < config.min_unstake_e8s {
         return Err("BELOW_MINIMUM".to_string());
     }
+    if amount_e8s % ONE_ICP_E8S != 0 {
+        return Err("WHOLE_ICP_ONLY".to_string());
+    }
     // The pool neuron must keep ≥ 1 ICP after the split (NNS minimum stake).
     // The last ~1 ICP of shares can only exit after someone else stakes.
     if pool.total_staked_e8s.saturating_sub(amount_e8s) < ONE_ICP_E8S {
         return Err("POOL_FLOOR".to_string());
     }
 
-    // Split is the point of no return — a clean failure means nothing moved.
-    let split_neuron_id = gov_split(neuron_id, amount_e8s)
+    // Treasury fronts the split fee: inject one fee into the pool neuron,
+    // then split amount+fee — the NNS charges its fee from the split, so the
+    // child ends up holding EXACTLY the requested amount and the user's
+    // remaining stake decreases by exactly that amount (no 0.0001 haircut).
+    fund_pool_neuron_from_treasury(&config, &mut pool, tier, ICP_FEE_E8S).await?;
+
+    // Split is the point of no return — a clean failure means nothing moved
+    // (the injected fee at worst leaves the neuron 0.0001 over-funded).
+    let split_neuron_id = gov_split(neuron_id, amount_e8s.saturating_add(ICP_FEE_E8S))
         .await
         .map_err(|e| format!("SPLIT_FAILED: {}", e))?;
 
@@ -6075,6 +6453,8 @@ async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
         dissolve_eta: now.saturating_add(delay_ns),
         disburse_block: None,
         fee_refund_block: None,
+        merged_into: None,
+        child_e8s: Some(amount_e8s),
         settled_at: None,
     };
     // Best-effort StartDissolving; the sweep retries (and re-stamps the ETA).
@@ -6086,6 +6466,97 @@ async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     });
     staking_audit("unstake_split", caller, amount_e8s, id);
     Ok(id)
+}
+
+/// Merge a still-dissolving unstake neuron back into any tier pool — the
+/// "changed my mind" path. The dissolve is stopped, the child's stake (minus
+/// one ledger fee charged by governance on merge) joins the chosen tier, and
+/// the user's stake there resumes earning weight and tickets immediately.
+///
+/// The platform's main neurons are merge TARGETS only, never sources: the
+/// source must be a child tracked in PENDING_UNSTAKES, and is additionally
+/// checked against every platform neuron id before any governance call.
+#[ic_cdk::update]
+async fn merge_unstake(unstake_id: u64, target_tier: StakeTier) -> Result<(), String> {
+    require_authenticated()?;
+    require_lossless_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    let _lock = StakingLock::new()?;
+
+    let mut pending = PENDING_UNSTAKES
+        .with(|m| m.borrow().get(&unstake_id))
+        .ok_or("UNSTAKE_NOT_FOUND")?;
+    if pending.user != caller {
+        return Err("NOT_YOUR_UNSTAKE".to_string());
+    }
+    if !matches!(pending.status, UnstakeStatus::SplitDone | UnstakeStatus::Dissolving) {
+        return Err("NOT_MERGEABLE".to_string());
+    }
+    let now = current_time();
+    if now >= pending.dissolve_eta {
+        // Fully dissolved — the sweep is about to disburse it; let it pay out.
+        return Err("ALREADY_DISSOLVED".to_string());
+    }
+
+    let mut pool = tier_pool(target_tier);
+    let target_neuron = pool.neuron_id.ok_or("POOL_NOT_READY")?;
+    if pool.bootstrap != StakingBootstrap::Ready {
+        return Err("POOL_NOT_READY".to_string());
+    }
+
+    // Hard guard: never let a platform neuron be the merge source.
+    let source = pending.split_neuron_id;
+    let mut platform_ids: Vec<u64> = [StakeTier::SixMonths, StakeTier::OneYear, StakeTier::TwoYears]
+        .iter()
+        .filter_map(|t| tier_pool(*t).neuron_id)
+        .collect();
+    if let Some(ea) = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().neuron_id) {
+        platform_ids.push(ea);
+    }
+    if platform_ids.contains(&source) {
+        return Err("SOURCE_IS_PLATFORM_NEURON".to_string());
+    }
+
+    // A dissolving neuron can't merge — stop the dissolve first. Both calls
+    // are idempotent-safe: a failure after StopDissolving leaves the child
+    // intact (not dissolving) and the unstake mergeable/retryable; the
+    // dissolve clock only matters again if the user abandons the merge.
+    gov_stop_dissolving(source)
+        .await
+        .map_err(|e| format!("STOP_DISSOLVE_FAILED: {}", e))?;
+    // Governance charges one fee on merge — the treasury fronts it into the
+    // target neuron so the user's FULL child amount restakes (keeps holdings
+    // whole-ICP and the cycle zero-loss).
+    fund_pool_neuron_from_treasury(&CONFIG.with(|c| c.borrow().get().clone()), &mut pool, target_tier, ICP_FEE_E8S).await?;
+    gov_merge(target_neuron, source)
+        .await
+        .map_err(|e| format!("MERGE_FAILED: {}", e))?;
+
+    let credited = unstake_child_e8s(&pending);
+    pending.status = UnstakeStatus::Merged;
+    pending.merged_into = Some(target_tier);
+    pending.settled_at = Some(now);
+    PENDING_UNSTAKES.with(|m| {
+        m.borrow_mut().insert(unstake_id, pending);
+    });
+
+    let key = stake_key(target_tier, caller);
+    let mut stake = STAKES.with(|m| m.borrow().get(&key)).unwrap_or(UserStake {
+        amount_e8s: 0,
+        staked_at: now,
+        last_action_at: now,
+    });
+    stake.amount_e8s = stake.amount_e8s.saturating_add(credited);
+    stake.last_action_at = now;
+    STAKES.with(|m| {
+        m.borrow_mut().insert(key, stake);
+    });
+    pool.total_staked_e8s = pool.total_staked_e8s.saturating_add(credited);
+    set_tier_pool(target_tier, pool);
+
+    staking_audit("unstake_merge", caller, credited, unstake_id);
+    Ok(())
 }
 
 // ── Lossless voting ──
@@ -6247,19 +6718,26 @@ async fn process_pending_unstakes() {
     }
 }
 
-/// Pay the user back every fee the stake/unstake cycle cost them (deposit +
-/// split + disburse = 0.0003 ICP) from the treasury. Idempotent via the
-/// persisted block index; the sweep retries until the transfer lands.
+/// Pay the user back every fee the stake/unstake cycle cost them, from the
+/// treasury. Legacy unstakes: deposit + split + disburse = 0.0003 ICP. Since
+/// the treasury began fronting the split fee at unstake (child_e8s set), the
+/// refund is deposit + disburse = 0.0002 ICP. Idempotent via the persisted
+/// block index; the sweep retries until the transfer lands.
 async fn settle_unstake_fee_refund(ledger_id: Principal, unstake: &mut PendingUnstake) {
     if unstake.fee_refund_block.is_some() {
         return;
     }
+    let refund = if unstake.child_e8s.is_some() {
+        2 * ICP_FEE_E8S
+    } else {
+        STAKE_FEE_REIMBURSEMENT_E8S
+    };
     let dest = LedgerAccount { owner: unstake.user, subaccount: None };
     match call_ledger_transfer(
         ledger_id,
         Some(TREASURY_SUBACCOUNT),
         dest,
-        STAKE_FEE_REIMBURSEMENT_E8S,
+        refund,
         Some(ICP_FEE_E8S),
     )
     .await
@@ -6269,7 +6747,7 @@ async fn settle_unstake_fee_refund(ledger_id: Principal, unstake: &mut PendingUn
             PENDING_UNSTAKES.with(|m| {
                 m.borrow_mut().insert(unstake.id, unstake.clone());
             });
-            staking_audit("unstake_fee_refund", unstake.user, STAKE_FEE_REIMBURSEMENT_E8S, unstake.id);
+            staking_audit("unstake_fee_refund", unstake.user, refund, unstake.id);
         }
         Err(e) => {
             canister_print(&format!("unstake {} fee refund pending: {}", unstake.id, e));
@@ -6578,7 +7056,9 @@ fn admin_set_staking_config(
             config.min_stake_e8s = m;
         }
         if let Some(m) = min_unstake_e8s {
-            if m < ONE_ICP_E8S + ICP_FEE_E8S {
+            // Floor is exactly 1 ICP: the treasury fronts the split fee, so
+            // the child neuron holds the full requested amount (NNS minimum).
+            if m < ONE_ICP_E8S {
                 return Err("INVALID_MIN_UNSTAKE".to_string());
             }
             config.min_unstake_e8s = m;
@@ -6670,7 +7150,27 @@ fn dev_add_mock_maturity(amount_e8s: u64, tier: StakeTier) -> Result<(), String>
 // to a user (lottery wins, unstake disbursements, upvote shares, refunds).
 
 /// Powerball jackpot odds: 5-of-69 white balls + 1-of-26 red ball.
-const LOTTERY_ODDS_DENOMINATOR: u64 = 292_201_338;
+/// Dynamic-odds cadence: every draw has a 1-in-N chance of crowning a winner
+/// REGARDLESS of how many tickets exist (the denominator scales with the
+/// ticket supply). With 3 draws/week (≈13/month) and N = 13, a jackpot lands
+/// about once a month in expectation, and the chance of at least one winner
+/// within 3 months is 1 − (12/13)^39 ≈ 96%. Replaces the original fixed
+/// Powerball denominator (292,201,338), which made wins effectively
+/// impossible at launch-scale ticket counts.
+const LOTTERY_DRAWS_PER_WIN: u64 = 13;
+
+/// A drawing only actually runs when the pot holds at least this much (50
+/// ICP). The countdown always ticks; the pot check happens at the scheduled
+/// moment — too small, and the drawing rolls over to the next slot (no
+/// randomness consumed, no draw record). Forced dev draws bypass the gate.
+const LOTTERY_MIN_POT_E8S: u64 = 5_000_000_000;
+
+/// The ticket-space size for a draw: total × 13, so P(some ticket wins) is
+/// exactly 1/13 and every ticket inside the winning range is equally likely
+/// — i.e. each user's win chance is their stake-weighted share of tickets.
+fn lottery_odds_denominator(total_tickets: u64) -> u64 {
+    total_tickets.max(1).saturating_mul(LOTTERY_DRAWS_PER_WIN)
+}
 /// Winner takes 80% of the pot; 20% stays for the next drawing.
 const LOTTERY_WINNER_SHARE_PCT: u64 = 80;
 /// Draw instant within a draw day (≈ Powerball's 22:59 US Eastern the night
@@ -6739,7 +7239,7 @@ pub struct LotteryDraw {
     pub total_tickets: u64,
     /// Lottery-pot balance at draw time.
     pub pot_e8s: u64,
-    /// The random index in [0, LOTTERY_ODDS_DENOMINATOR); a ticket wins when
+    /// The random index in [0, total_tickets × 13); a ticket wins when
     /// this lands below `total_tickets`.
     pub winning_ticket: Option<u64>,
     pub winner: Option<Principal>,
@@ -6757,8 +7257,8 @@ pub enum PayoutType {
     CommitmentRefund,
     /// 25% of a settled burn, split among the top pool neurons' owners.
     PoolReward,
-    /// A claimed monthly Co-Founder yield share.
-    CoFounderYield,
+    /// A claimed monthly Early Adopter yield share.
+    EarlyAdopterYield,
 }
 
 /// One payout the site made to a user, in the token's smallest unit. Drives
@@ -6796,6 +7296,9 @@ pub struct LotteryInfo {
     pub my_daily_tickets: u64,
     pub pot_e8s: u64,
     pub odds_denominator: u64,
+    /// Drawings only run when the pot holds at least this much (rolls over
+    /// otherwise). The countdown still ticks below the line.
+    pub min_pot_e8s: u64,
     pub draws_held: u64,
     pub last_winner: Option<Principal>,
     pub last_win_at: Option<u64>,
@@ -7004,21 +7507,10 @@ async fn run_lottery_draw(forced_winning_ticket: Option<u64>) {
     let now = current_time();
     let mut state = lottery_state();
 
+    // The countdown always advances to the next slot — whether or not this
+    // drawing actually runs is decided right now, at the scheduled moment.
     state.next_draw_at = next_draw_after(now.max(state.next_draw_at));
-    state.draws_held += 1;
     set_lottery_state(state.clone());
-
-    let winning_ticket = match forced_winning_ticket {
-        Some(t) => t,
-        None => match lottery_random_u64().await {
-            // Modulo bias over 2^64 is ~1e-11 of the denominator — negligible.
-            Ok(r) => r % LOTTERY_ODDS_DENOMINATOR,
-            Err(e) => {
-                canister_print(&format!("lottery draw skipped, no randomness: {}", e));
-                return;
-            }
-        },
-    };
 
     let pot_account = LedgerAccount {
         owner: get_canister_id(),
@@ -7027,6 +7519,32 @@ async fn run_lottery_draw(forced_winning_ticket: Option<u64>) {
     let pot_e8s = call_ledger_balance(config.ledger_canister_id, pot_account)
         .await
         .unwrap_or(0);
+
+    // Last-minute go/no-go: below the minimum pot the drawing rolls over —
+    // no randomness, no draw record, draws_held untouched.
+    if forced_winning_ticket.is_none() && pot_e8s < LOTTERY_MIN_POT_E8S {
+        canister_print(&format!(
+            "lottery drawing skipped: pot {} e8s below the {} e8s minimum — rolls over",
+            pot_e8s, LOTTERY_MIN_POT_E8S
+        ));
+        return;
+    }
+
+    let mut state = lottery_state();
+    state.draws_held += 1;
+    set_lottery_state(state.clone());
+
+    let winning_ticket = match forced_winning_ticket {
+        Some(t) => t,
+        None => match lottery_random_u64().await {
+            // Modulo bias over 2^64 is negligible at these denominators.
+            Ok(r) => r % lottery_odds_denominator(state.total_tickets),
+            Err(e) => {
+                canister_print(&format!("lottery draw skipped, no randomness: {}", e));
+                return;
+            }
+        },
+    };
 
     // A win needs a hit ticket AND a prize big enough to actually transfer —
     // otherwise the drawing rolls over (tickets keep accumulating).
@@ -7160,13 +7678,19 @@ fn user_daily_tickets(user: Principal) -> u64 {
         return 0;
     }
     let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
+    // Stake-weighted: base × term multiplier × whole ICP staked in the tier
+    // (1 ICP for 6 months = base/day; 500 ICP for 2 years = base × 4 × 500).
+    // Sub-1-ICP stakes still earn one base unit so small stakers participate.
     StakeTier::all().iter().fold(0u64, |acc, &tier| {
-        let staked = STAKES
+        let staked_e8s = STAKES
             .with(|m| m.borrow().get(&stake_key(tier, user)))
-            .map(|s| s.amount_e8s > 0)
-            .unwrap_or(false);
-        if staked {
-            acc.saturating_add(base.saturating_mul(tier.weight_multiplier()))
+            .map(|s| s.amount_e8s)
+            .unwrap_or(0);
+        if staked_e8s > 0 {
+            let whole_icp = (staked_e8s / ONE_ICP_E8S).max(1);
+            acc.saturating_add(
+                base.saturating_mul(tier.weight_multiplier()).saturating_mul(whole_icp),
+            )
         } else {
             acc
         }
@@ -7260,7 +7784,8 @@ async fn get_lottery_info() -> LotteryInfo {
         tickets_per_day: config.lottery_tickets_per_day,
         my_daily_tickets,
         pot_e8s,
-        odds_denominator: LOTTERY_ODDS_DENOMINATOR,
+        odds_denominator: lottery_odds_denominator(state.total_tickets),
+        min_pot_e8s: LOTTERY_MIN_POT_E8S,
         draws_held: state.draws_held,
         last_winner: state.last_winner,
         last_win_at: state.last_win_at,
@@ -8005,18 +8530,16 @@ fn log_dapp_event(event_type: &str, dapp_id: u64, user: Principal, amount: u64) 
     });
 }
 
-/// First two admin-curated cards. Real ecosystem content (not local mocks),
-/// so this seeds on every network when the directory is empty.
+/// Admin-curated cards. Real ecosystem content (not local mocks), so this
+/// seeds on every network. Per-entry insert-if-missing (matched by name) so
+/// entries added later still land on already-populated directories at
+/// post_upgrade without duplicating existing cards.
 fn seed_default_dapps() {
-    let already_seeded = DAPPS.with(|m| !m.borrow().is_empty());
-    if already_seeded {
-        return;
-    }
     let owner = CONFIG.with(|c| {
         c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
     });
     let now = current_time();
-    let samples: [(&str, &str, &str); 2] = [
+    let samples: [(&str, &str, &str); 8] = [
         (
             "idGeek 2.0",
             "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
@@ -8027,8 +8550,42 @@ fn seed_default_dapps() {
             "https://liquidium.fi/",
             "Cross-chain lending protocol: supply Bitcoin and borrow stablecoins without selling your holdings. Chain Fusion collateral across chains, auto-compounded yield for lenders, no lock-ups, fully non-custodial.",
         ),
+        (
+            "ICPSwap",
+            "https://app.icpswap.com/",
+            "The Internet Computer's leading decentralized exchange: swap, provide concentrated liquidity, and farm across ICP, ckBTC, ckETH and stablecoin pools — every order book, position and fee settled fully on-chain.",
+        ),
+        (
+            "OISY Wallet",
+            "https://oisy.com/",
+            "Browser-based multi-chain wallet powered by Chain Fusion: hold and send BTC, ETH, SOL, ICP and ERC-20 tokens from one interface — no extension, no seed phrase, secured by Internet Identity and threshold cryptography.",
+        ),
+        (
+            "OpenChat",
+            "https://oc.app/",
+            "Fully on-chain messaging that feels like your favorite chat app: communities, channels, and instant crypto transfers in-chat. Governed by its own SNS DAO — the flagship proof that social runs on the Internet Computer.",
+        ),
+        (
+            "Partyhats",
+            "https://partyhats.xyz/",
+            "Fully on-chain casino with no house edge: burn PARTY tokens to play mines and other provably-fair games, provide liquidity on PartyDEX to earn yield, and trade ICP Party Hat NFTs — every bet and payout settled by smart contracts on the Internet Computer.",
+        ),
+        (
+            "Dyvr",
+            "https://dyvr.com/",
+            "Emerging Internet Computer dapp — visit the site for the latest on what Dyvr is building on ICP.",
+        ),
+        (
+            "onicai",
+            "https://www.onicai.com/",
+            "AI-as-a-Service platform pioneering on-chain artificial intelligence: run large language models entirely inside ICP canisters, compete in incentivized AI tournaments via funnAI, and build with open-source GGUF tooling — no off-chain inference required.",
+        ),
     ];
+    let existing: Vec<String> = DAPPS.with(|m| m.borrow().iter().map(|e| e.value().name.clone()).collect());
     for (name, url, description) in samples {
+        if existing.iter().any(|n| n == name) {
+            continue;
+        }
         let id = next_dapp_id();
         DAPPS.with(|m| {
             m.borrow_mut().insert(id, DappListing {
@@ -8398,11 +8955,11 @@ fn admin_set_explorer_ledger(token: ExplorerToken, ledger: Principal) -> Result<
 pub enum EscrowKind {
     Explorer,
     Arcade,
-    CoFounder,
+    EarlyAdopter,
 }
 
 /// Withdraw the caller's remaining balance from one of their pay-first
-/// deposit subaccounts (Explorer listing / Arcade customization / Co-Founder
+/// deposit subaccounts (Explorer listing / Arcade customization / Early Adopter
 /// stake). These accounts are funded right before a paid action; if that
 /// action then fails — expired quote, listing quota, closed membership — the
 /// deposit would otherwise be stranded with no recovery path (review
@@ -8418,7 +8975,7 @@ async fn reclaim_escrow(kind: EscrowKind, token: ExplorerToken) -> Result<u64, S
     let sub = match kind {
         EscrowKind::Explorer => derive_explorer_subaccount(&caller),
         EscrowKind::Arcade => derive_arcade_subaccount(&caller),
-        EscrowKind::CoFounder => derive_cofounder_subaccount(&caller),
+        EscrowKind::EarlyAdopter => derive_early_adopter_subaccount(&caller),
     };
     let config = CONFIG.with(|c| c.borrow().get().clone());
     let ledger_id = explorer_token_ledger(token, &config);
@@ -8974,10 +9531,10 @@ fn get_arcade_leaderboard(game: String) -> Vec<ArcadeLeaderboardRow> {
 }
 
 // ==========================================
-// 18. Co-Founders (permanent stake, monthly yield shares)
+// 18. Early Adopters (permanent stake, monthly yield shares)
 // ==========================================
 //
-// Co-founders stake ICP into a single platform-owned 2-year neuron.
+// Early adopters stake ICP into a single platform-owned 2-year neuron.
 // THE STAKE IS PERMANENT — there is deliberately NO unstake method anywhere
 // in this section, and the UI states it in bold before anyone commits.
 //
@@ -8987,41 +9544,41 @@ fn get_arcade_leaderboard(game: String) -> Vec<ArcadeLeaderboardRow> {
 //   • otherwise the first 1,000 ICP of the month's yield goes to the
 //     treasury (a 500–1,000 ICP month is entirely treasury's);
 //   • the excess above 1,000 ICP joins the share pool and is split across
-//     all co-founders IN PROPORTION TO THEIR STAKED ICP — but only when at
+//     all early adopters IN PROPORTION TO THEIR STAKED ICP — but only when at
 //     least 100 ICP is available to split; otherwise the pool rolls over
 //     to the next month;
-//   • a co-founder must claim their share before the NEXT monthly
+//   • an early adopter must claim their share before the NEXT monthly
 //     settlement — unclaimed shares are forfeited to the treasury then.
 
 /// 1,000 ICP — the treasury's monthly cut comes first.
-const COFOUNDER_TREASURY_CUT_E8S: u64 = 100_000_000_000;
+const EARLY_ADOPTER_TREASURY_CUT_E8S: u64 = 100_000_000_000;
 /// 2,000 ICP — once a settled month's yield reaches this, membership closes
-/// PERMANENTLY: no new co-founders, ever. Existing co-founders can still top
+/// PERMANENTLY: no new early adopters, ever. Existing early adopters can still top
 /// up at any time.
-const COFOUNDER_CLOSE_YIELD_E8S: u64 = 200_000_000_000;
+const EARLY_ADOPTER_CLOSE_YIELD_E8S: u64 = 200_000_000_000;
 /// 500 ICP — a month that yields less than this is restaked into the neuron
 /// (compounding everyone's future yield) instead of being paid out at all.
-const COFOUNDER_RESTAKE_BELOW_E8S: u64 = 50_000_000_000;
-/// 2 years — the co-founder neuron's dissolve delay.
-const COFOUNDER_DISSOLVE_SECS: u32 = 63_115_200;
+const EARLY_ADOPTER_RESTAKE_BELOW_E8S: u64 = 50_000_000_000;
+/// 2 years — the early adopter neuron's dissolve delay.
+const EARLY_ADOPTER_DISSOLVE_SECS: u32 = 63_115_200;
 /// 100 ICP — minimum distributable pot; below this it rolls over.
-const COFOUNDER_MIN_DISTRIBUTION_E8S: u64 = 10_000_000_000;
+const EARLY_ADOPTER_MIN_DISTRIBUTION_E8S: u64 = 10_000_000_000;
 /// 1 ICP minimum buy-in.
-const MIN_COFOUNDER_STAKE_E8S: u64 = 100_000_000;
+const MIN_EARLY_ADOPTER_STAKE_E8S: u64 = 100_000_000;
 /// Settlement period: 30-day months indexed from the Unix epoch.
-const COFOUNDER_PERIOD_NANOS: u64 = 30 * DAY_NANOS;
-const MAX_COFOUNDERS: u64 = 10_000;
+const EARLY_ADOPTER_PERIOD_NANOS: u64 = 30 * DAY_NANOS;
+const MAX_EARLY_ADOPTERS: u64 = 10_000;
 
 /// The platform neuron's stake account (locally a plain subaccount; mainnet
 /// integration will pin a real 2-year neuron — same canary path as staking).
-const COFOUNDER_NEURON_SUBACCOUNT: [u8; 32] = [5u8; 32];
+const EARLY_ADOPTER_NEURON_SUBACCOUNT: [u8; 32] = [5u8; 32];
 /// Where neuron yield lands between settlements.
-const COFOUNDER_YIELD_SUBACCOUNT: [u8; 32] = [6u8; 32];
+const EARLY_ADOPTER_YIELD_SUBACCOUNT: [u8; 32] = [6u8; 32];
 /// Allocated-but-unclaimed shares + rollover live here.
-const COFOUNDER_SHARE_POOL_SUBACCOUNT: [u8; 32] = [7u8; 32];
+const EARLY_ADOPTER_SHARE_POOL_SUBACCOUNT: [u8; 32] = [7u8; 32];
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CoFounder {
+pub struct EarlyAdopter {
     pub user: Principal,
     pub staked_e8s: u64,
     pub joined_at: u64,
@@ -9031,7 +9588,7 @@ pub struct CoFounder {
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CoFounderState {
+pub struct EarlyAdopterState {
     pub total_staked_e8s: u64,
     /// Pool e8s carried forward because a month's pot was under 100 ICP.
     pub rollover_e8s: u64,
@@ -9041,7 +9598,7 @@ pub struct CoFounderState {
     pub total_distributed_e8s: u64,
     pub total_expired_e8s: u64,
     /// Latched true the first time a month's yield reaches 2,000 ICP —
-    /// membership never reopens (existing co-founders may still top up).
+    /// membership never reopens (existing early adopters may still top up).
     #[serde(default)]
     pub membership_closed: bool,
     /// ── Neuron bootstrap (same lifecycle as the staking tiers) ──
@@ -9062,18 +9619,18 @@ pub struct CoFounderState {
     pub total_restaked_e8s: u64,
     /// In-flight settlement journal (None when no settlement is mid-run).
     #[serde(default)]
-    pub pending_job: Option<CoFounderJob>,
+    pub pending_job: Option<EarlyAdopterJob>,
 }
 
 /// Settlement journal: the month's amounts are computed ONCE from the inbox
 /// snapshot and each ledger leg is flagged as it lands, so a retry resumes
 /// where it failed instead of re-routing the remaining balance — re-routing
 /// double-dipped the treasury's 1,000 ICP cut and could mis-restake the
-/// co-founders' pot (review 2026-06-11). Unclaimed shares are also zeroed
+/// early adopters' pot (review 2026-06-11). Unclaimed shares are also zeroed
 /// synchronously at job creation, which closes the window where a claim
 /// landing mid-settlement double-spent the share pool.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CoFounderJob {
+pub struct EarlyAdopterJob {
     pub month: u64,
     pub started_at: u64,
     pub yield_e8s: u64,
@@ -9089,17 +9646,17 @@ pub struct CoFounderJob {
 
 /// One monthly settlement — drives the yield + share-pool charts.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CoFounderRound {
+pub struct EarlyAdopterRound {
     pub month: u64,
     pub settled_at: u64,
     pub yield_e8s: u64,
     pub treasury_e8s: u64,
-    /// Total allocated to co-founders this round (proportional to stake).
+    /// Total allocated to early adopters this round (proportional to stake).
     pub distributed_e8s: u64,
     /// Yield restaked into the neuron (months under 500 ICP).
     #[serde(default)]
     pub restaked_e8s: u64,
-    pub cofounder_count: u64,
+    pub early_adopter_count: u64,
     /// Unclaimed shares from the PREVIOUS round forfeited to the treasury.
     pub expired_e8s: u64,
     pub rollover_after_e8s: u64,
@@ -9108,7 +9665,7 @@ pub struct CoFounderRound {
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CoFounderInfo {
+pub struct EarlyAdopterInfo {
     pub enabled: bool,
     /// True once any month's yield has reached `close_threshold_e8s` —
     /// permanently; new members are rejected, existing ones may top up.
@@ -9117,7 +9674,7 @@ pub struct CoFounderInfo {
     /// Months yielding under this are restaked into the neuron.
     pub restake_threshold_e8s: u64,
     pub total_restaked_e8s: u64,
-    /// The co-founder neuron (None until the first claim lands).
+    /// The early adopter neuron (None until the first claim lands).
     pub neuron_id: Option<u64>,
     /// True once the neuron follows the primary voting neuron on all topics
     /// (bootstrap Ready) — it then votes on every NNS proposal the leader does.
@@ -9127,7 +9684,7 @@ pub struct CoFounderInfo {
     pub treasury_cut_e8s: u64,
     pub min_distribution_e8s: u64,
     pub period_nanos: u64,
-    pub cofounder_count: u64,
+    pub early_adopter_count: u64,
     pub total_staked_e8s: u64,
     pub rollover_e8s: u64,
     /// Live share-pool ledger balance (unclaimed shares + rollover).
@@ -9141,17 +9698,17 @@ pub struct CoFounderInfo {
     pub fee_e8s: u64,
 }
 
-impl_storable!(CoFounder);
-impl_storable!(CoFounderState);
-impl_storable!(CoFounderRound);
+impl_storable!(EarlyAdopter);
+impl_storable!(EarlyAdopterState);
+impl_storable!(EarlyAdopterRound);
 
 thread_local! {
-    static COFOUNDERS: RefCell<StableBTreeMap<Principal, CoFounder, Memory>> = MEMORY_MANAGER.with(|mm| {
+    static EARLY_ADOPTERS: RefCell<StableBTreeMap<Principal, EarlyAdopter, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(46))))
     });
 
-    static COFOUNDER_STATE: RefCell<StableCell<CoFounderState, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(47)), CoFounderState {
+    static EARLY_ADOPTER_STATE: RefCell<StableCell<EarlyAdopterState, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(47)), EarlyAdopterState {
             total_staked_e8s: 0,
             rollover_e8s: 0,
             last_processed_month: 0,
@@ -9168,26 +9725,26 @@ thread_local! {
         }))
     });
 
-    static COFOUNDER_ROUNDS: RefCell<StableBTreeMap<u64, CoFounderRound, Memory>> = MEMORY_MANAGER.with(|mm| {
+    static EARLY_ADOPTER_ROUNDS: RefCell<StableBTreeMap<u64, EarlyAdopterRound, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(48))))
     });
 }
 
-fn require_cofounders_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_COFOUNDERS) {
+fn require_early_adopters_enabled() -> Result<(), String> {
+    if !feature_enabled(FLAG_EARLY_ADOPTERS) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
 }
 
-fn cofounder_month(now: u64) -> u64 {
-    now / COFOUNDER_PERIOD_NANOS
+fn early_adopter_month(now: u64) -> u64 {
+    now / EARLY_ADOPTER_PERIOD_NANOS
 }
 
-fn derive_cofounder_subaccount(user: &Principal) -> [u8; 32] {
+fn derive_early_adopter_subaccount(user: &Principal) -> [u8; 32] {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
-    hasher.update(b"proof_of_burn_cofounder_v1");
+    hasher.update(b"proof_of_burn_early_adopter_v1");
     hasher.update(user.as_slice());
     let result = hasher.finalize();
     let mut sub = [0u8; 32];
@@ -9202,22 +9759,22 @@ fn derive_cofounder_subaccount(user: &Principal) -> [u8; 32] {
 /// • Otherwise the first 1,000 ICP is the treasury's and the excess (net of
 ///   the one ledger fee burned moving it into the share pool — found by
 ///   local e2e) feeds the distribution pot.
-fn cofounder_route_yield(yield_e8s: u64, fee: u64) -> (u64, u64, u64) {
-    if yield_e8s < COFOUNDER_RESTAKE_BELOW_E8S {
+fn early_adopter_route_yield(yield_e8s: u64, fee: u64) -> (u64, u64, u64) {
+    if yield_e8s < EARLY_ADOPTER_RESTAKE_BELOW_E8S {
         return (yield_e8s, 0, 0);
     }
-    let treasury_cut = yield_e8s.min(COFOUNDER_TREASURY_CUT_E8S);
+    let treasury_cut = yield_e8s.min(EARLY_ADOPTER_TREASURY_CUT_E8S);
     let excess = yield_e8s.saturating_sub(treasury_cut);
     let excess_net = if excess > fee { excess - fee } else { 0 };
     (0, treasury_cut, excess_net)
 }
 
-/// Pure pot allocation (unit-tested): split `pot` across co-founders in
+/// Pure pot allocation (unit-tested): split `pot` across early adopters in
 /// proportion to their staked ICP. Returns the per-founder shares and the
 /// integer-division dust left over. Pots under 100 ICP allocate nothing.
-fn cofounder_allocate(pot: u64, stakes: &[(Principal, u64)]) -> (Vec<(Principal, u64)>, u64) {
+fn early_adopter_allocate(pot: u64, stakes: &[(Principal, u64)]) -> (Vec<(Principal, u64)>, u64) {
     let total: u128 = stakes.iter().map(|(_, s)| *s as u128).sum();
-    if total == 0 || pot < COFOUNDER_MIN_DISTRIBUTION_E8S {
+    if total == 0 || pot < EARLY_ADOPTER_MIN_DISTRIBUTION_E8S {
         return (Vec::new(), pot);
     }
     let mut shares = Vec::with_capacity(stakes.len());
@@ -9233,61 +9790,61 @@ fn cofounder_allocate(pot: u64, stakes: &[(Principal, u64)]) -> (Vec<(Principal,
 }
 
 #[ic_cdk::query]
-fn get_cofounder_info() -> CoFounderInfo {
+fn get_early_adopter_info() -> EarlyAdopterInfo {
     let caller = get_caller();
-    let state = COFOUNDER_STATE.with(|c| c.borrow().get().clone());
-    let me = COFOUNDERS.with(|m| m.borrow().get(&caller));
-    let unclaimed: u64 = COFOUNDERS.with(|m| {
+    let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
+    let me = EARLY_ADOPTERS.with(|m| m.borrow().get(&caller));
+    let unclaimed: u64 = EARLY_ADOPTERS.with(|m| {
         m.borrow().iter().map(|e| e.value().claimable_e8s).sum()
     });
     let config = CONFIG.with(|c| c.borrow().get().clone());
-    CoFounderInfo {
-        enabled: feature_enabled(FLAG_COFOUNDERS),
+    EarlyAdopterInfo {
+        enabled: feature_enabled(FLAG_EARLY_ADOPTERS),
         membership_closed: state.membership_closed,
-        close_threshold_e8s: COFOUNDER_CLOSE_YIELD_E8S,
-        restake_threshold_e8s: COFOUNDER_RESTAKE_BELOW_E8S,
+        close_threshold_e8s: EARLY_ADOPTER_CLOSE_YIELD_E8S,
+        restake_threshold_e8s: EARLY_ADOPTER_RESTAKE_BELOW_E8S,
         total_restaked_e8s: state.total_restaked_e8s,
         neuron_id: state.neuron_id,
         follows_primary_neuron: state.bootstrap >= 3,
         primary_neuron_id: config.primary_neuron_id,
-        min_stake_e8s: MIN_COFOUNDER_STAKE_E8S,
-        treasury_cut_e8s: COFOUNDER_TREASURY_CUT_E8S,
-        min_distribution_e8s: COFOUNDER_MIN_DISTRIBUTION_E8S,
-        period_nanos: COFOUNDER_PERIOD_NANOS,
-        cofounder_count: COFOUNDERS.with(|m| m.borrow().len()),
+        min_stake_e8s: MIN_EARLY_ADOPTER_STAKE_E8S,
+        treasury_cut_e8s: EARLY_ADOPTER_TREASURY_CUT_E8S,
+        min_distribution_e8s: EARLY_ADOPTER_MIN_DISTRIBUTION_E8S,
+        period_nanos: EARLY_ADOPTER_PERIOD_NANOS,
+        early_adopter_count: EARLY_ADOPTERS.with(|m| m.borrow().len()),
         total_staked_e8s: state.total_staked_e8s,
         rollover_e8s: state.rollover_e8s,
         share_pool_e8s: state.rollover_e8s.saturating_add(unclaimed),
         total_yield_e8s: state.total_yield_e8s,
         total_distributed_e8s: state.total_distributed_e8s,
-        next_distribution_at: (state.last_processed_month + 1) * COFOUNDER_PERIOD_NANOS,
+        next_distribution_at: (state.last_processed_month + 1) * EARLY_ADOPTER_PERIOD_NANOS,
         my_staked_e8s: me.as_ref().map(|c| c.staked_e8s).unwrap_or(0),
         my_claimable_e8s: me.as_ref().map(|c| c.claimable_e8s).unwrap_or(0),
         fee_e8s: 10_000,
     }
 }
 
-/// One row of the public co-founder roster.
+/// One row of the public early adopter roster.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CoFounderPublic {
+pub struct EarlyAdopterPublic {
     pub user: Principal,
     pub staked_e8s: u64,
     pub joined_at: u64,
-    /// True when this co-founder is a platform admin — rendered as the
+    /// True when this early adopter is a platform admin — rendered as the
     /// "FOUNDER" tag (the team has its own ICP locked in the same neuron).
     pub is_admin: bool,
 }
 
-/// The full co-founder roster, largest stake first.
+/// The full early adopter roster, largest stake first.
 #[ic_cdk::query]
-fn list_cofounders() -> Vec<CoFounderPublic> {
+fn list_early_adopters() -> Vec<EarlyAdopterPublic> {
     let admins = CONFIG.with(|c| c.borrow().get().admins.clone());
-    let mut roster: Vec<CoFounderPublic> = COFOUNDERS.with(|m| {
+    let mut roster: Vec<EarlyAdopterPublic> = EARLY_ADOPTERS.with(|m| {
         m.borrow()
             .iter()
             .map(|e| {
                 let c = e.value();
-                CoFounderPublic {
+                EarlyAdopterPublic {
                     user: c.user,
                     staked_e8s: c.staked_e8s,
                     joined_at: c.joined_at,
@@ -9303,54 +9860,54 @@ fn list_cofounders() -> Vec<CoFounderPublic> {
 /// Settlement history, oldest first (chart data: yield per month + share
 /// pool balance after each settlement).
 #[ic_cdk::query]
-fn list_cofounder_rounds() -> Vec<CoFounderRound> {
-    let mut rounds: Vec<CoFounderRound> =
-        COFOUNDER_ROUNDS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+fn list_early_adopter_rounds() -> Vec<EarlyAdopterRound> {
+    let mut rounds: Vec<EarlyAdopterRound> =
+        EARLY_ADOPTER_ROUNDS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
     rounds.sort_by_key(|r| r.month);
     rounds
 }
 
 /// The caller's deposit account for becoming (or topping up as) a
-/// co-founder. Fund it with `amount + 0.0001 ICP`, then call
-/// `cofounder_stake(amount)`.
+/// early adopter. Fund it with `amount + 0.0001 ICP`, then call
+/// `early_adopter_stake(amount)`.
 #[ic_cdk::query]
-fn get_cofounder_deposit_address() -> LedgerAccount {
+fn get_early_adopter_deposit_address() -> LedgerAccount {
     let caller = get_caller();
     LedgerAccount {
         owner: get_canister_id(),
-        subaccount: Some(derive_cofounder_subaccount(&caller)),
+        subaccount: Some(derive_early_adopter_subaccount(&caller)),
     }
 }
 
-/// Stake into the platform's 2-year co-founder neuron. PERMANENT: there is
+/// Stake into the platform's 2-year early adopter neuron. PERMANENT: there is
 /// no unstake path, by design — the principal can never be withdrawn.
 #[ic_cdk::update]
-async fn cofounder_stake(amount_e8s: u64) -> Result<(), String> {
+async fn early_adopter_stake(amount_e8s: u64) -> Result<(), String> {
     require_authenticated()?;
-    require_cofounders_enabled()?;
+    require_early_adopters_enabled()?;
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
 
-    if amount_e8s < MIN_COFOUNDER_STAKE_E8S {
+    if amount_e8s < MIN_EARLY_ADOPTER_STAKE_E8S {
         return Err("BELOW_MIN_STAKE".to_string());
     }
-    let is_member = COFOUNDERS.with(|m| m.borrow().get(&caller).is_some());
+    let is_member = EARLY_ADOPTERS.with(|m| m.borrow().get(&caller).is_some());
     // Once a month's yield has hit 2,000 ICP, the founders' table is full —
-    // forever. Existing co-founders may still top up at any time.
+    // forever. Existing early adopters may still top up at any time.
     if !is_member {
-        let closed = COFOUNDER_STATE.with(|c| c.borrow().get().membership_closed);
+        let closed = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().membership_closed);
         if closed {
             return Err("MEMBERSHIP_CLOSED".to_string());
         }
-        let at_quota = COFOUNDERS.with(|m| m.borrow().len() >= MAX_COFOUNDERS);
+        let at_quota = EARLY_ADOPTERS.with(|m| m.borrow().len() >= MAX_EARLY_ADOPTERS);
         if at_quota {
-            return Err("COFOUNDER_QUOTA_REACHED".to_string());
+            return Err("EARLY_ADOPTER_QUOTA_REACHED".to_string());
         }
     }
 
     let config = CONFIG.with(|c| c.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
-    let sub = derive_cofounder_subaccount(&caller);
+    let sub = derive_early_adopter_subaccount(&caller);
     let escrow = LedgerAccount {
         owner: get_canister_id(),
         subaccount: Some(sub),
@@ -9365,7 +9922,7 @@ async fn cofounder_stake(amount_e8s: u64) -> Result<(), String> {
 
     // Fix the claim nonce at the very first stake — the governance staking
     // account derives from it (offset +9 keeps clear of the tier nonces).
-    let nonce = COFOUNDER_STATE.with(|c| {
+    let nonce = EARLY_ADOPTER_STATE.with(|c| {
         let mut s = c.borrow().get().clone();
         if s.nonce == 0 {
             s.nonce = current_time() + 9;
@@ -9376,11 +9933,11 @@ async fn cofounder_stake(amount_e8s: u64) -> Result<(), String> {
 
     // Escrow → the neuron's stake. Mainnet: legacy transfer with memo ==
     // nonce to the governance staking account (claimable). Local: park in
-    // the co-founder neuron subaccount (mock governance claims from there).
+    // the early adopter neuron subaccount (mock governance claims from there).
     if config.is_local || cfg!(not(target_arch = "wasm32")) {
         let neuron_dest = LedgerAccount {
             owner: get_canister_id(),
-            subaccount: Some(COFOUNDER_NEURON_SUBACCOUNT),
+            subaccount: Some(EARLY_ADOPTER_NEURON_SUBACCOUNT),
         };
         call_ledger_transfer(ledger_id, Some(sub), neuron_dest, amount_e8s, Some(10_000))
             .await
@@ -9401,9 +9958,9 @@ async fn cofounder_stake(amount_e8s: u64) -> Result<(), String> {
     }
 
     let now = current_time();
-    COFOUNDERS.with(|m| {
+    EARLY_ADOPTERS.with(|m| {
         let mut m = m.borrow_mut();
-        let mut entry = m.get(&caller).unwrap_or(CoFounder {
+        let mut entry = m.get(&caller).unwrap_or(EarlyAdopter {
             user: caller,
             staked_e8s: 0,
             joined_at: now,
@@ -9414,21 +9971,21 @@ async fn cofounder_stake(amount_e8s: u64) -> Result<(), String> {
         entry.last_stake_at = now;
         m.insert(caller, entry);
     });
-    COFOUNDER_STATE.with(|c| {
+    EARLY_ADOPTER_STATE.with(|c| {
         let mut s = c.borrow().get().clone();
         s.total_staked_e8s = s.total_staked_e8s.saturating_add(amount_e8s);
         s.pending_refresh_e8s = s.pending_refresh_e8s.saturating_add(amount_e8s);
         // The very first stake anchors the settlement clock to "now" so the
         // first month isn't instantly due.
         if s.last_processed_month == 0 {
-            s.last_processed_month = cofounder_month(now);
+            s.last_processed_month = early_adopter_month(now);
         }
         c.borrow_mut().set(s);
     });
 
     let entry = AuditLogEntry {
         timestamp: now,
-        event_type: "cofounder_stake".to_string(),
+        event_type: "early_adopter_stake".to_string(),
         proposal_id: 0,
         user: caller,
         amount_e8s,
@@ -9439,19 +9996,19 @@ async fn cofounder_stake(amount_e8s: u64) -> Result<(), String> {
 
     // Best-effort claim + bootstrap (dissolve delay, follow the primary
     // voting neuron); the sweep repairs any failure.
-    if let Err(e) = advance_cofounder_bootstrap().await {
-        canister_print(&format!("cofounder_stake: bootstrap deferred to sweep: {}", e));
+    if let Err(e) = advance_early_adopter_bootstrap().await {
+        canister_print(&format!("early_adopter_stake: bootstrap deferred to sweep: {}", e));
     }
     Ok(())
 }
 
-/// Drive the co-founder neuron's state machine: claim/refresh pending stake,
+/// Drive the early adopter neuron's state machine: claim/refresh pending stake,
 /// then (once) set the 2-year dissolve delay, go public, and FOLLOW THE
 /// PRIMARY VOTING NEURON on all topics — from then on it votes on every NNS
 /// proposal the leader votes on. Mirrors `advance_tier_bootstrap`.
-async fn advance_cofounder_bootstrap() -> Result<(), String> {
+async fn advance_early_adopter_bootstrap() -> Result<(), String> {
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
-    let mut state = COFOUNDER_STATE.with(|c| c.borrow().get().clone());
+    let mut state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
 
     if state.pending_refresh_e8s > 0 && state.nonce != 0 {
         let id = gov_claim_or_refresh(state.nonce, state.pending_refresh_e8s, state.neuron_id).await?;
@@ -9460,7 +10017,7 @@ async fn advance_cofounder_bootstrap() -> Result<(), String> {
             state.neuron_id = Some(id);
             state.bootstrap = 1; // Claimed
         }
-        COFOUNDER_STATE.with(|c| { c.borrow_mut().set(state.clone()); });
+        EARLY_ADOPTER_STATE.with(|c| { c.borrow_mut().set(state.clone()); });
     }
 
     let neuron_id = match state.neuron_id {
@@ -9469,15 +10026,15 @@ async fn advance_cofounder_bootstrap() -> Result<(), String> {
     };
 
     if state.bootstrap == 1 {
-        gov_increase_dissolve_delay(neuron_id, COFOUNDER_DISSOLVE_SECS).await?;
+        gov_increase_dissolve_delay(neuron_id, EARLY_ADOPTER_DISSOLVE_SECS).await?;
         state.bootstrap = 2; // DelaySet
-        COFOUNDER_STATE.with(|c| { c.borrow_mut().set(state.clone()); });
+        EARLY_ADOPTER_STATE.with(|c| { c.borrow_mut().set(state.clone()); });
     }
     if state.bootstrap == 2 {
         gov_set_visibility(neuron_id).await?;
         gov_follow_all_topics(neuron_id, config.primary_neuron_id).await?;
         state.bootstrap = 3; // Ready — following the primary neuron
-        COFOUNDER_STATE.with(|c| { c.borrow_mut().set(state.clone()); });
+        EARLY_ADOPTER_STATE.with(|c| { c.borrow_mut().set(state.clone()); });
     }
     Ok(())
 }
@@ -9485,13 +10042,13 @@ async fn advance_cofounder_bootstrap() -> Result<(), String> {
 /// Claim the caller's current monthly share. Shares not claimed before the
 /// next settlement are forfeited to the treasury.
 #[ic_cdk::update]
-async fn claim_cofounder_yield() -> Result<u64, String> {
+async fn claim_early_adopter_yield() -> Result<u64, String> {
     require_authenticated()?;
-    require_cofounders_enabled()?;
+    require_early_adopters_enabled()?;
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
 
-    let claimable = COFOUNDERS
+    let claimable = EARLY_ADOPTERS
         .with(|m| m.borrow().get(&caller))
         .map(|c| c.claimable_e8s)
         .unwrap_or(0);
@@ -9500,7 +10057,7 @@ async fn claim_cofounder_yield() -> Result<u64, String> {
     }
     // Zero the share BEFORE the transfer (no double-claim across await); on
     // transfer failure it is restored.
-    COFOUNDERS.with(|m| {
+    EARLY_ADOPTERS.with(|m| {
         let mut m = m.borrow_mut();
         if let Some(mut c) = m.get(&caller) {
             c.claimable_e8s = 0;
@@ -9512,14 +10069,14 @@ async fn claim_cofounder_yield() -> Result<u64, String> {
     let dest = LedgerAccount { owner: caller, subaccount: None };
     let transfer = call_ledger_transfer(
         config.ledger_canister_id,
-        Some(COFOUNDER_SHARE_POOL_SUBACCOUNT),
+        Some(EARLY_ADOPTER_SHARE_POOL_SUBACCOUNT),
         dest,
         net,
         Some(10_000),
     )
     .await;
     if let Err(e) = transfer {
-        COFOUNDERS.with(|m| {
+        EARLY_ADOPTERS.with(|m| {
             let mut m = m.borrow_mut();
             if let Some(mut c) = m.get(&caller) {
                 c.claimable_e8s = claimable;
@@ -9528,10 +10085,10 @@ async fn claim_cofounder_yield() -> Result<u64, String> {
         });
         return Err(format!("CLAIM_TRANSFER_FAILED: {}", e));
     }
-    record_payout(caller, PayoutType::CoFounderYield, IdeaToken::ICP, net, 0);
+    record_payout(caller, PayoutType::EarlyAdopterYield, IdeaToken::ICP, net, 0);
     let entry = AuditLogEntry {
         timestamp: current_time(),
-        event_type: "cofounder_claim".to_string(),
+        event_type: "early_adopter_claim".to_string(),
         proposal_id: 0,
         user: caller,
         amount_e8s: net,
@@ -9545,10 +10102,10 @@ async fn claim_cofounder_yield() -> Result<u64, String> {
 /// Run (or resume) one monthly settlement: expire unclaimed shares →
 /// treasury, route the month's yield (<500 restake / 1,000 cut / excess →
 /// pot), then split the pot in proportion to stake. All amounts are
-/// journaled in CoFounderState.pending_job before any transfer, and every
+/// journaled in EarlyAdopterState.pending_job before any transfer, and every
 /// completed leg is flagged, so a retry after a failed transfer resumes
 /// exactly where it stopped — it never re-reads the inbox and re-routes.
-async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
+async fn early_adopter_run_settlement(now: u64) -> Result<(), String> {
     let config = CONFIG.with(|c| c.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
     let fee = 10_000u64;
@@ -9556,16 +10113,16 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
     let treasury = LedgerAccount { owner: canister, subaccount: Some(TREASURY_SUBACCOUNT) };
 
     // 0. Load the in-flight job, or open a new one from the inbox snapshot.
-    let mut job = match COFOUNDER_STATE.with(|c| c.borrow().get().pending_job.clone()) {
+    let mut job = match EARLY_ADOPTER_STATE.with(|c| c.borrow().get().pending_job.clone()) {
         Some(job) => job,
         None => {
-            let inbox = LedgerAccount { owner: canister, subaccount: Some(COFOUNDER_YIELD_SUBACCOUNT) };
+            let inbox = LedgerAccount { owner: canister, subaccount: Some(EARLY_ADOPTER_YIELD_SUBACCOUNT) };
             let yield_e8s = call_ledger_balance(ledger_id, inbox).await?;
-            let (restaked, treasury_cut, excess_net) = cofounder_route_yield(yield_e8s, fee);
+            let (restaked, treasury_cut, excess_net) = early_adopter_route_yield(yield_e8s, fee);
             // Snapshot + zero the expiring shares in ONE synchronous block:
             // from this instant claims return NOTHING_TO_CLAIM, so a claim
             // racing the settlement can't double-spend the share pool.
-            let expired = COFOUNDERS.with(|m| {
+            let expired = EARLY_ADOPTERS.with(|m| {
                 let mut m = m.borrow_mut();
                 let keys: Vec<Principal> = m.iter().map(|e| *e.key()).collect();
                 let mut total = 0u64;
@@ -9580,8 +10137,8 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
                 }
                 total
             });
-            let job = CoFounderJob {
-                month: cofounder_month(now),
+            let job = EarlyAdopterJob {
+                month: early_adopter_month(now),
                 started_at: now,
                 yield_e8s,
                 expired_e8s: expired,
@@ -9593,7 +10150,7 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
                 cut_done: false,
                 pool_done: false,
             };
-            COFOUNDER_STATE.with(|c| {
+            EARLY_ADOPTER_STATE.with(|c| {
                 let mut s = c.borrow().get().clone();
                 s.pending_job = Some(job.clone());
                 c.borrow_mut().set(s);
@@ -9601,8 +10158,8 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
             job
         }
     };
-    let persist_job = |job: &CoFounderJob| {
-        COFOUNDER_STATE.with(|c| {
+    let persist_job = |job: &EarlyAdopterJob| {
+        EARLY_ADOPTER_STATE.with(|c| {
             let mut s = c.borrow().get().clone();
             s.pending_job = Some(job.clone());
             c.borrow_mut().set(s);
@@ -9612,11 +10169,11 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
     // 1. Forfeit the expired shares (share pool → treasury).
     if !job.expired_done {
         if job.expired_e8s > 0 {
-            let pool_acc = LedgerAccount { owner: canister, subaccount: Some(COFOUNDER_SHARE_POOL_SUBACCOUNT) };
+            let pool_acc = LedgerAccount { owner: canister, subaccount: Some(EARLY_ADOPTER_SHARE_POOL_SUBACCOUNT) };
             let pool_balance = call_ledger_balance(ledger_id, pool_acc).await?;
             let amt = job.expired_e8s.min(pool_balance).saturating_sub(fee);
             if amt > 0 {
-                call_ledger_transfer(ledger_id, Some(COFOUNDER_SHARE_POOL_SUBACCOUNT), treasury.clone(), amt, Some(fee))
+                call_ledger_transfer(ledger_id, Some(EARLY_ADOPTER_SHARE_POOL_SUBACCOUNT), treasury.clone(), amt, Some(fee))
                     .await
                     .map_err(|e| format!("EXPIRE_TRANSFER_FAILED: {}", e))?;
             }
@@ -9628,8 +10185,8 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
     // 2. Route the month's yield: restake (<500), treasury cut, pot excess.
     if !job.restake_done {
         if job.restake_e8s > fee {
-            let neuron_acc = LedgerAccount { owner: canister, subaccount: Some(COFOUNDER_NEURON_SUBACCOUNT) };
-            call_ledger_transfer(ledger_id, Some(COFOUNDER_YIELD_SUBACCOUNT), neuron_acc, job.restake_e8s - fee, Some(fee))
+            let neuron_acc = LedgerAccount { owner: canister, subaccount: Some(EARLY_ADOPTER_NEURON_SUBACCOUNT) };
+            call_ledger_transfer(ledger_id, Some(EARLY_ADOPTER_YIELD_SUBACCOUNT), neuron_acc, job.restake_e8s - fee, Some(fee))
                 .await
                 .map_err(|e| format!("RESTAKE_TRANSFER_FAILED: {}", e))?;
         }
@@ -9638,7 +10195,7 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
     }
     if !job.cut_done {
         if job.treasury_cut_e8s > fee {
-            call_ledger_transfer(ledger_id, Some(COFOUNDER_YIELD_SUBACCOUNT), treasury, job.treasury_cut_e8s - fee, Some(fee))
+            call_ledger_transfer(ledger_id, Some(EARLY_ADOPTER_YIELD_SUBACCOUNT), treasury, job.treasury_cut_e8s - fee, Some(fee))
                 .await
                 .map_err(|e| format!("TREASURY_CUT_FAILED: {}", e))?;
         }
@@ -9647,8 +10204,8 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
     }
     if !job.pool_done {
         if job.excess_net_e8s > 0 {
-            let pool = LedgerAccount { owner: canister, subaccount: Some(COFOUNDER_SHARE_POOL_SUBACCOUNT) };
-            call_ledger_transfer(ledger_id, Some(COFOUNDER_YIELD_SUBACCOUNT), pool, job.excess_net_e8s, Some(fee))
+            let pool = LedgerAccount { owner: canister, subaccount: Some(EARLY_ADOPTER_SHARE_POOL_SUBACCOUNT) };
+            call_ledger_transfer(ledger_id, Some(EARLY_ADOPTER_YIELD_SUBACCOUNT), pool, job.excess_net_e8s, Some(fee))
                 .await
                 .map_err(|e| format!("POOL_TRANSFER_FAILED: {}", e))?;
         }
@@ -9657,16 +10214,16 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
     }
 
     // 3. Finalize (runs exactly once — the job is cleared at the end):
-    // allocate shares in proportion to each co-founder's staked ICP.
-    let state = COFOUNDER_STATE.with(|c| c.borrow().get().clone());
-    let n = COFOUNDERS.with(|m| m.borrow().len());
+    // allocate shares in proportion to each early adopter's staked ICP.
+    let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
+    let n = EARLY_ADOPTERS.with(|m| m.borrow().len());
     let pot = job.excess_net_e8s.saturating_add(state.rollover_e8s);
-    let stakes: Vec<(Principal, u64)> = COFOUNDERS.with(|m| {
+    let stakes: Vec<(Principal, u64)> = EARLY_ADOPTERS.with(|m| {
         m.borrow().iter().map(|e| (*e.key(), e.value().staked_e8s)).collect()
     });
-    let (shares, new_rollover) = cofounder_allocate(pot, &stakes);
+    let (shares, new_rollover) = early_adopter_allocate(pot, &stakes);
     let allocated: u64 = shares.iter().map(|(_, s)| *s).sum();
-    COFOUNDERS.with(|m| {
+    EARLY_ADOPTERS.with(|m| {
         let mut m = m.borrow_mut();
         for (user, share) in &shares {
             if let Some(mut c) = m.get(user) {
@@ -9679,23 +10236,23 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
     // 4. Persist the round + state and close the job.
     let month = job.month;
     let yield_e8s = job.yield_e8s;
-    let unclaimed_now: u64 = COFOUNDERS.with(|m| m.borrow().iter().map(|e| e.value().claimable_e8s).sum());
-    COFOUNDER_ROUNDS.with(|m| {
-        m.borrow_mut().insert(month, CoFounderRound {
+    let unclaimed_now: u64 = EARLY_ADOPTERS.with(|m| m.borrow().iter().map(|e| e.value().claimable_e8s).sum());
+    EARLY_ADOPTER_ROUNDS.with(|m| {
+        m.borrow_mut().insert(month, EarlyAdopterRound {
             month,
             settled_at: now,
             yield_e8s,
             treasury_e8s: job.treasury_cut_e8s,
             distributed_e8s: allocated,
             restaked_e8s: job.restake_e8s,
-            cofounder_count: n,
+            early_adopter_count: n,
             expired_e8s: job.expired_e8s,
             rollover_after_e8s: new_rollover,
             share_pool_after_e8s: new_rollover.saturating_add(unclaimed_now),
         });
     });
-    let newly_closed = !state.membership_closed && yield_e8s >= COFOUNDER_CLOSE_YIELD_E8S;
-    COFOUNDER_STATE.with(|c| {
+    let newly_closed = !state.membership_closed && yield_e8s >= EARLY_ADOPTER_CLOSE_YIELD_E8S;
+    EARLY_ADOPTER_STATE.with(|c| {
         let mut s = c.borrow().get().clone();
         s.rollover_e8s = new_rollover;
         s.last_processed_month = month.max(s.last_processed_month);
@@ -9716,7 +10273,7 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
     if newly_closed {
         let entry = AuditLogEntry {
             timestamp: now,
-            event_type: "cofounder_membership_closed".to_string(),
+            event_type: "early_adopter_membership_closed".to_string(),
             proposal_id: month,
             user: get_canister_id(),
             amount_e8s: yield_e8s,
@@ -9727,7 +10284,7 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
     }
     let entry = AuditLogEntry {
         timestamp: now,
-        event_type: "cofounder_settlement".to_string(),
+        event_type: "early_adopter_settlement".to_string(),
         proposal_id: month,
         user: get_canister_id(),
         amount_e8s: yield_e8s,
@@ -9739,45 +10296,45 @@ async fn cofounder_run_settlement(now: u64) -> Result<(), String> {
 }
 
 /// Sweep hook: settle once whenever a new 30-day period has started (no-op
-/// until the first co-founder exists).
-async fn cofounder_settlement_check() {
-    if !feature_enabled(FLAG_COFOUNDERS) {
+/// until the first early adopter exists).
+async fn early_adopter_settlement_check() {
+    if !feature_enabled(FLAG_EARLY_ADOPTERS) {
         return;
     }
-    let has_members = COFOUNDERS.with(|m| !m.borrow().is_empty());
+    let has_members = EARLY_ADOPTERS.with(|m| !m.borrow().is_empty());
     if !has_members {
         return;
     }
     // Repair the neuron bootstrap (claim restaked yield, follow the leader).
-    if let Err(e) = advance_cofounder_bootstrap().await {
-        canister_print(&format!("cofounder bootstrap retry failed: {}", e));
+    if let Err(e) = advance_early_adopter_bootstrap().await {
+        canister_print(&format!("early_adopter bootstrap retry failed: {}", e));
     }
     let now = current_time();
-    let state = COFOUNDER_STATE.with(|c| c.borrow().get().clone());
+    let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
     // Run when a new period starts, and ALSO whenever a journaled settlement
     // is mid-flight (a leg failed) so it resumes promptly.
-    if cofounder_month(now) > state.last_processed_month || state.pending_job.is_some() {
-        if let Err(e) = cofounder_run_settlement(now).await {
-            canister_print(&format!("cofounder settlement failed (will retry next sweep): {}", e));
+    if early_adopter_month(now) > state.last_processed_month || state.pending_job.is_some() {
+        if let Err(e) = early_adopter_run_settlement(now).await {
+            canister_print(&format!("early_adopter settlement failed (will retry next sweep): {}", e));
         }
     }
 }
 
 /// Local-dev: where to send mock yield (the neuron's maturity inbox).
 #[ic_cdk::query]
-fn get_cofounder_yield_inbox_address() -> LedgerAccount {
+fn get_early_adopter_yield_inbox_address() -> LedgerAccount {
     LedgerAccount {
         owner: get_canister_id(),
-        subaccount: Some(COFOUNDER_YIELD_SUBACCOUNT),
+        subaccount: Some(EARLY_ADOPTER_YIELD_SUBACCOUNT),
     }
 }
 
 /// Local-dev: force a settlement now regardless of the period clock.
 #[ic_cdk::update]
-async fn dev_run_cofounder_settlement() -> Result<(), String> {
+async fn dev_run_early_adopter_settlement() -> Result<(), String> {
     require_authenticated()?;
     require_local_dev()?;
-    cofounder_run_settlement(current_time()).await
+    early_adopter_run_settlement(current_time()).await
 }
 
 /// Local-dev: jump the page to a significant preset state (VISUAL ONLY —
@@ -9786,7 +10343,7 @@ async fn dev_run_cofounder_settlement() -> Result<(), String> {
 /// 6-month history + a claimable share for the caller, 2 = membership
 /// closed (same history plus the 2,000+ ICP month that latched it).
 #[ic_cdk::update]
-fn dev_set_cofounder_preset(preset: u8) -> Result<(), String> {
+fn dev_set_early_adopter_preset(preset: u8) -> Result<(), String> {
     require_authenticated()?;
     require_local_dev()?;
     if preset > 2 {
@@ -9794,15 +10351,15 @@ fn dev_set_cofounder_preset(preset: u8) -> Result<(), String> {
     }
     let caller = get_caller();
     let now = current_time();
-    let month_now = cofounder_month(now);
+    let month_now = early_adopter_month(now);
     const ICP_E8S: u64 = 100_000_000;
 
     // Wipe model state.
-    let members: Vec<Principal> = COFOUNDERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-    COFOUNDERS.with(|m| { let mut m = m.borrow_mut(); for k in members { m.remove(&k); } });
-    let months: Vec<u64> = COFOUNDER_ROUNDS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-    COFOUNDER_ROUNDS.with(|m| { let mut m = m.borrow_mut(); for k in months { m.remove(&k); } });
-    let mut state = CoFounderState {
+    let members: Vec<Principal> = EARLY_ADOPTERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    EARLY_ADOPTERS.with(|m| { let mut m = m.borrow_mut(); for k in members { m.remove(&k); } });
+    let months: Vec<u64> = EARLY_ADOPTER_ROUNDS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    EARLY_ADOPTER_ROUNDS.with(|m| { let mut m = m.borrow_mut(); for k in months { m.remove(&k); } });
+    let mut state = EarlyAdopterState {
         total_staked_e8s: 0,
         rollover_e8s: 0,
         last_processed_month: month_now,
@@ -9828,12 +10385,12 @@ fn dev_set_cofounder_preset(preset: u8) -> Result<(), String> {
         ];
         let total: u64 = fixtures.iter().map(|(_, s, _)| *s).sum();
         for (user, staked, months_ago) in fixtures {
-            COFOUNDERS.with(|m| {
-                m.borrow_mut().insert(user, CoFounder {
+            EARLY_ADOPTERS.with(|m| {
+                m.borrow_mut().insert(user, EarlyAdopter {
                     user,
                     staked_e8s: staked,
-                    joined_at: now.saturating_sub((months_ago + 2) * COFOUNDER_PERIOD_NANOS),
-                    last_stake_at: now.saturating_sub(months_ago * COFOUNDER_PERIOD_NANOS),
+                    joined_at: now.saturating_sub((months_ago + 2) * EARLY_ADOPTER_PERIOD_NANOS),
+                    last_stake_at: now.saturating_sub(months_ago * EARLY_ADOPTER_PERIOD_NANOS),
                     // The caller gets a juicy unclaimed share to exercise Claim.
                     claimable_e8s: if user == caller { 75 * ICP_E8S } else { 0 },
                 });
@@ -9846,14 +10403,14 @@ fn dev_set_cofounder_preset(preset: u8) -> Result<(), String> {
         state.nonce = 7;
 
         // Six months of varied history: restake, treasury-only, payouts…
-        let mk = |months_ago: u64, yield_icp: u64, treasury: u64, dist: u64, restake: u64, expired: u64, roll: u64| CoFounderRound {
+        let mk = |months_ago: u64, yield_icp: u64, treasury: u64, dist: u64, restake: u64, expired: u64, roll: u64| EarlyAdopterRound {
             month: month_now.saturating_sub(months_ago),
-            settled_at: now.saturating_sub(months_ago * COFOUNDER_PERIOD_NANOS),
+            settled_at: now.saturating_sub(months_ago * EARLY_ADOPTER_PERIOD_NANOS),
             yield_e8s: yield_icp * ICP_E8S,
             treasury_e8s: treasury * ICP_E8S,
             distributed_e8s: dist * ICP_E8S,
             restaked_e8s: restake * ICP_E8S,
-            cofounder_count: 4,
+            early_adopter_count: 4,
             expired_e8s: expired * ICP_E8S,
             rollover_after_e8s: roll * ICP_E8S,
             share_pool_after_e8s: (roll + dist / 2) * ICP_E8S,
@@ -9873,7 +10430,7 @@ fn dev_set_cofounder_preset(preset: u8) -> Result<(), String> {
         state.total_distributed_e8s = rounds.iter().map(|r| r.distributed_e8s).sum();
         state.total_restaked_e8s = rounds.iter().map(|r| r.restaked_e8s).sum();
         state.total_expired_e8s = rounds.iter().map(|r| r.expired_e8s).sum();
-        COFOUNDER_ROUNDS.with(|m| {
+        EARLY_ADOPTER_ROUNDS.with(|m| {
             let mut m = m.borrow_mut();
             for r in rounds {
                 m.insert(r.month, r);
@@ -9881,7 +10438,7 @@ fn dev_set_cofounder_preset(preset: u8) -> Result<(), String> {
         });
     }
 
-    COFOUNDER_STATE.with(|c| { c.borrow_mut().set(state); });
+    EARLY_ADOPTER_STATE.with(|c| { c.borrow_mut().set(state); });
     Ok(())
 }
 
@@ -10433,7 +10990,8 @@ mod tests {
             hot_keys: vec![Principal::management_canister()],
             cached_neuron_stake_e8s: 100_000_000,
             maturity_e8s_equivalent: 0,
-            voting_power: 100_000_000,
+            voting_power: Some(100_000_000),
+            deciding_voting_power: None,
             followees: vec![(
                 TOPIC_GOVERNANCE,
                 Followees {
@@ -10460,7 +11018,8 @@ mod tests {
             hot_keys: vec![Principal::anonymous()],
             cached_neuron_stake_e8s: 100_000_000,
             maturity_e8s_equivalent: 0,
-            voting_power: 100_000_000,
+            voting_power: Some(100_000_000),
+            deciding_voting_power: None,
             followees: vec![(
                 TOPIC_GOVERNANCE,
                 Followees {
@@ -10786,7 +11345,8 @@ mod tests {
             hot_keys: vec![],
             cached_neuron_stake_e8s: 0,
             maturity_e8s_equivalent: 0,
-            voting_power: 50_000_000_000,
+            voting_power: Some(50_000_000_000),
+            deciding_voting_power: None,
             followees: vec![],
         };
         set_mock_neuron(Ok(mock_n.clone()));
@@ -10820,7 +11380,7 @@ mod tests {
         assert_eq!(pn.voting_power, 50_000_000_000);
 
         // Re-call overwrite
-        mock_n.voting_power = 60_000_000_000;
+        mock_n.voting_power = Some(60_000_000_000);
         set_mock_neuron(Ok(mock_n.clone()));
         let res = create_pool_draft(54321).await;
         assert!(res.is_ok());
@@ -11293,7 +11853,8 @@ mod tests {
             controller: Some(Principal::from_slice(&[22; 29])),
             cached_neuron_stake_e8s: 25_000_000_000,
             maturity_e8s_equivalent: 0,
-            voting_power: 25_000_000_000,
+            voting_power: Some(25_000_000_000),
+            deciding_voting_power: None,
             hot_keys: vec![get_canister_id()],
             followees: vec![(
                 TOPIC_GOVERNANCE,
@@ -11312,7 +11873,8 @@ mod tests {
             controller: Some(Principal::from_slice(&[33; 29])),
             cached_neuron_stake_e8s: 30_000_000_000,
             maturity_e8s_equivalent: 0,
-            voting_power: 30_000_000_000,
+            voting_power: Some(30_000_000_000),
+            deciding_voting_power: None,
             hot_keys: vec![get_canister_id()],
             followees: vec![], // no follow
         };
@@ -11349,7 +11911,8 @@ mod tests {
             controller: Some(Principal::from_slice(&[33; 29])),
             cached_neuron_stake_e8s: 30_000_000_000,
             maturity_e8s_equivalent: 0,
-            voting_power: 30_000_000_000,
+            voting_power: Some(30_000_000_000),
+            deciding_voting_power: None,
             hot_keys: vec![get_canister_id()],
             followees: vec![(
                 TOPIC_GOVERNANCE,
@@ -11545,12 +12108,29 @@ mod tests {
     fn test_seed_default_dapps_idempotent_and_listed_first() {
         clear_dapps();
         seed_default_dapps();
-        seed_default_dapps(); // no-op on a non-empty directory
+        seed_default_dapps(); // re-run inserts nothing new
         let listed = list_dapps();
-        assert_eq!(listed.len(), 2);
+        assert_eq!(listed.len(), 5);
         assert_eq!(listed[0].name, "idGeek 2.0");
         assert_eq!(listed[1].name, "Liquidium");
+        assert_eq!(listed[2].name, "ICPSwap");
+        assert_eq!(listed[3].name, "OISY Wallet");
+        assert_eq!(listed[4].name, "OpenChat");
         assert!(listed.iter().all(|d| !d.community && d.expires_at.is_none()));
+    }
+
+    #[test]
+    fn test_seed_default_dapps_backfills_missing_on_populated_directory() {
+        clear_dapps();
+        seed_default_dapps();
+        // Simulate a directory seeded before the newer curated entries existed.
+        let icpswap_id = list_dapps().iter().find(|d| d.name == "ICPSwap").unwrap().id;
+        DAPPS.with(|m| { m.borrow_mut().remove(&icpswap_id); });
+        assert_eq!(list_dapps().len(), 4);
+        seed_default_dapps();
+        let listed = list_dapps();
+        assert_eq!(listed.len(), 5, "missing curated entry is backfilled");
+        assert_eq!(listed.iter().filter(|d| d.name == "ICPSwap").count(), 1, "no duplicates");
     }
 
     #[tokio::test]
@@ -11779,15 +12359,15 @@ mod tests {
         clear_arcade();
     }
 
-    // ── Co-Founders ────────────────────────────────────────────────────────
+    // ── Early Adopters ────────────────────────────────────────────────────────
 
-    fn clear_cofounders() {
-        let keys: Vec<Principal> = COFOUNDERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-        COFOUNDERS.with(|m| { let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
-        let months: Vec<u64> = COFOUNDER_ROUNDS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-        COFOUNDER_ROUNDS.with(|m| { let mut m = m.borrow_mut(); for k in months { m.remove(&k); } });
-        COFOUNDER_STATE.with(|c| {
-            c.borrow_mut().set(CoFounderState {
+    fn clear_early_adopters() {
+        let keys: Vec<Principal> = EARLY_ADOPTERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        EARLY_ADOPTERS.with(|m| { let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
+        let months: Vec<u64> = EARLY_ADOPTER_ROUNDS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        EARLY_ADOPTER_ROUNDS.with(|m| { let mut m = m.borrow_mut(); for k in months { m.remove(&k); } });
+        EARLY_ADOPTER_STATE.with(|c| {
+            c.borrow_mut().set(EarlyAdopterState {
                 total_staked_e8s: 0, rollover_e8s: 0, last_processed_month: 0,
                 total_yield_e8s: 0, total_distributed_e8s: 0, total_expired_e8s: 0,
                 membership_closed: false, nonce: 0, neuron_id: None,
@@ -11797,84 +12377,84 @@ mod tests {
         });
     }
 
-    fn enable_cofounders_flag() {
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_COFOUNDERS.to_string(), 1); });
+    fn enable_early_adopters_flag() {
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_EARLY_ADOPTERS.to_string(), 1); });
     }
 
     const ICP: u64 = 100_000_000;
 
     #[test]
-    fn test_cofounder_route_yield_rules() {
+    fn test_early_adopter_route_yield_rules() {
         // Under 500 ICP: the whole month restakes into the neuron.
-        assert_eq!(cofounder_route_yield(499 * ICP, 0), (499 * ICP, 0, 0));
-        assert_eq!(cofounder_route_yield(1, 0), (1, 0, 0));
+        assert_eq!(early_adopter_route_yield(499 * ICP, 0), (499 * ICP, 0, 0));
+        assert_eq!(early_adopter_route_yield(1, 0), (1, 0, 0));
         // 500..1,000: all treasury, nothing to the pot.
-        assert_eq!(cofounder_route_yield(500 * ICP, 0), (0, 500 * ICP, 0));
-        assert_eq!(cofounder_route_yield(999 * ICP, 0), (0, 999 * ICP, 0));
-        assert_eq!(cofounder_route_yield(1000 * ICP, 0), (0, 1000 * ICP, 0));
+        assert_eq!(early_adopter_route_yield(500 * ICP, 0), (0, 500 * ICP, 0));
+        assert_eq!(early_adopter_route_yield(999 * ICP, 0), (0, 999 * ICP, 0));
+        assert_eq!(early_adopter_route_yield(1000 * ICP, 0), (0, 1000 * ICP, 0));
         // Above 1,000: treasury keeps 1,000, the excess feeds the pot.
-        assert_eq!(cofounder_route_yield(1150 * ICP, 0), (0, 1000 * ICP, 150 * ICP));
+        assert_eq!(early_adopter_route_yield(1150 * ICP, 0), (0, 1000 * ICP, 150 * ICP));
         // The pot is net of the ledger fee burned moving it into the pool —
         // otherwise the final claim is one fee short (caught by local e2e).
-        assert_eq!(cofounder_route_yield(1200 * ICP, 10_000), (0, 1000 * ICP, 200 * ICP - 10_000));
+        assert_eq!(early_adopter_route_yield(1200 * ICP, 10_000), (0, 1000 * ICP, 200 * ICP - 10_000));
         // Excess at or below one fee doesn't move.
-        assert_eq!(cofounder_route_yield(1000 * ICP + 9_000, 10_000), (0, 1000 * ICP, 0));
+        assert_eq!(early_adopter_route_yield(1000 * ICP + 9_000, 10_000), (0, 1000 * ICP, 0));
     }
 
     #[test]
-    fn test_cofounder_allocate_is_proportional_to_stake() {
+    fn test_early_adopter_allocate_is_proportional_to_stake() {
         let a = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
         let b = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
         // 10 vs 30 staked → 25% / 75% of the pot.
         let stakes = vec![(a, 10 * ICP), (b, 30 * ICP)];
-        let (shares, dust) = cofounder_allocate(200 * ICP, &stakes);
+        let (shares, dust) = early_adopter_allocate(200 * ICP, &stakes);
         assert_eq!(shares, vec![(a, 50 * ICP), (b, 150 * ICP)]);
         assert_eq!(dust, 0);
         // Pots under 100 ICP allocate nothing — everything rolls over.
-        let (none, roll) = cofounder_allocate(99 * ICP, &stakes);
+        let (none, roll) = early_adopter_allocate(99 * ICP, &stakes);
         assert!(none.is_empty());
         assert_eq!(roll, 99 * ICP);
         // Integer dust stays in the pool.
         let stakes3 = vec![(a, 1 * ICP), (b, 2 * ICP)];
-        let (shares3, dust3) = cofounder_allocate(100 * ICP + 1, &stakes3);
+        let (shares3, dust3) = early_adopter_allocate(100 * ICP + 1, &stakes3);
         let total: u64 = shares3.iter().map(|(_, s)| *s).sum();
         assert_eq!(total + dust3, 100 * ICP + 1);
         assert!(shares3[1].1 == shares3[0].1 * 2 || shares3[1].1 == shares3[0].1 * 2 + 1);
         // No stake → nothing allocated.
-        assert_eq!(cofounder_allocate(500 * ICP, &[]).0.len(), 0);
+        assert_eq!(early_adopter_allocate(500 * ICP, &[]).0.len(), 0);
     }
 
     #[tokio::test]
-    async fn test_cofounder_stake_is_permanent_and_validated() {
-        clear_cofounders();
-        enable_cofounders_flag();
+    async fn test_early_adopter_stake_is_permanent_and_validated() {
+        clear_early_adopters();
+        enable_early_adopters_flag();
         let user = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
         CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
         set_mock_caller(user);
 
         // Below the 1 ICP minimum.
-        assert_eq!(cofounder_stake(ICP - 1).await.unwrap_err(), "BELOW_MIN_STAKE");
+        assert_eq!(early_adopter_stake(ICP - 1).await.unwrap_err(), "BELOW_MIN_STAKE");
         // Underfunded escrow.
         set_mock_ledger_balance(2 * ICP); // needs 2 ICP + fee
-        assert_eq!(cofounder_stake(2 * ICP).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
+        assert_eq!(early_adopter_stake(2 * ICP).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
         // Funded: stake lands and accumulates.
         set_mock_ledger_balance(2 * ICP + 10_000);
         set_mock_ledger_transfer(Ok(1));
-        cofounder_stake(2 * ICP).await.unwrap();
-        cofounder_stake(2 * ICP).await.unwrap();
-        let info = get_cofounder_info();
+        early_adopter_stake(2 * ICP).await.unwrap();
+        early_adopter_stake(2 * ICP).await.unwrap();
+        let info = get_early_adopter_info();
         assert_eq!(info.my_staked_e8s, 4 * ICP);
-        assert_eq!(info.cofounder_count, 1);
+        assert_eq!(info.early_adopter_count, 1);
         assert_eq!(info.total_staked_e8s, 4 * ICP);
         // The settlement clock anchored to "now" — next run is a month out.
         assert!(info.next_distribution_at > current_time());
-        clear_cofounders();
+        clear_early_adopters();
     }
 
     #[tokio::test]
-    async fn test_cofounder_settlement_allocates_claims_and_expires() {
-        clear_cofounders();
-        enable_cofounders_flag();
+    async fn test_early_adopter_settlement_allocates_claims_and_expires() {
+        clear_early_adopters();
+        enable_early_adopters_flag();
         let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
         let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
         CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
@@ -11882,13 +12462,13 @@ mod tests {
         // Alice stakes 10, Bob 30 → shares must be 25% / 75%.
         set_mock_caller(alice);
         set_mock_ledger_balance(10 * ICP + 10_000);
-        cofounder_stake(10 * ICP).await.unwrap();
+        early_adopter_stake(10 * ICP).await.unwrap();
         set_mock_caller(bob);
         set_mock_ledger_balance(30 * ICP + 10_000);
-        cofounder_stake(30 * ICP).await.unwrap();
+        early_adopter_stake(30 * ICP).await.unwrap();
 
         // The neuron bootstraps and follows the primary voting neuron.
-        let info = get_cofounder_info();
+        let info = get_early_adopter_info();
         assert!(info.neuron_id.is_some(), "neuron claimed at first stake");
         assert!(info.follows_primary_neuron, "follows the leader on all topics");
 
@@ -11898,71 +12478,71 @@ mod tests {
         let alice_share = pot / 4;
         let bob_share = (pot as u128 * 3 / 4) as u64;
         set_mock_ledger_balance(1200 * ICP); // inbox balance read
-        cofounder_run_settlement(current_time()).await.unwrap();
+        early_adopter_run_settlement(current_time()).await.unwrap();
         set_mock_caller(alice);
-        assert_eq!(get_cofounder_info().my_claimable_e8s, alice_share);
+        assert_eq!(get_early_adopter_info().my_claimable_e8s, alice_share);
         set_mock_caller(bob);
-        assert_eq!(get_cofounder_info().my_claimable_e8s, bob_share);
-        let rounds = list_cofounder_rounds();
+        assert_eq!(get_early_adopter_info().my_claimable_e8s, bob_share);
+        let rounds = list_early_adopter_rounds();
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].yield_e8s, 1200 * ICP);
         assert_eq!(rounds[0].treasury_e8s, 1000 * ICP);
         assert_eq!(rounds[0].distributed_e8s, alice_share + bob_share);
         assert_eq!(rounds[0].restaked_e8s, 0);
-        assert_eq!(rounds[0].cofounder_count, 2);
+        assert_eq!(rounds[0].early_adopter_count, 2);
 
         // Alice claims; Bob doesn't.
         set_mock_caller(alice);
-        let net = claim_cofounder_yield().await.unwrap();
+        let net = claim_early_adopter_yield().await.unwrap();
         assert_eq!(net, alice_share - 10_000);
-        assert_eq!(claim_cofounder_yield().await.unwrap_err(), "NOTHING_TO_CLAIM");
+        assert_eq!(claim_early_adopter_yield().await.unwrap_err(), "NOTHING_TO_CLAIM");
 
         // Month 2 settles with low yield (50 ICP — under 500, so the whole
         // month RESTAKES into the neuron) and Bob's unclaimed share is
         // forfeited to the treasury.
         set_mock_ledger_balance(50 * ICP);
-        cofounder_run_settlement(current_time() + COFOUNDER_PERIOD_NANOS).await.unwrap();
+        early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
         set_mock_caller(bob);
-        assert_eq!(get_cofounder_info().my_claimable_e8s, 0, "unclaimed share expired");
-        let rounds = list_cofounder_rounds();
+        assert_eq!(get_early_adopter_info().my_claimable_e8s, 0, "unclaimed share expired");
+        let rounds = list_early_adopter_rounds();
         assert_eq!(rounds.len(), 2);
         let r2 = rounds.iter().find(|r| r.expired_e8s > 0).expect("expiry recorded");
         assert_eq!(r2.expired_e8s, bob_share);
         assert_eq!(r2.treasury_e8s, 0, "sub-500 months pay the treasury nothing");
         assert_eq!(r2.restaked_e8s, 50 * ICP, "sub-500 months compound into the neuron");
         assert_eq!(r2.distributed_e8s, 0);
-        assert_eq!(get_cofounder_info().total_restaked_e8s, 50 * ICP);
+        assert_eq!(get_early_adopter_info().total_restaked_e8s, 50 * ICP);
 
         // Month 3: 700 ICP — between the thresholds → all treasury.
         set_mock_ledger_balance(700 * ICP);
-        cofounder_run_settlement(current_time() + 2 * COFOUNDER_PERIOD_NANOS).await.unwrap();
-        let rounds = list_cofounder_rounds();
+        early_adopter_run_settlement(current_time() + 2 * EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
+        let rounds = list_early_adopter_rounds();
         let r3 = rounds.iter().find(|r| r.treasury_e8s == 700 * ICP).expect("mid-band month");
         assert_eq!(r3.restaked_e8s, 0);
         assert_eq!(r3.distributed_e8s, 0);
-        clear_cofounders();
+        clear_early_adopters();
     }
 
     #[tokio::test]
-    async fn test_cofounder_settlement_resumes_journal_without_rerouting() {
-        clear_cofounders();
-        enable_cofounders_flag();
+    async fn test_early_adopter_settlement_resumes_journal_without_rerouting() {
+        clear_early_adopters();
+        enable_early_adopters_flag();
         let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
         let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
         CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
         set_mock_ledger_transfer(Ok(1));
         set_mock_caller(alice);
         set_mock_ledger_balance(10 * ICP + 10_000);
-        cofounder_stake(10 * ICP).await.unwrap();
+        early_adopter_stake(10 * ICP).await.unwrap();
         set_mock_caller(bob);
         set_mock_ledger_balance(30 * ICP + 10_000);
-        cofounder_stake(30 * ICP).await.unwrap();
+        early_adopter_stake(30 * ICP).await.unwrap();
 
         // A 1,600 ICP month whose treasury-cut transfer fails mid-flight.
         set_mock_ledger_balance(1600 * ICP);
         set_mock_ledger_transfer(Err("ledger down".into()));
-        assert!(cofounder_run_settlement(current_time()).await.is_err());
-        let job = COFOUNDER_STATE.with(|c| c.borrow().get().pending_job.clone()).expect("journal persisted");
+        assert!(early_adopter_run_settlement(current_time()).await.is_err());
+        let job = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().pending_job.clone()).expect("journal persisted");
         assert_eq!(job.yield_e8s, 1600 * ICP);
         assert_eq!(job.treasury_cut_e8s, 1000 * ICP);
         assert_eq!(job.excess_net_e8s, 600 * ICP - 10_000);
@@ -11973,9 +12553,9 @@ mod tests {
         // amounts must be used instead.
         set_mock_ledger_balance(0);
         set_mock_ledger_transfer(Ok(2));
-        cofounder_run_settlement(current_time()).await.unwrap();
-        assert!(COFOUNDER_STATE.with(|c| c.borrow().get().pending_job.is_none()), "journal closed");
-        let rounds = list_cofounder_rounds();
+        early_adopter_run_settlement(current_time()).await.unwrap();
+        assert!(EARLY_ADOPTER_STATE.with(|c| c.borrow().get().pending_job.is_none()), "journal closed");
+        let rounds = list_early_adopter_rounds();
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].yield_e8s, 1600 * ICP, "original month, not the re-read remainder");
         assert_eq!(rounds[0].treasury_e8s, 1000 * ICP, "cut taken exactly once");
@@ -11988,15 +12568,15 @@ mod tests {
         // of double-spending the share pool.
         set_mock_ledger_balance(50 * ICP);
         set_mock_ledger_transfer(Err("ledger down".into()));
-        assert!(cofounder_run_settlement(current_time() + COFOUNDER_PERIOD_NANOS).await.is_err());
+        assert!(early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.is_err());
         set_mock_caller(alice);
-        assert_eq!(claim_cofounder_yield().await.unwrap_err(), "NOTHING_TO_CLAIM");
+        assert_eq!(claim_early_adopter_yield().await.unwrap_err(), "NOTHING_TO_CLAIM");
         set_mock_ledger_transfer(Ok(3));
-        cofounder_run_settlement(current_time() + COFOUNDER_PERIOD_NANOS).await.unwrap();
-        let rounds = list_cofounder_rounds();
+        early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
+        let rounds = list_early_adopter_rounds();
         let r2 = rounds.iter().find(|r| r.expired_e8s > 0).expect("expiry recorded");
         assert_eq!(r2.expired_e8s, pot / 4 + (pot as u128 * 3 / 4) as u64);
-        clear_cofounders();
+        clear_early_adopters();
     }
 
     #[tokio::test]
@@ -12012,49 +12592,49 @@ mod tests {
         set_mock_ledger_transfer(Ok(9));
         assert_eq!(reclaim_escrow(EscrowKind::Explorer, ExplorerToken::ICP).await.unwrap(), 5 * ICP - 10_000);
         assert_eq!(reclaim_escrow(EscrowKind::Arcade, ExplorerToken::CkUSDT).await.unwrap(), 5 * ICP - 10_000);
-        assert_eq!(reclaim_escrow(EscrowKind::CoFounder, ExplorerToken::ICP).await.unwrap(), 5 * ICP - 10_000);
+        assert_eq!(reclaim_escrow(EscrowKind::EarlyAdopter, ExplorerToken::ICP).await.unwrap(), 5 * ICP - 10_000);
     }
 
     #[tokio::test]
-    async fn test_cofounder_membership_closes_at_2000_yield_but_topups_continue() {
-        clear_cofounders();
-        enable_cofounders_flag();
+    async fn test_early_adopter_membership_closes_at_2000_yield_but_topups_continue() {
+        clear_early_adopters();
+        enable_early_adopters_flag();
         let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
         let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
         CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
         set_mock_ledger_transfer(Ok(1));
         set_mock_caller(alice);
         set_mock_ledger_balance(5 * ICP + 10_000);
-        cofounder_stake(5 * ICP).await.unwrap();
+        early_adopter_stake(5 * ICP).await.unwrap();
 
         // A 1,999 ICP month keeps the doors open.
         set_mock_ledger_balance(1999 * ICP);
-        cofounder_run_settlement(current_time()).await.unwrap();
-        assert!(!get_cofounder_info().membership_closed);
+        early_adopter_run_settlement(current_time()).await.unwrap();
+        assert!(!get_early_adopter_info().membership_closed);
 
         // A 2,000 ICP month latches the table shut — permanently.
         set_mock_ledger_balance(2000 * ICP);
-        cofounder_run_settlement(current_time() + COFOUNDER_PERIOD_NANOS).await.unwrap();
-        assert!(get_cofounder_info().membership_closed);
+        early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
+        assert!(get_early_adopter_info().membership_closed);
 
         // New members are turned away…
         set_mock_caller(bob);
         set_mock_ledger_balance(5 * ICP + 10_000);
-        assert_eq!(cofounder_stake(5 * ICP).await.unwrap_err(), "MEMBERSHIP_CLOSED");
+        assert_eq!(early_adopter_stake(5 * ICP).await.unwrap_err(), "MEMBERSHIP_CLOSED");
         // …even after a later low-yield month (the latch never reopens).
         set_mock_ledger_balance(10 * ICP);
-        cofounder_run_settlement(current_time() + 2 * COFOUNDER_PERIOD_NANOS).await.unwrap();
+        early_adopter_run_settlement(current_time() + 2 * EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
         set_mock_caller(bob);
         set_mock_ledger_balance(5 * ICP + 10_000);
-        assert_eq!(cofounder_stake(5 * ICP).await.unwrap_err(), "MEMBERSHIP_CLOSED");
+        assert_eq!(early_adopter_stake(5 * ICP).await.unwrap_err(), "MEMBERSHIP_CLOSED");
 
-        // …but an existing co-founder can always add more.
+        // …but an existing early adopter can always add more.
         set_mock_caller(alice);
         set_mock_ledger_balance(3 * ICP + 10_000);
-        cofounder_stake(3 * ICP).await.unwrap();
-        assert_eq!(get_cofounder_info().my_staked_e8s, 8 * ICP);
-        assert_eq!(get_cofounder_info().cofounder_count, 1);
-        clear_cofounders();
+        early_adopter_stake(3 * ICP).await.unwrap();
+        assert_eq!(get_early_adopter_info().my_staked_e8s, 8 * ICP);
+        assert_eq!(get_early_adopter_info().early_adopter_count, 1);
+        clear_early_adopters();
     }
 
     #[test]
@@ -12741,6 +13321,8 @@ mod tests {
             dissolve_eta: 2,
             disburse_block: None,
             fee_refund_block: None,
+            merged_into: None,
+            child_e8s: None,
             settled_at: None,
         };
         let decoded = PendingUnstake::from_bytes(unstake.to_bytes());
@@ -12844,13 +13426,18 @@ mod tests {
             stake(5_000_000, StakeTier::SixMonths).await.unwrap_err(),
             "BELOW_MINIMUM"
         );
-        stake(10_000_000, StakeTier::SixMonths).await.unwrap();
+        // Fractional stakes are rejected; top up with a whole ICP instead.
+        assert_eq!(
+            stake(10_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            "WHOLE_ICP_ONLY"
+        );
+        stake(100_000_000, StakeTier::SixMonths).await.unwrap();
         let pool = tier_pool(StakeTier::SixMonths);
-        assert_eq!(pool.total_staked_e8s, 210_000_000);
+        assert_eq!(pool.total_staked_e8s, 300_000_000);
         assert_eq!(pool.neuron_id, Some(neuron_id), "one pooled neuron per tier");
         assert_eq!(
             MOCK_GOV.with(|g| g.borrow().neurons.get(&neuron_id).unwrap().stake_e8s),
-            210_000_000
+            300_000_000
         );
         assert_eq!(
             STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
@@ -12858,7 +13445,7 @@ mod tests {
         );
         assert_eq!(
             STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, bob)).unwrap().amount_e8s),
-            10_000_000
+            100_000_000
         );
 
         // A different tier gets its own neuron (first stake ≥ 1 ICP again).
@@ -12875,12 +13462,12 @@ mod tests {
             StakeTier::TwoYears.dissolve_delay_secs()
         );
         // 6-month pool untouched by the 2-year stake.
-        assert_eq!(tier_pool(StakeTier::SixMonths).total_staked_e8s, 210_000_000);
+        assert_eq!(tier_pool(StakeTier::SixMonths).total_staked_e8s, 300_000_000);
 
         // Insufficient escrow is rejected before any state change.
         set_mock_ledger_balance(0);
         assert_eq!(
-            stake(10_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            stake(100_000_000, StakeTier::SixMonths).await.unwrap_err(),
             "INSUFFICIENT_DEPOSIT"
         );
     }
@@ -12896,10 +13483,10 @@ mod tests {
         // Make the claim fail: the share is still credited and the refresh
         // stays pending for the sweep.
         set_mock_manage_neuron(Some(Err("governance unavailable".to_string())));
-        stake(150_000_000, StakeTier::OneYear).await.unwrap();
+        stake(200_000_000, StakeTier::OneYear).await.unwrap();
         let pool = tier_pool(StakeTier::OneYear);
-        assert_eq!(pool.total_staked_e8s, 150_000_000);
-        assert_eq!(pool.pending_refresh_e8s, 150_000_000);
+        assert_eq!(pool.total_staked_e8s, 200_000_000);
+        assert_eq!(pool.pending_refresh_e8s, 200_000_000);
         assert_eq!(pool.bootstrap, StakingBootstrap::NotStarted);
         assert!(pool.neuron_id.is_none());
 
@@ -12916,6 +13503,77 @@ mod tests {
         assert_eq!(pool.pending_refresh_e8s, 0);
         assert_eq!(pool.bootstrap, StakingBootstrap::Ready);
         assert!(pool.neuron_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_merge_unstake_back_into_tier() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap(); // 5 ICP
+        stake(200_000_000, StakeTier::OneYear).await.unwrap(); // bootstrap 1y pool
+
+        let id = unstake(200_000_000, StakeTier::SixMonths).await.unwrap();
+        let pool_1y_before = tier_pool(StakeTier::OneYear).total_staked_e8s;
+
+        // Validation gauntlet.
+        assert_eq!(merge_unstake(999, StakeTier::OneYear).await.unwrap_err(), "UNSTAKE_NOT_FOUND");
+        let bob = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
+        set_mock_caller(bob);
+        assert_eq!(merge_unstake(id, StakeTier::OneYear).await.unwrap_err(), "NOT_YOUR_UNSTAKE");
+        set_mock_caller(alice);
+        assert_eq!(merge_unstake(id, StakeTier::TwoYears).await.unwrap_err(), "POOL_NOT_READY");
+
+        // Happy path: merge the dissolving 6mo child into the 1-YEAR pool.
+        merge_unstake(id, StakeTier::OneYear).await.unwrap();
+        let pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(pending.status, UnstakeStatus::Merged);
+        assert_eq!(pending.merged_into, Some(StakeTier::OneYear));
+        // Treasury fronts BOTH the split and merge fees — the full unstaked
+        // amount restakes (whole-ICP invariant).
+        let credited = 200_000_000;
+        let key = stake_key(StakeTier::OneYear, alice);
+        assert_eq!(
+            STAKES.with(|m| m.borrow().get(&key)).unwrap().amount_e8s,
+            200_000_000 + credited
+        );
+        assert_eq!(
+            tier_pool(StakeTier::OneYear).total_staked_e8s,
+            pool_1y_before + credited
+        );
+        // Mock governance agrees: child drained, 1y neuron grew.
+        let child_stake = MOCK_GOV.with(|g| g.borrow().neurons.get(&pending.split_neuron_id).unwrap().stake_e8s);
+        assert_eq!(child_stake, 0);
+
+        // Terminal — a merged unstake can't merge (or disburse) again.
+        assert_eq!(merge_unstake(id, StakeTier::OneYear).await.unwrap_err(), "NOT_MERGEABLE");
+    }
+
+    #[tokio::test]
+    async fn test_merge_unstake_never_consumes_platform_neurons() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap();
+        let id = unstake(200_000_000, StakeTier::SixMonths).await.unwrap();
+
+        // Corrupt the record so the "child" IS the 6-month platform neuron —
+        // the guard must refuse before any governance call.
+        let main_id = tier_pool(StakeTier::SixMonths).neuron_id.unwrap();
+        let mut pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
+        pending.split_neuron_id = main_id;
+        PENDING_UNSTAKES.with(|m| { m.borrow_mut().insert(id, pending); });
+        assert_eq!(
+            merge_unstake(id, StakeTier::SixMonths).await.unwrap_err(),
+            "SOURCE_IS_PLATFORM_NEURON"
+        );
+        // Platform neuron untouched in the mock.
+        let main_stake = MOCK_GOV.with(|g| g.borrow().neurons.get(&main_id).unwrap().stake_e8s);
+        assert!(main_stake > 0);
     }
 
     #[tokio::test]
@@ -12936,21 +13594,26 @@ mod tests {
             unstake(50_000_000, StakeTier::SixMonths).await.unwrap_err(),
             "BELOW_MINIMUM"
         );
-        // 5 − 4.2 = 0.8 ICP remainder < 1 ICP pool floor.
+        // Fractional amounts are rejected outright.
         assert_eq!(
             unstake(420_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            "WHOLE_ICP_ONLY"
+        );
+        // 5 − 5 = 0 remainder < 1 ICP pool floor.
+        assert_eq!(
+            unstake(500_000_000, StakeTier::SixMonths).await.unwrap_err(),
             "POOL_FLOOR"
         );
         // No stake in a different tier.
         assert_eq!(
-            unstake(150_000_000, StakeTier::TwoYears).await.unwrap_err(),
+            unstake(200_000_000, StakeTier::TwoYears).await.unwrap_err(),
             "POOL_NOT_READY"
         );
 
-        let id = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        let id = unstake(200_000_000, StakeTier::SixMonths).await.unwrap();
         let pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
         assert_eq!(pending.status, UnstakeStatus::Dissolving);
-        assert_eq!(pending.amount_e8s, 150_000_000);
+        assert_eq!(pending.amount_e8s, 200_000_000);
         assert_eq!(pending.tier, StakeTier::SixMonths);
         // The mock dissolve clock runs the tier's full 6-month term.
         let child_eta = MOCK_GOV.with(|g| {
@@ -12962,10 +13625,10 @@ mod tests {
         );
         assert_eq!(
             STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
-            350_000_000
+            300_000_000
         );
-        assert_eq!(tier_pool(StakeTier::SixMonths).total_staked_e8s, 350_000_000);
-        // The split child holds amount − split fee in the mock governance.
+        assert_eq!(tier_pool(StakeTier::SixMonths).total_staked_e8s, 300_000_000);
+        // Treasury fronts the split fee — the child holds the FULL amount.
         assert_eq!(
             MOCK_GOV.with(|g| g
                 .borrow()
@@ -12973,8 +13636,9 @@ mod tests {
                 .get(&pending.split_neuron_id)
                 .unwrap()
                 .stake_e8s),
-            150_000_000 - ICP_FEE_E8S
+            200_000_000
         );
+        assert_eq!(pending.child_e8s, Some(200_000_000));
 
         // Not dissolved yet → the sweep leaves it pending.
         staking_sweep().await;
@@ -12994,10 +13658,10 @@ mod tests {
 
         // Unstaking the full remainder is allowed only down to the pool floor.
         assert_eq!(
-            unstake(350_000_000, StakeTier::SixMonths).await.unwrap_err(),
+            unstake(300_000_000, StakeTier::SixMonths).await.unwrap_err(),
             "POOL_FLOOR"
         );
-        assert!(unstake(250_000_000, StakeTier::SixMonths).await.is_ok());
+        assert!(unstake(200_000_000, StakeTier::SixMonths).await.is_ok());
     }
 
     #[tokio::test]
@@ -13204,8 +13868,10 @@ mod tests {
             admin_set_staking_config(Some(0), None, None).unwrap_err(),
             "INVALID_MIN_STAKE"
         );
+        // Exactly 1 ICP is the new floor (treasury fronts the split fee).
+        admin_set_staking_config(None, Some(ONE_ICP_E8S), None).unwrap();
         assert_eq!(
-            admin_set_staking_config(None, Some(ONE_ICP_E8S), None).unwrap_err(),
+            admin_set_staking_config(None, Some(ONE_ICP_E8S - 1), None).unwrap_err(),
             "INVALID_MIN_UNSTAKE"
         );
         assert_eq!(
@@ -13916,13 +14582,20 @@ mod tests {
         assert!(!info.eligible);
         assert_eq!(info.my_daily_tickets, 0);
 
-        // Staked in two tiers: grant = base × (1 + 4).
+        // Stake-weighted: 1 ICP 6mo (base×1×1) + 1 ICP 2y (base×4×1) = 25/day.
         seed_stake(StakeTier::SixMonths, alice, 100_000_000);
         seed_stake(StakeTier::TwoYears, alice, 100_000_000);
         let info = get_lottery_info().await;
         assert!(info.eligible);
         assert_eq!(info.my_daily_tickets, 25);
-        assert_eq!(info.odds_denominator, LOTTERY_ODDS_DENOMINATOR);
+        // Bigger stake → proportionally more tickets (500 ICP 2y = base×4×500).
+        seed_stake(StakeTier::TwoYears, alice, 50_000_000_000);
+        let info = get_lottery_info().await;
+        assert_eq!(info.my_daily_tickets, 5 + 5 * 4 * 500);
+        // Dynamic odds: the denominator is total_tickets × 13 (min 13).
+        assert_eq!(lottery_odds_denominator(0), 13);
+        assert_eq!(lottery_odds_denominator(1), 13);
+        assert_eq!(lottery_odds_denominator(10_000), 130_000);
     }
 
     #[test]
@@ -13999,13 +14672,112 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
         stake(500_000_000, StakeTier::SixMonths).await.unwrap();
-        let id = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        let id = unstake(200_000_000, StakeTier::SixMonths).await.unwrap();
         dev_fast_forward_dissolve(id).unwrap();
         staking_sweep().await;
         let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
         assert!(payouts.iter().any(|po| po.user == alice
             && po.payout_type == PayoutType::UnstakeDisbursement
-            && po.amount == 150_000_000));
+            && po.amount == 200_000_000));
+    }
+
+    #[test]
+    fn test_get_full_neuron_wire_compat() {
+        // Regression for the prod maturity-sweep failure: governance's Neuron
+        // record no longer has `voting_power` (only `deciding_voting_power :
+        // opt nat64`). A wire-shaped Neuron WITHOUT voting_power must decode,
+        // and the helper must read the modern field.
+        #[derive(CandidType)]
+        struct WireNeuron {
+            id: Option<NeuronId>,
+            controller: Option<Principal>,
+            hot_keys: Vec<Principal>,
+            cached_neuron_stake_e8s: u64,
+            maturity_e8s_equivalent: u64,
+            deciding_voting_power: Option<u64>,
+            followees: Vec<(i32, Followees)>,
+        }
+        let bytes = candid::encode_one(WireNeuron {
+            id: Some(NeuronId { id: 42 }),
+            controller: Some(Principal::anonymous()),
+            hot_keys: vec![],
+            cached_neuron_stake_e8s: 100_000_000,
+            maturity_e8s_equivalent: 5,
+            deciding_voting_power: Some(123_456),
+            followees: vec![],
+        })
+        .unwrap();
+        let neuron: Neuron = candid::decode_one(&bytes)
+            .expect("Neuron without legacy voting_power must decode");
+        assert_eq!(neuron_voting_power(&neuron), 123_456);
+
+        // Local mock still uses the legacy field — the helper falls back.
+        let legacy = Neuron {
+            id: Some(NeuronId { id: 1 }),
+            controller: None,
+            hot_keys: vec![],
+            cached_neuron_stake_e8s: 0,
+            maturity_e8s_equivalent: 0,
+            voting_power: Some(777),
+            deciding_voting_power: None,
+            followees: vec![],
+        };
+        assert_eq!(neuron_voting_power(&legacy), 777);
+    }
+
+    #[test]
+    fn test_cmc_notify_wire_compat() {
+        // Regression for the mainnet trap on proposal 142135: our args must
+        // decode as the CMC's exact arg type (block_index : nat64). Encoding
+        // `nat` there is rejected by the CMC's decoder ("Subtyping error:
+        // TypeInner::Nat64").
+        #[derive(CandidType, Deserialize)]
+        struct WireArg {
+            block_index: u64,
+            canister_id: Principal,
+        }
+        let bytes = candid::encode_one(NotifyTopUpArgs {
+            canister_id: Principal::anonymous(),
+            block_index: 7,
+        })
+        .unwrap();
+        let wire: WireArg = candid::decode_one(&bytes).unwrap();
+        assert_eq!(wire.block_index, 7);
+
+        // Every response variant the real CMC can produce (cmc.did) must
+        // decode into our NotifyTopUpResult — the old enum couldn't decode
+        // Processing / InvalidTransaction / TransactionTooOld(nat64) /
+        // Refunded.block_index at all.
+        #[derive(CandidType)]
+        enum WireErr {
+            Refunded { block_index: Option<u64>, reason: String },
+            Processing,
+            TransactionTooOld(u64),
+            InvalidTransaction(String),
+            Other { error_code: u64, error_message: String },
+        }
+        #[derive(CandidType)]
+        enum WireRes {
+            Ok(candid::Nat),
+            Err(WireErr),
+        }
+        let wire_responses = [
+            WireRes::Ok(candid::Nat::from(5_000_000u64)),
+            WireRes::Err(WireErr::Refunded { block_index: Some(9), reason: "bad memo".into() }),
+            WireRes::Err(WireErr::Processing),
+            WireRes::Err(WireErr::TransactionTooOld(3)),
+            WireRes::Err(WireErr::InvalidTransaction("x".into())),
+            WireRes::Err(WireErr::Other { error_code: 1, error_message: "y".into() }),
+        ];
+        for wire in wire_responses {
+            let bytes = candid::encode_one(wire).unwrap();
+            let decoded: NotifyTopUpResult = candid::decode_one(&bytes)
+                .expect("real CMC response variant must decode");
+            drop(decoded);
+        }
+
+        // "TPUP" little-endian — the memo the CMC requires on the transfer.
+        assert_eq!(MEMO_TOP_UP, 1_347_768_404);
     }
 
     #[test]
@@ -14013,15 +14785,15 @@ mod tests {
         install_staking_test_config();
         let res = notify_top_up(NotifyTopUpArgs {
             canister_id: get_canister_id(),
-            block_index: candid::Nat::from(1u64),
+            block_index: 1,
         });
         assert!(matches!(res, NotifyTopUpResult::Ok(_)), "local always acks");
         CONFIG.with(|cell| { cell.borrow_mut().set(test_config(false)); });
         let res = notify_top_up(NotifyTopUpArgs {
             canister_id: get_canister_id(),
-            block_index: candid::Nat::from(1u64),
+            block_index: 1,
         });
-        assert!(matches!(res, NotifyTopUpResult::Err(NotifyError::TransactionNotFound)));
+        assert!(matches!(res, NotifyTopUpResult::Err(NotifyError::InvalidTransaction(_))));
 
         // Flag-key validation.
         assert_eq!(admin_set_feature_flag("BAD KEY".to_string(), true).unwrap_err(), "INVALID_FLAG_KEY");
@@ -14204,7 +14976,7 @@ mod tests {
         assert_eq!(my.total_staked_e8s, 300_000_000);
         assert_eq!(my.total_weight_e8s, 30_000_000, "voting power = stake ÷ 10");
         assert_eq!(my.tiers.len(), 1);
-        let _uid = unstake(150_000_000, StakeTier::OneYear).await.unwrap();
+        let _uid = unstake(100_000_000, StakeTier::OneYear).await.unwrap();
         assert_eq!(list_my_pending_unstakes().len(), 1);
         cast_lossless_vote(pid, Stance::Adopt).unwrap();
         assert_eq!(get_my_lossless_votes().len(), 1);
@@ -14255,7 +15027,7 @@ mod tests {
         // gov_split also goes through manage_neuron → it would fail too, so
         // run the split first with gov up, then…
         set_mock_manage_neuron(None);
-        let id = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        let id = unstake(200_000_000, StakeTier::SixMonths).await.unwrap();
         let mut pu = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
         // Force the SplitDone state to exercise the sweep recovery branch.
         pu.status = UnstakeStatus::SplitDone;
@@ -14275,11 +15047,20 @@ mod tests {
         set_mock_caller(alice);
         seed_stake(StakeTier::SixMonths, alice, 100_000_000);
         claim_daily_tickets().unwrap();
-        set_mock_ledger_balance(1_000_000_000);
         set_mock_ledger_transfer(Ok(1));
 
-        // force_win=false runs the real-odds path off the mocked entropy
+        // Pot below the 50 ICP minimum: the drawing rolls over — countdown
+        // advances but no draw record is created and draws_held is untouched.
+        set_mock_ledger_balance(1_000_000_000);
+        let before_next = lottery_state().next_draw_at;
+        dev_run_lottery_draw(false).await.unwrap();
+        assert_eq!(list_lottery_draws().len(), 0, "below-minimum pot skips the drawing");
+        assert_eq!(lottery_state().draws_held, 0);
+        assert!(lottery_state().next_draw_at >= before_next, "countdown advanced");
+
+        // Pot at the minimum: the real-odds path runs off the mocked entropy
         // (u64::MAX % denominator ≫ 5 tickets → rolls over).
+        set_mock_ledger_balance(5_000_000_000);
         dev_run_lottery_draw(false).await.unwrap();
         let draw = LOTTERY_DRAWS.with(|m| m.borrow().get(&1)).unwrap();
         assert_eq!(draw.winner, None);
@@ -14390,7 +15171,7 @@ mod tests {
 
         // Unstake → fast-forward → one sweep pass disburses AND reimburses
         // every fee from the treasury.
-        let id = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        let id = unstake(200_000_000, StakeTier::SixMonths).await.unwrap();
         dev_fast_forward_dissolve(id).unwrap();
         staking_sweep().await;
         let pu = PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).unwrap();
@@ -14398,7 +15179,7 @@ mod tests {
         assert!(pu.fee_refund_block.is_some(), "treasury reimbursed the cycle fees");
 
         // If the refund transfer fails at disburse time, the sweep retries it.
-        let id2 = unstake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        let id2 = unstake(100_000_000, StakeTier::SixMonths).await.unwrap();
         dev_fast_forward_dissolve(id2).unwrap();
         set_mock_ledger_transfer(Err("treasury hiccup".to_string()));
         staking_sweep().await;
@@ -14452,20 +15233,21 @@ mod tests {
 
         set_mock_caller(alice);
         stake(300_000_000, StakeTier::OneYear).await.unwrap();
-        assert_eq!(claim_daily_tickets().unwrap(), 10);
-        assert_eq!(lottery_state().total_tickets, 15);
+        // Stake-weighted: 3 ICP × 1y multiplier (2×) × base 5 = 30/day.
+        assert_eq!(claim_daily_tickets().unwrap(), 30);
+        assert_eq!(lottery_state().total_tickets, 35);
 
         // Partial unstake: still staked → tickets stay live.
-        unstake(150_000_000, StakeTier::OneYear).await.unwrap();
+        unstake(100_000_000, StakeTier::OneYear).await.unwrap();
         assert_eq!(
             LOTTERY_TICKETS.with(|m| m.borrow().get(&alice)).unwrap().count,
-            10,
+            30,
             "partial unstake keeps tickets"
         );
 
         // Unstake the rest: eligibility ends NOW — tickets void, pool total
         // shrinks, no future drawing can pick her.
-        unstake(150_000_000, StakeTier::OneYear).await.unwrap();
+        unstake(200_000_000, StakeTier::OneYear).await.unwrap();
         let entry = LOTTERY_TICKETS.with(|m| m.borrow().get(&alice)).unwrap();
         assert_eq!(entry.count, 0, "full unstake voids current-round tickets");
         assert_eq!(lottery_state().total_tickets, 5, "only bob's tickets remain");
@@ -14517,7 +15299,7 @@ mod tests {
         set_mock_caller(bob);
         upvote_idea(idea, IdeaToken::CkBTC, 5_000).await.unwrap();
         set_mock_caller(alice);
-        stake(150_000_000, StakeTier::SixMonths).await.unwrap();
+        stake(200_000_000, StakeTier::SixMonths).await.unwrap();
 
         // In leg: the commitment refunds when the proposal misses.
         process_proposal_cutoff(pid).await.unwrap();
@@ -14531,7 +15313,7 @@ mod tests {
         assert_eq!(post.amount, IDEA_POST_FEE_E8S);
         let st = kind("stake").expect("stake lockup recorded");
         assert_eq!(st.direction, TxDirection::Out);
-        assert_eq!(st.amount, 150_000_000);
+        assert_eq!(st.amount, 200_000_000);
         let refund = kind("CommitmentRefund").expect("refund payout recorded");
         assert_eq!(refund.direction, TxDirection::In);
         assert_eq!(refund.amount, 200_000_000);
