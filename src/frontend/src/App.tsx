@@ -32,25 +32,27 @@ import Staking from "./Staking";
 import Lottery from "./Lottery";
 import Explorer from "./Explorer";
 import Arcade from "./Arcade";
-import CoFounders from "./CoFounders";
+import EarlyAdopters from "./EarlyAdopters";
 import Payouts from "./Payouts";
 import Admin from "./Admin";
 import Landing from "./Landing";
+import Dashboard from "./Dashboard";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
 import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal, DiscordMark, DISCORD_INVITE } from "./ui";
 
 // ── Shareable URL routing (hash-based; this is a static asset canister) ──
 // Each in-app page maps to a stable hash path so links are copy-pasteable.
-export type AppPage = 'landing' | 'dashboard' | 'ideas' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'cofounders' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'early_adopters' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
-  dashboard: '/voting',
+  dashboard: '/dashboard',
+  voting: '/voting',
   ideas: '/community',
   staking: '/staking',
   lottery: '/lottery',
   explorer: '/explorer',
   arcade: '/arcade',
-  cofounders: '/cofounders',
+  early_adopters: '/early_adopters',
   payouts: '/profile',
   admin: '/admin',
 };
@@ -61,7 +63,7 @@ const PATH_PAGE: Record<string, AppPage> = Object.fromEntries(
 /** Page named by the current URL hash, or null when at the root / unknown. */
 export function pageFromHash(hash: string): AppPage | null {
   const h = hash.replace(/^#/, '');
-  if (/^proposal-\d+$/.test(h)) return 'dashboard'; // shared proposal deep link
+  if (/^proposal-\d+$/.test(h)) return 'voting'; // shared proposal deep link
   const path = '/' + h.replace(/^\//, '');
   return PATH_PAGE[path] ?? null;
 }
@@ -528,7 +530,7 @@ export default function App() {
   const lotteryEnabled = featureFlags.find(f => f.key === 'lossless_lottery')?.enabled ?? false;
   const explorerEnabled = featureFlags.find(f => f.key === 'dapp_explorer')?.enabled ?? false;
   const arcadeEnabled = featureFlags.find(f => f.key === 'arcade')?.enabled ?? false;
-  const cofoundersEnabled = featureFlags.find(f => f.key === 'cofounders')?.enabled ?? false;
+  const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (= free voting power) and votes cast.
   const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
@@ -1081,7 +1083,7 @@ export default function App() {
     const e8s = BigInt(Math.floor(amt * 100_000_000));
     setIsTreasuryWithdrawing(true);
     try {
-      const res = await actor.admin_withdraw_treasury(dest, e8s);
+      const res = await actor.admin_withdraw_treasury(dest, e8s, false);
       if (res.__kind__ === "Err") {
         setTreasuryError(`Withdraw failed: ${res.Err}`);
         return;
@@ -1154,7 +1156,7 @@ export default function App() {
     if (page === 'arcade' && featureFlags.length > 0 && !arcadeEnabled) {
       setPage('dashboard');
     }
-    if (page === 'cofounders' && featureFlags.length > 0 && !cofoundersEnabled) {
+    if (page === 'early_adopters' && featureFlags.length > 0 && !earlyAdoptersEnabled) {
       setPage('dashboard');
     }
     // Profile is account-scoped: bounce signed-out visitors — but only once
@@ -1164,7 +1166,7 @@ export default function App() {
     if (page === 'payouts' && principal && principal.isAnonymous()) {
       setPage('dashboard');
     }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, cofoundersEnabled, principal, featureFlags.length]);
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1696,14 +1698,18 @@ export default function App() {
 
   // Single source of truth for site navigation — rendered in the persistent
   // desktop sidebar AND the mobile drawer. Order is deliberate:
-  // Voting → Staking → Lottery → Community R&D → Explorer → Arcade → Co-Founders → Profile (→ Admin).
+  // Voting → Staking → Lottery → Community R&D → Explorer → Arcade → Early Adopters → Profile (→ Admin).
   const renderNavLinks = (onNavigate?: () => void) => {
     const go = (p: typeof page) => { setPage(p); onNavigate?.(); };
     const linkStyle: React.CSSProperties = { justifyContent: 'flex-start', width: '100%', height: 38 };
     return (
       <>
         <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('dashboard')}>
-          <Icon name="flame" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
+          <Icon name="list" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
+          Dashboard
+        </Btn>
+        <Btn variant={page === 'voting' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('voting')}>
+          <Icon name="flame" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
           Voting
         </Btn>
         {losslessEnabled && (
@@ -1736,10 +1742,10 @@ export default function App() {
             Arcade
           </Btn>
         )}
-        {cofoundersEnabled && (
-          <Btn variant={page === 'cofounders' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('cofounders')}>
-            <Icon name="spark" size={14} stroke={page === 'cofounders' ? 'var(--char-950)' : 'currentColor'} />
-            Co-Founders
+        {earlyAdoptersEnabled && (
+          <Btn variant={page === 'early_adopters' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('early_adopters')}>
+            <Icon name="spark" size={14} stroke={page === 'early_adopters' ? 'var(--char-950)' : 'currentColor'} />
+            Early Adopters
           </Btn>
         )}
       </>
@@ -1954,7 +1960,7 @@ export default function App() {
       </header>
 
       {/* ── Mobile Pool FAB (dashboard only) ── */}
-      {page === 'dashboard' && (
+      {page === 'voting' && (
         <button
           className="pool-mobile-fab"
           onClick={() => setPoolMobileOpen(true)}
@@ -2051,7 +2057,16 @@ export default function App() {
                   border: '1px solid var(--border)', background: 'transparent',
                 }}>
                   <div className="row" style={{ justifyContent: 'space-between' }}>
-                    <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>#{n.neuron_id.toString()}</span>
+                    {isLocal ? (
+                      <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>#{n.neuron_id.toString()}</span>
+                    ) : (
+                      <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${n.neuron_id.toString()}`}
+                        target="_blank" rel="noreferrer"
+                        style={{ fontSize: 12, color: 'var(--sprout)', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                        title="View on the NNS dashboard">
+                        #{n.neuron_id.toString()} <Icon name="external" size={10} stroke="var(--sprout)" />
+                      </a>
+                    )}
                     {n.rank <= 25
                       ? <Chip tone="ok" style={{ height: 18, fontSize: 10 }}><Icon name="check" size={10} /> Active - Paid</Chip>
                       : <Chip tone="muted" style={{ height: 18, fontSize: 10 }}>Active</Chip>}
@@ -2130,10 +2145,10 @@ export default function App() {
               host={host}
               rootKey={env?.IC_ROOT_KEY}
               onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'staking' : 'dashboard')}
+              onGoParticipate={() => setPage(losslessEnabled ? 'staking' : 'voting')}
             />
-          ) : page === 'cofounders' ? (
-            <CoFounders
+          ) : page === 'early_adopters' ? (
+            <EarlyAdopters
               actor={actor}
               identity={identity}
               principal={principal}
@@ -2149,6 +2164,7 @@ export default function App() {
               actor={actor}
               principal={principal}
               isLocal={config?.is_local ?? false}
+              backendCanisterId={backendCanisterId}
               onSignIn={handleLogin}
             />
           ) : page === 'admin' ? (
@@ -2162,6 +2178,29 @@ export default function App() {
               ledgerCanisterId={ledgerCanisterId}
               onChanged={() => { fetchConfig(); fetchFeatureFlags(); }}
               openTreasury={openTreasury}
+            />
+          ) : page === 'dashboard' ? (
+            <Dashboard
+              actor={actor}
+              principal={principal}
+              isAdmin={isAdmin}
+              tier={tier}
+              holdings={holdings}
+              proposals={proposals}
+              myCommitments={myCommitments}
+              myLosslessVotes={myLosslessVotes}
+              myStake={myStake}
+              globalStats={globalStats}
+              flags={{
+                staking: losslessEnabled,
+                lottery: lotteryEnabled,
+                ideas: ideaBoardEnabled,
+                explorer: explorerEnabled,
+                arcade: arcadeEnabled,
+                earlyAdopters: earlyAdoptersEnabled,
+              }}
+              go={(p) => setPage(p)}
+              onSignIn={handleLogin}
             />
           ) : (
           <div className="dashboard-container">
@@ -2337,73 +2376,63 @@ export default function App() {
               </div>
             </Reveal>
 
-            {/* ── PB-071: Neuron Identity Block ── */}
+            {/* ── PB-071: Neuron Identity Block — staking-card style ── */}
             <Reveal delay={70} motion={motion}>
-              <div className="card col" style={{ gap: 13 }}>
-                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                  <div className="col" style={{ gap: 7, minWidth: 0 }}>
-                    <Eyrow>
-                      <span
-                        style={{
-                          color: 'var(--sprout)',
-                          fontWeight: 'bold',
-                        }}
-                      >
-                        {leaderInfo && totalSyndicateVP > 0n
-                          ? `${fmtVP(
-                              totalSyndicateVP
-                            )} VOTING POWER`
-                          : '… VOTING POWER'}
-                      </span>
-                    </Eyrow>
-                    <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-                      <span className="mono" style={{ fontSize: 18, color: 'var(--fg)', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
-                        Neuron {formatNeuronId(config?.primary_neuron_id)}
-                      </span>
-                      <button onClick={handleCopy} title="Copy neuron ID" style={{
-                        display: 'grid', placeItems: 'center', width: 24, height: 24,
-                        borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', color: 'var(--fg-3)', cursor: 'pointer'
-                      }}>
-                        <Icon name={copied ? "check" : "copy"} size={12} stroke={copied ? "var(--sprout)" : "var(--fg-3)"} />
-                      </button>
-                    </div>
-
-                  </div>
+              <div className="card col" style={{ gap: 12 }}>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>Community leader neuron</b>
                   {isFollowing ? (
-                    <Chip tone="ok" style={{ height: 24 }}><Icon name="check" size={12} /> Following</Chip>
+                    <Chip tone="ok" style={{ height: 22 }}><Icon name="check" size={12} /> Following</Chip>
                   ) : (
-                    <Chip tone="muted" style={{ height: 24 }}><LiveDot color="var(--fg-3)" on={false} /> Not following</Chip>
+                    <Chip tone="muted" style={{ height: 22 }}><LiveDot color="var(--fg-3)" on={false} /> Not following</Chip>
                   )}
                 </div>
 
-                <div className="col" style={{ gap: 6 }}>
-                  <div style={{ height: 6, borderRadius: 999, background: 'var(--char-800)', overflow: 'hidden' }}>
-                    <div style={{ width: '72%', height: '100%', background: 'var(--border-hi)', borderRadius: 999 }} />
+                <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0, alignItems: 'center' }}>
+                    <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
+                    <span className="row" style={{ gap: 6, alignItems: 'center', minWidth: 0 }}>
+                      {isLocal ? (
+                        <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
+                          #{config?.primary_neuron_id.toString() ?? '…'}
+                        </span>
+                      ) : (
+                        <a
+                          className="mono"
+                          href={`https://dashboard.internetcomputer.org/neuron/${config?.primary_neuron_id.toString() ?? ''}`}
+                          target="_blank" rel="noreferrer"
+                          style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                          title="View the leader neuron on the NNS dashboard"
+                        >
+                          #{config?.primary_neuron_id.toString() ?? '…'} <Icon name="external" size={11} stroke="var(--sprout)" />
+                        </a>
+                      )}
+                      <button onClick={handleCopy} title="Copy neuron ID" style={{
+                        display: 'grid', placeItems: 'center', width: 22, height: 22, flexShrink: 0,
+                        borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', color: 'var(--fg-3)', cursor: 'pointer'
+                      }}>
+                        <Icon name={copied ? "check" : "copy"} size={11} stroke={copied ? "var(--sprout)" : "var(--fg-3)"} />
+                      </button>
+                    </span>
                   </div>
-                  <div className="row" style={{ gap: 10 }}>
-                    <span
-                      className="mono"
-                      style={{
-                        fontSize: 11.5,
-                        color: 'var(--fg-3)',
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      Community Leader Neuron
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Combined voting power</span>
+                    <span className="mono" style={{ color: 'var(--sprout)' }}>
+                      {leaderInfo && totalSyndicateVP > 0n ? `${fmtVP(totalSyndicateVP)} VP` : '…'}
+                    </span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Dissolve delay</span>
+                    <span className="mono">
+                      {leaderInfo ? `${(Number(leaderInfo.dissolve_delay_seconds) / 31_557_600).toFixed(1)} years` : '…'}
                     </span>
                   </div>
                 </div>
 
                 <div className="row" style={{
-                  justifyContent: 'space-between', alignItems: 'center', paddingTop: 10,
+                  justifyContent: 'flex-end', alignItems: 'center', paddingTop: 10,
                   borderTop: '1px solid var(--border)', marginTop: 1
                 }}>
-                  <a href="https://nns.ic0.app" target="_blank" rel="noreferrer" style={{ textDecoration: 'none', flexShrink: 0 }}>
-                    <span className="row" style={{ gap: 6, color: 'var(--fg-2)', fontSize: 13, whiteSpace: 'nowrap' }}>
-                      <Icon name="external" size={13} /> Open in NNS
-                    </span>
-                  </a>
-
                   {!isFollowing ? (
                     !principal || principal.isAnonymous() ? (
                       <span className="row" style={{ gap: 6, color: 'var(--burn)', fontSize: 12.5, whiteSpace: 'nowrap' }}>
@@ -2850,7 +2879,7 @@ export default function App() {
                               {!myCommitment
                                 ? 'Free staked vote — your stake never moves; it just adds weight to this proposal.'
                                 : met
-                                ? 'Threshold met — when the neuron votes, your ICP is spent (50/25/25 treasury/backend/frontend; 25/25/25/25 when pool is active).'
+                                ? 'Threshold met — when the neuron votes, your committed ICP is burned.'
                                 : 'If the threshold misses, your committed ICP is returned.'}
                             </span>
                           </div>
@@ -2960,7 +2989,7 @@ export default function App() {
         </main>
 
         {/* ── Pool Sidebar (desktop — hidden on mobile, use FAB instead) ── */}
-        {page === 'dashboard' && (
+        {page === 'voting' && (
         <aside
           className="pool-sidebar-desktop"
           style={{
@@ -3082,9 +3111,18 @@ export default function App() {
                     border: '1px solid var(--border)', background: 'transparent',
                   }}>
                     <div className="row" style={{ justifyContent: 'space-between', gap: 6 }}>
-                      <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        #{n.neuron_id.toString()}
-                      </span>
+                      {isLocal ? (
+                        <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          #{n.neuron_id.toString()}
+                        </span>
+                      ) : (
+                        <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${n.neuron_id.toString()}`}
+                          target="_blank" rel="noreferrer"
+                          style={{ fontSize: 11, color: 'var(--sprout)', display: 'inline-flex', alignItems: 'center', gap: 3, overflow: 'hidden', whiteSpace: 'nowrap' }}
+                          title="View on the NNS dashboard">
+                          #{n.neuron_id.toString()} <Icon name="external" size={9} stroke="var(--sprout)" />
+                        </a>
+                      )}
                       {n.rank <= 25
                         ? <Chip tone="ok" style={{ height: 17, fontSize: 10 }}><Icon name="check" size={9} /> Active - Paid</Chip>
                         : <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>Active</Chip>}
@@ -3105,7 +3143,7 @@ export default function App() {
         )}
 
         {/* Right Column: Tweak panel & Progression Ladder — local dev only */}
-        {page === 'dashboard' && isLocal && dashControlsOpen && <aside style={{
+        {page === 'voting' && isLocal && dashControlsOpen && <aside style={{
           width: 320, padding: 24, borderLeft: '1px solid var(--border)', background: 'var(--bg-alt)',
           display: 'flex', flexDirection: 'column', gap: 24, flexShrink: 0, overflowY: 'auto'
         }}>

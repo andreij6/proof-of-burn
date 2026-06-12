@@ -349,8 +349,12 @@ describe('pageFromHash (shareable URL routing)', () => {
     expect(pageFromHash('#')).toBe('landing');
     expect(pageFromHash('#/')).toBe('landing');
   });
-  it('routes shared proposal deep links to the dashboard', () => {
-    expect(pageFromHash('#proposal-138512')).toBe('dashboard');
+  it('routes shared proposal deep links to the voting page', () => {
+    expect(pageFromHash('#proposal-138512')).toBe('voting');
+  });
+  it('routes /dashboard to the hub and /voting to the voting page', () => {
+    expect(pageFromHash('#/dashboard')).toBe('dashboard');
+    expect(pageFromHash('#/voting')).toBe('voting');
   });
   it('returns null for unknown hashes', () => {
     expect(pageFromHash('#/nope')).toBeNull();

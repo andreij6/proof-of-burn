@@ -5,10 +5,11 @@ import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal } from "./ui";
 
 // ==========================================
-// Lossless Lottery — Powerball odds & cadence over the staking-yield pot.
+// Lossless Lottery — stake-weighted tickets, dynamic odds (one winner a month
+// in expectation) over the staking-yield pot.
 // Stakers only: the daily ticket grant scales with the staked term
 // (6mo = 5, 1y = 10, 2y = 20, summed across tiers). Each ticket has the
-// Powerball jackpot odds (1 in 292,201,338) at each of the three weekly
+// dynamic odds (each drawing has a 1-in-13 chance of a winner) at the three weekly
 // drawings. Tickets accumulate until someone wins, then the round restarts:
 // the winner takes 80% of the pot, 20% seeds the next drawing.
 // ==========================================
@@ -114,7 +115,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
   const handleDevDraw = (forceWin: boolean) => run(forceWin ? 'devwin' : 'devdraw', async () => {
     const res = await actor.dev_run_lottery_draw(forceWin);
     if (res.__kind__ === "Err") { setError(res.Err); return; }
-    setNotice(forceWin ? "Forced drawing held — ticket #0 wins." : "Drawing held at real Powerball odds.");
+    setNotice(forceWin ? "Forced drawing held — ticket #0 wins." : "Drawing held at the live dynamic odds.");
     await refresh();
   });
 
@@ -136,11 +137,14 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
           <Icon name="target" size={16} stroke="var(--burn)" />
           <Eyebrow accent>Lossless lottery</Eyebrow>
         </span>
-        <b style={{ fontSize: 17 }}>Stake to play. Powerball odds. Nobody loses.</b>
+        <b style={{ fontSize: 17 }}>Stake to play. A winner about once a month. Nobody loses.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
           Stakers collect free tickets daily — 5 for a 6-month stake, 10 for 1 year, 20 for 2 years
-          (tiers add up). Three drawings a week at American Powerball jackpot odds
-          (1 in 292,201,338 per ticket). Tickets pile up until someone wins — then the winner takes
+          (tiers add up), and the grant scales with how much you stake — 1 ICP for 6 months earns
+          5 tickets a day, 500 ICP for 2 years earns 10,000. Every drawing has a fixed 1-in-13
+          chance of crowning a winner no matter how many tickets exist (three drawings a week ≈ one
+          jackpot a month on average, and a 96% chance of at least one within 3 months); your
+          tickets are your share of that chance. Tickets pile up until someone wins — then the winner takes
           80% of the prize pool, 20% seeds the next round, and everyone's tickets reset. The pool is
           funded by staking yield (half of every harvest), so no one ever pays in. Win and the ICP
           lands straight in your wallet — nothing to claim, ever. Staying staked is the deal:
@@ -198,8 +202,15 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
           </span>
           <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
             <Icon name="clock" size={12} stroke="var(--fg-3)" />
-            Powerball cadence: Mon, Wed &amp; Sat nights (US Eastern).
+            Drawings: Mon, Wed &amp; Sat nights (US Eastern).
           </span>
+          {info && info.pot_e8s < info.min_pot_e8s && (
+            <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--haze)' }}>
+              <Icon name="info" size={12} stroke="var(--haze)" />
+              Drawings only run once the pot holds {fmtICP(info.min_pot_e8s)} ICP — below that,
+              the countdown rolls over to the next slot and the pot keeps growing.
+            </span>
+          )}
         </div>
 
         {/* ── Prize pool ── */}
@@ -214,7 +225,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
           </span>
           <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
             <Icon name="zap" size={12} stroke="var(--fg-3)" />
-            Fed by all three pooled neurons: 50% of every yield harvest.
+            Fed by all three pooled neurons: 80% of every yield harvest.
           </span>
         </div>
 

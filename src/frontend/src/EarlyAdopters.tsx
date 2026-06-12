@@ -1,17 +1,17 @@
 import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
-import type { CoFounderInfo, CoFounderPublic, CoFounderRound } from "./bindings/backend";
+import type { EarlyAdopterInfo, EarlyAdopterPublic, EarlyAdopterRound } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Btn, Chip, LiveDot, formatPrincipal } from "./ui";
 import { fmtTokenAmount } from "./IdeaBoard";
 
 // ==========================================
-// Co-Founders — permanent stake into the platform's 2-year neuron.
+// Early Adopters — permanent stake into the platform's 2-year neuron.
 // THE STAKE CAN NEVER BE WITHDRAWN (no unstake exists in the canister);
 // this component says so loudly and requires an explicit acknowledgement.
-// Monthly settlement: yield under 500 ICP restakes into the neuron; above
-// that the first 1,000 ICP goes to the treasury and the excess splits across
-// co-founders in proportion to their staked ICP once ≥100 ICP is available
+// Monthly settlement: yield under 50 ICP restakes into the neuron; above
+// that the first 150 ICP goes to the treasury and the excess splits across
+// early adopters in proportion to their staked ICP once ≥100 ICP is available
 // (else it rolls over). Shares must be claimed before the next settlement.
 // ==========================================
 
@@ -22,7 +22,7 @@ const ROSTER_PAGE_SIZE = 25;
 const CF_TH: React.CSSProperties = { padding: '6px 10px', textAlign: 'center', fontWeight: 500 };
 const CF_TD: React.CSSProperties = { padding: '7px 10px', textAlign: 'center' };
 
-interface CoFoundersProps {
+interface EarlyAdoptersProps {
   actor: any;
   identity: any;
   principal: Principal | null;
@@ -111,7 +111,7 @@ function SettlementTree() {
 
   return (
     <svg viewBox="0 0 860 705" style={{ width: '100%', height: 'auto' }} role="img"
-      aria-label="Decision tree of the monthly Co-Founders settlement">
+      aria-label="Decision tree of the monthly Early Adopters settlement">
       <defs>
         <marker id="cfArrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0,0 L8,4 L0,8 z" fill="var(--fg-3)" />
@@ -138,18 +138,18 @@ function SettlementTree() {
       {txt(430, 188, ['How much yield did the', 'neuron earn this month?'])}
       {/* three branches */}
       {arrow('M280,192 C190,192 150,220 150,252')}
-      {lbl(178, 230, '< 500 ICP')}
+      {lbl(178, 230, '< 50 ICP')}
       {arrow('M430,216 L430,252')}
-      {lbl(478, 238, '500–1,000 ICP')}
+      {lbl(478, 238, '50–150 ICP')}
       {arrow('M580,192 C670,192 710,220 710,252')}
-      {lbl(688, 230, '> 1,000 ICP')}
+      {lbl(688, 230, '> 150 ICP')}
 
       {box(150, 254, 230, 62, 'restake')}
       {txt(150, 274, ['RESTAKED into the neuron —', 'compounds everyone’s', 'future yield'], 'var(--burn)')}
       {box(430, 254, 200, 48, 'treasury')}
       {txt(430, 274, ['All of it →', 'Treasury'], 'var(--fg-2)')}
       {box(710, 254, 230, 48, 'treasury')}
-      {txt(710, 274, ['First 1,000 ICP →', 'Treasury'], 'var(--fg-2)')}
+      {txt(710, 274, ['First 150 ICP →', 'Treasury'], 'var(--fg-2)')}
 
       {/* 4. The pot */}
       {arrow('M710,302 L710,334')}
@@ -170,7 +170,7 @@ function SettlementTree() {
 
       {/* 6. Proportional split + claim window */}
       {box(710, 496, 250, 48, 'founder')}
-      {txt(710, 516, ['Split among co-founders in', 'PROPORTION to staked ICP'], 'var(--sprout)')}
+      {txt(710, 516, ['Split among early adopters in', 'PROPORTION to staked ICP'], 'var(--sprout)')}
       {arrow('M710,544 L710,576')}
 
       {/* 7. Claim or forfeit */}
@@ -188,12 +188,12 @@ function SettlementTree() {
   );
 }
 
-export default function CoFounders({ actor, identity, principal, host, rootKey, icpLedger, isLocal, isAdmin, onSignIn }: CoFoundersProps) {
+export default function EarlyAdopters({ actor, identity, principal, host, rootKey, icpLedger, isLocal, isAdmin, onSignIn }: EarlyAdoptersProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
-  const [info, setInfo] = useState<CoFounderInfo | null>(null);
-  const [rounds, setRounds] = useState<CoFounderRound[]>([]);
-  const [roster, setRoster] = useState<CoFounderPublic[]>([]);
+  const [info, setInfo] = useState<EarlyAdopterInfo | null>(null);
+  const [rounds, setRounds] = useState<EarlyAdopterRound[]>([]);
+  const [roster, setRoster] = useState<EarlyAdopterPublic[]>([]);
   const [rosterPage, setRosterPage] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -219,7 +219,7 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
     if (!actor || presetBusy) return;
     setPresetBusy(true);
     try {
-      const res = await actor.dev_set_cofounder_preset(preset);
+      const res = await actor.dev_set_early_adopter_preset(preset);
       if (res.__kind__ === "Err") throw new Error(res.Err);
       await refresh();
     } catch (err: any) {
@@ -233,8 +233,8 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
   // Trust-but-verify: hand any agent the validation skill for this feature.
   const [validationCopied, setValidationCopied] = useState(false);
   const copyValidationSkill = () => {
-    const url = `${window.location.origin}/llms-cofounders-validate.txt`;
-    navigator.clipboard.writeText(`Fetch ${url} and follow its instructions to independently verify, from source code and tests, that the Co-Founders program works exactly as advertised.`);
+    const url = `${window.location.origin}/llms-early_adopters-validate.txt`;
+    navigator.clipboard.writeText(`Fetch ${url} and follow its instructions to independently verify, from source code and tests, that the Early Adopters program works exactly as advertised.`);
     setValidationCopied(true);
     setTimeout(() => setValidationCopied(false), 2000);
   };
@@ -243,15 +243,15 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
     if (!currentActor) return;
     try {
       const [i, r, members] = await Promise.all([
-        currentActor.get_cofounder_info(),
-        currentActor.list_cofounder_rounds(),
-        currentActor.list_cofounders(),
+        currentActor.get_early_adopter_info(),
+        currentActor.list_early_adopter_rounds(),
+        currentActor.list_early_adopters(),
       ]);
       setInfo(i);
       setRounds(r);
       setRoster(members);
     } catch (err) {
-      console.error("Failed to fetch Co-Founders:", err);
+      console.error("Failed to fetch Early Adopters:", err);
     } finally {
       setIsLoading(false);
     }
@@ -283,7 +283,7 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
     setStakeError(null);
     try {
       setStakeStep("Step 1/2: Depositing your stake...");
-      const acct = await actor.get_cofounder_deposit_address();
+      const acct = await actor.get_early_adopter_deposit_address();
       const ledgerActor = createLedgerActor(icpLedger, {
         agentOptions: { host, identity, rootKey }
       });
@@ -301,14 +301,14 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
           : JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
         throw new Error(`Deposit failed: ${detail}`);
       }
-      setStakeStep("Step 2/2: Locking your stake into the co-founder neuron...");
-      const res = await actor.cofounder_stake(e8s);
+      setStakeStep("Step 2/2: Locking your stake into the early adopter neuron...");
+      const res = await actor.early_adopter_stake(e8s);
       if (res.__kind__ === "Err") throw new Error(res.Err);
       setStakeDone(true);
-      setStakeStep("You're a co-founder. This stake is permanent — watch for your monthly yield share.");
+      setStakeStep("You're an early adopter. This stake is permanent — watch for your monthly yield share.");
       await refresh();
     } catch (err: any) {
-      console.error("Co-founder stake error:", err);
+      console.error("Early adopter stake error:", err);
       setStakeError(err.message || String(err));
     } finally {
       setStakeBusy(false);
@@ -320,7 +320,7 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
     setClaimBusy(true);
     setClaimNote(null);
     try {
-      const res = await actor.claim_cofounder_yield();
+      const res = await actor.claim_early_adopter_yield();
       if (res.__kind__ === "Err") throw new Error(res.Err);
       setClaimNote(`Claimed ${fmtICP8(res.Ok)} ICP — it's in your wallet.`);
       await refresh();
@@ -335,12 +335,12 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
     return (
       <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
         <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
-        Loading Co-Founders...
+        Loading Early Adopters...
       </div>
     );
   }
 
-  const isCoFounder = info.my_staked_e8s > 0n;
+  const isEarlyAdopter = info.my_staked_e8s > 0n;
   const deadline = new Date(Number(info.next_distribution_at / 1_000_000n));
 
   const rosterPageCount = Math.max(1, Math.ceil(roster.length / ROSTER_PAGE_SIZE));
@@ -376,7 +376,7 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
         <Eyebrow accent>Permanent seats, monthly yield</Eyebrow>
         <span className="row" style={{ gap: 10 }}>
           <Icon name="spark" size={22} stroke="var(--burn)" />
-          <h4 style={{ margin: 0 }}>Co-Founders</h4>
+          <h4 style={{ margin: 0 }}>Early Adopters</h4>
         </span>
         <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
           Stake ICP permanently into the platform's 2-year neuron and earn a monthly share of
@@ -439,11 +439,11 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
           <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
             <b>The platform:</b> {fmtICP8(info.treasury_cut_e8s)} ICP/month of guaranteed
             treasury funding, plus a permanent 2-year neuron that <b>follows the platform's
-            primary voting neuron</b> — every co-founder stake multiplies its weight on every
+            primary voting neuron</b> — every early adopter stake multiplies its weight on every
             NNS proposal.
           </span>
           <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-            <b>ICP holders at large:</b> every co-founder stake is supply locked away forever in
+            <b>ICP holders at large:</b> every early adopter stake is supply locked away forever in
             a max-commitment neuron that votes on every proposal — deflationary pressure and
             long-horizon governance weight, funded voluntarily.
           </span>
@@ -459,10 +459,10 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
             `Each ~month (30-day periods) the neuron's yield is settled.`,
             `Months under ${fmtICP8(info.restake_threshold_e8s)} ICP are restaked into the neuron — nothing pays out, the principal compounds for everyone.`,
             `Otherwise the first ${fmtICP8(info.treasury_cut_e8s)} ICP of the month's yield goes to the protocol treasury.`,
-            `Everything above it is split among co-founders IN PROPORTION TO STAKED ICP, once at least ${fmtICP8(info.min_distribution_e8s)} ICP is available. Smaller pots roll over to next month.`,
+            `Everything above it is split among early adopters IN PROPORTION TO STAKED ICP, once at least ${fmtICP8(info.min_distribution_e8s)} ICP is available. Smaller pots roll over to next month.`,
             `You must claim your share before the next monthly settlement. Unclaimed shares are forfeited to the treasury.`,
-            `The first month that yields ${fmtICP8(info.close_threshold_e8s)} ICP closes membership permanently — existing co-founders keep their seats and can still top up anytime.`,
-            `The co-founder neuron follows the platform's primary voting neuron (#${info.primary_neuron_id.toString()}) on all topics — it votes on every NNS proposal.`,
+            `The first month that yields ${fmtICP8(info.close_threshold_e8s)} ICP closes membership permanently — existing early adopters keep their seats and can still top up anytime.`,
+            `The early adopter neuron follows the platform's primary voting neuron (#${info.primary_neuron_id.toString()}) on all topics — it votes on every NNS proposal.`,
           ].map((t, i) => (
             <span key={i} className="row" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', alignItems: 'flex-start' }}>
               <span style={{ color: 'var(--burn)' }}>·</span><span style={{ flex: 1 }}>{t}</span>
@@ -479,8 +479,8 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
 
         {/* ── My position / join ── */}
         <div className="col card" style={{ gap: 10, flex: 1, minWidth: 260, padding: '14px 16px' }}>
-          <Eyebrow>{isCoFounder ? 'Your co-founder seat' : 'Become a co-founder'}</Eyebrow>
-          {isCoFounder ? (
+          <Eyebrow>{isEarlyAdopter ? 'Your early adopter seat' : 'Become an early adopter'}</Eyebrow>
+          {isEarlyAdopter ? (
             <>
               <span className="row" style={{ gap: 6, alignItems: 'baseline' }}>
                 <b className="mono" style={{ fontSize: 20 }}>{fmtICP8(info.my_staked_e8s)}</b>
@@ -519,8 +519,8 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
               </span>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
                 A month's yield reached {fmtICP8(info.close_threshold_e8s)} ICP, so the founders'
-                table is full — permanently. The {info.cofounder_count.toString()} existing
-                co-founders keep their seats.
+                table is full — permanently. The {info.early_adopter_count.toString()} existing
+                early adopters keep their seats.
               </span>
             </>
           ) : (
@@ -546,7 +546,7 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
       <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
         {[
           ['Membership', info.membership_closed ? 'Closed' : 'Open'],
-          ['Co-founders', info.cofounder_count.toString()],
+          ['Early adopters', info.early_adopter_count.toString()],
           ['Total staked', `${fmtICP8(info.total_staked_e8s)} ICP`],
           ['Share pool', `${fmtICP8(info.share_pool_e8s)} ICP`],
           ['Restaked', `${fmtICP8(info.total_restaked_e8s)} ICP`],
@@ -560,19 +560,68 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
         ))}
       </div>
 
-      {/* ── Neuron status ── */}
-      <span className="row" style={{ gap: 8, fontSize: 12, color: 'var(--fg-2)', flexWrap: 'wrap' }}>
-        <Icon name="zap" size={13} stroke={info.follows_primary_neuron ? 'var(--sprout)' : 'var(--haze)'} />
-        {info.neuron_id !== undefined && info.neuron_id !== null ? (
-          <span>
-            Co-founder neuron <b className="mono">#{info.neuron_id.toString()}</b>
-            {info.follows_primary_neuron
-              ? <> · follows primary neuron <b className="mono">#{info.primary_neuron_id.toString()}</b> — votes on every NNS proposal</>
-              : ' · bootstrap in progress (follow set-up pending)'}
+      {/* ── Neuron card — same layout as the Staking term-pool cards ── */}
+      <div className="col" style={{
+        gap: 10, padding: '14px 16px', borderRadius: 10,
+        border: '1px solid var(--border)', background: 'transparent',
+      }}>
+        <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+          <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>Early adopter neuron · 2-year</b>
+          {info.neuron_id !== undefined && info.neuron_id !== null
+            ? (info.follows_primary_neuron
+              ? <Chip tone="ok"><LiveDot size={5} /> Ready</Chip>
+              : <Chip tone="pending">Bootstrapping</Chip>)
+            : <Chip tone="muted">Awaiting first stake</Chip>}
+        </div>
+        <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
+          <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+            <span style={{ color: 'var(--fg-3)' }}>Staked</span>
+            <span className="mono">{fmtICP8(info.total_staked_e8s)} ICP</span>
+          </div>
+          <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+            <span style={{ color: 'var(--fg-3)' }}>Early adopters</span>
+            <span className="mono">{info.early_adopter_count.toString()}</span>
+          </div>
+          <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
+            <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
+            {info.neuron_id !== undefined && info.neuron_id !== null ? (
+              isLocal ? (
+                <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
+                  #{info.neuron_id.toString()}
+                </span>
+              ) : (
+                <a
+                  className="mono"
+                  href={`https://dashboard.internetcomputer.org/neuron/${info.neuron_id.toString()}`}
+                  target="_blank" rel="noreferrer"
+                  style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                  title="View this neuron on the NNS dashboard"
+                >
+                  #{info.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                </a>
+              )
+            ) : (
+              <span style={{ color: 'var(--fg-3)' }}>created on first stake</span>
+            )}
+          </div>
+          <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+            <span style={{ color: 'var(--fg-3)' }}>Follows primary</span>
+            <span className="mono" style={{ color: info.follows_primary_neuron ? 'var(--sprout)' : 'var(--haze)' }}>
+              {info.follows_primary_neuron ? `#${info.primary_neuron_id.toString()} · all topics` : 'pending'}
+            </span>
+          </div>
+        </div>
+        {info.follows_primary_neuron && (
+          <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout)' }}>
+            <Icon name="eye" size={12} stroke="var(--sprout)" />
+            Public on the NNS — audit it any time.
           </span>
-        ) : (
-          <span>Neuron is created at the first co-founder stake, with a 2-year dissolve delay, following primary neuron <b className="mono">#{info.primary_neuron_id.toString()}</b>.</span>
         )}
+      </div>
+
+      <span className="row" style={{ gap: 8, fontSize: 12, color: 'var(--fg-2)', flexWrap: 'wrap' }}>
+        <Icon name="info" size={12} stroke="var(--fg-3)" />
+        <span>Votes on every NNS proposal alongside the platform's primary neuron.</span>
         <button onClick={copyValidationSkill} style={{
           background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
           fontSize: 11.5, textDecoration: 'underline dotted', textUnderlineOffset: 3,
@@ -586,20 +635,20 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
       {/* ── Charts ── */}
       <div className="row" style={{ gap: 14, flexWrap: 'wrap' }}>
         <BarChart title="Yield collected — each of the last 12 months (ICP)" points={yieldPoints} color="var(--burn)" />
-        <BarChart title="ICP held in the co-founder share pool — last 12 months" points={poolPoints} color="var(--sprout)" />
+        <BarChart title="ICP held in the early adopter share pool — last 12 months" points={poolPoints} color="var(--sprout)" />
       </div>
 
-      {/* ── The co-founders (largest stake first, 25 per page) ── */}
+      {/* ── The early adopters (largest stake first, 25 per page) ── */}
       <div className="col" style={{ gap: 10 }}>
         <span className="row" style={{ gap: 8 }}>
           <Icon name="coins" size={14} stroke="var(--burn)" />
-          <b style={{ fontSize: 14, color: 'var(--fg)' }}>The co-founders</b>
+          <b style={{ fontSize: 14, color: 'var(--fg)' }}>The early adopters</b>
           <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
             · {roster.length} seat{roster.length === 1 ? '' : 's'} · ordered by stake · yield shares follow these percentages
           </span>
         </span>
         {roster.length === 0 ? (
-          <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>No co-founders yet — the first seat is open.</span>
+          <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>No early adopters yet — the first seat is open.</span>
         ) : (
           <>
             <div style={{ overflowX: 'auto' }}>
@@ -607,7 +656,7 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
                 <thead>
                   <tr className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
                     <th style={CF_TH}>#</th>
-                    <th style={{ ...CF_TH, textAlign: 'left' }}>Co-founder</th>
+                    <th style={{ ...CF_TH, textAlign: 'left' }}>Early adopter</th>
                     <th style={CF_TH}>Staked</th>
                     <th style={CF_TH}>% of pool</th>
                     <th style={CF_TH}>Joined</th>
@@ -697,7 +746,7 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
                 <Icon name="spark" size={15} stroke="var(--burn)" />
-                <b>Stake as a co-founder</b>
+                <b>Stake as an early adopter</b>
               </span>
               <Btn variant="ghost" sm onClick={() => !stakeBusy && setIsStakeOpen(false)}><Icon name="x" size={14} /></Btn>
             </div>
@@ -733,7 +782,7 @@ export default function CoFounders({ actor, identity, principal, host, rootKey, 
                     onChange={e => { setAcknowledged(e.target.checked); setStakeError(null); }} />
                   <span style={{ flex: 1 }}>
                     I understand that this stake is <b>irreversible and permanent</b> — my ICP can
-                    never be withdrawn, and my only return is the monthly co-founder yield share.
+                    never be withdrawn, and my only return is the monthly early adopter yield share.
                   </span>
                 </label>
                 {stakeStep && !stakeError && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>{stakeStep}</span>}

@@ -33,3 +33,7 @@ target/
 dist/
 **/src/bindings/
 
+
+# Agent worktrees and local-only artifacts
+.claude/worktrees/
+cycles_of_influence_economic_analysis.docx

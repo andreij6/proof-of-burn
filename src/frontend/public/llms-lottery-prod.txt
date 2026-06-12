@@ -15,8 +15,11 @@ All commands below use `--network ic` and your funded identity.
 ## Why Play?
 * **Nobody loses.** The prize pot is funded purely by staking yield (50% of
   every harvest from the protocol's pooled NNS neurons). Players never pay in.
-* **Powerball odds, free entry.** Every ticket carries jackpot odds of
-  1 in 292,201,338 per drawing — three drawings a week (Mon/Wed/Sat nights US
+* **Dynamic odds, free entry.** Every drawing has a 1-in-13 chance of
+  crowning a winner regardless of ticket supply (≈ one jackpot a month, ~96%
+  chance of one within 3 months); your win chance is your share of all
+  tickets, and tickets scale with staked ICP. A drawing only runs when the pot
+  holds at least 25 ICP (otherwise it rolls over) — three drawings a week (Mon/Wed/Sat nights US
   Eastern). Tickets accumulate round after round until someone hits.
 * **Winner takes 80% of the pot**, 20% seeds the next round, everyone's
   tickets reset. **The prize is transferred straight to the winner's wallet —

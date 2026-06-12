@@ -1939,10 +1939,10 @@ fn test_stake_unstake_roundtrip_integration() {
     // The staked ICP physically sits in the local mock stake subaccount.
     assert_eq!(balance_of(&env, env.backend, Some(vec![4u8; 32])), 300_000_000);
 
-    // Unstake 1.5 ICP → split + dissolving.
+    // Unstake 2 ICP (whole-ICP only) → split + dissolving.
     let reply = env
         .pic
-        .update_call(env.backend, env.user, "unstake", encode_args((150_000_000u64, StakeTier::OneYear)).unwrap())
+        .update_call(env.backend, env.user, "unstake", encode_args((200_000_000u64, StakeTier::OneYear)).unwrap())
         .expect("unstake call");
     let res: NatResult = decode_one(&reply).unwrap();
     let unstake_id = match res {
@@ -1950,7 +1950,7 @@ fn test_stake_unstake_roundtrip_integration() {
         NatResult::Err(e) => panic!("unstake failed: {}", e),
     };
     let pool = staking_pool_info(&env);
-    assert_eq!(pool.total_staked_e8s, 150_000_000);
+    assert_eq!(pool.total_staked_e8s, 100_000_000);
 
     // Sweep before the dissolve delay: still locked.
     run_staking_sweep(&env, env.user);
@@ -1980,15 +1980,16 @@ fn test_stake_unstake_roundtrip_integration() {
     assert_eq!(pending[0].status, UnstakeStatus::Disbursed);
     assert!(pending[0].disburse_block.is_some());
 
-    // Zero-loss: disburse = amount − split/disburse fees, then the treasury
-    // reimburses all 3 cycle fees (0.0003 ICP) in the same sweep pass — so
-    // relative to the pre-unstake balance the user is UP by one fee (the
-    // deposit fee they paid from their wallet at stake time).
+    // Zero-loss: the treasury fronts the split fee at unstake (child holds
+    // the full amount), disburse = amount − disburse fee, then the treasury
+    // reimburses deposit + disburse fees (0.0002 ICP) in the same sweep pass
+    // — so relative to the pre-unstake balance the user is UP by one fee
+    // (the deposit fee they paid from their wallet at stake time).
     let after = balance_of(&env, env.user, None);
     assert_eq!(
         after - before,
-        150_000_000 + 10_000,
-        "amount − 2 fees + 3-fee treasury reimbursement"
+        200_000_000 + 10_000,
+        "amount − disburse fee + 2-fee treasury reimbursement"
     );
 }
 
@@ -2075,18 +2076,19 @@ fn test_yield_distribution_integration() {
     // the distribution happens on a later tick, off the inbox balance).
     run_staking_sweep(&env, env.user);
 
-    // All neuron yield is split 50% lottery prize pot / 50% treasury.
+    // All neuron yield is split 80% lottery prize pot / 20% treasury
+    // (GROWTH_TARGETS.md §5 — the lottery EV is the stakers' return).
     let spendable = 200_000_000 - 20_000;
     let treasury = balance_of(&env, env.backend, Some(vec![1u8; 32]));
     let lottery = balance_of(&env, env.backend, Some(vec![3u8; 32]));
-    assert_eq!(lottery, spendable / 2, "50% → lottery prize pot");
+    assert_eq!(lottery, spendable * 4 / 5, "80% → lottery prize pot");
     // Treasury = its yield share + the seeded fee-cover float (minted in
     // do_stake_as) minus the 2 fees it fronted for the zero-loss stake.
     let treasury_float = 1_000_000 - 20_000;
     assert_eq!(
         treasury,
-        (spendable - spendable / 2) + treasury_float,
-        "50% → treasury (plus the fee-cover float)"
+        (spendable - spendable * 4 / 5) + treasury_float,
+        "20% → treasury (plus the fee-cover float)"
     );
     assert_eq!(balance_of(&env, env.backend, Some(vec![2u8; 32])), 0, "inbox drained");
 

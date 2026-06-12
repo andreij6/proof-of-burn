@@ -50,9 +50,9 @@ These are the only runtime-tunable levers. Everything else requires a canister u
 **NOT runtime-configurable** (requires code change + upgrade):
 - Protocol fee per commitment: `500_000` e8s (0.005 ICP), line 2578
 - Treasury/cycles split ratio (50/25/25), inside `settle_burn_split`
-- Lottery minimum pot: `LOTTERY_MIN_POT_E8S` = `5_000_000_000` (50 ICP), line 7166
+- Lottery minimum pot: `LOTTERY_MIN_POT_E8S` = `2_500_000_000` (25 ICP — lowered June 2026, see GROWTH_TARGETS.md)
 - AI reviewer price: `ai_price_e8s` = `5_000_000` (0.05 ICP), set at `init`
-- Early Adopter constants: treasury cut (1,000 ICP/month), close threshold (2,000 ICP/month), restake-below (500 ICP/month)
+- Early Adopter constants: treasury cut (150 ICP/month), close threshold (600 ICP/month), restake-below (50 ICP/month) — recalibrated June 2026, see GROWTH_TARGETS.md §3
 
 ---
 
@@ -140,7 +140,7 @@ Monitor pool neuron registrations. If you're seeing steady demand, keep the fee 
 
 **Stream 3: Early Adopter program (enable at >50 ICP TVL in EA neuron)**
 
-When enabled, the first 1,000 ICP/month of yield goes entirely to the treasury. The monthly yield check fires every 30 days; yield below 500 ICP/month is re-staked rather than distributed.
+When enabled, the first 150 ICP/month of yield goes to the treasury (capped — recalibrated June 2026). The monthly yield check fires every 30 days; yield below 50 ICP/month is re-staked rather than distributed; everything above the cut flows to members.
 
 At the EA neuron's 2-year dissolve delay (NNS ~7–7.8% APY at 2-year max dissolve, up to ~8.75% APY with max age bonus on a long-held non-dissolving neuron — post-Mission 70 rates):
 - To yield 500 ICP/month (minimum payout trigger): need ~69,000–81,000 ICP staked in EA program
@@ -180,7 +180,7 @@ admin_set_feature_flag("early_adopters", true)
 
 ### Staking Yields
 
-Lossless staking yield flows from the pool neuron's NNS maturity, split **50% lottery prize pot / 50% treasury**. Users receive 0% of the raw NNS yield directly — their "yield" is entirely lottery-denominated.
+Lossless staking yield flows from the pool neuron's NNS maturity, split **80% lottery prize pot / 20% treasury** (rebalanced from 50/50, June 2026). Users receive 0% of the raw NNS yield directly — their "yield" is entirely lottery-denominated.
 
 At 10,000 ICP TVL and the pool neuron's current ~7–8.75% APY (post-Mission 70, 2-year max dissolve): ~700–875 ICP/year maturity → ~350–437 ICP/year to lottery pot → ~2.2–2.8 ICP per draw (3 draws/week, 156/year). At this TVL draws are modest; prize per draw scales linearly with TVL — 100,000 ICP staked produces ~22–28 ICP/draw.
 
@@ -196,7 +196,7 @@ The pool neuron earns 7–7.8% APY at 2-year dissolve delay, rising to ~8.75% AP
 - Draw 3× per week (Tue/Thu/Sun at 03:00 UTC) is already baked in. Do not change.
 
 **Lottery min-pot guard:**
-The lottery will not draw until the pot holds ≥ 50 ICP (`LOTTERY_MIN_POT_E8S` = `5_000_000_000`). At 7–8.75% NNS APY (post-Mission 70), you need roughly **1,150–1,350 ICP staked** for the pot to accumulate its first 50 ICP within about a year. Target **3,000+ ICP TVL** for the pot to grow fast enough that draws feel regular and prizes are worth anticipating (~2+ ICP/draw at 3×/week pace). Communicate this clearly. Until the pot crosses 50 ICP, users accumulate tickets but no draws happen — make this visible in the UI to avoid a "lottery is broken" perception.
+The lottery will not draw until the pot holds ≥ 25 ICP (`LOTTERY_MIN_POT_E8S` = `2_500_000_000`; lowered from 50 — see GROWTH_TARGETS.md). At 7–8.75% NNS APY (post-Mission 70), you need roughly **1,150–1,350 ICP staked** for the pot to accumulate its first 50 ICP within about a year. Target **3,000+ ICP TVL** for the pot to grow fast enough that draws feel regular and prizes are worth anticipating (~2+ ICP/draw at 3×/week pace). Communicate this clearly. Until the pot crosses 50 ICP, users accumulate tickets but no draws happen — make this visible in the UI to avoid a "lottery is broken" perception.
 
 ### Keeping Governance Participation High
 

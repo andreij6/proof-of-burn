@@ -2800,6 +2800,12 @@ pub struct NeuronFollowStatus {
     /// SNS & Neurons' Fund) point at the primary neuron.
     pub follows_primary: bool,
     pub topics_following_primary: Vec<i32>,
+    /// Live neuron stake (cached_neuron_stake_e8s).
+    pub stake_e8s: u64,
+    /// Uncollected yield: maturity that hasn't been harvested yet. Tier
+    /// neurons harvest automatically once this crosses the configured
+    /// maturity threshold (default 1.05 ICP); the EA neuron settles monthly.
+    pub maturity_e8s: u64,
     pub error: Option<String>,
 }
 
@@ -2818,8 +2824,30 @@ async fn admin_check_neuron_following() -> Vec<NeuronFollowStatus> {
     if let Some(id) = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().neuron_id) {
         targets.push(("early_adopters".to_string(), id));
     }
+    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
     let mut out = Vec::new();
     for (label, neuron_id) in targets {
+        if is_local || cfg!(not(target_arch = "wasm32")) {
+            // Local mock governance: bootstrap always sets the follows, and
+            // stake/maturity live in MOCK_GOV.
+            let (stake, maturity) = MOCK_GOV.with(|g| {
+                g.borrow()
+                    .neurons
+                    .get(&neuron_id)
+                    .map(|n| (n.stake_e8s, n.maturity_e8s))
+                    .unwrap_or((0, 0))
+            });
+            out.push(NeuronFollowStatus {
+                label,
+                neuron_id,
+                follows_primary: true,
+                topics_following_primary: vec![TOPIC_CATCH_ALL, TOPIC_GOVERNANCE, TOPIC_SNS_AND_NEURONS_FUND],
+                stake_e8s: stake,
+                maturity_e8s: maturity,
+                error: None,
+            });
+            continue;
+        }
         match get_full_neuron(neuron_id).await {
             Ok(n) => {
                 let topics: Vec<i32> = n
@@ -2836,6 +2864,8 @@ async fn admin_check_neuron_following() -> Vec<NeuronFollowStatus> {
                     neuron_id,
                     follows_primary: follows,
                     topics_following_primary: topics,
+                    stake_e8s: n.cached_neuron_stake_e8s,
+                    maturity_e8s: n.maturity_e8s_equivalent,
                     error: None,
                 });
             }
@@ -2844,6 +2874,8 @@ async fn admin_check_neuron_following() -> Vec<NeuronFollowStatus> {
                 neuron_id,
                 follows_primary: false,
                 topics_following_primary: vec![],
+                stake_e8s: 0,
+                maturity_e8s: 0,
                 error: Some(e),
             }),
         }
@@ -2851,21 +2883,176 @@ async fn admin_check_neuron_following() -> Vec<NeuronFollowStatus> {
     out
 }
 
-/// Admin: withdraw ICP from the treasury subaccount to a destination principal.
+/// 15 ICP — withdrawals and neuron allocations may not take the ICP treasury
+/// below this without an explicit override. The cycle top-up timer silently
+/// skips when treasury ≤ 10 ICP, so this floor is the canister's life support
+/// (see ECONOMICS_PLAYBOOK.md Risk #1).
+const TREASURY_FLOOR_E8S: u64 = 1_500_000_000;
+
+/// Refuse an ICP-treasury outflow that would breach the 15 ICP floor, unless
+/// the admin explicitly overrides. `outflow_e8s` must include ledger fees.
+async fn treasury_floor_check(
+    config: &Config,
+    outflow_e8s: u64,
+    override_floor: bool,
+) -> Result<(), String> {
+    if override_floor {
+        return Ok(());
+    }
+    let treasury = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    let balance = call_ledger_balance(config.ledger_canister_id, treasury).await?;
+    if balance.saturating_sub(outflow_e8s) < TREASURY_FLOOR_E8S {
+        return Err("TREASURY_FLOOR".to_string());
+    }
+    Ok(())
+}
+
+#[derive(CandidType, Serialize)]
+struct CanisterIdRecord {
+    canister_id: Principal,
+}
+
+/// Subset decode of the management canister's canister_status reply — we
+/// only need the cycle balance (extra fields are skipped by candid).
+#[derive(CandidType, Deserialize)]
+struct CanisterStatusCycles {
+    cycles: candid::Nat,
+}
+
+/// Admin: the FRONTEND canister's live cycle balance, via the management
+/// canister. Requires this backend to be a controller of the frontend
+/// canister (ops: `icp canister update-settings frontend --add-controller
+/// <backend-id>`); otherwise returns the management canister's rejection.
 #[ic_cdk::update(guard = "require_admin")]
-async fn admin_withdraw_treasury(to: Principal, amount_e8s: u64) -> Result<(), String> {
+async fn admin_get_frontend_cycles() -> Result<u64, String> {
+    let fid = frontend_canister_id();
+    let res: Result<(CanisterStatusCycles,), _> = ic_cdk::call(
+        Principal::management_canister(),
+        "canister_status",
+        (CanisterIdRecord { canister_id: fid },),
+    )
+    .await;
+    match res {
+        Ok((status,)) => Ok(u64::try_from(status.cycles.0.clone()).unwrap_or(u64::MAX)),
+        Err((code, msg)) => Err(format!("STATUS_FAILED ({:?}): {}", code, msg)),
+    }
+}
+
+/// Admin: withdraw ICP from the treasury subaccount to a destination
+/// principal. Guarded by the 15 ICP floor unless `override_floor`.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_withdraw_treasury(to: Principal, amount_e8s: u64, override_floor: bool) -> Result<(), String> {
     if to == Principal::anonymous() {
         return Err("INVALID_DESTINATION".to_string());
     }
     if amount_e8s == 0 {
         return Err("INVALID_AMOUNT".to_string());
     }
-    let ledger_id = CONFIG.with(|cell| cell.borrow().get().ledger_canister_id);
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    treasury_floor_check(&config, amount_e8s.saturating_add(ICP_FEE_E8S), override_floor).await?;
     let dest = LedgerAccount { owner: to, subaccount: None };
-    call_ledger_transfer(ledger_id, Some(TREASURY_SUBACCOUNT), dest, amount_e8s, Some(10_000))
+    call_ledger_transfer(config.ledger_canister_id, Some(TREASURY_SUBACCOUNT), dest, amount_e8s, Some(10_000))
         .await
         .map(|_| ())
         .map_err(|e| format!("TREASURY_WITHDRAW_FAILED: {}", e))
+}
+
+/// Admin: withdraw ANY supported token from the treasury account (the same
+/// subaccount exists on every configured ledger — upvote shares, explorer
+/// payments etc. accumulate there). The 15 ICP floor applies to ICP only.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_withdraw_treasury_token(
+    token: ExplorerToken,
+    to: Principal,
+    amount: u64,
+    override_floor: bool,
+) -> Result<(), String> {
+    if to == Principal::anonymous() {
+        return Err("INVALID_DESTINATION".to_string());
+    }
+    if amount == 0 {
+        return Err("INVALID_AMOUNT".to_string());
+    }
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ledger = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    if matches!(token, ExplorerToken::ICP) {
+        treasury_floor_check(&config, amount.saturating_add(fee), override_floor).await?;
+    }
+    let dest = LedgerAccount { owner: to, subaccount: None };
+    call_ledger_transfer(ledger, Some(TREASURY_SUBACCOUNT), dest, amount, Some(fee))
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("TREASURY_WITHDRAW_FAILED: {}", e))
+}
+
+/// Admin: allocate treasury ICP into a tier pool neuron (boosts its yield —
+/// and therefore the lottery pot — without belonging to any staker).
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_fund_tier_neuron(tier: StakeTier, amount_e8s: u64, override_floor: bool) -> Result<(), String> {
+    if amount_e8s == 0 {
+        return Err("INVALID_AMOUNT".to_string());
+    }
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let mut pool = tier_pool(tier);
+    if pool.neuron_id.is_none() || pool.bootstrap != StakingBootstrap::Ready {
+        return Err("POOL_NOT_READY".to_string());
+    }
+    treasury_floor_check(&config, amount_e8s.saturating_add(ICP_FEE_E8S), override_floor).await?;
+    fund_pool_neuron_from_treasury(&config, &mut pool, tier, amount_e8s).await?;
+    staking_audit("admin_fund_neuron", get_caller(), amount_e8s, tier.idx() as u64);
+    Ok(())
+}
+
+/// Admin: allocate treasury ICP into the early-adopter neuron (compounds the
+/// program's yield; distributed by the normal monthly bands).
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_fund_early_adopter_neuron(amount_e8s: u64, override_floor: bool) -> Result<(), String> {
+    if amount_e8s == 0 {
+        return Err("INVALID_AMOUNT".to_string());
+    }
+    let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
+    if state.nonce == 0 || state.neuron_id.is_none() {
+        return Err("EA_NEURON_NOT_BOOTSTRAPPED".to_string());
+    }
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    treasury_floor_check(&config, amount_e8s.saturating_add(ICP_FEE_E8S), override_floor).await?;
+    if config.is_local || cfg!(not(target_arch = "wasm32")) {
+        let neuron_dest = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(EARLY_ADOPTER_NEURON_SUBACCOUNT),
+        };
+        call_ledger_transfer(config.ledger_canister_id, Some(TREASURY_SUBACCOUNT), neuron_dest, amount_e8s, Some(ICP_FEE_E8S))
+            .await
+            .map_err(|e| format!("TREASURY_TRANSFER_FAILED: {}", e))?;
+    } else {
+        let gov = Principal::from_text(NNS_GOVERNANCE_ID).unwrap();
+        let staking_sub = neuron_staking_subaccount(get_canister_id(), state.nonce);
+        call_ledger_legacy_transfer(
+            config.ledger_canister_id,
+            Some(TREASURY_SUBACCOUNT),
+            account_id_bytes(gov, &staking_sub),
+            amount_e8s,
+            ICP_FEE_E8S,
+            state.nonce,
+        )
+        .await
+        .map_err(|e| format!("TREASURY_TRANSFER_FAILED: {}", e))?;
+    }
+    EARLY_ADOPTER_STATE.with(|c| {
+        let mut s = c.borrow().get().clone();
+        s.pending_refresh_e8s = s.pending_refresh_e8s.saturating_add(amount_e8s);
+        let _ = c.borrow_mut().set(s);
+    });
+    // Best-effort refresh; the sweep repairs any failure.
+    if let Err(e) = advance_early_adopter_bootstrap().await {
+        canister_print(&format!("admin_fund_early_adopter_neuron: refresh deferred: {}", e));
+    }
+    staking_audit("admin_fund_ea_neuron", get_caller(), amount_e8s, 0);
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -6836,7 +7023,9 @@ async fn distribute_yield_inbox() {
     }
 
     let spendable = balance - 2 * ICP_FEE_E8S;
-    let lottery_amt = spendable / 2;
+    // 80% lottery / 20% treasury (was 50/50, June 2026): the lottery EV is
+    // what pays stakers their advertised return — see GROWTH_TARGETS.md §5.
+    let lottery_amt = spendable * 4 / 5;
     let treasury_amt = spendable - lottery_amt;
 
     let id = NEXT_YIELD_ID.with(|c| {
@@ -7007,6 +7196,13 @@ fn get_staking_pool_info() -> StakingPoolInfo {
     }
 }
 
+/// Admin: every unstake record across all users — the split neurons the
+/// canister manages on users' behalf (dissolving, restaked, disbursed).
+#[ic_cdk::query(guard = "require_admin")]
+fn admin_list_pending_unstakes() -> Vec<PendingUnstake> {
+    PENDING_UNSTAKES.with(|m| m.borrow().iter().map(|e| e.value()).collect())
+}
+
 #[ic_cdk::query]
 fn list_my_pending_unstakes() -> Vec<PendingUnstake> {
     let caller = get_caller();
@@ -7159,11 +7355,12 @@ fn dev_add_mock_maturity(amount_e8s: u64, tier: StakeTier) -> Result<(), String>
 /// impossible at launch-scale ticket counts.
 const LOTTERY_DRAWS_PER_WIN: u64 = 13;
 
-/// A drawing only actually runs when the pot holds at least this much (50
-/// ICP). The countdown always ticks; the pot check happens at the scheduled
-/// moment — too small, and the drawing rolls over to the next slot (no
-/// randomness consumed, no draw record). Forced dev draws bypass the gate.
-const LOTTERY_MIN_POT_E8S: u64 = 5_000_000_000;
+/// A drawing only actually runs when the pot holds at least this much (25
+/// ICP — see docs/GROWTH_TARGETS.md). The countdown always ticks; the pot
+/// check happens at the scheduled moment — too small, and the drawing rolls
+/// over to the next slot (no randomness consumed, no draw record). Forced
+/// dev draws bypass the gate.
+const LOTTERY_MIN_POT_E8S: u64 = 2_500_000_000;
 
 /// The ticket-space size for a draw: total × 13, so P(some ticket wins) is
 /// exactly 1/13 and every ticket inside the winning range is equally likely
@@ -9550,15 +9747,19 @@ fn get_arcade_leaderboard(game: String) -> Vec<ArcadeLeaderboardRow> {
 //   • an early adopter must claim their share before the NEXT monthly
 //     settlement — unclaimed shares are forfeited to the treasury then.
 
-/// 1,000 ICP — the treasury's monthly cut comes first.
-const EARLY_ADOPTER_TREASURY_CUT_E8S: u64 = 100_000_000_000;
-/// 2,000 ICP — once a settled month's yield reaches this, membership closes
+/// 150 ICP — the treasury's monthly cut comes first, CAPPED here so member
+/// yield scales with the neuron. Recalibrated from 1,000 (June 2026): at the
+/// 70k-ICP target the old cut absorbed every realistic month entirely,
+/// paying members 0% forever — see docs/GROWTH_TARGETS.md §3.
+const EARLY_ADOPTER_TREASURY_CUT_E8S: u64 = 15_000_000_000;
+/// 600 ICP — once a settled month's yield reaches this, membership closes
 /// PERMANENTLY: no new early adopters, ever. Existing early adopters can still top
-/// up at any time.
-const EARLY_ADOPTER_CLOSE_YIELD_E8S: u64 = 200_000_000_000;
-/// 500 ICP — a month that yields less than this is restaked into the neuron
+/// up at any time. (Recalibrated from 2,000 — unreachable at target scale.)
+const EARLY_ADOPTER_CLOSE_YIELD_E8S: u64 = 60_000_000_000;
+/// 50 ICP — a month that yields less than this is restaked into the neuron
 /// (compounding everyone's future yield) instead of being paid out at all.
-const EARLY_ADOPTER_RESTAKE_BELOW_E8S: u64 = 50_000_000_000;
+/// (Recalibrated from 500.)
+const EARLY_ADOPTER_RESTAKE_BELOW_E8S: u64 = 5_000_000_000;
 /// 2 years — the early adopter neuron's dissolve delay.
 const EARLY_ADOPTER_DISSOLVE_SECS: u32 = 63_115_200;
 /// 100 ICP — minimum distributable pot; below this it rolls over.
@@ -12110,12 +12311,15 @@ mod tests {
         seed_default_dapps();
         seed_default_dapps(); // re-run inserts nothing new
         let listed = list_dapps();
-        assert_eq!(listed.len(), 5);
+        assert_eq!(listed.len(), 8);
         assert_eq!(listed[0].name, "idGeek 2.0");
         assert_eq!(listed[1].name, "Liquidium");
         assert_eq!(listed[2].name, "ICPSwap");
         assert_eq!(listed[3].name, "OISY Wallet");
         assert_eq!(listed[4].name, "OpenChat");
+        assert_eq!(listed[5].name, "Partyhats");
+        assert_eq!(listed[6].name, "Dyvr");
+        assert_eq!(listed[7].name, "onicai");
         assert!(listed.iter().all(|d| !d.community && d.expires_at.is_none()));
     }
 
@@ -12126,10 +12330,10 @@ mod tests {
         // Simulate a directory seeded before the newer curated entries existed.
         let icpswap_id = list_dapps().iter().find(|d| d.name == "ICPSwap").unwrap().id;
         DAPPS.with(|m| { m.borrow_mut().remove(&icpswap_id); });
-        assert_eq!(list_dapps().len(), 4);
+        assert_eq!(list_dapps().len(), 7);
         seed_default_dapps();
         let listed = list_dapps();
-        assert_eq!(listed.len(), 5, "missing curated entry is backfilled");
+        assert_eq!(listed.len(), 8, "missing curated entry is backfilled");
         assert_eq!(listed.iter().filter(|d| d.name == "ICPSwap").count(), 1, "no duplicates");
     }
 
@@ -12385,20 +12589,20 @@ mod tests {
 
     #[test]
     fn test_early_adopter_route_yield_rules() {
-        // Under 500 ICP: the whole month restakes into the neuron.
-        assert_eq!(early_adopter_route_yield(499 * ICP, 0), (499 * ICP, 0, 0));
+        // Under 50 ICP: the whole month restakes into the neuron.
+        assert_eq!(early_adopter_route_yield(49 * ICP, 0), (49 * ICP, 0, 0));
         assert_eq!(early_adopter_route_yield(1, 0), (1, 0, 0));
-        // 500..1,000: all treasury, nothing to the pot.
-        assert_eq!(early_adopter_route_yield(500 * ICP, 0), (0, 500 * ICP, 0));
-        assert_eq!(early_adopter_route_yield(999 * ICP, 0), (0, 999 * ICP, 0));
-        assert_eq!(early_adopter_route_yield(1000 * ICP, 0), (0, 1000 * ICP, 0));
-        // Above 1,000: treasury keeps 1,000, the excess feeds the pot.
-        assert_eq!(early_adopter_route_yield(1150 * ICP, 0), (0, 1000 * ICP, 150 * ICP));
+        // 50..150: all treasury, nothing to the pot.
+        assert_eq!(early_adopter_route_yield(50 * ICP, 0), (0, 50 * ICP, 0));
+        assert_eq!(early_adopter_route_yield(149 * ICP, 0), (0, 149 * ICP, 0));
+        assert_eq!(early_adopter_route_yield(150 * ICP, 0), (0, 150 * ICP, 0));
+        // Above 150: the treasury cut is CAPPED at 150, the excess feeds the pot.
+        assert_eq!(early_adopter_route_yield(300 * ICP, 0), (0, 150 * ICP, 150 * ICP));
         // The pot is net of the ledger fee burned moving it into the pool —
         // otherwise the final claim is one fee short (caught by local e2e).
-        assert_eq!(early_adopter_route_yield(1200 * ICP, 10_000), (0, 1000 * ICP, 200 * ICP - 10_000));
+        assert_eq!(early_adopter_route_yield(350 * ICP, 10_000), (0, 150 * ICP, 200 * ICP - 10_000));
         // Excess at or below one fee doesn't move.
-        assert_eq!(early_adopter_route_yield(1000 * ICP + 9_000, 10_000), (0, 1000 * ICP, 0));
+        assert_eq!(early_adopter_route_yield(150 * ICP + 9_000, 10_000), (0, 150 * ICP, 0));
     }
 
     #[test]
@@ -12472,12 +12676,12 @@ mod tests {
         assert!(info.neuron_id.is_some(), "neuron claimed at first stake");
         assert!(info.follows_primary_neuron, "follows the leader on all topics");
 
-        // Month 1: 1,200 ICP yield in the inbox → 1,000 treasury; the 200
+        // Month 1: 350 ICP yield in the inbox → 150 treasury cut; the 200
         // excess (net of one pool-transfer fee) splits 25/75 by stake.
         let pot = 200 * ICP - 10_000;
         let alice_share = pot / 4;
         let bob_share = (pot as u128 * 3 / 4) as u64;
-        set_mock_ledger_balance(1200 * ICP); // inbox balance read
+        set_mock_ledger_balance(350 * ICP); // inbox balance read
         early_adopter_run_settlement(current_time()).await.unwrap();
         set_mock_caller(alice);
         assert_eq!(get_early_adopter_info().my_claimable_e8s, alice_share);
@@ -12485,8 +12689,8 @@ mod tests {
         assert_eq!(get_early_adopter_info().my_claimable_e8s, bob_share);
         let rounds = list_early_adopter_rounds();
         assert_eq!(rounds.len(), 1);
-        assert_eq!(rounds[0].yield_e8s, 1200 * ICP);
-        assert_eq!(rounds[0].treasury_e8s, 1000 * ICP);
+        assert_eq!(rounds[0].yield_e8s, 350 * ICP);
+        assert_eq!(rounds[0].treasury_e8s, 150 * ICP);
         assert_eq!(rounds[0].distributed_e8s, alice_share + bob_share);
         assert_eq!(rounds[0].restaked_e8s, 0);
         assert_eq!(rounds[0].early_adopter_count, 2);
@@ -12497,10 +12701,10 @@ mod tests {
         assert_eq!(net, alice_share - 10_000);
         assert_eq!(claim_early_adopter_yield().await.unwrap_err(), "NOTHING_TO_CLAIM");
 
-        // Month 2 settles with low yield (50 ICP — under 500, so the whole
-        // month RESTAKES into the neuron) and Bob's unclaimed share is
-        // forfeited to the treasury.
-        set_mock_ledger_balance(50 * ICP);
+        // Month 2 settles with low yield (49 ICP — under the 50 restake
+        // band, so the whole month RESTAKES into the neuron) and Bob's
+        // unclaimed share is forfeited to the treasury.
+        set_mock_ledger_balance(49 * ICP);
         early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
         set_mock_caller(bob);
         assert_eq!(get_early_adopter_info().my_claimable_e8s, 0, "unclaimed share expired");
@@ -12508,16 +12712,16 @@ mod tests {
         assert_eq!(rounds.len(), 2);
         let r2 = rounds.iter().find(|r| r.expired_e8s > 0).expect("expiry recorded");
         assert_eq!(r2.expired_e8s, bob_share);
-        assert_eq!(r2.treasury_e8s, 0, "sub-500 months pay the treasury nothing");
-        assert_eq!(r2.restaked_e8s, 50 * ICP, "sub-500 months compound into the neuron");
+        assert_eq!(r2.treasury_e8s, 0, "sub-50 months pay the treasury nothing");
+        assert_eq!(r2.restaked_e8s, 49 * ICP, "sub-50 months compound into the neuron");
         assert_eq!(r2.distributed_e8s, 0);
-        assert_eq!(get_early_adopter_info().total_restaked_e8s, 50 * ICP);
+        assert_eq!(get_early_adopter_info().total_restaked_e8s, 49 * ICP);
 
-        // Month 3: 700 ICP — between the thresholds → all treasury.
-        set_mock_ledger_balance(700 * ICP);
+        // Month 3: 100 ICP — between the thresholds (50..150) → all treasury.
+        set_mock_ledger_balance(100 * ICP);
         early_adopter_run_settlement(current_time() + 2 * EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
         let rounds = list_early_adopter_rounds();
-        let r3 = rounds.iter().find(|r| r.treasury_e8s == 700 * ICP).expect("mid-band month");
+        let r3 = rounds.iter().find(|r| r.treasury_e8s == 100 * ICP).expect("mid-band month");
         assert_eq!(r3.restaked_e8s, 0);
         assert_eq!(r3.distributed_e8s, 0);
         clear_early_adopters();
@@ -12538,13 +12742,13 @@ mod tests {
         set_mock_ledger_balance(30 * ICP + 10_000);
         early_adopter_stake(30 * ICP).await.unwrap();
 
-        // A 1,600 ICP month whose treasury-cut transfer fails mid-flight.
-        set_mock_ledger_balance(1600 * ICP);
+        // A 750 ICP month whose treasury-cut transfer fails mid-flight.
+        set_mock_ledger_balance(750 * ICP);
         set_mock_ledger_transfer(Err("ledger down".into()));
         assert!(early_adopter_run_settlement(current_time()).await.is_err());
         let job = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().pending_job.clone()).expect("journal persisted");
-        assert_eq!(job.yield_e8s, 1600 * ICP);
-        assert_eq!(job.treasury_cut_e8s, 1000 * ICP);
+        assert_eq!(job.yield_e8s, 750 * ICP);
+        assert_eq!(job.treasury_cut_e8s, 150 * ICP);
         assert_eq!(job.excess_net_e8s, 600 * ICP - 10_000);
         assert!(job.expired_done && job.restake_done && !job.cut_done);
 
@@ -12557,8 +12761,8 @@ mod tests {
         assert!(EARLY_ADOPTER_STATE.with(|c| c.borrow().get().pending_job.is_none()), "journal closed");
         let rounds = list_early_adopter_rounds();
         assert_eq!(rounds.len(), 1);
-        assert_eq!(rounds[0].yield_e8s, 1600 * ICP, "original month, not the re-read remainder");
-        assert_eq!(rounds[0].treasury_e8s, 1000 * ICP, "cut taken exactly once");
+        assert_eq!(rounds[0].yield_e8s, 750 * ICP, "original month, not the re-read remainder");
+        assert_eq!(rounds[0].treasury_e8s, 150 * ICP, "cut taken exactly once");
         assert_eq!(rounds[0].restaked_e8s, 0, "remainder NOT mis-restaked");
         let pot = 600 * ICP - 10_000;
         assert_eq!(rounds[0].distributed_e8s, pot / 4 + (pot as u128 * 3 / 4) as u64);
@@ -12596,7 +12800,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_early_adopter_membership_closes_at_2000_yield_but_topups_continue() {
+    async fn test_early_adopter_membership_closes_at_600_yield_but_topups_continue() {
         clear_early_adopters();
         enable_early_adopters_flag();
         let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
@@ -12608,12 +12812,12 @@ mod tests {
         early_adopter_stake(5 * ICP).await.unwrap();
 
         // A 1,999 ICP month keeps the doors open.
-        set_mock_ledger_balance(1999 * ICP);
+        set_mock_ledger_balance(599 * ICP);
         early_adopter_run_settlement(current_time()).await.unwrap();
         assert!(!get_early_adopter_info().membership_closed);
 
         // A 2,000 ICP month latches the table shut — permanently.
-        set_mock_ledger_balance(2000 * ICP);
+        set_mock_ledger_balance(600 * ICP);
         early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
         assert!(get_early_adopter_info().membership_closed);
 
@@ -13800,15 +14004,15 @@ mod tests {
         assert_eq!(pool_2y.pending_maturity.len(), 1);
         assert_eq!(pool_2y.total_yield_e8s, 110_000_000);
 
-        // Distribute: 50% lottery pot / 50% treasury, single shared pot.
+        // Distribute: 80% lottery pot / 20% treasury, single shared pot.
         set_mock_ledger_balance(220_000_000);
         distribute_yield_inbox().await;
         let dists = list_yield_distributions();
         assert_eq!(dists.len(), 1);
         let d = &dists[0];
         let spendable = 220_000_000 - 2 * ICP_FEE_E8S;
-        assert_eq!(d.lottery_amount_e8s, spendable / 2);
-        assert_eq!(d.treasury_amount_e8s, spendable - spendable / 2);
+        assert_eq!(d.lottery_amount_e8s, spendable * 4 / 5);
+        assert_eq!(d.treasury_amount_e8s, spendable - spendable * 4 / 5);
         assert_eq!(d.lottery_amount_e8s + d.treasury_amount_e8s, spendable);
         assert_eq!(d.status, YieldStatus::Done);
 
@@ -14522,9 +14726,21 @@ mod tests {
         install_staking_test_config();
         let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         set_mock_ledger_transfer(Ok(2));
-        admin_withdraw_treasury(alice, 1_000_000).await.unwrap();
+        // Mock treasury balance below the 15 ICP floor → guarded.
+        set_mock_ledger_balance(1_400_000_000);
+        assert_eq!(
+            admin_withdraw_treasury(alice, 1_000_000, false).await.unwrap_err(),
+            "TREASURY_FLOOR"
+        );
+        // Explicit override bypasses the floor.
+        admin_withdraw_treasury(alice, 1_000_000, true).await.unwrap();
+        // Well above the floor → allowed without override.
+        set_mock_ledger_balance(100_000_000_000);
+        admin_withdraw_treasury(alice, 1_000_000, false).await.unwrap();
+        // Token withdrawals share the plumbing (floor applies to ICP only).
+        admin_withdraw_treasury_token(ExplorerToken::CkUSDC, alice, 5_000_000, false).await.unwrap();
         set_mock_ledger_transfer(Err("ledger down".to_string()));
-        assert!(admin_withdraw_treasury(alice, 1_000_000).await.is_err());
+        assert!(admin_withdraw_treasury(alice, 1_000_000, false).await.is_err());
 
         // Lottery base grant bounds.
         assert_eq!(admin_set_lottery_config(Some(10_001)).unwrap_err(), "INVALID_TICKETS_PER_DAY");

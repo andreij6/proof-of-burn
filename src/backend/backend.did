@@ -1,13 +1,14 @@
+// Mirrors the real CMC candid (rs/nns/cmc/cmc.did) exactly — block_index is
+// nat64, not nat (the CMC's decoder traps on nat; see proposal 142135).
 type NotifyTopUpArgs = record {
   canister_id : principal;
-  block_index : nat;
+  block_index : nat64;
 };
 type NotifyError = variant {
-  Refunded : record { refund_block_index : opt nat; reason : text };
-  InvalidTokenLedger;
-  TransactionNotFound;
-  TransactionTooOld;
-  AlreadyNotified;
+  Refunded : record { block_index : opt nat64; reason : text };
+  Processing;
+  TransactionTooOld : nat64;
+  InvalidTransaction : text;
   Other : record { error_code : nat64; error_message : text };
 };
 type NotifyTopUpResult = variant {
@@ -147,6 +148,18 @@ type InitPayload = record {
   ledger_canister_id : opt principal;
 };
 type LedgerAccount = record { owner : principal; subaccount : opt blob };
+// Live NNS follow status of a platform-owned neuron (admin diagnostic).
+type NeuronFollowStatus = record {
+  label : text;
+  neuron_id : nat64;
+  follows_primary : bool;
+  topics_following_primary : vec int32;
+  // Live neuron stake + uncollected (unharvested) maturity, straight from
+  // NNS governance. Tier neurons auto-harvest past the maturity threshold.
+  stake_e8s : nat64;
+  maturity_e8s : nat64;
+  error : opt text;
+};
 type Proposal = record {
   id : nat64;
   status : text;
@@ -277,7 +290,7 @@ type StakingPoolInfo = record {
   // Lifetime yield across all tiers (split 50/50 lottery pot / treasury).
   total_yield_e8s : nat64;
 };
-type UnstakeStatus = variant { SplitDone; Dissolving; Disbursed };
+type UnstakeStatus = variant { SplitDone; Dissolving; Disbursed; Merged };
 type PendingUnstake = record {
   id : nat64;
   user : principal;
@@ -290,6 +303,11 @@ type PendingUnstake = record {
   // tier's full term).
   dissolve_eta : nat64;
   disburse_block : opt nat64;
+  // Tier the dissolving neuron was merged back into (status == Merged).
+  merged_into : opt StakeTier;
+  // What the split child holds: the exact requested amount since the treasury
+  // began fronting the split fee; absent on legacy unstakes (amount − 0.0001).
+  child_e8s : opt nat64;
   // Treasury fee reimbursement (0.0003 ICP) — makes the cycle zero-loss.
   fee_refund_block : opt nat64;
   settled_at : opt nat64;
@@ -325,6 +343,9 @@ type LotteryDraw = record {
   round : nat64;
   drawn_at : nat64;
   total_tickets : nat64;
+  // Drawings only run when the pot holds at least min_pot_e8s (50 ICP) —
+  // checked at the scheduled moment; otherwise the drawing rolls over.
+  min_pot_e8s : nat64;
   pot_e8s : nat64;
   winning_ticket : opt nat64;
   winner : opt principal;
@@ -350,6 +371,9 @@ type LotteryInfo = record {
   tickets_per_day : nat64;
   // The caller's actual daily grant across their staked tiers (0 = not staked).
   my_daily_tickets : nat64;
+  // Drawings only run when the pot holds at least min_pot_e8s (50 ICP) —
+  // checked at the scheduled moment; otherwise the drawing rolls over.
+  min_pot_e8s : nat64;
   pot_e8s : nat64;
   // Powerball jackpot odds: 1 in 292,201,338 per ticket per draw.
   odds_denominator : nat64;
@@ -358,7 +382,7 @@ type LotteryInfo = record {
   last_win_at : opt nat64;
   total_paid_e8s : nat64;
 };
-type PayoutType = variant { LotteryWin; UnstakeDisbursement; IdeaUpvoteShare; CommitmentRefund; PoolReward; CoFounderYield };
+type PayoutType = variant { LotteryWin; UnstakeDisbursement; IdeaUpvoteShare; CommitmentRefund; PoolReward; EarlyAdopterYield };
 // One payout the site made to a user, in the token's smallest unit.
 type Payout = record {
   id : nat64;
@@ -440,7 +464,7 @@ type ExplorerInfo = record {
 };
 type ExplorerQuoteResult = variant { Ok : ExplorerQuote; Err : text };
 // Which pay-first deposit escrow to reclaim from.
-type EscrowKind = variant { Explorer; Arcade; CoFounder };
+type EscrowKind = variant { Explorer; Arcade; EarlyAdopter };
 
 // ── Arcade (skill games, participation-gated) ──
 // Palette indices for the low-poly golfer (defaults are all 0).
@@ -483,17 +507,17 @@ type ArcadeHoleDef = record {
   bars : vec ArcadeBarDef;
 };
 type ArcadeCourseEntry = record { index : nat8; hole : ArcadeHoleDef };
-// ── Co-Founders (permanent stake — NO unstake exists, by design) ──
-type CoFounderInfo = record {
+// ── Early Adopters (permanent stake — NO unstake exists, by design) ──
+type EarlyAdopterInfo = record {
   enabled : bool;
   // True once any month's yield has reached close_threshold_e8s (2,000 ICP)
-  // — permanent; new members rejected, existing co-founders may still top up.
+  // — permanent; new members rejected, existing early adopters may still top up.
   membership_closed : bool;
   close_threshold_e8s : nat64;
   // Months yielding under this (500 ICP) are restaked into the neuron.
   restake_threshold_e8s : nat64;
   total_restaked_e8s : nat64;
-  // The co-founder neuron; once bootstrapped it follows the primary voting
+  // The early adopter neuron; once bootstrapped it follows the primary voting
   // neuron on all topics and votes on every NNS proposal the leader does.
   neuron_id : opt nat64;
   follows_primary_neuron : bool;
@@ -504,7 +528,7 @@ type CoFounderInfo = record {
   // Minimum pot (100 ICP) before an even split happens; below it rolls over.
   min_distribution_e8s : nat64;
   period_nanos : nat64;
-  cofounder_count : nat64;
+  early_adopter_count : nat64;
   total_staked_e8s : nat64;
   rollover_e8s : nat64;
   // Live share-pool balance (unclaimed shares + rollover).
@@ -516,24 +540,24 @@ type CoFounderInfo = record {
   my_claimable_e8s : nat64;
   fee_e8s : nat64;
 };
-// One row of the public co-founder roster.
-type CoFounderPublic = record {
+// One row of the public early adopter roster.
+type EarlyAdopterPublic = record {
   user : principal;
   staked_e8s : nat64;
   joined_at : nat64;
   is_admin : bool;
 };
 // One monthly settlement — drives the yield + share-pool charts.
-type CoFounderRound = record {
+type EarlyAdopterRound = record {
   month : nat64;
   settled_at : nat64;
   yield_e8s : nat64;
   treasury_e8s : nat64;
-  // Allocated to co-founders, proportional to staked ICP.
+  // Allocated to early adopters, proportional to staked ICP.
   distributed_e8s : nat64;
   // Yield restaked into the neuron (months under 500 ICP).
   restaked_e8s : nat64;
-  cofounder_count : nat64;
+  early_adopter_count : nat64;
   // Unclaimed shares from the previous round forfeited to the treasury.
   expired_e8s : nat64;
   rollover_after_e8s : nat64;
@@ -560,7 +584,15 @@ service : (InitPayload) -> {
   admin_set_proposal_deadline : (nat64, nat64) -> (Result);
   admin_trigger_sweep : () -> (Result);
   // Admin: withdraw ICP from the treasury subaccount to a destination principal.
-  admin_withdraw_treasury : (principal, nat64) -> (Result);
+  // Guarded by the 15 ICP treasury floor unless override_floor = true.
+  admin_withdraw_treasury : (principal, nat64, bool) -> (Result);
+  // Withdraw any supported token from the treasury account (floor applies to ICP).
+  admin_withdraw_treasury_token : (ExplorerToken, principal, nat64, bool) -> (Result);
+  // Allocate treasury ICP into a tier pool neuron / the early-adopter neuron.
+  admin_fund_tier_neuron : (StakeTier, nat64, bool) -> (Result);
+  admin_fund_early_adopter_neuron : (nat64, bool) -> (Result);
+  // Frontend canister's live cycle balance (backend must control the frontend).
+  admin_get_frontend_cycles : () -> (variant { Ok : nat64; Err : text });
   commit : (nat64, Stance, nat64) -> (Result);
   create_pool_draft : (nat64) -> (Result);
   cancel_pool_draft : (nat64) -> (Result);
@@ -602,6 +634,10 @@ service : (InitPayload) -> {
   get_my_commitments : () -> (vec Commitment) query;
   get_proposal : (nat64) -> (opt Proposal) query;
   get_treasury_balance : () -> (BalanceResult);
+  // The treasury's ledger account — deposit ICP here to fund it directly.
+  get_treasury_deposit_address : () -> (LedgerAccount) query;
+  // Admin diagnostic: live NNS follow status of every platform-owned neuron.
+  admin_check_neuron_following : () -> (vec NeuronFollowStatus);
   list_active_proposals : () -> (vec Proposal) query;
   list_all_proposals : () -> (vec Proposal) query;
   list_vote_history : () -> (vec VoteRecord) query;
@@ -670,9 +706,15 @@ service : (InitPayload) -> {
   // Split + dissolve `amount` out of the tier's pool; ICP lands in the
   // caller's wallet after the tier's full term. Returns the pending-unstake id.
   unstake : (nat64, StakeTier) -> (UnstakeResult);
+  // Merge a still-dissolving unstake neuron back into any tier pool (the
+  // platform's main neurons are merge targets only, never sources). The
+  // child's stake minus 0.0002 ICP of neuron fees resumes earning there.
+  merge_unstake : (nat64, StakeTier) -> (Result);
   get_my_stake : () -> (UserStakeInfo) query;
   get_staking_pool_info : () -> (StakingPoolInfo) query;
   list_my_pending_unstakes : () -> (vec PendingUnstake) query;
+  // Admin: every user's unstake split-neuron record (dissolving/restaked/disbursed).
+  admin_list_pending_unstakes : () -> (vec PendingUnstake) query;
   // Free vote with staked weight × term multiplier (balance of power only —
   // never the burn threshold).
   cast_lossless_vote : (nat64, Stance) -> (Result);
@@ -776,30 +818,30 @@ service : (InitPayload) -> {
   admin_set_arcade_hole : (nat8, ArcadeHoleDef) -> (Result);
   // Admin: drop one hole's override, reverting to the built-in layout.
   admin_reset_arcade_hole : (nat8) -> (Result);
-  // ── Co-Founders (permanent stake into the platform's 2-year neuron) ──
+  // ── Early Adopters (permanent stake into the platform's 2-year neuron) ──
   // Program stats + the caller's position (stake, claimable share, deadline).
-  get_cofounder_info : () -> (CoFounderInfo) query;
+  get_early_adopter_info : () -> (EarlyAdopterInfo) query;
   // Monthly settlement history, oldest first (chart data).
-  list_cofounder_rounds : () -> (vec CoFounderRound) query;
-  // The full co-founder roster, largest stake first. is_admin marks team
+  list_early_adopter_rounds : () -> (vec EarlyAdopterRound) query;
+  // The full early adopter roster, largest stake first. is_admin marks team
   // members (rendered as the FOUNDER tag).
-  list_cofounders : () -> (vec CoFounderPublic) query;
+  list_early_adopters : () -> (vec EarlyAdopterPublic) query;
   // The caller's deposit subaccount. Fund with amount + 0.0001 ICP, then
-  // call cofounder_stake.
-  get_cofounder_deposit_address : () -> (LedgerAccount) query;
-  // Stake into the co-founder neuron. PERMANENT — there is no unstake
+  // call early_adopter_stake.
+  get_early_adopter_deposit_address : () -> (LedgerAccount) query;
+  // Stake into the early adopter neuron. PERMANENT — there is no unstake
   // method anywhere in this canister, by design.
-  cofounder_stake : (nat64) -> (Result);
+  early_adopter_stake : (nat64) -> (Result);
   // Claim the caller's monthly share. Unclaimed shares are forfeited to the
   // treasury at the next monthly settlement.
-  claim_cofounder_yield : () -> (ClaimResult);
+  claim_early_adopter_yield : () -> (ClaimResult);
   // Local-dev: the neuron's yield inbox (send mock yield here).
-  get_cofounder_yield_inbox_address : () -> (LedgerAccount) query;
+  get_early_adopter_yield_inbox_address : () -> (LedgerAccount) query;
   // Local-dev: force a settlement now regardless of the period clock.
-  dev_run_cofounder_settlement : () -> (Result);
+  dev_run_early_adopter_settlement : () -> (Result);
   // Local-dev: jump the page to a preset state (0 fresh/open, 1 open with
   // members + history + claimable, 2 membership closed). Visual only.
-  dev_set_cofounder_preset : (nat8) -> (Result);
+  dev_set_early_adopter_preset : (nat8) -> (Result);
   // ── Social profile ──
   // Set (empty text clears) the caller's X/Twitter handle (no @, 1–15 chars
   // [A-Za-z0-9_]). Used for proposal-sharing social features.

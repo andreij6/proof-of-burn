@@ -12,7 +12,7 @@ import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP } from "./ui";
 // term multiplier (1× / 2× / 4×), and qualify for the lossless lottery
 // (5 / 10 / 20 daily tickets per tier). Unstaking splits the tier's neuron
 // and dissolves it for the tier's full term. All three neurons' yield is
-// harvested into one inbox and split 50% lottery prize pot / 50% treasury.
+// harvested into one inbox and split 80% lottery prize pot / 20% treasury.
 // ==========================================
 
 const E8S = 100_000_000n;
@@ -39,10 +39,11 @@ const TIER_META: Record<StakeTier, { label: string; short: string; mult: number;
   [StakeTier.TwoYears]: { label: '2 years', short: '2 yr', mult: 4, tickets: '20' },
 };
 
+/** Whole-ICP only: staking and unstaking reject fractional amounts. */
 function parseIcp(text: string): bigint | null {
   const v = parseFloat(text);
-  if (isNaN(v) || v <= 0) return null;
-  return BigInt(Math.round(v * 100_000_000));
+  if (isNaN(v) || v <= 0 || !Number.isInteger(v)) return null;
+  return BigInt(v) * 100_000_000n;
 }
 
 /** "~12 days" / "~3 hours" / "any moment" from a nanosecond ETA. */
@@ -158,7 +159,7 @@ export default function Staking({
       return;
     }
     setStakeInput('');
-    setNotice(`Staked ${fmtICP(amount)} ICP for ${termLabel} — ${fmtICP(amount / 10n)} voting power (stake ÷ 10) and ${TIER_META[tier].tickets} lottery tickets/day are live.`);
+    setNotice(`Staked ${fmtICP(amount)} ICP for ${termLabel} — ${fmtICP(amount / 10n)} voting power (stake ÷ 10) and ${TIER_META[tier].tickets} lottery tickets per ICP per day are live.`);
     await refresh();
     onActivity();
   });
@@ -193,6 +194,17 @@ export default function Staking({
   const handleDevSweep = () => run('sweep', async () => {
     const res = await actor.dev_run_staking_sweep();
     if (res.__kind__ === "Err") setError(res.Err);
+    await refresh();
+    onActivity();
+  });
+
+  // Restake dialog: pick which tier pool to merge a dissolving neuron into.
+  const [restakeTarget, setRestakeTarget] = useState<bigint | null>(null); // unstake id
+  const handleRestake = (id: bigint, t: StakeTier) => run(`merge-${id}`, async () => {
+    const res = await actor.merge_unstake(id, t);
+    if (res.__kind__ === "Err") { setError(res.Err); setRestakeTarget(null); return; }
+    setRestakeTarget(null);
+    setNotice(`Restaked into the ${TIER_META[t].label} pool — your stake there is earning voting power and tickets again (0.0001 ICP merge fee).`);
     await refresh();
     onActivity();
   });
@@ -250,7 +262,7 @@ export default function Staking({
           your voting power is the ICP you stake ÷ 10 (10 staked ICP = 1 burned ICP of weight),
           longer terms earn more lottery tickets (5 / 10 / 20 a day), and staking qualifies you for
           the lossless lottery (5 / 10 / 20 free tickets a day). The neurons' yield funds the
-          protocol — 50% lottery prize pool, 50% treasury — and you can unstake any time: your ICP
+          protocol — 80% lottery prize pool, 20% treasury — and you can unstake any time: your ICP
           returns to your wallet after the term's dissolve.
         </span>
       </div>
@@ -347,7 +359,7 @@ export default function Staking({
 
         {/* ── Yield ── */}
         <div className="col" style={{ ...card, gap: 10, flex: '1 1 260px', minWidth: 250 }}>
-          <Eyebrow>Yield · 50% lottery / 50% treasury</Eyebrow>
+          <Eyebrow>Yield · 80% lottery / 20% treasury</Eyebrow>
           <div className="col" style={{ gap: 7, fontSize: 12.5 }}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span style={{ color: 'var(--fg-3)' }}>Harvested (lifetime)</span>
@@ -411,7 +423,7 @@ export default function Staking({
                 </div>
                 <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                   <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>1 VP / 10 ICP</Chip>
-                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].tickets} tickets/day</Chip>
+                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].tickets} tickets / ICP / day</Chip>
                 </div>
                 <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
                   <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
@@ -463,38 +475,125 @@ export default function Staking({
       </div>
 
       {/* ── Pending unstakes ── */}
-      {signedIn && unstakes.length > 0 && (
+      {signedIn && unstakes.filter(u => u.status !== UnstakeStatus.Merged).length > 0 && (
         <div className="col" style={{ ...card, gap: 10 }}>
           <Eyebrow>Your unstakes</Eyebrow>
           <div className="col" style={{ gap: 8 }}>
-            {[...unstakes].sort((a, b) => Number(b.created_at - a.created_at)).map(u => (
-              <div key={u.id.toString()} className="row" style={{
-                justifyContent: 'space-between', gap: 10, flexWrap: 'wrap',
-                padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 8,
+            {/* Restaked (merged) neurons are empty husks — hidden from the list. */}
+            {[...unstakes].filter(u => u.status !== UnstakeStatus.Merged).sort((a, b) => Number(b.created_at - a.created_at)).map(u => (
+              <div key={u.id.toString()} className="col" style={{
+                gap: 10, padding: '14px 16px', borderRadius: 10,
+                border: '1px solid var(--border)',
               }}>
-                <span className="row" style={{ gap: 10 }}>
-                  <span className="mono" style={{ fontSize: 13 }}>{fmtICP(u.amount_e8s)} ICP</span>
-                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[u.tier].short}</Chip>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                  <span className="row" style={{ gap: 10, alignItems: 'center' }}>
+                    <b className="mono" style={{ fontSize: 16 }}>{fmtICP(u.amount_e8s)} ICP</b>
+                    <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[u.tier].short}</Chip>
+                  </span>
                   {u.status === UnstakeStatus.Disbursed ? (
                     <Chip tone="ok"><Icon name="checkCircle" size={11} /> In your wallet</Chip>
+                  ) : u.status === UnstakeStatus.Merged ? (
+                    <Chip tone="ok"><Icon name="undo" size={11} /> Restaked · {u.merged_into !== undefined && u.merged_into !== null ? TIER_META[u.merged_into].short : 'pool'}</Chip>
                   ) : u.status === UnstakeStatus.Dissolving ? (
                     <Chip tone="pending"><Icon name="clock" size={11} /> Dissolving · {etaLabel(u.dissolve_eta)}</Chip>
                   ) : (
                     <Chip tone="muted"><LiveDot size={6} /> Starting dissolve…</Chip>
                   )}
-                </span>
-                {isLocal && u.status !== UnstakeStatus.Disbursed && (
-                  <Btn variant="ghost" sm onClick={() => handleDevFastForward(u.id)} disabled={busy !== null}>
-                    {busy === `ff-${u.id}` ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Fast-forward (dev)
-                  </Btn>
+                </div>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8, fontSize: 12.5, minWidth: 0 }}>
+                  <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Dissolving neuron</span>
+                  {isLocal ? (
+                    <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>#{u.split_neuron_id.toString()}</span>
+                  ) : (
+                    <a
+                      className="mono"
+                      href={`https://dashboard.internetcomputer.org/neuron/${u.split_neuron_id.toString()}`}
+                      target="_blank" rel="noreferrer"
+                      style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                      title="View the dissolving neuron on the NNS dashboard"
+                    >
+                      #{u.split_neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                    </a>
+                  )}
+                </div>
+                {(u.status === UnstakeStatus.Dissolving || u.status === UnstakeStatus.SplitDone) && (
+                  <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                    <Btn variant="secondary" sm onClick={() => setRestakeTarget(u.id)} disabled={busy !== null}>
+                      <Icon name="undo" size={12} stroke="var(--burn)" /> Restake
+                    </Btn>
+                    {isLocal && (
+                      <Btn variant="ghost" sm onClick={() => handleDevFastForward(u.id)} disabled={busy !== null}>
+                        {busy === `ff-${u.id}` ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Fast-forward (dev)
+                      </Btn>
+                    )}
+                  </div>
                 )}
               </div>
             ))}
           </div>
+          <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.5 }}>
+            <Icon name="info" size={12} stroke="var(--fg-3)" style={{ flexShrink: 0, marginTop: 2 }} />
+            <span>
+              Each unstake splits its own neuron that dissolves for the tier's full term — follow it
+              live with the neuron link. When the dissolve completes, the protocol automatically
+              disburses the ICP to your wallet (it appears under Profile as an "Unstake disbursement"
+              payout) and the treasury reimburses every ledger fee, so you receive exactly what you
+              unstaked. Changed your mind? Restake the dissolving neuron into any term pool and it
+              starts earning voting power and tickets again immediately. After a restake the
+              emptied neuron still exists on the NNS (merges never delete the source), and
+              NNS explorers can show stale balances for a few hours while their indexers
+              catch up — the live stake is already in the pool neuron.
+            </span>
+          </span>
         </div>
       )}
 
-      {/* ── Yield history ── */}
+      {/* ── Restake dialog: choose the destination tier pool ── */}
+      {restakeTarget !== null && (() => {
+        const u = unstakes.find(x => x.id === restakeTarget);
+        if (!u) return null;
+        return (
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 300, display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+            background: 'color-mix(in srgb, var(--char-950) 70%, transparent)',
+          }} onClick={() => busy === null && setRestakeTarget(null)}>
+            <div className="col" style={{
+              gap: 14, width: 'min(440px, calc(100vw - 32px))', padding: '20px 22px',
+              borderRadius: 12, background: 'var(--surface)', border: '1px solid var(--border-hi)',
+            }} onClick={e => e.stopPropagation()}>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                <Eyebrow accent>Restake {fmtICP(u.amount_e8s)} ICP</Eyebrow>
+                <button onClick={() => setRestakeTarget(null)} disabled={busy !== null} style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)', padding: 2,
+                }}><Icon name="x" size={15} /></button>
+              </div>
+              <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                The dissolve stops and neuron <b className="mono">#{u.split_neuron_id.toString()}</b> merges
+                into the term pool you pick — your stake there earns voting power and lottery tickets
+                again immediately. A 0.0001 ICP merge fee applies.
+              </span>
+              <div className="col" style={{ gap: 8 }}>
+                {TIER_ORDER.map(t => (
+                  <Btn key={t} variant="secondary" onClick={() => handleRestake(u.id, t)}
+                    disabled={busy !== null}
+                    style={{ justifyContent: 'space-between', width: '100%', height: 44 }}>
+                    <span className="row" style={{ gap: 8 }}>
+                      {busy === `merge-${u.id}` ? <LiveDot size={8} /> : <Icon name="zap" size={13} stroke="var(--burn)" />}
+                      <b>{TIER_META[t].label}</b>
+                    </span>
+                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                      {TIER_META[t].tickets} tickets / ICP / day
+                    </span>
+                  </Btn>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+            {/* ── Yield history ── */}
       {yields.length > 0 && (
         <div className="col" style={{ ...card, gap: 10 }}>
           <Eyebrow>Yield distributions</Eyebrow>
@@ -549,7 +648,7 @@ export default function Staking({
           </div>
           <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
             Add mock maturity ≥ 1.05 ICP to a tier's neuron, then run the sweep twice: first
-            harvests into the shared yield inbox, second splits it 50% lottery pot / 50% treasury.
+            harvests into the shared yield inbox, second splits it 80% lottery pot / 20% treasury.
           </span>
         </div>
       )}

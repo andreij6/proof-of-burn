@@ -96,7 +96,7 @@ and reimburses all three cycle fees (0.0003 ICP, `fee_refund_block` on the
 PendingUnstake, retried by the sweep) with the disbursement. Staking is also the lossless-lottery eligibility gate (the
 daily ticket grant = base 5 × multiplier per staked tier). Maturity from all
 three neurons is harvested on the 5-minute sweep into the shared yield inbox
-(`[2u8;32]`) and split **50% lottery prize pot (`[3u8;32]`) / 50% treasury**.
+(`[2u8;32]`) and split **80% lottery prize pot (`[3u8;32]`) / 20% treasury** (rebalanced from 50/50 June 2026 — GROWTH_TARGETS.md §5).
 
 Tier dissolve delays are FIXED in code; `admin_set_staking_config` only tunes
 `(min_stake_e8s, min_unstake_e8s, maturity_threshold_e8s)` (null = keep).
@@ -122,14 +122,21 @@ Tier dissolve delays are FIXED in code; `admin_set_staking_config` only tunes
 
 ---
 
-## Lossless Lottery (Powerball-style, stakers only)
+## Lossless Lottery (stake-weighted, dynamic odds, stakers only)
 
 Staking is the eligibility gate: stakers collect tickets daily — base 5
-(admin-tunable) × the tier multiplier, summed over staked tiers (5 / 10 / 20
-for 6mo / 1y / 2y; `NOT_STAKED` otherwise). Drawings copy the American
-Powerball: jackpot odds **1 in 292,201,338 per ticket**, three drawings a
+(admin-tunable) × the tier multiplier × **whole ICP staked in the tier**,
+summed over staked tiers (1 ICP/6mo = 5/day; 500 ICP/2y = 10,000/day;
+`NOT_STAKED` otherwise). Odds are **dynamic**: the draw space is
+`total_tickets × 13`, so every drawing has exactly a 1-in-13 chance of
+crowning a winner no matter how many tickets exist — with three drawings a
 week (Mon/Wed/Sat nights US Eastern — implemented as Tue/Thu/Sun 03:00 UTC,
-checked by the 5-minute timer). Tickets accumulate until someone wins; the
+checked by the 5-minute timer) that's **one jackpot a month in expectation
+and a ≈96% chance of at least one within 3 months**. A user's win chance is
+their stake-weighted share of all tickets. **Drawings only run when the pot
+holds ≥ 25 ICP** (`LOTTERY_MIN_POT_E8S`): the countdown always ticks, the pot
+check happens at the scheduled moment, and an under-funded drawing rolls over
+(no randomness, no draw record). Tickets accumulate until someone wins; the
 winner takes **80%** of the lottery pot (`[3u8;32]`, fed by 50% of every
 yield harvest across all three neurons), 20% seeds the next round, and all
 tickets reset. Prize payouts use a journal-first saga (`LotteryDraw`)

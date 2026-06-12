@@ -93,10 +93,10 @@ icp canister call backend admin_set_explorer_ledger "(variant { CkUSDC }, princi
 icp canister call backend admin_set_explorer_ledger "(variant { CkUSDT }, principal \"$CKUSDT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 ok "Token ledgers wired (ckBTC=$CKBTC_ID, ckETH=$CKETH_ID, ckUSDC=$CKUSDC_ID, ckUSDT=$CKUSDT_ID)"
 
-# The arcade + co-founders ship dark (flags default OFF) — on for local testing.
+# The arcade + early adopters ship dark (flags default OFF) — on for local testing.
 icp canister call backend admin_set_feature_flag '("arcade", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-icp canister call backend admin_set_feature_flag '("cofounders", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-ok "Arcade + Co-Founders flags enabled (local)"
+icp canister call backend admin_set_feature_flag '("early_adopters", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+ok "Arcade + Early Adopters flags enabled (local)"
 
 # ── 6. Mock data (only seeds what is missing) ────────────────────────────────
 # 6a. Proposals + sample ideas auto-seed in init/post_upgrade when empty.
