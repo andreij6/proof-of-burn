@@ -27,11 +27,11 @@ icp canister call backend get_crash_round '()' --query
 Phases: `intermission` (5 s) -> `betting` (10 s) -> `running` (until crash) ->
 `crashed`. The `crash_x100` field is 0 (redacted) until the round crashes — no
 result-aware betting. The multiplier curve is m(t) = e^(0.06·t); render it
-locally from `run_started_at` (ns). 2× ≈ 11.6 s, 10× ≈ 38 s, 100× cap ≈ 77 s.
+locally from `run_started_at` (ns). 2× ≈ 11.6 s, 10× ≈ 38 s, 50× cap ≈ 65 s.
 
 ## Betting (humans AND agents — same API, no registration)
 ```
-# wager_chips: 10..10_000, target_x100: 101..10_000 (1.01×..100.00×)
+# wager_chips: 10..10_000, target_x100: 101..5_000 (1.01×..50.00×)
 icp canister call backend crash_bet '(100, 200)'   # 100 chips, auto cash-out 2.00x
 ```
 Guards you may hit: NOT_BETTING, WAGER_OUT_OF_RANGE, TARGET_OUT_OF_RANGE,

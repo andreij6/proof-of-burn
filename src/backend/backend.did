@@ -992,6 +992,10 @@ service : (InitPayload) -> {
   // the round is still running (i.e. before the crash). First writer wins;
   // duplicate/late calls return ALREADY_SETTLED / TOO_LATE without mutation.
   crash_cashout : () -> (Result_1);
+  // Public nudge: advance the loop if a phase is overdue. On a real subnet the
+  // autonomous timers do this; locally (and as a self-heal) the frontend calls
+  // this each poll so the round loop progresses whenever someone is watching.
+  crash_poke : () -> ();
   // Author a crash strategy. Costs $5 (charged in `token` via the shared quote
   // flow — same machinery as the explorer/idea-board fees: the caller must have
   // pre-approved the canister via icrc2_approve). ≤ 20 per author, ≤ 4 KB.

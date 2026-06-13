@@ -25,7 +25,7 @@ export function crashPointX100FromU(u: bigint): number {
   const hb = u & (e - 1n);
   let x = (100n * e - hb) / (e - hb);
   if (x < 100n) x = 100n;
-  if (x > 10000n) x = 10000n;
+  if (x > 5000n) x = 5000n; // 50.00× cap (max multiplier 5000)
   return Number(x);
 }
 
@@ -65,9 +65,9 @@ export async function hashForwardHex(seedHex: string, times: number): Promise<st
 }
 
 export type ChipTone = "gold" | "sprout" | "ember";
-/** History-bar chip tone: 100× moon = gold, ≥2× = sprout, else ember. */
+/** History-bar chip tone: 50× moon (the cap) = gold, ≥2× = sprout, else ember. */
 export function historyChipTone(x100: number): ChipTone {
-  if (x100 >= 10000) return "gold";
+  if (x100 >= 5000) return "gold";
   if (x100 >= 200) return "sprout";
   return "ember";
 }

@@ -54,6 +54,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   const [verify, setVerify] = useState<{ item: CrashHistoryItem; data?: CrashVerifyView; client?: number } | null>(null);
   const [muted, setMuted] = useState(false);
   const [autopilotOpen, setAutopilotOpen] = useState(false);
+  const [chatTab, setChatTab] = useState<'chat' | 'history'>('chat');
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
 
@@ -62,6 +63,9 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   const refresh = useCallback(async () => {
     if (!actor) return;
     try {
+      // Nudge the round loop forward (no-op on a healthy subnet; drives it
+      // locally where idle timers don't fire). Fire-and-forget.
+      actor.crash_poke?.().catch(() => {});
       const [r, h, s] = await Promise.all([
         actor.get_crash_round(),
         actor.get_crash_history(20n),
@@ -144,12 +148,15 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
     ctx.fillRect(0, 0, W, H);
     const crashed = phase === 'crashed';
     const peak = crashed && round ? Number(round.crash_x100) : liveX100;
-    const span = Math.max(300, peak * 1.15); // y axis scales with the run
-    const toY = (x100: number) => H - (Math.log(x100 / 100) / Math.log(span / 100)) * (H - 16) - 8;
-    // grid lines at 2×,5×,10×…
+    // LINEAR y-axis so e^(0.06t) renders as a pronounced upward parabola. The
+    // axis tracks the peak (curve fills the height) and tops out at 50× (5000
+    // in ×100), the display ceiling.
+    const span = Math.min(5000, Math.max(200, Math.ceil(peak * 1.08)));
+    const toY = (x100: number) => H - ((Math.min(x100, span) - 100) / (span - 100)) * (H - 16) - 8;
+    // grid lines at 2×,5×,10×,20×,50×…
     ctx.strokeStyle = 'rgba(255,255,255,0.06)';
     ctx.lineWidth = 1;
-    for (const g of [200, 500, 1000, 2000, 5000, 10000]) {
+    for (const g of [200, 500, 1000, 2000, 5000]) {
       if (g > span) break;
       const y = toY(g);
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
@@ -272,7 +279,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
               <div style={{ color: 'var(--fg-3)', fontSize: 12 }}>
                 {phase === 'betting' && round && `betting closes in ${Math.max(0, Math.ceil((Number(BigInt(round.phase_deadline) / 1_000_000n) - Date.now()) / 1000))}s`}
                 {phase === 'running' && <span><LiveDot color="var(--sprout)" /> live</span>}
-                {phase === 'crashed' && round && Number(round.crash_x100) >= 10000 && <span style={{ color: 'var(--haze)' }}>\ud83c\udf19 MOON</span>}
+                {phase === 'crashed' && round && Number(round.crash_x100) >= 5000 && <span style={{ color: 'var(--haze)' }}>🌙 MOON</span>}
                 {phase === 'crashed' && round && <span style={{ color: 'var(--ember)' }}> BUSTED @ {fmtX(Number(round.crash_x100))}×</span>}
                 {phase === 'intermission' && 'next round starting…'}
               </div>
@@ -280,38 +287,65 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
             <canvas ref={canvasRef} width={680} height={240} style={{ width: '100%', height: 240, marginTop: 8, borderRadius: 8, display: 'block' }} />
           </div>
 
-          {/* History bar */}
-          <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-            {history.map((h) => {
+          {/* History bar — a single line, newest first, clipped (no scroll). */}
+          <div className="row" style={{ gap: 6, flexWrap: 'nowrap', overflow: 'hidden' }}>
+            {history.slice(0, 16).map((h) => {
               const tone = historyChipTone(Number(h.crash_x100));
               const color = tone === 'gold' ? 'var(--haze)' : tone === 'sprout' ? 'var(--sprout)' : 'var(--ember)';
               return (
                 <button key={String(h.id)} onClick={() => openVerify(h)} title="verify"
-                  style={{ border: `1px solid ${color}`, color, background: 'transparent', borderRadius: 6, padding: '2px 8px', fontSize: 12, fontVariantNumeric: 'tabular-nums', cursor: 'pointer' }}>
+                  style={{ border: `1px solid ${color}`, color, background: 'transparent', borderRadius: 6, padding: '2px 8px', fontSize: 12, fontVariantNumeric: 'tabular-nums', cursor: 'pointer', flex: '0 0 auto' }}>
                   {fmtX(Number(h.crash_x100))}×
                 </button>
               );
             })}
           </div>
 
-          {/* Chat — directly below the game */}
+          {/* Chat + History tabs — directly below the game */}
           <div style={card}>
-            <Eyebrow>Casino chat</Eyebrow>
-            <div className="col" style={{ gap: 3, marginTop: 8, maxHeight: 260, overflowY: 'auto', fontSize: 12 }}>
-              {chat.length === 0 && <span style={{ color: 'var(--fg-3)' }}>Say hi \ud83d\udc4b</span>}
-              {chat.map((m) => (
-                <div key={String(m.id)}>
-                  <span style={{ color: 'var(--fg-3)' }}>{formatPrincipal(Principal.fromText(m.author.toString()))}:</span>{' '}
-                  <span style={{ color: 'var(--fg-2)' }}>{m.text}</span>
-                </div>
-              ))}
+            <div className="row" style={{ gap: 6 }}>
+              <Btn variant={chatTab === 'chat' ? 'primary' : 'ghost'} sm onClick={() => setChatTab('chat')}>Chat</Btn>
+              <Btn variant={chatTab === 'history' ? 'primary' : 'ghost'} sm onClick={() => setChatTab('history')}>History</Btn>
             </div>
-            {signedIn && (
-              <div className="row" style={{ gap: 6, marginTop: 8 }}>
-                <input value={chatText} onChange={(e) => setChatText(e.target.value)} maxLength={200}
-                  onKeyDown={(e) => { if (e.key === 'Enter') sendChat(); }} placeholder="message (200)"
-                  style={{ flex: 1, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
-                <Btn variant="secondary" sm disabled={busy} onClick={sendChat}>Send</Btn>
+
+            {chatTab === 'chat' ? (
+              <>
+                <div className="col" style={{ gap: 3, marginTop: 10, maxHeight: 260, overflowY: 'auto', fontSize: 12 }}>
+                  {chat.length === 0 && <span style={{ color: 'var(--fg-3)' }}>Say hi 👋</span>}
+                  {chat.map((m) => (
+                    <div key={String(m.id)}>
+                      <span style={{ color: 'var(--fg-3)' }}>{formatPrincipal(Principal.fromText(m.author.toString()))}:</span>{' '}
+                      <span style={{ color: 'var(--fg-2)' }}>{m.text}</span>
+                    </div>
+                  ))}
+                </div>
+                {signedIn && (
+                  <div className="row" style={{ gap: 6, marginTop: 8 }}>
+                    <input value={chatText} onChange={(e) => setChatText(e.target.value)} maxLength={200}
+                      onKeyDown={(e) => { if (e.key === 'Enter') sendChat(); }} placeholder="message (200)"
+                      style={{ flex: 1, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
+                    <Btn variant="secondary" sm disabled={busy} onClick={sendChat}>Send</Btn>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="col" style={{ marginTop: 10, maxHeight: 320, overflowY: 'auto', fontSize: 12 }}>
+                <div className="row" style={{ justifyContent: 'space-between', color: 'var(--fg-3)', padding: '4px 6px', borderBottom: '1px solid var(--border)' }}>
+                  <span>Round</span><span>Multiplier</span><span>Verify</span>
+                </div>
+                {history.length === 0 && <span style={{ color: 'var(--fg-3)', padding: '6px' }}>No rounds yet.</span>}
+                {history.map((h) => {
+                  const tone = historyChipTone(Number(h.crash_x100));
+                  const color = tone === 'gold' ? 'var(--haze)' : tone === 'sprout' ? 'var(--sprout)' : 'var(--ember)';
+                  return (
+                    <button key={String(h.id)} onClick={() => openVerify(h)}
+                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)', color: 'var(--fg-2)', padding: '5px 6px', cursor: 'pointer', fontSize: 12 }}>
+                      <span style={{ color: 'var(--fg-3)' }}>#{String(h.id)}</span>
+                      <span style={{ color, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>{fmtX(Number(h.crash_x100))}×</span>
+                      <Icon name="check" size={12} stroke={color} />
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -411,7 +445,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                 const col = p.outcome === 'won' ? 'var(--sprout)' : p.outcome === 'lost' ? 'var(--ember)' : 'var(--fg-2)';
                 return (
                   <div key={i} className="row" style={{ justifyContent: 'space-between', fontSize: 12, color: col }}>
-                    <span>{formatPrincipal(Principal.fromText(p.user.toString()))} {p.auto_pilot && '\ud83e\udd16'}</span>
+                    <span>{formatPrincipal(Principal.fromText(p.user.toString()))} {p.auto_pilot && '🤖'}</span>
                     <span>{Number(p.wager_chips)} @ {fmtX(Number(p.target_x100))}× {p.outcome === 'won' ? `✓ ${fmtX(Number(p.payout_x100))}×` : m > 0 ? `out ${fmtX(m)}×` : ''}</span>
                   </div>
                 );

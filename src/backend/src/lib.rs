@@ -4242,6 +4242,11 @@ fn setup_timers() {
         early_adopter_settlement_check().await;
         casino_weekly_burn();
     });
+    // Short watchdog so the crash loop self-heals if a one-shot timer is ever
+    // dropped (e.g. across an upgrade). Cheap: a couple of reads when idle.
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(15), || async {
+        crash_watchdog().await;
+    });
 }
 
 /// Local-dev faucet — sends 100 ICP from the canister's own account to the caller.
@@ -11638,8 +11643,8 @@ const CHIP_E8S: u64 = 100_000;
 const CRASH_MIN_BET_CHIPS: u64 = 10; // 0.01 VP
 const CRASH_MAX_BET_CHIPS: u64 = 10_000; // 10 VP
 const CRASH_MIN_TARGET_X100: u64 = 101; // 1.01x
-const CRASH_MAX_TARGET_X100: u64 = 10_000; // 100.00x
-const CRASH_CAP_X100: u64 = 10_000; // 100.00x cap on the curve
+const CRASH_MAX_TARGET_X100: u64 = 5_000; // 50.00x
+const CRASH_CAP_X100: u64 = 5_000; // 50.00x cap on the curve (max multiplier 5000)
 const CRASH_DOMAIN: &[u8] = b"caldera-crash-v1";
 /// Round phase durations.
 const CRASH_INTERMISSION_NANOS: u64 = 5 * 1_000_000_000;
@@ -12003,15 +12008,19 @@ fn crash_bot_chatter(r: &CrashRound) {
         return;
     }
     let e = r.crash_x100.wrapping_mul(2_654_435_761).wrapping_add(r.id);
-    if e % 5 < 2 {
-        return; // ~60% of rounds someone talks
+    if e % 10 == 0 {
+        return; // ~90% of rounds someone talks
     }
-    let speaker = bots[(e as usize) % bots.len()];
-    let win = ["ez money 💰", "called it", "🚀🚀🚀", "cashed in time", "10x club"];
-    let bust = ["rip", "so close", "one more round", "the house burns it all 🔥", "set auto lower next time"];
-    let neutral = ["gl all", "who's in?", "2x and run", "let it ride", "feeling lucky"];
+    let win = ["ez money 💰", "called it", "🚀🚀🚀", "cashed in time", "10x club", "to the moon 🌙"];
+    let bust = ["rip", "so close", "one more round", "the house burns it all 🔥", "set auto lower next time", "knew it would dump"];
+    let neutral = ["gl all", "who's in?", "2x and run", "let it ride", "feeling lucky", "send it"];
     let pool: &[&str] = if r.crash_x100 >= 1000 { &win } else if r.crash_x100 <= 130 { &bust } else { &neutral };
-    bot_say(speaker, pool[(e as usize / 7) % pool.len()]);
+    bot_say(bots[(e as usize) % bots.len()], pool[(e as usize / 7) % pool.len()]);
+    // ~40% of the time a second bot chimes in with a different line.
+    if e % 5 < 2 && bots.len() > 1 {
+        let other = bots[(e as usize / 3 + 1) % bots.len()];
+        bot_say(other, pool[(e as usize / 11 + 1) % pool.len()]);
+    }
 }
 
 // ── Provably-fair engine (plans/crash/01 C4/C5, PB-232) ─────────────────────
@@ -12278,6 +12287,22 @@ fn crash_resume() {
     }
 }
 
+/// Watchdog (runs on a short interval): if the current phase is overdue — a
+/// one-shot timer was dropped, e.g. across an upgrade — drive the transition so
+/// the loop self-heals instead of wedging. No-op when off/paused/uninitialised.
+async fn crash_watchdog() {
+    if !feature_enabled(FLAG_CRASH) || casino_book().paused {
+        return;
+    }
+    if !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
+        return;
+    }
+    let r = crash_state();
+    if current_time() > r.phase_deadline.saturating_add(1_000_000_000) {
+        crash_tick().await;
+    }
+}
+
 /// One phase transition. Idempotent w.r.t. the flag/pause (a stale timer that
 /// fires after a pause/flag-off simply settles the current round then stops).
 async fn crash_tick() {
@@ -12304,14 +12329,24 @@ async fn crash_tick() {
         }
         CrashPhase::Running => {
             crash_settle_round(&mut r, now);
+            // Hold the crashed result for the intermission window; the watchdog
+            // and the armed timer both open the next round once it elapses.
+            r.phase_deadline = now + CRASH_INTERMISSION_NANOS;
             set_crash_state(r.clone());
             crash_archive(r);
-            // Intermission before the next round (if still live).
             if feature_enabled(FLAG_CRASH) && !casino_book().paused {
                 crash_arm_timer(CRASH_INTERMISSION_NANOS);
             }
         }
     }
+}
+
+/// Public nudge: advance the loop if a phase is overdue. On a real subnet the
+/// autonomous timers do this; locally (and as a self-heal) the frontend calls
+/// this each poll so the round loop progresses whenever someone is watching.
+#[ic_cdk::update]
+async fn crash_poke() {
+    crash_watchdog().await;
 }
 
 fn crash_open_round(now: u64) {
@@ -12369,12 +12404,11 @@ fn crash_settle_round(r: &mut CrashRound, now: u64) {
         round_sum += delta;
         // Strategy lifetime-VP leaderboard + auto-pilot session bookkeeping.
         if let Some(sid) = bet.strategy_id {
-            CRASH_STRATEGIES.with(|m| {
-                if let Some(mut s) = m.borrow().get(&sid) {
-                    s.lifetime_vp_e8s += delta;
-                    m.borrow_mut().insert(sid, s);
-                }
-            });
+            let existing = CRASH_STRATEGIES.with(|m| m.borrow().get(&sid));
+            if let Some(mut s) = existing {
+                s.lifetime_vp_e8s += delta;
+                CRASH_STRATEGIES.with(|m| m.borrow_mut().insert(sid, s));
+            }
         }
         if bet.auto_pilot {
             crash_autopilot_after_round(bet.user, delta, pay > 0);
@@ -13119,13 +13153,12 @@ fn start_autopilot(strategy_id: u64) -> Result<(), String> {
 fn stop_autopilot() -> Result<(), String> {
     require_authenticated()?;
     let caller = get_caller();
-    CRASH_AUTOPILOT.with(|m| {
-        if let Some(mut st) = m.borrow().get(&caller) {
-            st.active = false;
-            st.stop_reason = Some("stopped by user".to_string());
-            m.borrow_mut().insert(caller, st);
-        }
-    });
+    let existing = CRASH_AUTOPILOT.with(|m| m.borrow().get(&caller));
+    if let Some(mut st) = existing {
+        st.active = false;
+        st.stop_reason = Some("stopped by user".to_string());
+        CRASH_AUTOPILOT.with(|m| m.borrow_mut().insert(caller, st));
+    }
     Ok(())
 }
 
@@ -13283,12 +13316,11 @@ async fn buy_license(listing_id: u64, token: ExplorerToken) -> Result<u64, Strin
     counters.next_license_id += 1;
     set_crash_counters(counters);
     MARKET_LICENSES.with(|m| m.borrow_mut().insert(id, License { id, listing_id, buyer: caller, at: current_time() }));
-    MARKET_LISTINGS.with(|m| {
-        if let Some(mut l) = m.borrow().get(&listing_id) {
-            l.sales += 1;
-            m.borrow_mut().insert(listing_id, l);
-        }
-    });
+    let listing_now = MARKET_LISTINGS.with(|m| m.borrow().get(&listing_id));
+    if let Some(mut l) = listing_now {
+        l.sales += 1;
+        MARKET_LISTINGS.with(|m| m.borrow_mut().insert(listing_id, l));
+    }
     Ok(id)
 }
 
@@ -19172,6 +19204,44 @@ mod tests {
         let u2 = Principal::from_slice(&[8; 29]);
         stake_for_test(u2, 5_000 * ONE_ICP_E8S, now);
         assert_eq!(crash_place_bet(u2, 100, 200, false, None), Err("NOT_BETTING".into()));
+    }
+
+    #[test]
+    fn settle_with_strategy_bet_does_not_panic() {
+        // Regression: settling an auto-pilot bet (strategy_id set) must not hit a
+        // RefCell double-borrow when updating the strategy's lifetime-VP total.
+        casino_test_reset();
+        let seed = sha256(b"settle-strat");
+        let (terminal, cps) = build_crash_chain(seed, 100, 10);
+        CRASH_CHAIN.with(|c| {
+            let _ = c.borrow_mut().set(CrashChain { initialized: true, chain_seed: seed, terminal, n: 100, stride: 10, checkpoints: cps });
+        });
+        seed_builtin_strategies();
+        let bot = Principal::from_slice(&[0xB0, 9, 9]);
+        stake_for_test(bot, 1_000 * ONE_ICP_E8S, current_time());
+        let mut r = CrashRound {
+            id: 1,
+            phase: CrashPhase::Running,
+            chain_index: 1,
+            crash_x100: 300,
+            run_started_at: current_time(),
+            ..Default::default()
+        };
+        r.bets.push(CrashBet {
+            user: bot,
+            wager_chips: 100,
+            target_x100: 200,
+            manual_x100: None,
+            outcome: BetOutcome::Pending,
+            payout_x100: 0,
+            delta_e8s: 0,
+            auto_pilot: true,
+            strategy_id: Some(2),
+        });
+        crash_settle_round(&mut r, current_time()); // must not panic
+        assert_eq!(r.bets[0].outcome, BetOutcome::Won, "target 2x ≤ crash 3x pays");
+        let s = CRASH_STRATEGIES.with(|m| m.borrow().get(&2)).unwrap();
+        assert!(s.lifetime_vp_e8s > 0, "strategy leaderboard accrues the win");
     }
 
     #[test]

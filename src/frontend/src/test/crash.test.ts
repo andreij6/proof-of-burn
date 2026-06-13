@@ -43,9 +43,9 @@ describe('crash point formula', () => {
   it('floors at 1.00× and caps at 100×', () => {
     // hb = 0 (u not div by 101) → exactly 100.
     expect(crashPointX100FromU(1n)).toBe(100);
-    // hb just under 2^52 → very large, capped at 10000.
+    // hb just under 2^52 → very large, capped at 5000 (50×).
     const e = 1n << 52n;
-    expect(crashPointX100FromU(e - 1n)).toBe(10000);
+    expect(crashPointX100FromU(e - 1n)).toBe(5000);
   });
 
   it('reads u from the first 8 bytes big-endian', () => {
