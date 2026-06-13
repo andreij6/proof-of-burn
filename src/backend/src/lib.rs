@@ -814,6 +814,7 @@ fn post_upgrade() {
     // Re-arm the crash round loop from the persisted phase (timers don't survive
     // upgrades; a mid-flight round resumes from its remaining time, plans/crash/01).
     crash_resume();
+    poker_ensure_tables();
 }
 
 // ==========================================
@@ -4246,6 +4247,15 @@ fn setup_timers() {
     // dropped (e.g. across an upgrade). Cheap: a couple of reads when idle.
     ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(15), || async {
         crash_watchdog().await;
+    });
+    // Poker tables advance on this tick too (paced hand loop, house-agent play).
+    // Idle tables are nearly free (a few reads). The spectator UI also pokes.
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(2), || async {
+        if feature_active(FLAG_POKER) {
+            for id in 1..=POKER_NUM_TABLES {
+                poker_advance(id).await;
+            }
+        }
     });
 }
 
@@ -12282,11 +12292,14 @@ fn casino_chips(user: Principal) -> u64 {
 /// bet or a poker sit-down, so they can't be double-spent (plans/crash/02).
 fn reserved_chips(user: Principal) -> u64 {
     let r = crash_state();
-    if matches!(r.phase, CrashPhase::Betting | CrashPhase::Running) {
+    let crash = if matches!(r.phase, CrashPhase::Betting | CrashPhase::Running) {
         r.bets.iter().filter(|b| b.user == user && b.outcome == BetOutcome::Pending).map(|b| b.wager_chips).sum()
     } else {
         0
-    }
+    };
+    // A live poker seat reserves its stack too, so the same VP can't be spent
+    // in both games at once (casino-wide reservation, plans/crash C2).
+    crash + poker_reserved_chips(user)
 }
 
 fn casino_available_chips(user: Principal) -> u64 {
@@ -13773,7 +13786,7 @@ mod poker_engine {
         }
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub enum SeatStatus {
         Empty,
         Active,
@@ -13783,7 +13796,7 @@ mod poker_engine {
         WaitingForBb,
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Seat {
         pub occupied: bool,
         pub stack: u64,                 // chips
@@ -13808,7 +13821,7 @@ mod poker_engine {
         }
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub enum Phase {
         Preflop,
         Flop,
@@ -13827,7 +13840,7 @@ mod poker_engine {
         BetTo(u64),
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Engine {
         pub seats: Vec<Seat>, // len NUM_SEATS
         pub button: usize,
@@ -13959,6 +13972,12 @@ mod poker_engine {
             (0..self.seats.len())
                 .filter(|&i| matches!(self.seats[i].status, SeatStatus::Active | SeatStatus::AllIn))
                 .collect()
+        }
+
+        /// Seats that reached showdown (didn't fold). Used by the canister layer
+        /// to decide whether to reveal hole cards.
+        pub fn still_in_count(&self) -> usize {
+            self.still_in().len()
         }
 
         pub fn legal_actions(&self, seat: usize) -> LegalActions {
@@ -14234,6 +14253,1176 @@ mod poker_engine {
             d
         }
     }
+}
+
+// ==========================================
+// 21b. Agent Poker — canister layer (tables, agents, API, house play)
+// ==========================================
+
+use poker_engine::{Action as EngAction, Engine, Phase, Seat, SeatStatus};
+
+const POKER_NUM_TABLES: u8 = 10;
+const POKER_MIN_SIT_CHIPS: u64 = 500; // 10 BB
+const POKER_ACTION_DEADLINE_NANOS: u64 = 30 * 1_000_000_000;
+const POKER_PACE_NANOS: u64 = 3 * 1_000_000_000; // "thinking" delay between actions
+const POKER_INTER_HAND_NANOS: u64 = 5 * 1_000_000_000;
+const POKER_HANDS_KEEP: u64 = 2_000;
+const POKER_DEFAULT_STOPLOSS_PCT: u64 = 25;
+const POKER_MODEL_MAX: usize = 40;
+const POKER_RECLAIM_COOLDOWN_NANOS: u64 = 24 * 3_600 * 1_000_000_000;
+const POKER_HOUSE_MODEL: &str = "caldera-house";
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PokerStyle {
+    #[default]
+    Tag, // tight-aggressive (default)
+    Lag, // loose-aggressive
+    Nit, // very tight
+    Station, // loose-passive
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AgentMode {
+    #[default]
+    House,
+    External,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum AgentState {
+    #[default]
+    Idle,
+    Searching,
+    Waitlisted,
+    Seated,
+    StopLossHit,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PokerAgent {
+    pub agent_principal: Principal,
+    pub mode: AgentMode,
+    pub model: String,
+    pub style: PokerStyle,
+    pub avatar_url: Option<String>,
+    pub stop_loss_e8s: u64,
+    pub claimed_at: u64,
+    pub last_seen: u64,
+    pub table_id: Option<u8>,
+    pub seat: Option<u8>,
+    pub state: AgentState,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub enum BufAction {
+    Fold,
+    Check,
+    Call,
+    BetTo(u64),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PokerTable {
+    pub id: u8,
+    pub hand_no: u64,
+    pub button: u8,
+    pub seat_owners: Vec<Option<Principal>>, // len 9
+    pub engine: Option<Engine>,
+    pub next_event_at: u64,
+    pub action_deadline: u64,
+    pub buffered: Option<(u8, BufAction)>,
+    pub resume_at: u64,
+    pub last_result: Option<String>,
+    pub last_board: Vec<u8>,
+    pub paused: bool,
+    pub seed_hex: String,
+    pub timeouts: Vec<u8>, // consecutive auto-folds per seat
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PokerHandSeat {
+    pub owner: Principal,
+    pub model: String,
+    pub hole: Option<[u8; 2]>,
+    pub delta_chips: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PokerHandRecord {
+    pub id: u64,
+    pub table_id: u8,
+    pub hand_no: u64,
+    pub board: Vec<u8>,
+    pub seed_hex: String,
+    pub winners_msg: String,
+    pub at: u64,
+    pub seats: Vec<PokerHandSeat>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PokerCounters {
+    pub next_hand_id: u64,
+    pub next_waitlist_seq: u64,
+}
+
+impl_storable!(PokerTable);
+impl_storable!(PokerAgent);
+impl_storable!(PokerHandRecord);
+impl_storable!(PokerCounters);
+
+thread_local! {
+    static POKER_TABLES: RefCell<StableBTreeMap<u8, PokerTable, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(54)))));
+    static POKER_HANDS: RefCell<StableBTreeMap<u64, PokerHandRecord, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(55)))));
+    static POKER_AGENTS: RefCell<StableBTreeMap<Principal, PokerAgent, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(56)))));
+    static POKER_AGENT_INDEX: RefCell<StableBTreeMap<Principal, Principal, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(57)))));
+    static POKER_WAITLIST: RefCell<StableBTreeMap<u64, Principal, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(59)))));
+    static POKER_COUNTERS: RefCell<StableCell<PokerCounters, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(73)), PokerCounters::default())));
+}
+
+fn poker_counters() -> PokerCounters {
+    POKER_COUNTERS.with(|c| c.borrow().get().clone())
+}
+fn set_poker_counters(c: PokerCounters) {
+    POKER_COUNTERS.with(|cell| { let _ = cell.borrow_mut().set(c); });
+}
+fn get_poker_table(id: u8) -> Option<PokerTable> {
+    POKER_TABLES.with(|m| m.borrow().get(&id))
+}
+fn set_poker_table(t: PokerTable) {
+    POKER_TABLES.with(|m| { m.borrow_mut().insert(t.id, t); });
+}
+fn get_poker_agent(owner: Principal) -> Option<PokerAgent> {
+    POKER_AGENTS.with(|m| m.borrow().get(&owner))
+}
+fn set_poker_agent(owner: Principal, a: PokerAgent) {
+    POKER_AGENTS.with(|m| { m.borrow_mut().insert(owner, a); });
+}
+
+fn require_poker_visible() -> Result<(), String> {
+    if !feature_visible(FLAG_POKER, get_caller()) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+/// Chips reserved by a live poker seat (so they can't be double-spent in crash).
+fn poker_reserved_chips(user: Principal) -> u64 {
+    let a = match get_poker_agent(user) {
+        Some(a) => a,
+        None => return 0,
+    };
+    let (tid, seat) = match (a.table_id, a.seat) {
+        (Some(t), Some(s)) => (t, s),
+        _ => return 0,
+    };
+    if let Some(t) = get_poker_table(tid) {
+        if let Some(eng) = &t.engine {
+            if let Some(s) = eng.seats.get(seat as usize) {
+                return s.stack + s.committed_total;
+            }
+        }
+    }
+    // Between hands: the whole bankroll is committed to the seat.
+    casino_chips(user)
+}
+
+/// Lazily create the 10 cash tables on first access.
+fn poker_ensure_tables() {
+    let count = POKER_TABLES.with(|m| m.borrow().len());
+    if count >= POKER_NUM_TABLES as u64 {
+        return;
+    }
+    for id in 1..=POKER_NUM_TABLES {
+        if get_poker_table(id).is_none() {
+            set_poker_table(PokerTable {
+                id,
+                hand_no: 0,
+                button: 0,
+                seat_owners: vec![None; poker_engine::NUM_SEATS],
+                engine: None,
+                next_event_at: 0,
+                action_deadline: 0,
+                buffered: None,
+                resume_at: 0,
+                last_result: None,
+                last_board: Vec::new(),
+                paused: false,
+                seed_hex: String::new(),
+                timeouts: vec![0; poker_engine::NUM_SEATS],
+            });
+        }
+    }
+}
+
+fn poker_open_seats(t: &PokerTable) -> usize {
+    t.seat_owners.iter().filter(|s| s.is_none()).count()
+}
+fn poker_occupants(t: &PokerTable) -> usize {
+    t.seat_owners.iter().filter(|s| s.is_some()).count()
+}
+
+// ── Settlement + hand lifecycle ─────────────────────────────────────────────
+
+fn poker_begin_hand(t: &mut PokerTable, seed: [u8; 32], now: u64) {
+    let mut seats = vec![Seat::default(); poker_engine::NUM_SEATS];
+    let mut ready = 0;
+    for i in 0..poker_engine::NUM_SEATS {
+        if let Some(owner) = t.seat_owners[i] {
+            let chips = casino_chips(owner);
+            let active = chips >= SMALL_BLIND_CHIPS;
+            seats[i] = Seat {
+                occupied: true,
+                stack: chips,
+                status: if active { SeatStatus::Active } else { SeatStatus::SittingOut },
+                ..Default::default()
+            };
+            if active {
+                ready += 1;
+            }
+        }
+    }
+    if ready < 2 {
+        t.engine = None;
+        t.resume_at = now + POKER_INTER_HAND_NANOS;
+        return;
+    }
+    t.hand_no += 1;
+    let deck = poker_engine::shuffled_deck(&seed);
+    t.seed_hex = hex32(&seed);
+    let eng = Engine::start_hand(seats, t.button as usize, deck);
+    t.engine = Some(eng);
+    t.action_deadline = now + POKER_ACTION_DEADLINE_NANOS;
+    t.next_event_at = now + POKER_PACE_NANOS;
+    t.buffered = None;
+    t.last_result = None;
+}
+
+const SMALL_BLIND_CHIPS: u64 = poker_engine::SMALL_BLIND;
+
+fn poker_settle_hand(t: &mut PokerTable, now: u64) {
+    let eng = match t.engine.take() {
+        Some(e) => e,
+        None => return,
+    };
+    let deltas = eng.deltas();
+    let mut counters = poker_counters();
+    let rec_id = counters.next_hand_id;
+    counters.next_hand_id += 1;
+    set_poker_counters(counters);
+    let mut rec_seats: Vec<PokerHandSeat> = Vec::new();
+    for i in 0..poker_engine::NUM_SEATS {
+        if let Some(owner) = t.seat_owners[i] {
+            let d = deltas[i];
+            if d != 0 {
+                casino_add_delta(owner, d as i128 * CHIP_E8S as i128);
+            }
+            let seat = &eng.seats[i];
+            // Reveal hole cards only for seats that reached showdown (not folded).
+            let revealed = !matches!(seat.status, SeatStatus::Folded) && eng.board.len() == 5 && eng.still_in_count() > 1;
+            let model = get_poker_agent(owner).map(|a| a.model).unwrap_or_default();
+            rec_seats.push(PokerHandSeat {
+                owner,
+                model,
+                hole: if revealed { Some(seat.hole) } else { None },
+                delta_chips: d,
+            });
+        }
+    }
+    let record = PokerHandRecord {
+        id: rec_id,
+        table_id: t.id,
+        hand_no: t.hand_no,
+        board: eng.board.clone(),
+        seed_hex: t.seed_hex.clone(),
+        winners_msg: eng.winners_msg.clone(),
+        at: now,
+        seats: rec_seats,
+    };
+    POKER_HANDS.with(|m| {
+        let mut map = m.borrow_mut();
+        map.insert(rec_id, record);
+        while map.len() > POKER_HANDS_KEEP {
+            if let Some(oldest) = map.iter().next().map(|e| *e.key()) {
+                map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    });
+    t.last_result = Some(format!("hand #{} — {}", t.hand_no, eng.winners_msg));
+    t.last_board = eng.board.clone();
+
+    // Stand up busted / stop-loss seats; rotate button; seat the waitlist.
+    for i in 0..poker_engine::NUM_SEATS {
+        if let Some(owner) = t.seat_owners[i] {
+            let chips = casino_chips(owner);
+            let agent = get_poker_agent(owner);
+            let floor = agent.as_ref().map(|a| a.stop_loss_e8s).unwrap_or(0);
+            let stop_hit = floor > 0 && casino_effective_vp_e8s(owner) <= floor;
+            if chips < POKER_MIN_SIT_CHIPS || stop_hit {
+                t.seat_owners[i] = None;
+                t.timeouts[i] = 0;
+                if let Some(mut a) = agent {
+                    a.table_id = None;
+                    a.seat = None;
+                    a.state = if stop_hit { AgentState::StopLossHit } else { AgentState::Idle };
+                    set_poker_agent(owner, a);
+                }
+            }
+        }
+    }
+    if let Some(nb) = poker_next_occupied(t, t.button) {
+        t.button = nb;
+    }
+    t.resume_at = now + POKER_INTER_HAND_NANOS;
+    t.engine = None;
+    poker_seat_waitlist(t, now);
+}
+
+fn poker_next_occupied(t: &PokerTable, from: u8) -> Option<u8> {
+    let n = poker_engine::NUM_SEATS;
+    for off in 1..=n {
+        let i = ((from as usize + off) % n) as u8;
+        if t.seat_owners[i as usize].is_some() {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn poker_seat_waitlist(t: &mut PokerTable, _now: u64) {
+    loop {
+        if poker_open_seats(t) == 0 {
+            return;
+        }
+        let head = POKER_WAITLIST.with(|m| m.borrow().iter().next().map(|e| (*e.key(), e.value())));
+        let (seq, owner) = match head {
+            Some(x) => x,
+            None => return,
+        };
+        // Skip stale waitlist entries (agent gone / already seated).
+        let ok = get_poker_agent(owner).map(|a| a.state == AgentState::Waitlisted).unwrap_or(false);
+        POKER_WAITLIST.with(|m| { m.borrow_mut().remove(&seq); });
+        if !ok {
+            continue;
+        }
+        if casino_chips(owner) < POKER_MIN_SIT_CHIPS {
+            if let Some(mut a) = get_poker_agent(owner) {
+                a.state = AgentState::Idle;
+                set_poker_agent(owner, a);
+            }
+            continue;
+        }
+        poker_place_in_seat(t, owner);
+    }
+}
+
+fn poker_place_in_seat(t: &mut PokerTable, owner: Principal) -> bool {
+    // First open seat clockwise from the button.
+    let n = poker_engine::NUM_SEATS;
+    for off in 1..=n {
+        let i = (t.button as usize + off) % n;
+        if t.seat_owners[i].is_none() {
+            t.seat_owners[i] = Some(owner);
+            t.timeouts[i] = 0;
+            if let Some(mut a) = get_poker_agent(owner) {
+                a.table_id = Some(t.id);
+                a.seat = Some(i as u8);
+                a.state = AgentState::Seated;
+                set_poker_agent(owner, a);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+// ── House-agent decision (heuristic play styles, PB-207/208) ────────────────
+
+fn poker_style_thresholds(style: PokerStyle) -> (u32, u32) {
+    // (call_threshold, raise_threshold) on a 0..100 strength scale.
+    match style {
+        PokerStyle::Nit => (58, 76),
+        PokerStyle::Tag => (46, 64),
+        PokerStyle::Lag => (32, 52),
+        PokerStyle::Station => (22, 90),
+    }
+}
+
+fn poker_preflop_score(hole: [u8; 2]) -> u32 {
+    let r0 = poker_engine::rank_of(hole[0]);
+    let r1 = poker_engine::rank_of(hole[1]);
+    let suited = poker_engine::suit_of(hole[0]) == poker_engine::suit_of(hole[1]);
+    let hi = r0.max(r1) as i32;
+    let lo = r0.min(r1) as i32;
+    let mut sc;
+    if r0 == r1 {
+        sc = 50 + hi * 4; // pairs strong; AA huge
+    } else {
+        sc = hi * 4 + lo;
+        if suited {
+            sc += 8;
+        }
+        let gap = hi - lo;
+        if gap == 1 {
+            sc += 6;
+        } else if gap == 2 {
+            sc += 2;
+        }
+        if hi >= 11 {
+            sc += 6; // A/K high
+        }
+    }
+    sc.clamp(0, 100) as u32
+}
+
+fn poker_postflop_score(hole: [u8; 2], board: &[u8]) -> u32 {
+    let mut cards = vec![hole[0], hole[1]];
+    cards.extend_from_slice(board);
+    let strength = poker_engine::eval_best(&cards);
+    let cat = strength >> 20;
+    // Map category to a coarse score; add the top tiebreak rank for nuance.
+    let top = ((strength >> 16) & 0xF) as u32;
+    let base = match cat {
+        8 => 99,
+        7 => 97,
+        6 => 94,
+        5 => 88,
+        4 => 84,
+        3 => 78,
+        2 => 64,
+        1 => 40 + top, // pair — kicker/rank matters
+        _ => 12 + top, // high card
+    };
+    base.min(100)
+}
+
+fn poker_rng_u64(t: &PokerTable, salt: u64) -> u64 {
+    let mut data = t.seed_hex.clone().into_bytes();
+    data.extend_from_slice(&t.hand_no.to_le_bytes());
+    data.extend_from_slice(&salt.to_le_bytes());
+    let h = sha256(&data);
+    u64::from_le_bytes(h[0..8].try_into().unwrap())
+}
+
+fn poker_house_decide(t: &PokerTable, eng: &Engine, seat: usize, style: PokerStyle) -> EngAction {
+    let la = eng.legal_actions(seat);
+    let hole = eng.seats[seat].hole;
+    let score = if eng.board.is_empty() {
+        poker_preflop_score(hole)
+    } else {
+        poker_postflop_score(hole, &eng.board)
+    };
+    let (call_thr, raise_thr) = poker_style_thresholds(style);
+    let roll = (poker_rng_u64(t, seat as u64 + eng.board.len() as u64 * 17) % 100) as u32;
+    let pot = eng.pot_total();
+
+    if la.can_check {
+        // No bet to call: bet for value/bluff or check.
+        let bluff = roll < 12; // occasional steal
+        if (score >= raise_thr || bluff) && la.min_raise_to > 0 {
+            let target = la.min_raise_to.max(eng.seats[seat].committed_street + (pot / 2).max(poker_engine::BIG_BLIND));
+            return EngAction::BetTo(target.min(la.max_raise_to));
+        }
+        return EngAction::Check;
+    }
+    // Facing a bet.
+    if score >= raise_thr && la.min_raise_to > 0 && roll < 70 {
+        let target = la.min_raise_to.max(eng.seats[seat].committed_street + pot.max(poker_engine::BIG_BLIND));
+        return EngAction::BetTo(target.min(la.max_raise_to));
+    }
+    if score >= call_thr {
+        return EngAction::Call;
+    }
+    // Pot-odds bluff-catch / float occasionally with weak holdings.
+    if roll < 8 && la.call_amount * 4 <= pot.max(1) {
+        return EngAction::Call;
+    }
+    EngAction::Fold
+}
+
+fn buf_to_eng(b: BufAction) -> EngAction {
+    match b {
+        BufAction::Fold => EngAction::Fold,
+        BufAction::Check => EngAction::Check,
+        BufAction::Call => EngAction::Call,
+        BufAction::BetTo(x) => EngAction::BetTo(x),
+    }
+}
+
+/// Advance one paced step on a table. Async because starting a hand draws RNG.
+async fn poker_advance(table_id: u8) {
+    if !feature_active(FLAG_POKER) {
+        return;
+    }
+    let mut t = match get_poker_table(table_id) {
+        Some(t) => t,
+        None => return,
+    };
+    if t.paused {
+        return;
+    }
+    let now = current_time();
+    match &t.engine {
+        None => {
+            // Between hands: start one when due and ≥2 funded seats are present.
+            if now < t.resume_at {
+                return;
+            }
+            let ready = t.seat_owners.iter().filter(|s| s.map(|o| casino_chips(o) >= SMALL_BLIND_CHIPS).unwrap_or(false)).count();
+            if ready < 2 {
+                return;
+            }
+            let seed = match crash_random_seed().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            // Re-read (could have changed during await) and start.
+            t = match get_poker_table(table_id) {
+                Some(t) => t,
+                None => return,
+            };
+            poker_begin_hand(&mut t, seed, current_time());
+            set_poker_table(t);
+        }
+        Some(eng) if eng.phase == Phase::Done => {
+            poker_settle_hand(&mut t, now);
+            set_poker_table(t);
+        }
+        Some(eng) => {
+            if now < t.next_event_at {
+                return;
+            }
+            let seat = eng.acting;
+            let owner = match t.seat_owners.get(seat).and_then(|o| *o) {
+                Some(o) => o,
+                None => return,
+            };
+            let agent = get_poker_agent(owner);
+            let is_house = agent.as_ref().map(|a| a.mode == AgentMode::House).unwrap_or(true);
+            let action: Option<EngAction> = if is_house {
+                let style = agent.as_ref().map(|a| a.style).unwrap_or_default();
+                Some(poker_house_decide(&t, eng, seat, style))
+            } else if let Some((bs, ba)) = t.buffered {
+                if bs as usize == seat {
+                    Some(buf_to_eng(ba))
+                } else {
+                    None
+                }
+            } else if now >= t.action_deadline {
+                // Timeout: check if legal, else fold; count it.
+                let la = eng.legal_actions(seat);
+                Some(if la.can_check { EngAction::Check } else { EngAction::Fold })
+            } else {
+                None
+            };
+            let Some(act) = action else {
+                return;
+            };
+            let mut eng2 = eng.clone();
+            let timed_out = !is_house && t.buffered.is_none() && now >= t.action_deadline;
+            if eng2.apply_action(seat, act).is_err() {
+                // Fall back to a guaranteed-legal action.
+                let la = eng2.legal_actions(seat);
+                let _ = eng2.apply_action(seat, if la.can_check { EngAction::Check } else { EngAction::Fold });
+            }
+            t.buffered = None;
+            // External timeout bookkeeping → lose the seat after repeated fails.
+            if timed_out {
+                t.timeouts[seat] = t.timeouts[seat].saturating_add(1);
+                if t.timeouts[seat] >= 3 {
+                    if let Some(mut a) = get_poker_agent(owner) {
+                        a.table_id = None;
+                        a.seat = None;
+                        a.state = AgentState::Idle;
+                        set_poker_agent(owner, a);
+                    }
+                    t.seat_owners[seat] = None;
+                    t.timeouts[seat] = 0;
+                }
+            } else if !is_house {
+                t.timeouts[seat] = 0;
+            }
+            t.engine = Some(eng2);
+            t.next_event_at = now + POKER_PACE_NANOS;
+            t.action_deadline = now + POKER_ACTION_DEADLINE_NANOS;
+            set_poker_table(t);
+        }
+    }
+}
+
+// ── Public API: agents, seating, action, views (PB-205/206/213/214/215) ─────
+
+fn poker_owner_of(caller: Principal) -> Option<Principal> {
+    if POKER_AGENTS.with(|m| m.borrow().contains_key(&caller)) {
+        Some(caller)
+    } else {
+        POKER_AGENT_INDEX.with(|m| m.borrow().get(&caller))
+    }
+}
+
+fn valid_model(m: &str) -> bool {
+    !m.is_empty()
+        && m.chars().count() <= POKER_MODEL_MAX
+        && m.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
+}
+
+/// Claim your one poker agent (Profile → Agent Space). Passing your own
+/// principal = a house-mode agent (the canister plays your style); a different
+/// principal registers an external bot. One agent per user; an agent principal
+/// serves one owner; re-claim allowed after a 24 h cooldown, never while seated.
+#[ic_cdk::update]
+fn claim_poker_agent(agent_principal: Principal, model: String) -> Result<(), String> {
+    require_poker_visible()?;
+    require_authenticated()?;
+    let owner = get_caller();
+    let now = current_time();
+    poker_ensure_tables();
+    if let Some(existing) = get_poker_agent(owner) {
+        if matches!(existing.state, AgentState::Seated | AgentState::Waitlisted | AgentState::Searching) {
+            return Err("AGENT_BUSY".to_string());
+        }
+        if now.saturating_sub(existing.claimed_at) < POKER_RECLAIM_COOLDOWN_NANOS && existing.agent_principal != agent_principal {
+            return Err("RECLAIM_COOLDOWN".to_string());
+        }
+        // Releasing the old agent-principal index.
+        POKER_AGENT_INDEX.with(|m| { m.borrow_mut().remove(&existing.agent_principal); });
+    }
+    let is_house = agent_principal == owner;
+    if !is_house {
+        // Agent principal must not already serve another owner.
+        if let Some(other) = POKER_AGENT_INDEX.with(|m| m.borrow().get(&agent_principal)) {
+            if other != owner {
+                return Err("AGENT_TAKEN".to_string());
+            }
+        }
+        if !valid_model(&model) {
+            return Err("INVALID_MODEL".to_string());
+        }
+    }
+    let model = if is_house { POKER_HOUSE_MODEL.to_string() } else { model.trim().to_string() };
+    let stop_loss = casino_staking_weight_e8s(owner) * POKER_DEFAULT_STOPLOSS_PCT / 100;
+    let agent = PokerAgent {
+        agent_principal,
+        mode: if is_house { AgentMode::House } else { AgentMode::External },
+        model,
+        style: PokerStyle::Tag,
+        avatar_url: None,
+        stop_loss_e8s: stop_loss,
+        claimed_at: now,
+        last_seen: now,
+        table_id: None,
+        seat: None,
+        state: AgentState::Idle,
+    };
+    POKER_AGENT_INDEX.with(|m| { m.borrow_mut().insert(agent_principal, owner); });
+    set_poker_agent(owner, agent);
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn set_poker_style(style: PokerStyle) -> Result<(), String> {
+    require_authenticated()?;
+    let owner = get_caller();
+    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
+    a.style = style;
+    set_poker_agent(owner, a);
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn set_poker_model(model: String) -> Result<(), String> {
+    require_authenticated()?;
+    let owner = get_caller();
+    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
+    if a.mode == AgentMode::House {
+        return Err("HOUSE_MODEL_FIXED".to_string());
+    }
+    if !valid_model(&model) {
+        return Err("INVALID_MODEL".to_string());
+    }
+    a.model = model.trim().to_string();
+    set_poker_agent(owner, a);
+    Ok(())
+}
+
+/// Set the stop-loss effective-VP floor (0 = off). Owner-only, between hands.
+#[ic_cdk::update]
+fn set_poker_stop_loss(stop_loss_e8s: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let owner = get_caller();
+    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
+    a.stop_loss_e8s = stop_loss_e8s;
+    set_poker_agent(owner, a);
+    Ok(())
+}
+
+/// Enter matchmaking: the canister seats the agent at the table with the most
+/// open seats (tie → lowest id); all full ⇒ FIFO waitlist. Idempotent.
+#[ic_cdk::update]
+fn poker_find_seat() -> Result<(), String> {
+    require_poker_visible()?;
+    require_authenticated()?;
+    let caller = get_caller();
+    let owner = poker_owner_of(caller).ok_or("NO_AGENT")?;
+    poker_ensure_tables();
+    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
+    if matches!(a.state, AgentState::Seated | AgentState::Waitlisted) {
+        return Ok(()); // idempotent
+    }
+    if casino_chips(owner) < POKER_MIN_SIT_CHIPS {
+        return Err("MIN_SIT_500_CHIPS".to_string());
+    }
+    // Stop-loss: don't seat into a pointless one-hand session.
+    if a.stop_loss_e8s > 0 && casino_effective_vp_e8s(owner) <= a.stop_loss_e8s {
+        return Err("STOP_LOSS_FLOOR".to_string());
+    }
+    // Pick the table with the most open seats (tie → lowest id).
+    let mut best: Option<(u8, usize)> = None;
+    for id in 1..=POKER_NUM_TABLES {
+        if let Some(t) = get_poker_table(id) {
+            if t.paused {
+                continue;
+            }
+            let open = poker_open_seats(&t);
+            if open > 0 && best.map(|(_, o)| open > o).unwrap_or(true) {
+                best = Some((id, open));
+            }
+        }
+    }
+    if let Some((id, _)) = best {
+        let mut t = get_poker_table(id).unwrap();
+        poker_place_in_seat(&mut t, owner);
+        set_poker_table(t);
+    } else {
+        // All full → waitlist.
+        let mut counters = poker_counters();
+        let seq = counters.next_waitlist_seq;
+        counters.next_waitlist_seq += 1;
+        set_poker_counters(counters);
+        POKER_WAITLIST.with(|m| { m.borrow_mut().insert(seq, owner); });
+        a.state = AgentState::Waitlisted;
+        a.table_id = None;
+        a.seat = None;
+        set_poker_agent(owner, a);
+    }
+    Ok(())
+}
+
+/// Stand up (after the current hand) or leave the waitlist.
+#[ic_cdk::update]
+fn poker_leave() -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let owner = poker_owner_of(caller).ok_or("NO_AGENT")?;
+    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
+    if let (Some(tid), Some(seat)) = (a.table_id, a.seat) {
+        if let Some(mut t) = get_poker_table(tid) {
+            // If a hand is live and this seat is in it, fold then vacate.
+            if let Some(eng) = &mut t.engine {
+                if eng.seats.get(seat as usize).map(|s| s.status == SeatStatus::Active).unwrap_or(false) {
+                    let _ = eng.apply_action(seat as usize, EngAction::Fold);
+                }
+            }
+            t.seat_owners[seat as usize] = None;
+            t.timeouts[seat as usize] = 0;
+            set_poker_table(t);
+        }
+    }
+    // Remove from waitlist if present.
+    let mine: Vec<u64> = POKER_WAITLIST.with(|m| m.borrow().iter().filter(|e| e.value() == owner).map(|e| *e.key()).collect());
+    POKER_WAITLIST.with(|m| {
+        let mut map = m.borrow_mut();
+        for k in mine {
+            map.remove(&k);
+        }
+    });
+    a.table_id = None;
+    a.seat = None;
+    a.state = AgentState::Idle;
+    set_poker_agent(owner, a);
+    Ok(())
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub enum PokerActionInput {
+    Fold,
+    Check,
+    Call,
+    BetTo(u64),
+}
+
+/// External agent acts. Buffered and revealed on the table's pacing timer
+/// (D18). `hand_no` guards against stale actions.
+#[ic_cdk::update]
+fn poker_act(table_id: u8, hand_no: u64, action: PokerActionInput) -> Result<(), String> {
+    require_poker_visible()?;
+    require_authenticated()?;
+    let caller = get_caller();
+    let owner = poker_owner_of(caller).ok_or("NO_AGENT")?;
+    let mut t = get_poker_table(table_id).ok_or("NO_TABLE")?;
+    if t.hand_no != hand_no {
+        return Err("STALE_HAND".to_string());
+    }
+    let agent = get_poker_agent(owner).ok_or("NO_AGENT")?;
+    let seat = match (agent.table_id, agent.seat) {
+        (Some(tid), Some(s)) if tid == table_id => s,
+        _ => return Err("NOT_SEATED".to_string()),
+    };
+    let eng = t.engine.as_ref().ok_or("NO_HAND")?;
+    if eng.acting != seat as usize || eng.seats[seat as usize].status != SeatStatus::Active {
+        return Err("NOT_YOUR_TURN".to_string());
+    }
+    let buf = match action {
+        PokerActionInput::Fold => BufAction::Fold,
+        PokerActionInput::Check => BufAction::Check,
+        PokerActionInput::Call => BufAction::Call,
+        PokerActionInput::BetTo(x) => BufAction::BetTo(x),
+    };
+    t.buffered = Some((seat, buf));
+    // Reveal on the pacing timer (no instant bot rushes the table).
+    t.next_event_at = current_time() + POKER_PACE_NANOS;
+    set_poker_table(t);
+    if let Some(mut a) = get_poker_agent(owner) {
+        a.last_seen = current_time();
+        set_poker_agent(owner, a);
+    }
+    Ok(())
+}
+
+/// Public nudge that advances every active table (timers don't fire on a quiet
+/// local replica; the spectator UI calls this each poll). Async (draws RNG).
+#[ic_cdk::update]
+async fn poker_poke() {
+    if !feature_active(FLAG_POKER) {
+        return;
+    }
+    for id in 1..=POKER_NUM_TABLES {
+        poker_advance(id).await;
+    }
+}
+
+// ── View DTOs ───────────────────────────────────────────────────────────────
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PokerLegalView {
+    pub can_check: bool,
+    pub call_amount: u64,
+    pub min_raise_to: u64,
+    pub max_raise_to: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PokerSeatView {
+    pub seat: u8,
+    pub occupied: bool,
+    pub principal: Option<Principal>,
+    pub model: String,
+    pub stack_chips: u64,
+    pub committed_chips: u64,
+    pub status: String,
+    pub is_acting: bool,
+    pub hole: Option<Vec<u8>>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PokerTableView {
+    pub table_id: u8,
+    pub hand_no: u64,
+    pub phase: String,
+    pub board: Vec<u8>,
+    pub pot_chips: u64,
+    pub button: u8,
+    pub acting_seat: Option<u8>,
+    pub action_deadline: u64,
+    pub seats: Vec<PokerSeatView>,
+    pub my_seat: Option<u8>,
+    pub legal: Option<PokerLegalView>,
+    pub last_result: Option<String>,
+    pub paused: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PokerLobbyRow {
+    pub table_id: u8,
+    pub seats_taken: u8,
+    pub max_seats: u8,
+    pub hand_no: u64,
+    pub pot_chips: u64,
+    pub phase: String,
+    pub waitlist_len: u64,
+    pub paused: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct MyPokerAgentView {
+    pub claimed: bool,
+    pub agent_principal: Option<Principal>,
+    pub mode: String,
+    pub model: String,
+    pub style: PokerStyle,
+    pub stop_loss_e8s: u64,
+    pub state: String,
+    pub table_id: Option<u8>,
+    pub seat: Option<u8>,
+    pub chips: u64,
+    pub effective_vp_e8s: u64,
+    pub waitlist_pos: Option<u64>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PokerHandSeatView {
+    pub principal: Principal,
+    pub model: String,
+    pub hole: Option<Vec<u8>>,
+    pub delta_chips: i64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PokerHandView {
+    pub id: u64,
+    pub table_id: u8,
+    pub hand_no: u64,
+    pub board: Vec<u8>,
+    pub seed_hex: String,
+    pub winners_msg: String,
+    pub at: u64,
+    pub seats: Vec<PokerHandSeatView>,
+}
+
+fn phase_name(p: Phase) -> &'static str {
+    match p {
+        Phase::Preflop => "preflop",
+        Phase::Flop => "flop",
+        Phase::Turn => "turn",
+        Phase::River => "river",
+        Phase::Showdown => "showdown",
+        Phase::Done => "done",
+    }
+}
+
+fn status_name(s: SeatStatus) -> &'static str {
+    match s {
+        SeatStatus::Empty => "empty",
+        SeatStatus::Active => "active",
+        SeatStatus::Folded => "folded",
+        SeatStatus::AllIn => "all-in",
+        SeatStatus::SittingOut => "sitting-out",
+        SeatStatus::WaitingForBb => "waiting",
+    }
+}
+
+/// Build a table view. When `viewer` owns a seat, that seat's hole cards and the
+/// legal-action helper are included; everyone else's hole cards stay hidden.
+fn build_table_view(t: &PokerTable, viewer: Option<Principal>) -> PokerTableView {
+    let viewer_owner = viewer.and_then(poker_owner_of);
+    let mut my_seat: Option<u8> = None;
+    let mut seats: Vec<PokerSeatView> = Vec::with_capacity(poker_engine::NUM_SEATS);
+    let acting = t.engine.as_ref().filter(|e| e.phase != Phase::Done).map(|e| e.acting);
+    for i in 0..poker_engine::NUM_SEATS {
+        let owner = t.seat_owners[i];
+        let model = owner.and_then(get_poker_agent).map(|a| a.model).unwrap_or_default();
+        let (stack, committed, status, hole) = if let Some(eng) = &t.engine {
+            let s = &eng.seats[i];
+            let is_mine = owner.is_some() && owner == viewer_owner;
+            if is_mine {
+                my_seat = Some(i as u8);
+            }
+            let reveal = is_mine && s.hole[0] != 255;
+            (s.stack, s.committed_total, status_name(s.status).to_string(), if reveal { Some(vec![s.hole[0], s.hole[1]]) } else { None })
+        } else {
+            let chips = owner.map(casino_chips).unwrap_or(0);
+            if owner.is_some() && owner == viewer_owner {
+                my_seat = Some(i as u8);
+            }
+            (chips, 0, if owner.is_some() { "seated".to_string() } else { "empty".to_string() }, None)
+        };
+        seats.push(PokerSeatView {
+            seat: i as u8,
+            occupied: owner.is_some(),
+            principal: owner,
+            model,
+            stack_chips: stack,
+            committed_chips: committed,
+            status,
+            is_acting: acting == Some(i),
+            hole,
+        });
+    }
+    let legal = match (&t.engine, my_seat) {
+        (Some(eng), Some(seat)) if eng.phase != Phase::Done && eng.acting == seat as usize => {
+            let la = eng.legal_actions(seat as usize);
+            Some(PokerLegalView {
+                can_check: la.can_check,
+                call_amount: la.call_amount,
+                min_raise_to: la.min_raise_to,
+                max_raise_to: la.max_raise_to,
+            })
+        }
+        _ => None,
+    };
+    PokerTableView {
+        table_id: t.id,
+        hand_no: t.hand_no,
+        phase: t.engine.as_ref().map(|e| phase_name(e.phase).to_string()).unwrap_or_else(|| "waiting".to_string()),
+        board: t.engine.as_ref().map(|e| e.board.clone()).unwrap_or_else(|| t.last_board.clone()),
+        pot_chips: t.engine.as_ref().map(|e| e.pot_total()).unwrap_or(0),
+        button: t.button,
+        acting_seat: acting.map(|a| a as u8),
+        action_deadline: t.action_deadline,
+        seats,
+        my_seat,
+        legal,
+        last_result: t.last_result.clone(),
+        paused: t.paused,
+    }
+}
+
+#[ic_cdk::query]
+fn get_poker_lobby() -> Vec<PokerLobbyRow> {
+    let waitlist_len = POKER_WAITLIST.with(|m| m.borrow().len());
+    (1..=POKER_NUM_TABLES)
+        .filter_map(get_poker_table)
+        .map(|t| PokerLobbyRow {
+            table_id: t.id,
+            seats_taken: poker_occupants(&t) as u8,
+            max_seats: poker_engine::NUM_SEATS as u8,
+            hand_no: t.hand_no,
+            pot_chips: t.engine.as_ref().map(|e| e.pot_total()).unwrap_or(0),
+            phase: t.engine.as_ref().map(|e| phase_name(e.phase).to_string()).unwrap_or_else(|| "idle".to_string()),
+            waitlist_len,
+            paused: t.paused,
+        })
+        .collect()
+}
+
+#[ic_cdk::query]
+fn get_table_public(table_id: u8) -> Option<PokerTableView> {
+    get_poker_table(table_id).map(|t| build_table_view(&t, None))
+}
+
+#[ic_cdk::query]
+fn get_my_table_view() -> Option<PokerTableView> {
+    let caller = get_caller();
+    let owner = poker_owner_of(caller)?;
+    let agent = get_poker_agent(owner)?;
+    let tid = agent.table_id?;
+    get_poker_table(tid).map(|t| build_table_view(&t, Some(caller)))
+}
+
+#[ic_cdk::query]
+fn get_my_poker_agent() -> MyPokerAgentView {
+    let caller = get_caller();
+    let owner = poker_owner_of(caller).unwrap_or(caller);
+    match get_poker_agent(owner) {
+        Some(a) => {
+            let waitlist_pos = if a.state == AgentState::Waitlisted {
+                POKER_WAITLIST.with(|m| m.borrow().iter().position(|e| e.value() == owner).map(|p| p as u64 + 1))
+            } else {
+                None
+            };
+            MyPokerAgentView {
+                claimed: true,
+                agent_principal: Some(a.agent_principal),
+                mode: if a.mode == AgentMode::House { "house".into() } else { "external".into() },
+                model: a.model,
+                style: a.style,
+                stop_loss_e8s: a.stop_loss_e8s,
+                state: format!("{:?}", a.state).to_lowercase(),
+                table_id: a.table_id,
+                seat: a.seat,
+                chips: casino_chips(owner),
+                effective_vp_e8s: casino_effective_vp_e8s(owner),
+                waitlist_pos,
+            }
+        }
+        None => MyPokerAgentView {
+            claimed: false,
+            agent_principal: None,
+            mode: String::new(),
+            model: String::new(),
+            style: PokerStyle::Tag,
+            stop_loss_e8s: 0,
+            state: "none".into(),
+            table_id: None,
+            seat: None,
+            chips: casino_chips(owner),
+            effective_vp_e8s: casino_effective_vp_e8s(owner),
+            waitlist_pos: None,
+        },
+    }
+}
+
+#[ic_cdk::query]
+fn get_poker_history(table_id: u8, n: u64) -> Vec<PokerHandView> {
+    let take = n.clamp(1, 50) as usize;
+    POKER_HANDS.with(|m| {
+        m.borrow()
+            .iter()
+            .rev()
+            .filter(|e| e.value().table_id == table_id)
+            .take(take)
+            .map(|e| {
+                let r = e.value();
+                PokerHandView {
+                    id: r.id,
+                    table_id: r.table_id,
+                    hand_no: r.hand_no,
+                    board: r.board.clone(),
+                    seed_hex: r.seed_hex.clone(),
+                    winners_msg: r.winners_msg.clone(),
+                    at: r.at,
+                    seats: r.seats.iter().map(|s| PokerHandSeatView {
+                        principal: s.owner,
+                        model: s.model.clone(),
+                        hole: s.hole.map(|h| vec![h[0], h[1]]),
+                        delta_chips: s.delta_chips,
+                    }).collect(),
+                }
+            })
+            .collect()
+    })
+}
+
+// ── Admin ───────────────────────────────────────────────────────────────────
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_pause_poker_table(table_id: u8, paused: bool) -> Result<(), String> {
+    let mut t = get_poker_table(table_id).ok_or("NO_TABLE")?;
+    t.paused = paused;
+    set_poker_table(t);
+    Ok(())
+}
+
+/// Void the current hand: refund every committed chip (delta 0), archive a void.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_void_poker_hand(table_id: u8) -> Result<(), String> {
+    let mut t = get_poker_table(table_id).ok_or("NO_TABLE")?;
+    if t.engine.is_none() {
+        return Err("NO_HAND".to_string());
+    }
+    // Drop the hand with no ledger writes; restore seats; next hand starts fresh.
+    t.engine = None;
+    t.buffered = None;
+    t.last_result = Some("hand voided by admin".to_string());
+    t.resume_at = current_time() + POKER_INTER_HAND_NANOS;
+    set_poker_table(t);
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&AuditLogEntry {
+            timestamp: current_time(),
+            event_type: "poker_void_hand".to_string(),
+            proposal_id: table_id as u64,
+            user: get_caller(),
+            amount_e8s: 0,
+        });
+    });
+    Ok(())
 }
 
 ic_cdk::export_candid!();
@@ -20079,6 +21268,42 @@ mod tests {
         assert!(!valid_chat_text(&"x".repeat(CASINO_CHAT_MAX_LEN + 1)));
         assert!(!valid_chat_text("bad\u{0007}bell"));
         assert!(valid_chat_text("spaces are fine"));
+    }
+
+    #[test]
+    fn poker_hand_settles_zero_sum() {
+        casino_test_reset();
+        let now = current_time();
+        let players = [Principal::from_slice(&[0xA, 1]), Principal::from_slice(&[0xA, 2]), Principal::from_slice(&[0xA, 3])];
+        for &u in &players {
+            stake_for_test(u, 1_000 * ONE_ICP_E8S, now);
+        }
+        poker_ensure_tables();
+        let mut t = get_poker_table(1).unwrap();
+        for (i, &u) in players.iter().enumerate() {
+            t.seat_owners[i] = Some(u);
+        }
+        poker_begin_hand(&mut t, [9u8; 32], now);
+        assert!(t.engine.is_some(), "a hand should start with 3 funded seats");
+        // Drive the hand with the house heuristic until it completes.
+        let mut guard = 0;
+        while t.engine.as_ref().map(|e| e.phase != poker_engine::Phase::Done).unwrap_or(false) && guard < 400 {
+            guard += 1;
+            let eng = t.engine.as_ref().unwrap();
+            let seat = eng.acting;
+            let act = poker_house_decide(&t, eng, seat, PokerStyle::Tag);
+            let mut e2 = eng.clone();
+            if e2.apply_action(seat, act).is_err() {
+                let la = e2.legal_actions(seat);
+                let _ = e2.apply_action(seat, if la.can_check { EngAction::Check } else { EngAction::Fold });
+            }
+            t.engine = Some(e2);
+        }
+        assert_eq!(t.engine.as_ref().unwrap().phase, poker_engine::Phase::Done, "hand terminated");
+        // Settlement only transfers VP between players (0% rake) → the casino
+        // reconciliation identity is preserved at exactly 0.
+        poker_settle_hand(&mut t, now);
+        assert_eq!(casino_reconciliation_e8s(), 0, "poker settle stays zero-sum");
     }
 
     // ===== Agent Poker (Epic I) engine =====

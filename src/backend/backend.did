@@ -559,6 +559,20 @@ type MyCasinoView = record {
   effective_vp_e8s : nat64;
   delta_e8s : int64;
 };
+type MyPokerAgentView = record {
+  stop_loss_e8s : nat64;
+  model : text;
+  waitlist_pos : opt nat64;
+  chips : nat64;
+  mode : text;
+  seat : opt nat8;
+  table_id : opt nat8;
+  agent_principal : opt principal;
+  claimed : bool;
+  state : text;
+  style : PokerStyle;
+  effective_vp_e8s : nat64;
+};
 type NeuronFollowStatus = record {
   topics_following_primary : vec int32;
   // Uncollected yield: maturity that hasn't been harvested yet. Tier
@@ -628,6 +642,66 @@ type PendingUnstake = record {
   // out of the child (child = amount − 0.0001).
   child_e8s : opt nat64;
   settled_at : opt nat64;
+};
+type PokerActionInput = variant { Call; Fold; BetTo : nat64; Check };
+type PokerHandSeatView = record {
+  model : text;
+  "principal" : principal;
+  delta_chips : int64;
+  hole : opt blob;
+};
+type PokerHandView = record {
+  at : nat64;
+  id : nat64;
+  hand_no : nat64;
+  table_id : nat8;
+  seed_hex : text;
+  winners_msg : text;
+  seats : vec PokerHandSeatView;
+  board : blob;
+};
+type PokerLegalView = record {
+  call_amount : nat64;
+  can_check : bool;
+  min_raise_to : nat64;
+  max_raise_to : nat64;
+};
+type PokerLobbyRow = record {
+  waitlist_len : nat64;
+  pot_chips : nat64;
+  hand_no : nat64;
+  table_id : nat8;
+  seats_taken : nat8;
+  max_seats : nat8;
+  phase : text;
+  paused : bool;
+};
+type PokerSeatView = record {
+  status : text;
+  model : text;
+  "principal" : opt principal;
+  occupied : bool;
+  hole : opt blob;
+  seat : nat8;
+  committed_chips : nat64;
+  stack_chips : nat64;
+  is_acting : bool;
+};
+type PokerStyle = variant { Lag; Nit; Tag; Station };
+type PokerTableView = record {
+  my_seat : opt nat8;
+  pot_chips : nat64;
+  hand_no : nat64;
+  acting_seat : opt nat8;
+  table_id : nat8;
+  last_result : opt text;
+  legal : opt PokerLegalView;
+  seats : vec PokerSeatView;
+  action_deadline : nat64;
+  board : blob;
+  phase : text;
+  button : nat8;
+  paused : bool;
 };
 type PoolInfo = record {
   total_pool_voting_power : nat64;
@@ -872,6 +946,7 @@ service : (InitPayload) -> {
   // Pause/unpause the round loop. The current round still settles; no new
   // betting window opens while paused.
   admin_pause_crash : (bool) -> (Result);
+  admin_pause_poker_table : (nat8, bool) -> (Result);
   // Admin: reject a pending community listing. The payment is refunded from
   // the treasury (minus one ledger fee), then the listing is deleted.
   // The listing is REMOVED before the refund transfer (and restored if it
@@ -953,6 +1028,8 @@ service : (InitPayload) -> {
   // Catastrophic-wedge escape hatch (writer #4): refund every wager in the
   // current round (delta 0 for all, house delta 0) and archive it void.
   admin_void_crash_round : () -> (Result);
+  // Void the current hand: refund every committed chip (delta 0), archive a void.
+  admin_void_poker_hand : (nat8) -> (Result);
   // Admin: withdraw ICP from the treasury subaccount to a destination
   // principal. Guarded by the 15 ICP floor unless `override_floor`.
   admin_withdraw_treasury : (principal, nat64, bool) -> (Result);
@@ -981,6 +1058,11 @@ service : (InitPayload) -> {
   // Claim the caller's current monthly share. Shares not claimed before the
   // next settlement are forfeited to the treasury.
   claim_early_adopter_yield : () -> (Result_1);
+  // Claim your one poker agent (Profile → Agent Space). Passing your own
+  // principal = a house-mode agent (the canister plays your style); a different
+  // principal registers an external bot. One agent per user; an agent principal
+  // serves one owner; re-claim allowed after a 24 h cooldown, never while seated.
+  claim_poker_agent : (principal, text) -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
   // Commit a vote in ANY supported token. The token is ESCROWED — it only
   // converts to ICP if the proposal passes its threshold and the vote is cast
@@ -1162,14 +1244,18 @@ service : (InitPayload) -> {
   get_my_lossless_votes : () -> (vec LosslessVote) query;
   // The caller's payout history, newest first (capped).
   get_my_payouts : () -> (vec Payout) query;
+  get_my_poker_agent : () -> (MyPokerAgentView) query;
   get_my_pool_neuron : () -> (opt PoolNeuron) query;
   get_my_stake : () -> (UserStakeInfo) query;
+  get_my_table_view : () -> (opt PokerTableView) query;
   // The caller's full transaction history — spends AND payouts. Out legs come
   // from the audit log (ICP flows: commits, idea posts, pool fees, stake
   // lockups) plus the token-typed upvote/funding journals; In legs are the
   // payout records. Newest first, capped.
   get_my_transactions : () -> (vec TransactionRecord) query;
   get_my_twitter_handle : () -> (opt text) query;
+  get_poker_history : (nat8, nat64) -> (vec PokerHandView) query;
+  get_poker_lobby : () -> (vec PokerLobbyRow) query;
   get_pool_info : () -> (PoolInfo) query;
   // The caller's deposit account for funding `project_id`. Fund it on the
   // chosen token's ledger with `amount + fee`, then call `fund_project`.
@@ -1180,6 +1266,7 @@ service : (InitPayload) -> {
   // then call `stake(amount)`.
   get_stake_deposit_address : () -> (LedgerAccount) query;
   get_staking_pool_info : () -> (StakingPoolInfo) query;
+  get_table_public : (nat8) -> (opt PokerTableView) query;
   get_treasury_balance : () -> (BalanceResult);
   // The treasury's ledger account — deposit ICP here to fund it directly
   // (admin top-ups, external donations). Not secret: it's just the backend
@@ -1233,6 +1320,17 @@ service : (InitPayload) -> {
   // checked against every platform neuron id before any governance call.
   merge_unstake : (nat64, StakeTier) -> (Result);
   notify_top_up : (NotifyTopUpArgs) -> (NotifyTopUpResult);
+  // External agent acts. Buffered and revealed on the table's pacing timer
+  // (D18). `hand_no` guards against stale actions.
+  poker_act : (nat8, nat64, PokerActionInput) -> (Result);
+  // Enter matchmaking: the canister seats the agent at the table with the most
+  // open seats (tie → lowest id); all full ⇒ FIFO waitlist. Idempotent.
+  poker_find_seat : () -> (Result);
+  // Stand up (after the current hand) or leave the waitlist.
+  poker_leave : () -> (Result);
+  // Public nudge that advances every active table (timers don't fire on a quiet
+  // local replica; the spectator UI calls this each poll). Async (draws RNG).
+  poker_poke : () -> ();
   // Post to the global casino chat (signed-in only, 200 chars, 1 msg/5 s).
   // Rendered as plain text by the UI — no markup, no links: zero injection
   // surface. Muted users' posts are silently accepted but only echoed to them.
@@ -1253,6 +1351,10 @@ service : (InitPayload) -> {
   record_idea_view : (nat64) -> (Result);
   refund_registration : () -> (Result);
   remove_admin : (principal) -> (Result);
+  set_poker_model : (text) -> (Result);
+  // Set the stop-loss effective-VP floor (0 = off). Owner-only, between hands.
+  set_poker_stop_loss : (nat64) -> (Result);
+  set_poker_style : (PokerStyle) -> (Result);
   // Set (or clear, with an empty string) the caller's X handle. A leading @
   // is stripped; X's own rules apply (1–15 chars, [A-Za-z0-9_]).
   set_twitter_handle : (text) -> (Result);
