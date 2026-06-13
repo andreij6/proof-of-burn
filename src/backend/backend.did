@@ -1146,6 +1146,9 @@ service : (InitPayload) -> {
   // Local-dev: seed a varied set of mock payout records for the caller so the
   // Profile page has realistic data. No-op if the caller already has payouts.
   dev_seed_payouts : () -> (Result);
+  // Local-dev only (admin): grant the caller chips and seat six house agents at
+  // Caldera 1 so a hand is always in progress to watch. Idempotent-ish.
+  dev_seed_poker_play : () -> (Result_2);
   // Local-dev: insert an Active pool neuron with an explicit voting power, so we
   // can seed mock pool members (with varied VP) for UI testing. Rejected on
   // mainnet (ledger canister ID check). Never callable by anonymous.

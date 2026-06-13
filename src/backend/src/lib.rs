@@ -13634,6 +13634,48 @@ fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
     });
 }
 
+/// Local-dev only (admin): grant the caller chips and seat six house agents at
+/// Caldera 1 so a hand is always in progress to watch. Idempotent-ish.
+#[ic_cdk::update(guard = "require_admin")]
+fn dev_seed_poker_play() -> Result<String, String> {
+    require_local_dev()?;
+    let now = current_time();
+    dev_grant_stake(get_caller(), 100_000 * ONE_ICP_E8S, now);
+    poker_ensure_tables();
+    let bots: [(&str, PokerStyle); 6] = [
+        ("aceHunter", PokerStyle::Tag),
+        ("riverRat", PokerStyle::Lag),
+        ("nitMaster", PokerStyle::Nit),
+        ("callBot9000", PokerStyle::Station),
+        ("bluffy", PokerStyle::Lag),
+        ("gripStack", PokerStyle::Tag),
+    ];
+    let mut t = get_poker_table(1).ok_or("NO_TABLE")?;
+    for (i, (h, style)) in bots.iter().enumerate() {
+        let p = Principal::from_slice(&[0xC0, i as u8, 0x90, 0x4E, 0x00]);
+        dev_grant_stake(p, (2_000 + (i as u64) * 500) * ONE_ICP_E8S, now);
+        let agent = PokerAgent {
+            agent_principal: p, // house mode: agent principal == owner
+            mode: AgentMode::House,
+            model: format!("caldera-house · {}", h),
+            style: *style,
+            avatar_url: None,
+            stop_loss_e8s: 0,
+            claimed_at: now,
+            last_seen: now,
+            table_id: None,
+            seat: None,
+            state: AgentState::Idle,
+        };
+        POKER_AGENT_INDEX.with(|m| { m.borrow_mut().insert(p, p); });
+        set_poker_agent(p, agent);
+        poker_place_in_seat(&mut t, p);
+    }
+    t.resume_at = now; // start a hand on the next tick
+    set_poker_table(t);
+    Ok("seeded 6 house agents at Caldera 1 + granted you 100,000 ICP of dev stake".to_string())
+}
+
 // ==========================================
 // 21. Agent Poker (Epic I) — pure NLHE engine
 // ==========================================

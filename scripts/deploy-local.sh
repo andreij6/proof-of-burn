@@ -99,7 +99,8 @@ icp canister call backend admin_set_feature_flag '("early_adopters", true)' -e "
 icp canister call backend admin_set_feature_flag '("crash", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # Crash needs a one-time genesis (hash chain + builtin strategies + start the loop).
 icp canister call backend admin_init_crash '()' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-ok "Arcade + Early Adopters + Casino (Crash) flags enabled (local)"
+icp canister call backend admin_set_feature_flag '("poker", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+ok "Arcade + Early Adopters + Casino (Crash + Poker) flags enabled (local)"
 
 # ── 6. Mock data (only seeds what is missing) ────────────────────────────────
 # 6a. Proposals + sample ideas auto-seed in init/post_upgrade when empty.

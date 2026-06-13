@@ -552,6 +552,8 @@ export default function App() {
   const explorerEnabled = featureFlags.find(f => f.key === 'dapp_explorer')?.enabled ?? false;
   const arcadeEnabled = featureFlags.find(f => f.key === 'arcade')?.enabled ?? false;
   const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
+  const pokerEnabled = featureFlags.find(f => f.key === 'poker')?.enabled ?? false;
+  const casinoEnabled = crashEnabled || pokerEnabled;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (= free voting power) and votes cast.
@@ -1179,7 +1181,7 @@ export default function App() {
     if (page === 'arcade' && featureFlags.length > 0 && !arcadeEnabled) {
       setPage('dashboard');
     }
-    if (page === 'casino' && featureFlags.length > 0 && !crashEnabled) {
+    if (page === 'casino' && featureFlags.length > 0 && !casinoEnabled) {
       setPage('dashboard');
     }
     if (page === 'early_adopters' && featureFlags.length > 0 && !earlyAdoptersEnabled) {
@@ -1812,7 +1814,7 @@ export default function App() {
           Earn
         </Btn>
 
-        {(arcadeEnabled || lotteryEnabled || crashEnabled) && (
+        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Play</Eyebrow>
         )}
         {arcadeEnabled && (
@@ -1821,7 +1823,7 @@ export default function App() {
             Arcade
           </Btn>
         )}
-        {crashEnabled && (
+        {casinoEnabled && (
           <Btn variant={page === 'casino' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('casino')}>
             <Icon name="zap" size={14} stroke={page === 'casino' ? 'var(--char-950)' : 'currentColor'} />
             Casino
@@ -2319,6 +2321,8 @@ export default function App() {
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
               onGoStaking={() => setPage(losslessEnabled ? 'staking' : 'voting')}
+              crashEnabled={crashEnabled}
+              pokerEnabled={pokerEnabled}
             />
           ) : page === 'payouts' ? (
             <Payouts

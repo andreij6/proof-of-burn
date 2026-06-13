@@ -9,6 +9,7 @@ import {
   multiplierX100, fmtX, historyChipTone, betButton, recomputeCrashX100,
   effectiveTargetX100, type BetPhase,
 } from './crashMath';
+import Poker from './Poker';
 
 interface CasinoProps {
   actor: any;
@@ -17,6 +18,8 @@ interface CasinoProps {
   onSignIn: () => void;
   /** Jump to the Staking tab — chips come from staking. */
   onGoStaking: () => void;
+  crashEnabled?: boolean;
+  pokerEnabled?: boolean;
 }
 
 // The C16 doctrine — repeated on the hub header, the game header, the bet panel
@@ -37,8 +40,9 @@ function vpFromE8s(e8s: bigint | number): string {
   return (Number(e8s) / VP_E8S).toFixed(2);
 }
 
-export default function Casino({ actor, principal, isLocal, onSignIn, onGoStaking }: CasinoProps) {
+export default function Casino({ actor, principal, isLocal, onSignIn, onGoStaking, crashEnabled = true, pokerEnabled = false }: CasinoProps) {
   const signedIn = !!principal && !principal.isAnonymous();
+  const [tab, setTab] = useState<'crash' | 'poker'>(crashEnabled ? 'crash' : 'poker');
   const [round, setRound] = useState<CrashRoundView | null>(null);
   const [history, setHistory] = useState<CrashHistoryItem[]>([]);
   const [stats, setStats] = useState<CasinoStatsView | null>(null);
@@ -259,12 +263,31 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
       : `Payout if it hits: ${((wagerChips * eff) / 100 / 1000).toLocaleString()} VP (cap 10,000).`;
   })();
 
-  if (stats && !stats.crash_enabled) {
+  if (!crashEnabled && !pokerEnabled) {
     return <div style={{ padding: 24 }}><Eyebrow>Casino</Eyebrow><p style={{ color: 'var(--fg-2)' }}>The Casino is currently closed.</p></div>;
+  }
+
+  // Resolve the active tab against what's actually enabled.
+  const activeTab: 'crash' | 'poker' = pokerEnabled && (!crashEnabled || tab === 'poker') ? 'poker' : 'crash';
+  const tabBar = crashEnabled && pokerEnabled ? (
+    <div className="row" style={{ gap: 6 }}>
+      <Btn variant={activeTab === 'crash' ? 'primary' : 'ghost'} onClick={() => setTab('crash')}><Icon name="zap" size={13} /> Crash</Btn>
+      <Btn variant={activeTab === 'poker' ? 'primary' : 'ghost'} onClick={() => setTab('poker')}><Icon name="zap" size={13} /> Poker</Btn>
+    </div>
+  ) : null;
+
+  if (activeTab === 'poker') {
+    return (
+      <div className="col" style={{ gap: 16 }}>
+        {tabBar}
+        <Poker actor={actor} principal={principal} onSignIn={onSignIn} onGoStaking={onGoStaking} />
+      </div>
+    );
   }
 
   return (
     <div className="col" style={{ gap: 16, paddingBottom: 40 }}>
+      {tabBar}
       {/* Hub header + doctrine (C16) */}
       <div style={{ ...card, borderColor: 'var(--burn)' }}>
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
