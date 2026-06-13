@@ -1,15 +1,15 @@
 ---
 name: frontend-dev
-description: Edit the React frontend (src/frontend). Use when changing UI pages, calling backend canister methods from TypeScript, working with generated candid bindings, or debugging "dead button" / undefined-data issues caused by candid optional decoding.
+description: Edit the React frontend (src/frontend). Use when building or changing UI pages (follow the established page anatomy so new pages stay consistent), calling backend canister methods from TypeScript, working with generated candid bindings, or debugging "dead button" / undefined-data issues caused by candid optional decoding.
 ---
 
 # Frontend development
 
 React 19 + TypeScript + Vite SPA in `src/frontend`. Pages are flat files in
 `src/frontend/src/`: `App.tsx` (shell/routing/auth), `Landing.tsx`,
-`Staking.tsx`, `Lottery.tsx`, `Payouts.tsx`, `IdeaBoard.tsx`, `Explorer.tsx`,
-`Arcade.tsx` (+ `arcade/` for Mini Golf), `EarlyAdopters.tsx`, `Admin.tsx`,
-shared widgets in `ui.tsx`.
+`Dashboard.tsx`, `Staking.tsx`, `Lottery.tsx`, `Payouts.tsx`, `IdeaBoard.tsx`,
+`Explorer.tsx`, `Arcade.tsx` (+ `arcade/` for Mini Golf), `EarlyAdopters.tsx`,
+`Casino.tsx` (+ `Poker.tsx`), `Admin.tsx`, shared widgets in `ui.tsx`.
 
 ```bash
 npm --prefix src/frontend run dev     # vite dev server (hot reload)
@@ -21,6 +21,89 @@ npm --prefix src/frontend test        # vitest run
 The asset canister serves `dist/`, so a change is only visible at
 http://frontend.local.localhost:8000/ after `bash scripts/deploy-local.sh`
 (which builds + syncs). Use the vite dev server for iteration.
+
+## Building a new page — copy an existing one, don't compose from scratch
+
+This is the most important rule for consistency. These pages all share the
+same skeleton; **open the closest existing page** (`Lottery.tsx` is the
+smallest, cleanest template; `Casino.tsx` is the newest hub layout) **and
+mirror its structure** rather than assembling a page from the design-system
+primitives yourself. Using the right tokens but a novel layout is exactly the
+inconsistency to avoid.
+
+### Page contract (props)
+
+Every page is a **default-exported function** in `src/frontend/src/<Name>.tsx`
+with a `interface <Name>Props` above it. Pages do **not** own routing — they
+receive what they need and call back to the shell:
+
+- Always: `actor: any`, `principal: Principal | null`, `onSignIn: () => void`.
+- As needed (match a neighbor's prop names exactly): `identity`, `host`,
+  `rootKey`, `isLocal`, `isAdmin`, `ledgerCanisterId`, `backendCanisterId`.
+- Navigation is a callback prop named `onGo<Target>` (e.g.
+  `onGoStaking: () => void`) — never import the router or mutate `page` from a
+  page. See `LotteryProps`/`CasinoProps`.
+
+### Page skeleton (mirror this exactly)
+
+```tsx
+return (
+  <div className="dashboard-container">            {/* 720px, centered, col, gap — the page frame */}
+    {/* ── Header ── */}
+    <div className="col" style={{ gap: 6 }}>
+      <span className="row" style={{ gap: 8 }}>
+        <Icon name="target" size={16} stroke="var(--burn)" />
+        <Eyebrow accent>Section label</Eyebrow>          {/* uppercase mono kicker */}
+      </span>
+      <b style={{ fontSize: 17 }}>One-line value proposition.</b>
+      <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
+        One sentence of context.{' '}
+        <MoreInfo title="How X works">…long explanation lives here…</MoreInfo>
+      </span>
+    </div>
+
+    {/* error/notice banner — row, border + color = ember (error) / sprout (ok) */}
+    {/* content: .row / .col flex utilities; cards via the local `card` style or .card class */}
+  </div>
+);
+```
+
+Don't introduce a new top-level wrapper class, a different header arrangement,
+or a bespoke "how it works" treatment. The long-form explanation goes in
+`<MoreInfo>`; the page keeps a one-line subtitle.
+
+### Reuse, don't reinvent (shared primitives in `ui.tsx`)
+
+`Icon` (named paths in `iconPaths`), `Eyebrow`, `Chip` (tones in `CHIP_TONES`),
+`Btn` (`primary | secondary | ghost | danger`, `sm`), `MoreInfo`, `LiveDot`,
+`fmtICP`, `formatPrincipal`. Use these for every button/badge/icon/amount —
+do not hand-roll a `<button>` or inline a color when a primitive exists.
+
+### Tokens & utilities — never hardcode
+
+Style with the CSS variables and utility classes in `index.css`, not literals:
+- Colors: `var(--burn)`, `--fg`/`--fg-2`/`--fg-3`, `--surface`, `--border`/
+  `--border-hi`, `--sprout`/`--ember`/`--haze` (+ their `-dim`/`-950` tints).
+- Spacing/shape: `--sp-*`, `--r-md`, `--elev-*`, `--dur-*`/`--ease-*`.
+- Layout classes: `.row`, `.col`, `.card`, `.mono`, `.dashboard-container`.
+
+Note: the per-card `card` style object is currently re-declared at the top of
+each page (e.g. `Lottery.tsx:124`, `Poker.tsx:22`). Match that — copy the same
+const or use the `.card` class — rather than inventing new card padding/border.
+
+### Wire it into the shell (`App.tsx`)
+
+A page isn't reachable until all four are done — follow how an existing page
+(e.g. `casino`) does each:
+
+1. Add the page id to the `AppPage` union type (`App.tsx:50`).
+2. Render it in the page-switch ternary chain (`~2294+`), passing the standard
+   props and `onGo…` callbacks (`setPage('…')`).
+3. Gate it on a feature flag derived from `list_feature_flags` — add a
+   `<x>Enabled` const alongside the others (`App.tsx:549-557`), show its nav
+   entry only when enabled, and add the redirect guard so a disabled page
+   bounces (`~1172`). New games/features ship dark (flag default OFF).
+4. Add the nav button/tab next to its peers (Earn/Participate/Play groups).
 
 ## Candid bindings — generated, never edited
 

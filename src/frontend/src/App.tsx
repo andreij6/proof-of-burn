@@ -34,6 +34,7 @@ import Lottery from "./Lottery";
 import Explorer from "./Explorer";
 import Arcade from "./Arcade";
 import Casino from "./Casino";
+import Ticker from "./Ticker";
 import EarlyAdopters from "./EarlyAdopters";
 import Payouts from "./Payouts";
 import Admin from "./Admin";
@@ -2055,6 +2056,19 @@ export default function App() {
         </button>
       </header>
 
+      {/* ── Global scrolling ticker: open votes · feature promo · crypto ── */}
+      <Ticker
+        proposals={proposals}
+        usdRates={usdRates}
+        onVote={(id) => { window.location.hash = `#proposal-${id}`; }}
+        promos={[
+          ...(casinoEnabled ? [{ emoji: '✨', label: 'New — the Casino: play for voting power', go: () => setPage('casino') }] : []),
+          ...(arcadeEnabled ? [{ emoji: '🕹️', label: 'Play the Arcade', go: () => setPage('arcade') }] : []),
+          ...(lotteryEnabled ? [{ emoji: '🎟️', label: 'Lossless Lottery — stake to win', go: () => setPage('lottery') }] : []),
+          ...(explorerEnabled ? [{ emoji: '🧭', label: 'Explore the ICP ecosystem', go: () => setPage('explorer') }] : []),
+          ...(ideaBoardEnabled ? [{ emoji: '💡', label: 'Community R&D — fund the roadmap', go: () => setPage('ideas') }] : []),
+        ]}
+      />
 
       {/* ── Main Layout (Nav Sidebar + Content + Tweak Panel) ── */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
