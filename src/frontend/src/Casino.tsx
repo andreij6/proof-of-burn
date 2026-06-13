@@ -315,49 +315,75 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
     </Btn>
   );
 
-  // ── Hub: a landing page with one card per game ──
+  // ── Hub: a landing page (Explorer-style) with one card per game ──
   if (screen === 'hub' || (screen === 'crash' && !crashEnabled) || (screen === 'poker' && !pokerEnabled)) {
     const recent = history.slice(0, 8);
+    const gameCard = (
+      key: string, name: string, badge: { label: string; tone: 'ok' | 'muted' }, accent: string,
+      blurb: string, stat: React.ReactNode, cta: string, go: () => void,
+    ) => (
+      <div key={key} className="hub-card" role="link" tabIndex={0} onClick={go}
+        onKeyDown={(e) => { if (e.key === 'Enter') go(); }}
+        style={{ ...card, cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <Icon name="zap" size={18} stroke={accent} />
+            <h4 style={{ margin: 0 }}>{name}</h4>
+          </span>
+          <Chip tone={badge.tone}>{badge.label}</Chip>
+        </div>
+        <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: 0, flex: 1 }}>{blurb}</p>
+        <div style={{ minHeight: 22 }}>{stat}</div>
+        <Btn variant="primary" sm style={{ alignSelf: 'flex-start' }}>{cta} →</Btn>
+      </div>
+    );
     return (
-      <div className="col" style={{ gap: 16, paddingBottom: 40 }}>
-        <div style={{ ...card, borderColor: 'var(--burn)' }}>
-          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-            <Icon name="zap" size={18} stroke="var(--burn)" />
-            <Eyebrow accent>Casino</Eyebrow>
-          </div>
-          <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: '10px 0 0' }}>{NO_LOSS_DOCTRINE}</p>
+      <div className="idea-board-container">
+        {/* ── Page header (title · subtitle · how it works) ── */}
+        <div className="col" style={{ gap: 6 }}>
+          <Eyebrow accent>Play for voting power</Eyebrow>
+          <span className="row" style={{ gap: 10 }}>
+            <Icon name="zap" size={22} stroke="var(--burn)" />
+            <h4 style={{ margin: 0 }}>Casino</h4>
+          </span>
+          <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
+            Wager your voting power across our games — your staked ICP is never at risk.{' '}
+            <MoreInfo title="How the Casino works">
+              <p style={{ margin: '0 0 8px' }}>
+                Chips are <b>voting power</b> (1 VP = 1,000 chips), earned by staking ICP. Games move only
+                this derived number — your staked ICP is never wagered, never at risk, and always
+                unstakeable in full. Go broke and your ICP is exactly where you left it.
+              </p>
+              <p style={{ margin: 0 }}>
+                <b>Crash</b> is house-banked with a 1% edge that's burned forever; <b>Poker</b> is
+                player-vs-player at 0% rake. A casino-wide stop-loss stands you down before zero.
+              </p>
+            </MoreInfo>
+          </p>
         </div>
 
-        <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
-          {crashEnabled && (
-            <button onClick={() => goScreen('crash')} style={{ ...card, flex: '1 1 280px', minWidth: 260, textAlign: 'left', cursor: 'pointer', borderColor: 'var(--border-hi)' }}>
-              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                <span className="row" style={{ gap: 8, alignItems: 'center' }}><Icon name="zap" size={16} stroke="var(--sprout)" /><Eyebrow>Crash</Eyebrow></span>
-                <Chip tone="ok">live</Chip>
-              </div>
-              <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: '8px 0' }}>A rising multiplier — cash out before it crashes. Provably fair, 1% edge burned.</p>
-              <div className="row" style={{ gap: 5, flexWrap: 'wrap', minHeight: 22 }}>
-                {recent.map((h) => {
-                  const x = Number(h.crash_x100);
-                  const color = x >= 5000 ? 'var(--haze)' : x >= 200 ? 'var(--sprout)' : 'var(--ember)';
-                  return <span key={String(h.id)} style={{ border: `1px solid ${color}`, color, borderRadius: 6, padding: '1px 6px', fontSize: 11, fontVariantNumeric: 'tabular-nums' }}>{fmtX(x)}×</span>;
-                })}
-              </div>
-              <div style={{ marginTop: 12 }}><Btn variant="primary" sm onClick={() => goScreen('crash')}>Enter Crash →</Btn></div>
-            </button>
+        {/* ── Games grid ── */}
+        <div className="idea-grid">
+          {crashEnabled && gameCard(
+            'crash', 'Crash', { label: 'live', tone: 'ok' }, 'var(--sprout)',
+            'A rising multiplier — cash out before it crashes. Provably fair, 1% edge burned.',
+            <div className="row" style={{ gap: 5, flexWrap: 'wrap' }}>
+              {recent.length === 0 && <span style={{ color: 'var(--fg-3)', fontSize: 12 }}>Recent rounds appear here.</span>}
+              {recent.map((h) => {
+                const x = Number(h.crash_x100);
+                const color = x >= 5000 ? 'var(--haze)' : x >= 200 ? 'var(--sprout)' : 'var(--ember)';
+                return <span key={String(h.id)} style={{ border: `1px solid ${color}`, color, borderRadius: 6, padding: '1px 6px', fontSize: 11, fontVariantNumeric: 'tabular-nums' }}>{fmtX(x)}×</span>;
+              })}
+            </div>,
+            'Enter Crash', () => goScreen('crash'),
           )}
-          {pokerEnabled && (
-            <button onClick={() => goScreen('poker')} style={{ ...card, flex: '1 1 280px', minWidth: 260, textAlign: 'left', cursor: 'pointer', borderColor: 'var(--border-hi)' }}>
-              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                <span className="row" style={{ gap: 8, alignItems: 'center' }}><Icon name="zap" size={16} stroke="var(--burn)" /><Eyebrow>Poker</Eyebrow></span>
-                <Chip tone="muted">agents only</Chip>
-              </div>
-              <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: '8px 0' }}>Caldera Hold'em — your agent plays No-Limit 25/50 while you watch. 0% rake, forever.</p>
-              <div style={{ color: 'var(--fg-3)', fontSize: 12, minHeight: 22 }}>
-                {pokerLobby ? `${pokerLobby.players} player${pokerLobby.players === 1 ? '' : 's'} across ${pokerLobby.tables} table${pokerLobby.tables === 1 ? '' : 's'}${pokerLobby.live ? ` · ${pokerLobby.live} live` : ''}` : 'Loading tables…'}
-              </div>
-              <div style={{ marginTop: 12 }}><Btn variant="primary" sm onClick={() => goScreen('poker')}>Enter Poker →</Btn></div>
-            </button>
+          {pokerEnabled && gameCard(
+            'poker', 'Poker', { label: 'agents only', tone: 'muted' }, 'var(--burn)',
+            "Caldera Hold'em — your agent plays No-Limit 25/50 while you watch. 0% rake, forever.",
+            <span style={{ color: 'var(--fg-3)', fontSize: 12 }}>
+              {pokerLobby ? `${pokerLobby.players} player${pokerLobby.players === 1 ? '' : 's'} across ${pokerLobby.tables} table${pokerLobby.tables === 1 ? '' : 's'}${pokerLobby.live ? ` · ${pokerLobby.live} live` : ''}` : 'Loading tables…'}
+            </span>,
+            'Enter Poker', () => goScreen('poker'),
           )}
         </div>
       </div>
