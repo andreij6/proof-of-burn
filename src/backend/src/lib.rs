@@ -11641,7 +11641,11 @@ const VP_E8S: u64 = 100_000_000;
 /// 1 chip = 0.001 VP = 1e5 weight-e8s. chips = effective_vp_e8s / CHIP_E8S.
 const CHIP_E8S: u64 = 100_000;
 const CRASH_MIN_BET_CHIPS: u64 = 10; // 0.01 VP
-const CRASH_MAX_BET_CHIPS: u64 = 10_000; // 10 VP
+const CRASH_MAX_BET_CHIPS: u64 = 10_000_000; // 10,000 VP (1 VP = 1,000 chips)
+/// Hard cap on a single player's payout in a single round: 10,000 VP. A bet
+/// whose `wager × target` would exceed this is auto-cashed at the capped
+/// multiplier instead (e.g. a 5,000 VP bet auto-cashes at 2.00×).
+const CASINO_PAYOUT_CAP_VP: u64 = 10_000;
 const CRASH_MIN_TARGET_X100: u64 = 101; // 1.01x
 const CRASH_MAX_TARGET_X100: u64 = 5_000; // 50.00x
 const CRASH_CAP_X100: u64 = 5_000; // 50.00x cap on the curve (max multiplier 5000)
@@ -11650,9 +11654,9 @@ const CRASH_DOMAIN: &[u8] = b"caldera-crash-v1";
 const CRASH_INTERMISSION_NANOS: u64 = 5 * 1_000_000_000;
 const CRASH_BETTING_NANOS: u64 = 10 * 1_000_000_000;
 /// Default per-round potential-payout cap (VP). Admin-tunable in [100, 100_000].
-const CRASH_DEFAULT_EXPOSURE_CAP_VP: u64 = 5_000;
+const CRASH_DEFAULT_EXPOSURE_CAP_VP: u64 = 100_000;
 const CRASH_EXPOSURE_CAP_MIN_VP: u64 = 100;
-const CRASH_EXPOSURE_CAP_MAX_VP: u64 = 100_000;
+const CRASH_EXPOSURE_CAP_MAX_VP: u64 = 1_000_000;
 /// How many finished rounds to keep in the archive.
 const CRASH_ARCHIVE_KEEP: u64 = 500;
 /// Genesis hash chain: N rounds (~7 months at 20 s/round), checkpoint stride.
@@ -12102,20 +12106,31 @@ fn crash_time_offset_nanos(crash_x100: u64) -> u64 {
     (t * 1_000_000_000.0).round() as u64
 }
 
+/// The auto-cashout target a bet is actually settled at: the lesser of the
+/// player's chosen target and the multiplier at which `wager × multiplier`
+/// hits the per-round payout cap (10,000 VP). So a 5,000 VP bet is auto-cashed
+/// at 2.00× no matter how high the player set their target.
+fn effective_target_x100(wager_chips: u64, target_x100: u64) -> u64 {
+    let cap_chips = CASINO_PAYOUT_CAP_VP.saturating_mul(1_000); // VP → chips
+    let cap_target = (cap_chips.saturating_mul(100) / wager_chips.max(1)).max(100);
+    target_x100.min(cap_target)
+}
+
 /// Pure settlement of one bet against a sealed crash point. Returns the signed
-/// VP delta (weight-e8s) and the multiplier it paid at (0 = lost). Auto target
-/// pays iff `target ≤ crash`; a recorded manual cashout always pays at its
-/// (≤ auto-target, < crash) multiplier. The wager principal never moves — only
-/// profit (win) or the wager (loss) is written, since chips are reserved, not
-/// debited (plans/crash/02).
+/// VP delta (weight-e8s) and the multiplier it paid at (0 = lost). The auto
+/// target — capped by the payout ceiling — pays iff `effective ≤ crash`; a
+/// recorded manual cashout pays at its (≤ effective, < crash) multiplier. The
+/// wager principal never moves — only profit (win) or the wager (loss) is
+/// written, since chips are reserved, not debited (plans/crash/02).
 fn settle_crash_bet(wager_chips: u64, target_x100: u64, manual_x100: Option<u64>, crash_x100: u64) -> (i128, u64) {
     let wager_e8s = (wager_chips as i128) * (CHIP_E8S as i128);
+    let eff = effective_target_x100(wager_chips, target_x100);
     let pay_x100 = match manual_x100 {
-        Some(m) => m, // recorded only when cashed before the crash → a win
-        None if target_x100 <= crash_x100 => target_x100,
+        Some(m) => m.min(eff), // recorded only when cashed before the crash → a win
+        None if eff <= crash_x100 => eff,
         None => 0,
     };
-    if pay_x100 >= 100 && (manual_x100.is_some() || target_x100 <= crash_x100) {
+    if pay_x100 >= 100 && (manual_x100.is_some() || eff <= crash_x100) {
         let profit = wager_e8s * (pay_x100 as i128 - 100) / 100;
         (profit, pay_x100)
     } else {
@@ -12475,9 +12490,10 @@ fn crash_place_bet(
     if effective.saturating_sub(wager_e8s) < CASINO_STOP_LOSS_FLOOR_E8S {
         return Err("STOP_LOSS_FLOOR".to_string());
     }
-    // Exposure cap: Σ(wager × target) ≤ cap (VP). Closes betting when tripped.
+    // Exposure cap: Σ(wager × effective target) ≤ cap (VP). Closes betting when
+    // tripped. The effective target already reflects the per-player payout cap.
     let cap_e8s = (casino_book().exposure_cap_vp as u128) * (VP_E8S as u128);
-    let bet_potential = (wager_e8s as u128) * (target_x100 as u128) / 100;
+    let bet_potential = (wager_e8s as u128) * (effective_target_x100(wager_chips, target_x100) as u128) / 100;
     if r.potential_payout_e8s + bet_potential > cap_e8s {
         return Err("ROUND_FULL".to_string());
     }
@@ -12534,11 +12550,11 @@ fn crash_cashout() -> Result<u64, String> {
     if bet.manual_x100.is_some() {
         return Err("ALREADY_SETTLED".to_string());
     }
-    // Never beat the crash, never beat your own auto target.
+    // Never beat the crash, never beat your own (payout-capped) auto target.
     if live_x100 >= r.crash_x100 {
         return Err("TOO_LATE".to_string());
     }
-    let recorded = live_x100.min(bet.target_x100);
+    let recorded = live_x100.min(effective_target_x100(bet.wager_chips, bet.target_x100));
     bet.manual_x100 = Some(recorded);
     set_crash_state(r);
     Ok(recorded)
@@ -13359,9 +13375,7 @@ async fn admin_init_crash() -> Result<String, String> {
     seed_builtin_strategies();
     let mut book = casino_book();
     book.paused = false;
-    if book.exposure_cap_vp == 0 {
-        book.exposure_cap_vp = CRASH_DEFAULT_EXPOSURE_CAP_VP;
-    }
+    book.exposure_cap_vp = CRASH_DEFAULT_EXPOSURE_CAP_VP;
     set_casino_book(book);
     // Start a fresh cycle.
     crash_arm_timer(0);
@@ -13433,19 +13447,56 @@ fn admin_void_crash_round() -> Result<(), String> {
 fn dev_seed_casino_play() -> Result<String, String> {
     require_local_dev()?;
     let now = current_time();
-    dev_grant_stake(get_caller(), 5_000 * ONE_ICP_E8S, now);
-    let handles = ["rocketRandy", "2xTina", "moonGoblin", "serStaker", "autoAnnie", "diamondDan"];
-    for (i, h) in handles.iter().enumerate() {
+    // 100,000 ICP of dev stake ≈ 10,000 VP of chips — enough to test the
+    // 10,000-VP payout cap (e.g. a 5,000-VP bet auto-cashing at 2×).
+    dev_grant_stake(get_caller(), 100_000 * ONE_ICP_E8S, now);
+    let house = get_canister_id();
+    // (handle, bet in VP, target ×100). Big bettors set a high target so the
+    // 10,000-VP payout cap is what stops them (auto-cash at 2.00× / 1.67× / 1.25×).
+    let bots: [(&str, u64, u64); 6] = [
+        ("rocketRandy", 500, 200),
+        ("2xTina", 1_500, 200),
+        ("moonGoblin", 3_000, 200),
+        ("serStaker", 5_000, 1_000),
+        ("autoAnnie", 6_000, 1_000),
+        ("diamondDan", 8_000, 1_000),
+    ];
+    let mut counters = crash_counters();
+    for (i, (h, bet_vp, target)) in bots.iter().enumerate() {
         let p = Principal::from_slice(&[0xB0, i as u8, 0xCA, 0x51, 0x00]);
-        dev_grant_stake(p, (1_000 + (i as u64) * 600) * ONE_ICP_E8S, now);
+        let bet_chips = bet_vp * 1_000;
+        // ~2× headroom in chips (1 ICP ≈ 100 chips at the dev tenure multiplier).
+        dev_grant_stake(p, bet_vp * 20 * ONE_ICP_E8S, now);
         CASINO_BOTS.with(|m| m.borrow_mut().insert(p, h.to_string()));
-        let strat = (i as u64 % 4) + 1; // builtin ids 1..=4
-        let base = CRASH_STRATEGIES.with(|m| m.borrow().get(&strat)).map(|s| s.base_bet_chips).unwrap_or(100);
+        // A per-bot flat strategy so the bet stays fixed each round.
+        let sid = counters.next_strategy_id;
+        counters.next_strategy_id += 1;
+        let reset = ProgressionRule { action: BetAction::Reset, factor_x100: 0 };
+        CRASH_STRATEGIES.with(|m| {
+            m.borrow_mut().insert(sid, CrashStrategy {
+                id: sid,
+                author: house,
+                name: format!("{} flat {}VP", h, bet_vp),
+                description: String::new(),
+                base_bet_chips: bet_chips,
+                auto_target_x100: *target,
+                on_loss: reset,
+                on_win: reset,
+                max_bet_chips: bet_chips,
+                max_consecutive_losses: 0,
+                skip_rounds_after_loss: 0,
+                stop: StrategyStop { take_profit_vp_x1000: 0, stop_loss_vp_x1000: 0, max_rounds: 1_000_000 },
+                version: 1,
+                builtin: false,
+                lifetime_vp_e8s: 0,
+                created_at: now,
+            })
+        });
         CRASH_AUTOPILOT.with(|m| {
             m.borrow_mut().insert(p, AutopilotState {
-                strategy_id: strat,
+                strategy_id: sid,
                 active: true,
-                current_bet_chips: base,
+                current_bet_chips: bet_chips,
                 consecutive_losses: 0,
                 skip_counter: 0,
                 rounds_played: 0,
@@ -13455,19 +13506,20 @@ fn dev_seed_casino_play() -> Result<String, String> {
             })
         });
     }
+    set_crash_counters(counters);
     bot_say(Principal::from_slice(&[0xB0, 0, 0xCA, 0x51, 0x00]), "gm degens — who's hitting 10x today");
-    bot_say(Principal::from_slice(&[0xB0, 1, 0xCA, 0x51, 0x00]), "auto at 2x, never lose principal 😎");
-    Ok("seeded 6 auto-pilot bots + granted you 5,000 ICP of dev stake to play".to_string())
+    bot_say(Principal::from_slice(&[0xB0, 3, 0xCA, 0x51, 0x00]), "betting 5k VP, capped at 2x but it's free money");
+    Ok("seeded 6 auto-pilot bots (500–8,000 VP) + granted you 100,000 ICP of dev stake to play".to_string())
 }
 
 /// Dev helper: park a stake directly in tier 0 so a principal has casino chips
-/// without running the real staking flow. Idempotent per (tier, user).
+/// without running the real staking flow. Overwrites any existing dev stake.
 fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
     STAKES.with(|m| {
-        let k = stake_key(StakeTier::all()[0], user);
-        if m.borrow().get(&k).is_none() {
-            m.borrow_mut().insert(k, UserStake { amount_e8s, staked_at: now, last_action_at: now });
-        }
+        m.borrow_mut().insert(
+            stake_key(StakeTier::all()[0], user),
+            UserStake { amount_e8s, staked_at: now, last_action_at: now },
+        );
     });
 }
 
@@ -19104,6 +19156,24 @@ mod tests {
         let (d, p) = settle_crash_bet(100, 1000, Some(150), 300);
         assert_eq!(p, 150);
         assert_eq!(d, 100 * CHIP_E8S as i128 / 2);
+    }
+
+    #[test]
+    fn payout_cap_auto_cashes_big_bets() {
+        // 5,000 VP (5,000,000 chips) with a 10× target is auto-cashed at 2.00×
+        // (5,000 × 2 = the 10,000-VP payout cap).
+        assert_eq!(effective_target_x100(5_000_000, 1000), 200);
+        let (d, p) = settle_crash_bet(5_000_000, 1000, None, 2500); // crashes at 25×
+        assert_eq!(p, 200, "settled at the payout-capped 2.00×");
+        assert_eq!(d, 5_000_000i128 * CHIP_E8S as i128, "profit = +5,000 VP");
+        // Larger bets cap lower; small bets are unaffected.
+        assert_eq!(effective_target_x100(6_000_000, 5000), 166);
+        assert_eq!(effective_target_x100(8_000_000, 5000), 125);
+        assert_eq!(effective_target_x100(100, 200), 200);
+        // A capped bet still loses if the crash is below the capped target.
+        let (d, p) = settle_crash_bet(5_000_000, 1000, None, 150); // crash 1.5× < 2×
+        assert_eq!(p, 0);
+        assert_eq!(d, -(5_000_000i128 * CHIP_E8S as i128));
     }
 
     #[test]

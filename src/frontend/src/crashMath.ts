@@ -64,6 +64,18 @@ export async function hashForwardHex(seedHex: string, times: number): Promise<st
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** Per-round payout cap (VP) — mirrors CASINO_PAYOUT_CAP_VP on the canister. */
+export const PAYOUT_CAP_VP = 10_000;
+
+/** The multiplier a bet is actually settled at: the lesser of the chosen target
+ * and the multiplier where wager × multiplier hits the 10,000-VP payout cap.
+ * A 5,000-VP bet auto-cashes at 2.00×. Mirrors `effective_target_x100`. */
+export function effectiveTargetX100(wagerChips: number, targetX100: number): number {
+  const capChips = PAYOUT_CAP_VP * 1000; // VP → chips
+  const capTarget = Math.max(100, Math.floor((capChips * 100) / Math.max(1, wagerChips)));
+  return Math.min(targetX100, capTarget);
+}
+
 export type ChipTone = "gold" | "sprout" | "ember";
 /** History-bar chip tone: 50× moon (the cap) = gold, ≥2× = sprout, else ember. */
 export function historyChipTone(x100: number): ChipTone {

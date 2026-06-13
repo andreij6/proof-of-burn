@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   multiplierX100, fmtX, crashPointX100FromU, uFromHashBytes,
-  historyChipTone, betButton, recomputeCrashX100,
+  historyChipTone, betButton, recomputeCrashX100, effectiveTargetX100,
 } from '../crashMath';
 
 describe('crash curve', () => {
@@ -61,6 +61,20 @@ describe('crash point formula', () => {
     const x = await recomputeCrashX100(seedHex);
     expect(x).toBeGreaterThanOrEqual(100);
     expect(x).toBeLessThanOrEqual(10000);
+  });
+});
+
+describe('payout cap (effective target)', () => {
+  it('caps a 5,000 VP bet at 2.00×', () => {
+    expect(effectiveTargetX100(5_000_000, 1000)).toBe(200);
+  });
+  it('caps larger bets lower', () => {
+    expect(effectiveTargetX100(6_000_000, 5000)).toBe(166);
+    expect(effectiveTargetX100(8_000_000, 5000)).toBe(125);
+  });
+  it('leaves small bets untouched', () => {
+    expect(effectiveTargetX100(100, 200)).toBe(200);
+    expect(effectiveTargetX100(5000, 1000)).toBe(1000);
   });
 });
 
