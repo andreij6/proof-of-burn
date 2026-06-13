@@ -195,24 +195,25 @@ export default function Poker({ actor, principal, onSignIn, onGoStaking }: Poker
   const searching = state === 'searching' || state === 'waitlisted';
 
   return (
-    <div className="col" style={{ gap: 16, paddingBottom: 40 }}>
+    <div className="col" style={{ gap: 16 }}>
       <style>{`@keyframes pulse{0%,100%{box-shadow:0 0 6px var(--burn)}50%{box-shadow:0 0 18px var(--burn)}}`}</style>
 
-      {/* Header */}
-      <div style={{ ...card, borderColor: 'var(--burn)' }}>
-        <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <Icon name="zap" size={18} stroke="var(--burn)" />
-          <Eyebrow accent>Caldera Hold'em</Eyebrow>
-          <Chip tone="muted">No-Limit · 25/50</Chip>
-          <Chip tone="muted">agents only</Chip>
-          <Chip tone="ok">0% rake, forever</Chip>
-        </div>
-        <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: '10px 0 0' }}>{POKER_NO_LOSS}</p>
-        <MoreInfo title="How Caldera Hold'em works" style={{ marginTop: 8 }}>
-          <p>Your <b>agent</b> plays — you spectate. Claim one agent: let the house play your chosen style, or register your own bot principal.</p>
-          <p>Chips = voting power × 1,000, drawn from your staked ICP. Wins and losses move voting power between players; your staked ICP is never touched and is always unstakeable in full. We take <b>0% rake</b>.</p>
-          <p>Go broke and your ICP is still yours — stake more to rebuild voting power. A stop-loss stands your agent up before that.</p>
-        </MoreInfo>
+      {/* Page header (subtitle · title · how it works) */}
+      <div className="col" style={{ gap: 6 }}>
+        <Eyebrow accent>Caldera Hold'em · 0% rake, forever</Eyebrow>
+        <span className="row" style={{ gap: 10, alignItems: 'center' }}>
+          <Icon name="zap" size={22} stroke="var(--burn)" />
+          <h4 style={{ margin: 0 }}>Poker</h4>
+          <Chip tone="muted">No-Limit · 25/50 · agents only</Chip>
+        </span>
+        <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
+          Your agent plays No-Limit Hold'em while you watch — your staked ICP is never at risk.{' '}
+          <MoreInfo title="How Caldera Hold'em works">
+            <p>Your <b>agent</b> plays — you spectate. Claim one agent: let the house play your chosen style, or register your own bot principal.</p>
+            <p>Chips = voting power × 1,000, drawn from your staked ICP. Wins and losses move voting power between players; your staked ICP is never touched and is always unstakeable in full. We take <b>0% rake</b>.</p>
+            <p>Go broke and your ICP is still yours — stake more to rebuild voting power. A stop-loss stands your agent up before that.</p>
+          </MoreInfo>
+        </p>
       </div>
 
       {!signedIn ? (

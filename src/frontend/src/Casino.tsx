@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
 import type {
   CrashRoundView, CrashBetView, CrashHistoryItem, CrashVerifyView,
-  CasinoStatsView, MyCasinoView, ChatMsgView, CrashStrategy, AutopilotState,
+  MyCasinoView, ChatMsgView, CrashStrategy, AutopilotState,
 } from './bindings/backend';
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal } from './ui';
 import {
@@ -61,7 +61,6 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   const [pokerLobby, setPokerLobby] = useState<{ tables: number; players: number; live: number } | null>(null);
   const [round, setRound] = useState<CrashRoundView | null>(null);
   const [history, setHistory] = useState<CrashHistoryItem[]>([]);
-  const [stats, setStats] = useState<CasinoStatsView | null>(null);
   const [me, setMe] = useState<MyCasinoView | null>(null);
   const [chat, setChat] = useState<ChatMsgView[]>([]);
   const [strategies, setStrategies] = useState<CrashStrategy[]>([]);
@@ -88,14 +87,12 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
       // Nudge the round loop forward (no-op on a healthy subnet; drives it
       // locally where idle timers don't fire). Fire-and-forget.
       actor.crash_poke?.().catch(() => {});
-      const [r, h, s] = await Promise.all([
+      const [r, h] = await Promise.all([
         actor.get_crash_round(),
         actor.get_crash_history(20n),
-        actor.get_casino_stats(),
       ]);
       setRound(r);
       setHistory(h);
-      setStats(s);
       const sinceId = chat.length ? chat[chat.length - 1].id : 0n;
       const newChat = await actor.get_casino_chat(sinceId);
       if (newChat.length) setChat((c) => [...c, ...newChat].slice(-200));
@@ -127,10 +124,6 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
     let stop = false;
     const tickHub = async () => {
       try {
-        if (crashEnabled) {
-          const h = await actor.get_crash_history(8n);
-          if (!stop) setHistory(h);
-        }
         if (pokerEnabled) {
           const rows = await actor.get_poker_lobby();
           if (!stop) {
@@ -317,29 +310,27 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
 
   // ── Hub: a landing page (Explorer-style) with one card per game ──
   if (screen === 'hub' || (screen === 'crash' && !crashEnabled) || (screen === 'poker' && !pokerEnabled)) {
-    const recent = history.slice(0, 8);
     const gameCard = (
-      key: string, name: string, badge: { label: string; tone: 'ok' | 'muted' }, accent: string,
-      blurb: string, stat: React.ReactNode, cta: string, go: () => void,
+      key: string, name: string, badge: { label: string; tone: 'ok' | 'muted' },
+      blurb: string, footL: string, footR: React.ReactNode, go: () => void,
     ) => (
-      <div key={key} className="hub-card" role="link" tabIndex={0} onClick={go}
+      <div key={key} className="card col hub-card" role="link" tabIndex={0} onClick={go}
         onKeyDown={(e) => { if (e.key === 'Enter') go(); }}
-        style={{ ...card, cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <span className="row" style={{ gap: 8, alignItems: 'center' }}>
-            <Icon name="zap" size={18} stroke={accent} />
-            <h4 style={{ margin: 0 }}>{name}</h4>
-          </span>
-          <Chip tone={badge.tone}>{badge.label}</Chip>
+        style={{ gap: 10, display: 'flex', flexDirection: 'column', cursor: 'pointer' }}>
+        <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+          <Chip tone={badge.tone} style={{ height: 19, fontSize: 10 }}><Icon name="zap" size={10} /> {badge.label}</Chip>
         </div>
-        <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: 0, flex: 1 }}>{blurb}</p>
-        <div style={{ minHeight: 22 }}>{stat}</div>
-        <Btn variant="primary" sm style={{ alignSelf: 'flex-start' }}>{cta} →</Btn>
+        <h6 style={{ margin: 0, fontSize: 15, lineHeight: 1.35 }}>{name}</h6>
+        <p style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0, flex: 1 }}>{blurb}</p>
+        <div className="row" style={{ justifyContent: 'space-between', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
+          <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>{footL}</span>
+          <span className="mono row" style={{ fontSize: 10.5, color: 'var(--fg-3)', gap: 4 }}>{footR}</span>
+        </div>
       </div>
     );
     return (
       <div className="idea-board-container">
-        {/* ── Page header (title · subtitle · how it works) ── */}
+        {/* ── Page header (subtitle · title · how it works) ── */}
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>Play for voting power</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
@@ -362,28 +353,21 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
           </p>
         </div>
 
-        {/* ── Games grid ── */}
+        {/* ── Games grid (whole card is clickable) ── */}
         <div className="idea-grid">
           {crashEnabled && gameCard(
-            'crash', 'Crash', { label: 'live', tone: 'ok' }, 'var(--sprout)',
+            'crash', 'Crash', { label: 'Live', tone: 'ok' },
             'A rising multiplier — cash out before it crashes. Provably fair, 1% edge burned.',
-            <div className="row" style={{ gap: 5, flexWrap: 'wrap' }}>
-              {recent.length === 0 && <span style={{ color: 'var(--fg-3)', fontSize: 12 }}>Recent rounds appear here.</span>}
-              {recent.map((h) => {
-                const x = Number(h.crash_x100);
-                const color = x >= 5000 ? 'var(--haze)' : x >= 200 ? 'var(--sprout)' : 'var(--ember)';
-                return <span key={String(h.id)} style={{ border: `1px solid ${color}`, color, borderRadius: 6, padding: '1px 6px', fontSize: 11, fontVariantNumeric: 'tabular-nums' }}>{fmtX(x)}×</span>;
-              })}
-            </div>,
-            'Enter Crash', () => goScreen('crash'),
+            'house-banked · 1% edge burned',
+            <>Watch <Icon name="zap" size={11} /></>,
+            () => goScreen('crash'),
           )}
           {pokerEnabled && gameCard(
-            'poker', 'Poker', { label: 'agents only', tone: 'muted' }, 'var(--burn)',
-            "Caldera Hold'em — your agent plays No-Limit 25/50 while you watch. 0% rake, forever.",
-            <span style={{ color: 'var(--fg-3)', fontSize: 12 }}>
-              {pokerLobby ? `${pokerLobby.players} player${pokerLobby.players === 1 ? '' : 's'} across ${pokerLobby.tables} table${pokerLobby.tables === 1 ? '' : 's'}${pokerLobby.live ? ` · ${pokerLobby.live} live` : ''}` : 'Loading tables…'}
-            </span>,
-            'Enter Poker', () => goScreen('poker'),
+            'poker', 'Poker', { label: 'Agents only', tone: 'muted' },
+            "Caldera Hold'em — your agent plays No-Limit Hold'em while you watch. 0% rake, forever.",
+            'No-Limit 25/50 · 0% rake',
+            <>{pokerLobby ? `${pokerLobby.players} playing` : 'Watch'} <Icon name="zap" size={11} /></>,
+            () => goScreen('poker'),
           )}
         </div>
       </div>
@@ -392,7 +376,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
 
   if (screen === 'poker') {
     return (
-      <div className="col" style={{ gap: 12 }}>
+      <div className="idea-board-container">
         {backBar}
         <Poker actor={actor} principal={principal} onSignIn={onSignIn} onGoStaking={onGoStaking} />
       </div>
@@ -401,26 +385,28 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
 
   // ── Crash screen ──
   return (
-    <div className="col" style={{ gap: 16, paddingBottom: 40 }}>
+    <div className="idea-board-container">
       {backBar}
-      {/* Hub header + doctrine (C16) */}
-      <div style={{ ...card, borderColor: 'var(--burn)' }}>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-            <Icon name="zap" size={18} stroke="var(--burn)" />
-            <Eyebrow accent>Casino · Crash</Eyebrow>
-            {stats?.chain_initialized && <Chip tone="ok">provably fair</Chip>}
-          </div>
-          <Btn variant="ghost" sm onClick={() => setMuted((m) => !m)}>
-            <Icon name={muted ? 'moon' : 'sound'} size={13} /> {muted ? 'Muted' : 'Sound'}
-          </Btn>
+      {/* Page header (subtitle · title · how it works) */}
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
+        <div className="col" style={{ gap: 6 }}>
+          <Eyebrow accent>Casino · provably fair</Eyebrow>
+          <span className="row" style={{ gap: 10 }}>
+            <Icon name="zap" size={22} stroke="var(--burn)" />
+            <h4 style={{ margin: 0 }}>Crash</h4>
+          </span>
+          <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
+            Cash out before the rising multiplier crashes. Chips are voting power — your staked ICP is never at risk.{' '}
+            <MoreInfo title="How Crash works">
+              <p>Chips are your <b>voting power</b> (1 VP = 1,000 chips), derived from your staked ICP. Betting moves only this derived number — your principal is never touched and is always unstakeable in full.</p>
+              <p>The house keeps a 1% edge, and <b>burns it</b>: the edge is destroyed forever, not collected. Destroyed VP can only re-enter the system by staking more ICP.</p>
+              <p>Every crash point was fixed at genesis by a hash chain — open any past round's <b>verify</b> dialog to recompute it yourself.</p>
+            </MoreInfo>
+          </p>
         </div>
-        <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: '10px 0 0' }}>{NO_LOSS_DOCTRINE}</p>
-        <MoreInfo title="How the Casino works" style={{ marginTop: 8 }}>
-          <p>Chips are your <b>voting power</b> (1 VP = 1,000 chips), derived from your staked ICP. Betting moves only this derived number — your principal is never touched and is always unstakeable in full.</p>
-          <p>The house keeps a 1% edge, and <b>burns it</b>: the edge is destroyed forever, not collected. Destroyed VP can only re-enter the system by staking more ICP.</p>
-          <p>Every crash point was fixed at genesis by a hash chain — open any past round's <b>verify</b> dialog to recompute it yourself.</p>
-        </MoreInfo>
+        <Btn variant="ghost" sm onClick={() => setMuted((m) => !m)}>
+          <Icon name={muted ? 'moon' : 'sound'} size={13} /> {muted ? 'Muted' : 'Sound'}
+        </Btn>
       </div>
 
       <div className="casino-grid">
