@@ -185,6 +185,66 @@ Notes:
 
 ---
 
+## Casino — Crash (Epic J)
+
+Bustabit-style multiplier game behind the `crash` flag (ships dark). Wagers are
+casino VP chips derived from staking weight — staked ICP is never touched. The
+house keeps a 1% edge and **burns it weekly**. Stable memory ids 60–71.
+
+### Flag rollout & genesis (owner)
+```
+# 1. enable the flag, 2. build the genesis hash chain + start the loop.
+icp canister call backend admin_set_feature_flag '("crash", true)'
+icp canister call backend admin_init_crash '()'   # -> Ok(terminal_hash_hex); idempotent
+```
+`admin_init_crash` draws the genesis seed (raw_rand), walks a 1M-element hash
+chain, publishes the terminal commitment, seeds the four builtin strategies, and
+arms the round loop. Re-running with an initialised chain only re-arms the loop.
+Standing rule: do NOT enable on mainnet until the owner has playtested locally.
+
+### Pause / resume (current round still settles)
+```
+icp canister call backend admin_pause_crash '(true)'    # no new betting window opens
+icp canister call backend admin_pause_crash '(false)'   # resume the loop
+```
+
+### Exposure cap (house variance bound)
+```
+# per-round Σ(wager × target) ceiling, in VP; railed to 100..100_000.
+icp canister call backend admin_set_exposure_cap '(5000)'
+```
+Tune DOWN if the house balance swings too hard. Betting closes early with
+`ROUND_FULL` when the cap is reached.
+
+### House monitoring & burn audit
+```
+icp canister call backend get_casino_stats '()' --query
+# -> house_vp_e8s, lifetime_burned_vp_e8s, jubilee_minted_vp_e8s,
+#    reconciliation_e8s (MUST be 0), exposure_cap_vp, paused, chain_initialized
+```
+The weekly burn fires from the 300 s sweep timer (and `admin_trigger_sweep`): a
+positive house balance is zeroed, the amount added to lifetime-burned, and an
+audit event `crash_house_burn` is logged. Reconciliation
+(Σ user deltas + house + burned − jubilee) is always 0 — alert if it isn't.
+
+### Void a wedged round (last resort)
+```
+icp canister call backend admin_void_crash_round '()'   # refunds all wagers (delta 0), audit-logged
+```
+
+### Chat moderation
+```
+icp canister call backend admin_mute_chat '(principal "<p>", <until_ns>)'
+icp canister call backend admin_delete_chat '(<msg_id>)'
+```
+
+### Upgrade safety
+The round state is stable; `post_upgrade` re-arms the crash timer from the
+remaining phase time (a round mid-flight resumes; a passed crash time seals on
+the next tick). Auto-pilots survive offline users but stop on flag-off / pause.
+
+---
+
 ## Local Dev Faucet
 
 `dev_faucet` pays 100 ICP from the **backend canister's own default account**

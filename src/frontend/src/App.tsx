@@ -33,6 +33,7 @@ import Staking from "./Staking";
 import Lottery from "./Lottery";
 import Explorer from "./Explorer";
 import Arcade from "./Arcade";
+import Casino from "./Casino";
 import EarlyAdopters from "./EarlyAdopters";
 import Payouts from "./Payouts";
 import Admin from "./Admin";
@@ -46,7 +47,7 @@ import { WALLET_TOKEN_META, parseTokenUnits, fmtUsd, thresholdProgress } from ".
 // Each in-app page maps to a stable hash path so links are copy-pasteable.
 // 'earn', 'staking' and 'early_adopters' are the three tabs of the Earn page —
 // each keeps its own path so old deep links keep working.
-export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'early_adopters' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'casino' | 'early_adopters' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -57,6 +58,7 @@ export const PAGE_PATH: Record<AppPage, string> = {
   lottery: '/lottery',
   explorer: '/explorer',
   arcade: '/arcade',
+  casino: '/casino',
   early_adopters: '/early_adopters',
   payouts: '/profile',
   admin: '/admin',
@@ -72,6 +74,8 @@ export function pageFromHash(hash: string): AppPage | null {
   const h = hash.replace(/^#/, '');
   if (/^proposal-\d+$/.test(h)) return 'voting'; // shared proposal deep link
   const path = '/' + h.replace(/^\//, '');
+  // The old poker path now lives under the Casino hub (plans/crash nav amend).
+  if (path === '/poker' || path.startsWith('/casino/')) return 'casino';
   return PATH_PAGE[path] ?? null;
 }
 
@@ -547,6 +551,7 @@ export default function App() {
   const lotteryEnabled = featureFlags.find(f => f.key === 'lossless_lottery')?.enabled ?? false;
   const explorerEnabled = featureFlags.find(f => f.key === 'dapp_explorer')?.enabled ?? false;
   const arcadeEnabled = featureFlags.find(f => f.key === 'arcade')?.enabled ?? false;
+  const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (= free voting power) and votes cast.
@@ -1172,6 +1177,9 @@ export default function App() {
       setPage('dashboard');
     }
     if (page === 'arcade' && featureFlags.length > 0 && !arcadeEnabled) {
+      setPage('dashboard');
+    }
+    if (page === 'casino' && featureFlags.length > 0 && !crashEnabled) {
       setPage('dashboard');
     }
     if (page === 'early_adopters' && featureFlags.length > 0 && !earlyAdoptersEnabled) {
@@ -1804,13 +1812,19 @@ export default function App() {
           Earn
         </Btn>
 
-        {(arcadeEnabled || lotteryEnabled) && (
+        {(arcadeEnabled || lotteryEnabled || crashEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Play</Eyebrow>
         )}
         {arcadeEnabled && (
           <Btn variant={page === 'arcade' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('arcade')}>
             <Icon name="gamepad" size={14} stroke={page === 'arcade' ? 'var(--char-950)' : 'currentColor'} />
             Arcade
+          </Btn>
+        )}
+        {crashEnabled && (
+          <Btn variant={page === 'casino' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('casino')}>
+            <Icon name="zap" size={14} stroke={page === 'casino' ? 'var(--char-950)' : 'currentColor'} />
+            Casino
           </Btn>
         )}
         {lotteryEnabled && (
@@ -2297,6 +2311,14 @@ export default function App() {
               rootKey={env?.IC_ROOT_KEY}
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'staking' : 'voting')}
+            />
+          ) : page === 'casino' ? (
+            <Casino
+              actor={actor}
+              principal={principal}
+              isLocal={config?.is_local ?? false}
+              onSignIn={handleLogin}
+              onGoStaking={() => setPage(losslessEnabled ? 'staking' : 'voting')}
             />
           ) : page === 'payouts' ? (
             <Payouts

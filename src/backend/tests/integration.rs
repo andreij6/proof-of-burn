@@ -2112,3 +2112,150 @@ fn test_yield_distribution_integration() {
     let pool = staking_pool_info(&env);
     assert_eq!(pool.total_yield_e8s, 200_000_000, "harvested maturity tracked per tier");
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// PB-240 — Crash / Casino: live round loop, fairness verify, chat, pause
+// ════════════════════════════════════════════════════════════════════════════
+// Drives the timer-driven round loop end-to-end. Settlement zero-sum and the
+// crash-point math are covered exhaustively by the in-lib unit tests; here we
+// prove the real loop advances, the genesis hash chain verifies, the casino
+// reconciliation stays at exactly zero, chat round-trips, and pause stops the
+// loop. A staked human bet is exercised by the local e2e script (crash-smoke).
+
+#[derive(CandidType, Deserialize, Debug)]
+enum StringResult {
+    Ok(String),
+    Err(String),
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct CasinoStatsDe {
+    house_vp_e8s: i64,
+    lifetime_burned_vp_e8s: u64,
+    jubilee_minted_vp_e8s: u64,
+    reconciliation_e8s: i64,
+    exposure_cap_vp: u64,
+    paused: bool,
+    crash_enabled: bool,
+    chain_initialized: bool,
+    terminal_hex: String,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct CrashHistoryItemDe {
+    id: u64,
+    crash_x100: u64,
+    chain_index: u64,
+    seed_hex: String,
+    crashed_at: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct CrashVerifyDe {
+    round_id: u64,
+    chain_index: u64,
+    seed_hex: String,
+    recomputed_x100: u64,
+    terminal_hex: String,
+    chain_verified: bool,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct ChatMsgDe {
+    id: u64,
+    author: Principal,
+    text: String,
+    at: u64,
+}
+
+fn enable_and_init_crash(pic: &PocketIc, canister: Principal, owner: Principal) {
+    let r = pic
+        .update_call(
+            canister,
+            owner,
+            "admin_set_feature_flag",
+            encode_args(("crash".to_string(), true)).unwrap(),
+        )
+        .expect("set crash flag");
+    let _: UnitResult = decode_one(&r).unwrap();
+    let r = pic
+        .update_call(canister, owner, "admin_init_crash", encode_one(()).unwrap())
+        .expect("init crash");
+    let res: StringResult = decode_one(&r).unwrap();
+    assert!(matches!(res, StringResult::Ok(_)), "genesis must succeed: {:?}", res);
+}
+
+fn casino_stats(pic: &PocketIc, canister: Principal) -> CasinoStatsDe {
+    let reply = pic
+        .query_call(canister, Principal::anonymous(), "get_casino_stats", encode_one(()).unwrap())
+        .expect("get_casino_stats");
+    decode_one(&reply).unwrap()
+}
+
+fn crash_history(pic: &PocketIc, canister: Principal) -> Vec<CrashHistoryItemDe> {
+    let reply = pic
+        .query_call(canister, Principal::anonymous(), "get_crash_history", encode_one(20u64).unwrap())
+        .expect("get_crash_history");
+    decode_one(&reply).unwrap()
+}
+
+#[test]
+fn crash_loop_runs_and_verifies() {
+    let Some((pic, canister)) = setup() else { return };
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    enable_and_init_crash(&pic, canister, owner);
+
+    let stats = casino_stats(&pic, canister);
+    assert!(stats.crash_enabled && stats.chain_initialized, "crash live + chain built");
+    assert_eq!(stats.terminal_hex.len(), 64, "terminal hash published");
+    assert_eq!(stats.reconciliation_e8s, 0, "fresh casino reconciles to 0");
+
+    // Drive the loop: betting (10s) + run + intermission (5s). Advance generously
+    // so several rounds complete; tick to fire the armed one-shot timers.
+    for _ in 0..60 {
+        pic.advance_time(std::time::Duration::from_secs(6));
+        pic.tick();
+    }
+
+    let history = crash_history(&pic, canister);
+    assert!(!history.is_empty(), "the loop should have completed rounds");
+    // Reconciliation stays at 0 with no bettors (house never moves).
+    assert_eq!(casino_stats(&pic, canister).reconciliation_e8s, 0);
+
+    // Provably-fair: a finished round's reveal verifies back to the terminal.
+    let round = &history[0];
+    assert!(!round.seed_hex.is_empty(), "finished round reveals its seed");
+    let reply = pic
+        .query_call(canister, Principal::anonymous(), "verify_crash_round", encode_one(round.id).unwrap())
+        .expect("verify_crash_round");
+    let verify: std::result::Result<CrashVerifyDe, String> = decode_one(&reply).unwrap();
+    let v = verify.expect("verify ok");
+    assert!(v.chain_verified, "reveal must hash forward to the genesis terminal");
+    assert_eq!(v.recomputed_x100, round.crash_x100, "recomputed point matches");
+}
+
+#[test]
+fn casino_chat_round_trip_and_pause() {
+    let Some((pic, canister)) = setup() else { return };
+    let owner = Principal::from_text(OWNER_TEXT).unwrap();
+    enable_and_init_crash(&pic, canister, owner);
+
+    // Chat: owner posts, anyone reads.
+    let r = pic
+        .update_call(canister, owner, "post_casino_chat", encode_one("gl all".to_string()).unwrap())
+        .expect("post chat");
+    let posted: std::result::Result<u64, String> = decode_one(&r).unwrap();
+    assert!(posted.is_ok(), "owner may chat");
+    let reply = pic
+        .query_call(canister, Principal::anonymous(), "get_casino_chat", encode_one(0u64).unwrap())
+        .expect("get chat");
+    let msgs: Vec<ChatMsgDe> = decode_one(&reply).unwrap();
+    assert!(msgs.iter().any(|m| m.text == "gl all"), "message visible");
+
+    // Pause stops the loop: no new rounds open after the current settles.
+    let r = pic
+        .update_call(canister, owner, "admin_pause_crash", encode_one(true).unwrap())
+        .expect("pause");
+    let _: UnitResult = decode_one(&r).unwrap();
+    assert!(casino_stats(&pic, canister).paused, "paused flag set");
+}

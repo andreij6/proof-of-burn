@@ -93,10 +93,13 @@ icp canister call backend admin_set_explorer_ledger "(variant { CkUSDC }, princi
 icp canister call backend admin_set_explorer_ledger "(variant { CkUSDT }, principal \"$CKUSDT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 ok "Token ledgers wired (ckBTC=$CKBTC_ID, ckETH=$CKETH_ID, ckUSDC=$CKUSDC_ID, ckUSDT=$CKUSDT_ID)"
 
-# The arcade + early adopters ship dark (flags default OFF) — on for local testing.
+# The arcade + early adopters + casino ship dark (flags default OFF) — on for local testing.
 icp canister call backend admin_set_feature_flag '("arcade", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 icp canister call backend admin_set_feature_flag '("early_adopters", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-ok "Arcade + Early Adopters flags enabled (local)"
+icp canister call backend admin_set_feature_flag '("crash", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+# Crash needs a one-time genesis (hash chain + builtin strategies + start the loop).
+icp canister call backend admin_init_crash '()' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+ok "Arcade + Early Adopters + Casino (Crash) flags enabled (local)"
 
 # ── 6. Mock data (only seeds what is missing) ────────────────────────────────
 # 6a. Proposals + sample ideas auto-seed in init/post_upgrade when empty.
