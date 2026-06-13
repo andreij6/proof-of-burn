@@ -379,7 +379,17 @@ type ExplorerQuote = record {
   expires_at : nat64;
 };
 type ExplorerToken = variant { ICP; CkUSDC; CkUSDT; CkBTC; CkETH };
-type FeatureFlag = record { key : text; enabled : bool };
+type FeatureFlag = record {
+  key : text;
+  // Effective for the CALLER (On for everyone, or AdminOn and the caller is an
+  // admin). UI gating reads this.
+  enabled : bool;
+  // The raw three-state setting (for the admin panel to display/cycle).
+  state : FlagState;
+};
+// A feature's three states. `Off` = nobody; `On` = everybody; `AdminOn` =
+// admins only (preview/playtest a feature live without exposing it).
+type FlagState = variant { On; Off; AdminOn };
 // App-wide totals used by the global stats strip in the UI.
 // - `tvl_e8s`: sum of `total_committed_e8s` over all proposals whose status
 // is `open` or `met` (i.e. escrow currently locked).
@@ -900,6 +910,9 @@ service : (InitPayload) -> {
   // kill-switch can be staged before the feature ships) but validated and
   // capped so the map can't be spammed.
   admin_set_feature_flag : (text, bool) -> (Result);
+  // Admin: set a feature's three-state flag — Off (nobody), On (everybody), or
+  // AdminOn (admins only, for a live preview/playtest).
+  admin_set_feature_flag_state : (text, FlagState) -> (Result);
   // Admin: set the frontend canister id that receives the 25% cycles share (PB-125).
   admin_set_frontend_canister : (principal) -> (Result);
   // Admin: tune how many tickets a daily login credits.
@@ -983,9 +996,11 @@ service : (InitPayload) -> {
   // real skin-in-the-game is the ICP burn itself, so following the leader neuron is
   // encouraged but self-attested. The user confirms in the UI; we record it here.
   confirm_follow : () -> (Result);
-  // Place a crash bet. `wager_chips` 10..10_000, `target_x100` 101..10_000.
-  // Humans and agent principals are identical here — no registry, no claim step
-  // (C9). The auto target is the latency-fair primary mechanism (C7).
+  // Place a crash bet. `wager_chips` 10..10_000_000; `target_x100` is the auto
+  // cash-out (101..5_000) or **0 for no auto cash-out** (manual only — cash out
+  // with `crash_cashout`). Humans and agent principals are identical here — no
+  // registry, no claim step (C9). The auto target is the latency-fair primary
+  // mechanism (C7); the payout cap is always enforced.
   crash_bet : (nat64, nat64) -> (Result);
   // Manual CASH OUT (the bonus action, C7). Executes at the multiplier of the
   // block that processes it — never above your own auto target, and only while

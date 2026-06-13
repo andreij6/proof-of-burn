@@ -4515,10 +4515,23 @@ pub struct IdeaUpvote {
     pub poster_block: Option<u64>,
 }
 
+/// A feature's three states. `Off` = nobody; `On` = everybody; `AdminOn` =
+/// admins only (preview/playtest a feature live without exposing it).
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlagState {
+    Off,
+    On,
+    AdminOn,
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct FeatureFlag {
     pub key: String,
+    /// Effective for the CALLER (On for everyone, or AdminOn and the caller is an
+    /// admin). UI gating reads this.
     pub enabled: bool,
+    /// The raw three-state setting (for the admin panel to display/cycle).
+    pub state: FlagState,
 }
 
 /// Admin-curated, fundable project (Community R&D "Projects" tab). Funding
@@ -4656,15 +4669,57 @@ fn feature_default(key: &str) -> bool {
     }
 }
 
+/// Stored value → state. Legacy values 0/1 map to Off/On; 2 = AdminOn. Unset
+/// falls back to the per-flag default.
+fn feature_state(key: &str) -> FlagState {
+    match FEATURE_FLAGS.with(|m| m.borrow().get(&key.to_string())) {
+        Some(0) => FlagState::Off,
+        Some(2) => FlagState::AdminOn,
+        Some(_) => FlagState::On, // 1 (and any legacy non-zero)
+        None => {
+            if feature_default(key) {
+                FlagState::On
+            } else {
+                FlagState::Off
+            }
+        }
+    }
+}
+
+fn flag_state_code(s: FlagState) -> u8 {
+    match s {
+        FlagState::Off => 0,
+        FlagState::On => 1,
+        FlagState::AdminOn => 2,
+    }
+}
+
+/// "On for everyone." Caller-agnostic — SAFE to call from timers (no `caller`).
+/// Treats `AdminOn` as off so global background processes don't run for an
+/// admin-only feature.
 fn feature_enabled(key: &str) -> bool {
-    FEATURE_FLAGS
-        .with(|m| m.borrow().get(&key.to_string()))
-        .map(|v| v == 1)
-        .unwrap_or_else(|| feature_default(key))
+    matches!(feature_state(key), FlagState::On)
+}
+
+/// "Not off" — the feature is live in some capacity (On or AdminOn). Used by
+/// background loops (e.g. the crash round loop) that must run so admins can use
+/// the feature under `AdminOn`. Caller-agnostic.
+fn feature_active(key: &str) -> bool {
+    !matches!(feature_state(key), FlagState::Off)
+}
+
+/// Effective for a specific caller: On for anyone, AdminOn only for admins.
+/// Only call from a message context (it needs the caller).
+fn feature_visible(key: &str, caller: Principal) -> bool {
+    match feature_state(key) {
+        FlagState::On => true,
+        FlagState::AdminOn => is_admin_principal(caller),
+        FlagState::Off => false,
+    }
 }
 
 fn require_idea_board_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_IDEA_BOARD) {
+    if !feature_visible(FLAG_IDEA_BOARD, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -4680,16 +4735,17 @@ fn valid_flag_key(key: &str) -> bool {
 /// admin-created keys). Public so anonymous viewers can hide gated UI.
 #[ic_cdk::query]
 fn list_feature_flags() -> Vec<FeatureFlag> {
-    let mut flags: Vec<FeatureFlag> = KNOWN_FEATURE_FLAGS
-        .iter()
-        .map(|k| FeatureFlag { key: k.to_string(), enabled: feature_enabled(k) })
-        .collect();
+    let caller = get_caller();
+    let mk = |key: String| {
+        let state = feature_state(&key);
+        FeatureFlag { enabled: feature_visible(&key, caller), state, key }
+    };
+    let mut flags: Vec<FeatureFlag> = KNOWN_FEATURE_FLAGS.iter().map(|k| mk(k.to_string())).collect();
     FEATURE_FLAGS.with(|m| {
         for entry in m.borrow().iter() {
             let key = entry.key().clone();
             if !KNOWN_FEATURE_FLAGS.contains(&key.as_str()) {
-                let enabled = entry.value() == 1;
-                flags.push(FeatureFlag { key, enabled });
+                flags.push(mk(key));
             }
         }
     });
@@ -4711,6 +4767,24 @@ fn admin_set_feature_flag(key: String, enabled: bool) -> Result<(), String> {
             return Err("TOO_MANY_FLAGS".to_string());
         }
         m.insert(key, if enabled { 1 } else { 0 });
+        Ok(())
+    })
+}
+
+/// Admin: set a feature's three-state flag — Off (nobody), On (everybody), or
+/// AdminOn (admins only, for a live preview/playtest).
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_feature_flag_state(key: String, state: FlagState) -> Result<(), String> {
+    let key = key.trim().to_string();
+    if !valid_flag_key(&key) {
+        return Err("INVALID_FLAG_KEY".to_string());
+    }
+    FEATURE_FLAGS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.get(&key).is_none() && m.len() >= MAX_FEATURE_FLAGS {
+            return Err("TOO_MANY_FLAGS".to_string());
+        }
+        m.insert(key, flag_state_code(state));
         Ok(())
     })
 }
@@ -4877,7 +4951,7 @@ fn validate_idea_text(title: &str, description: &str, detail: &str) -> Result<()
 fn get_idea_board_info() -> IdeaBoardInfo {
     let config = CONFIG.with(|c| c.borrow().get().clone());
     IdeaBoardInfo {
-        enabled: feature_enabled(FLAG_IDEA_BOARD),
+        enabled: feature_visible(FLAG_IDEA_BOARD, get_caller()),
         icp_ledger: token_ledger(IdeaToken::ICP, &config),
         ckbtc_ledger: token_ledger(IdeaToken::CkBTC, &config),
         cketh_ledger: token_ledger(IdeaToken::CkETH, &config),
@@ -6171,7 +6245,7 @@ impl Drop for StakingLock {
 }
 
 fn require_lossless_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_LOSSLESS_VOTING) {
+    if !feature_visible(FLAG_LOSSLESS_VOTING, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -7962,7 +8036,7 @@ fn set_lottery_state(state: LotteryState) {
 }
 
 fn require_lottery_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_LOSSLESS_LOTTERY) {
+    if !feature_visible(FLAG_LOSSLESS_LOTTERY, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -8331,7 +8405,7 @@ fn claim_daily_tickets() -> Result<u64, String> {
 async fn get_lottery_info() -> LotteryInfo {
     let caller = get_caller();
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
-    let enabled = feature_enabled(FLAG_LOSSLESS_LOTTERY);
+    let enabled = feature_visible(FLAG_LOSSLESS_LOTTERY, get_caller());
     let state = lottery_state();
     let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
 
@@ -8805,7 +8879,7 @@ thread_local! {
 }
 
 fn require_explorer_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_EXPLORER) {
+    if !feature_visible(FLAG_EXPLORER, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -9506,7 +9580,7 @@ fn seed_default_dapps() {
 fn get_explorer_info() -> ExplorerInfo {
     let config = CONFIG.with(|c| c.borrow().get().clone());
     ExplorerInfo {
-        enabled: feature_enabled(FLAG_EXPLORER),
+        enabled: feature_visible(FLAG_EXPLORER, get_caller()),
         icp_ledger: explorer_token_ledger(ExplorerToken::ICP, &config),
         ckbtc_ledger: explorer_token_ledger(ExplorerToken::CkBTC, &config),
         cketh_ledger: explorer_token_ledger(ExplorerToken::CkETH, &config),
@@ -10065,7 +10139,7 @@ thread_local! {
 }
 
 fn require_arcade_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_ARCADE) {
+    if !feature_visible(FLAG_ARCADE, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -10082,7 +10156,7 @@ fn arcade_game_flag(game: &str) -> &'static str {
 
 fn require_arcade_game_enabled(game: &str) -> Result<(), String> {
     require_arcade_enabled()?;
-    if !feature_enabled(arcade_game_flag(game)) {
+    if !feature_visible(arcade_game_flag(game), get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -10157,10 +10231,10 @@ fn get_arcade_info() -> ArcadeInfo {
         arcade_access(caller)
     };
     ArcadeInfo {
-        enabled: feature_enabled(FLAG_ARCADE),
-        minigolf_enabled: feature_enabled(FLAG_ARCADE_MINIGOLF),
-        fieldgoal_enabled: feature_enabled(FLAG_ARCADE_FIELDGOAL),
-        turborush_enabled: feature_enabled(FLAG_ARCADE_TURBORUSH),
+        enabled: feature_visible(FLAG_ARCADE, get_caller()),
+        minigolf_enabled: feature_visible(FLAG_ARCADE_MINIGOLF, get_caller()),
+        fieldgoal_enabled: feature_visible(FLAG_ARCADE_FIELDGOAL, get_caller()),
+        turborush_enabled: feature_visible(FLAG_ARCADE_TURBORUSH, get_caller()),
         full_access: has_stake || voted_recently,
         has_stake,
         voted_recently,
@@ -10872,7 +10946,7 @@ thread_local! {
 }
 
 fn require_early_adopters_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_EARLY_ADOPTERS) {
+    if !feature_visible(FLAG_EARLY_ADOPTERS, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -10940,7 +11014,7 @@ fn get_early_adopter_info() -> EarlyAdopterInfo {
     });
     let config = CONFIG.with(|c| c.borrow().get().clone());
     EarlyAdopterInfo {
-        enabled: feature_enabled(FLAG_EARLY_ADOPTERS),
+        enabled: feature_visible(FLAG_EARLY_ADOPTERS, get_caller()),
         membership_closed: state.membership_closed,
         close_threshold_e8s: EARLY_ADOPTER_CLOSE_YIELD_E8S,
         restake_threshold_e8s: EARLY_ADOPTER_RESTAKE_BELOW_E8S,
@@ -11969,7 +12043,7 @@ fn set_crash_state(r: CrashRound) {
 }
 
 fn require_crash_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_CRASH) {
+    if !feature_visible(FLAG_CRASH, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -12294,7 +12368,7 @@ async fn crash_random_seed() -> Result<[u8; 32], String> {
 /// Resume the loop after init/upgrade: if crash is live and a round is mid-flight,
 /// re-arm its timer from the remaining time; otherwise (idle) kick a fresh cycle.
 fn crash_resume() {
-    if !feature_enabled(FLAG_CRASH) || casino_book().paused || !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
+    if !feature_active(FLAG_CRASH) || casino_book().paused || !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
         return;
     }
     let r = crash_state();
@@ -12312,7 +12386,7 @@ fn crash_resume() {
 /// one-shot timer was dropped, e.g. across an upgrade — drive the transition so
 /// the loop self-heals instead of wedging. No-op when off/paused/uninitialised.
 async fn crash_watchdog() {
-    if !feature_enabled(FLAG_CRASH) || casino_book().paused {
+    if !feature_active(FLAG_CRASH) || casino_book().paused {
         return;
     }
     if !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
@@ -12346,7 +12420,7 @@ async fn crash_tick() {
         // Idle (initial), or the gap after a crash → open the next round, unless
         // the loop has been stopped (flag off / paused).
         CrashPhase::Intermission | CrashPhase::Crashed => {
-            if !feature_enabled(FLAG_CRASH) || casino_book().paused {
+            if !feature_active(FLAG_CRASH) || casino_book().paused {
                 return;
             }
             crash_open_round(now);
@@ -12365,7 +12439,7 @@ async fn crash_tick() {
             r.phase_deadline = now + CRASH_INTERMISSION_NANOS;
             set_crash_state(r.clone());
             crash_archive(r);
-            if feature_enabled(FLAG_CRASH) && !casino_book().paused {
+            if feature_active(FLAG_CRASH) && !casino_book().paused {
                 crash_arm_timer(CRASH_INTERMISSION_NANOS);
             }
         }
@@ -12743,7 +12817,7 @@ fn get_casino_stats() -> CasinoStatsView {
         reconciliation_e8s: i64::try_from(casino_reconciliation_e8s()).unwrap_or(i64::MAX),
         exposure_cap_vp: book.exposure_cap_vp,
         paused: book.paused,
-        crash_enabled: feature_enabled(FLAG_CRASH),
+        crash_enabled: feature_visible(FLAG_CRASH, get_caller()),
         chain_initialized: chain.initialized,
         terminal_hex: hex32(&chain.terminal),
     }
@@ -13373,7 +13447,7 @@ fn get_my_licenses() -> Vec<License> {
 /// except for re-arming the loop). The `crash` flag must already be ON.
 #[ic_cdk::update(guard = "require_admin")]
 async fn admin_init_crash() -> Result<String, String> {
-    if !feature_enabled(FLAG_CRASH) {
+    if !feature_active(FLAG_CRASH) {
         return Err("ENABLE_FLAG_FIRST".to_string());
     }
     let already = CRASH_CHAIN.with(|c| c.borrow().get().initialized);
@@ -13452,7 +13526,7 @@ fn admin_void_crash_round() -> Result<(), String> {
             amount_e8s: 0,
         });
     });
-    if feature_enabled(FLAG_CRASH) && !casino_book().paused {
+    if feature_active(FLAG_CRASH) && !casino_book().paused {
         crash_arm_timer(CRASH_INTERMISSION_NANOS);
     }
     Ok(())
@@ -15078,6 +15152,39 @@ mod tests {
             m.borrow_mut().remove(&FLAG_IDEA_BOARD.to_string());
             m.borrow_mut().remove(&"future_thing".to_string());
         });
+    }
+
+    #[test]
+    fn tri_state_feature_flags() {
+        let admin = p("2vxsx-fae");
+        let stranger = Principal::from_slice(&[7, 7, 7, 7]);
+        let mut cfg = test_config(true);
+        cfg.admins = vec![admin];
+        CONFIG.with(|c| {
+            let _ = c.borrow_mut().set(cfg);
+        });
+        let key = "tri_state_test".to_string();
+        let set = |code: u8| FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(key.clone(), code); });
+
+        // AdminOn: live for admins only.
+        set(2);
+        assert_eq!(feature_state(&key), FlagState::AdminOn);
+        assert!(!feature_enabled(&key), "AdminOn is not on-for-everyone (timers stay off)");
+        assert!(feature_active(&key), "AdminOn is active so the loop/admin can use it");
+        assert!(feature_visible(&key, admin), "admin sees an AdminOn feature");
+        assert!(!feature_visible(&key, stranger), "non-admin does not");
+
+        // On: everyone.
+        set(1);
+        assert!(feature_enabled(&key));
+        assert!(feature_visible(&key, stranger));
+
+        // Off: nobody.
+        set(0);
+        assert!(!feature_active(&key));
+        assert!(!feature_visible(&key, admin));
+
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&key); });
     }
 
     #[test]
