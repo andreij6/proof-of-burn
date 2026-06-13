@@ -1037,6 +1037,11 @@ service : (InitPayload) -> {
   // Local-dev: run one staking sweep pass immediately (instead of waiting for
   // the 5-minute timer).
   dev_run_staking_sweep : () -> (Result);
+  // Local-dev only (admin): make the table playable + lively. Grants the CALLER a
+  // dev stake (so they have chips to play), then seeds six auto-pilot bots with
+  // dev stakes and varied builtin strategies so every round has company, plus a
+  // little opening chatter. Bots react to outcomes via `crash_bot_chatter`.
+  dev_seed_casino_play : () -> (Result_2);
   // Local-dev: seed a varied set of mock payout records for the caller so the
   // Profile page has realistic data. No-op if the caller already has payouts.
   dev_seed_payouts : () -> (Result);

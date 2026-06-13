@@ -11966,6 +11966,54 @@ fn require_crash_enabled() -> Result<(), String> {
     Ok(())
 }
 
+thread_local! {
+    /// Local-dev simulation bots (principal -> display handle). MemoryId 72.
+    /// Used only by `dev_seed_casino_play` to make the table feel alive locally.
+    static CASINO_BOTS: RefCell<StableBTreeMap<Principal, String, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(72)))));
+}
+
+/// Insert a chat line on a principal's behalf, bypassing the rate limit — only
+/// ever called for simulation bots (plus the ring eviction the public path uses).
+fn bot_say(author: Principal, text: &str) {
+    let now = current_time();
+    let mut counters = crash_counters();
+    let id = counters.next_chat_id;
+    counters.next_chat_id += 1;
+    set_crash_counters(counters);
+    CASINO_CHAT.with(|m| {
+        let mut map = m.borrow_mut();
+        map.insert(id, ChatMsg { id, author, text: text.to_string(), at: now });
+        while map.len() > CASINO_CHAT_RING {
+            if let Some(oldest) = map.iter().next().map(|e| *e.key()) {
+                map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    });
+}
+
+/// After a round settles, occasionally have a bot react — keeps the local chat
+/// lively. Entropy comes from the (already-public) round outcome; no-op when no
+/// bots are seeded (i.e. always on mainnet).
+fn crash_bot_chatter(r: &CrashRound) {
+    let bots: Vec<Principal> = CASINO_BOTS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    if bots.is_empty() {
+        return;
+    }
+    let e = r.crash_x100.wrapping_mul(2_654_435_761).wrapping_add(r.id);
+    if e % 5 < 2 {
+        return; // ~60% of rounds someone talks
+    }
+    let speaker = bots[(e as usize) % bots.len()];
+    let win = ["ez money 💰", "called it", "🚀🚀🚀", "cashed in time", "10x club"];
+    let bust = ["rip", "so close", "one more round", "the house burns it all 🔥", "set auto lower next time"];
+    let neutral = ["gl all", "who's in?", "2x and run", "let it ride", "feeling lucky"];
+    let pool: &[&str] = if r.crash_x100 >= 1000 { &win } else if r.crash_x100 <= 130 { &bust } else { &neutral };
+    bot_say(speaker, pool[(e as usize / 7) % pool.len()]);
+}
+
 // ── Provably-fair engine (plans/crash/01 C4/C5, PB-232) ─────────────────────
 
 fn sha256(data: &[u8]) -> [u8; 32] {
@@ -12336,6 +12384,8 @@ fn crash_settle_round(r: &mut CrashRound, now: u64) {
     let mut book = casino_book();
     book.house_e8s -= round_sum;
     set_casino_book(book);
+    // Local-dev colour: bots react to the result (no-op when none are seeded).
+    crash_bot_chatter(r);
 }
 
 fn crash_archive(r: CrashRound) {
@@ -13341,6 +13391,52 @@ fn admin_void_crash_round() -> Result<(), String> {
         crash_arm_timer(CRASH_INTERMISSION_NANOS);
     }
     Ok(())
+}
+
+/// Local-dev only (admin): make the table playable + lively. Grants the CALLER a
+/// dev stake (so they have chips to play), then seeds six auto-pilot bots with
+/// dev stakes and varied builtin strategies so every round has company, plus a
+/// little opening chatter. Bots react to outcomes via `crash_bot_chatter`.
+#[ic_cdk::update(guard = "require_admin")]
+fn dev_seed_casino_play() -> Result<String, String> {
+    require_local_dev()?;
+    let now = current_time();
+    dev_grant_stake(get_caller(), 5_000 * ONE_ICP_E8S, now);
+    let handles = ["rocketRandy", "2xTina", "moonGoblin", "serStaker", "autoAnnie", "diamondDan"];
+    for (i, h) in handles.iter().enumerate() {
+        let p = Principal::from_slice(&[0xB0, i as u8, 0xCA, 0x51, 0x00]);
+        dev_grant_stake(p, (1_000 + (i as u64) * 600) * ONE_ICP_E8S, now);
+        CASINO_BOTS.with(|m| m.borrow_mut().insert(p, h.to_string()));
+        let strat = (i as u64 % 4) + 1; // builtin ids 1..=4
+        let base = CRASH_STRATEGIES.with(|m| m.borrow().get(&strat)).map(|s| s.base_bet_chips).unwrap_or(100);
+        CRASH_AUTOPILOT.with(|m| {
+            m.borrow_mut().insert(p, AutopilotState {
+                strategy_id: strat,
+                active: true,
+                current_bet_chips: base,
+                consecutive_losses: 0,
+                skip_counter: 0,
+                rounds_played: 0,
+                session_pnl_e8s: 0,
+                started_at: now,
+                stop_reason: None,
+            })
+        });
+    }
+    bot_say(Principal::from_slice(&[0xB0, 0, 0xCA, 0x51, 0x00]), "gm degens — who's hitting 10x today");
+    bot_say(Principal::from_slice(&[0xB0, 1, 0xCA, 0x51, 0x00]), "auto at 2x, never lose principal 😎");
+    Ok("seeded 6 auto-pilot bots + granted you 5,000 ICP of dev stake to play".to_string())
+}
+
+/// Dev helper: park a stake directly in tier 0 so a principal has casino chips
+/// without running the real staking flow. Idempotent per (tier, user).
+fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
+    STAKES.with(|m| {
+        let k = stake_key(StakeTier::all()[0], user);
+        if m.borrow().get(&k).is_none() {
+            m.borrow_mut().insert(k, UserStake { amount_e8s, staked_at: now, last_action_at: now });
+        }
+    });
 }
 
 ic_cdk::export_candid!();

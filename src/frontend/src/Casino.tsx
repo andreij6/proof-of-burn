@@ -53,6 +53,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   const [tick, setTick] = useState(0); // drives the live curve at ~10fps
   const [verify, setVerify] = useState<{ item: CrashHistoryItem; data?: CrashVerifyView; client?: number } | null>(null);
   const [muted, setMuted] = useState(false);
+  const [autopilotOpen, setAutopilotOpen] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
 
@@ -216,7 +217,23 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   } : null;
   const btn = betButton(phase, myBetForBtn, liveX100);
 
+  // Spacebar fires the big button (place / cash out) — unless you're typing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (!btn.enabled || busy) return;
+      e.preventDefault();
+      if (btn.action === 'place') placeBet();
+      else if (btn.action === 'cashout') cashOut();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [btn.action, btn.enabled, busy]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const card: React.CSSProperties = { background: 'var(--char-925)', border: '1px solid var(--border)', borderRadius: 12, padding: 16 };
+  const noVp = signedIn && me !== null && Number(me.chips) === 0;
 
   if (stats && !stats.crash_enabled) {
     return <div style={{ padding: 24 }}><Eyebrow>Casino</Eyebrow><p style={{ color: 'var(--fg-2)' }}>The Casino is currently closed.</p></div>;
@@ -245,7 +262,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
       </div>
 
       <div className="row" style={{ gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        {/* Graph + history + bet panel + players */}
+        {/* LEFT: the game, history, and chat directly below it */}
         <div className="col" style={{ gap: 16, flex: '2 1 520px', minWidth: 320 }}>
           <div style={{ ...card, position: 'relative' }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -255,7 +272,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
               <div style={{ color: 'var(--fg-3)', fontSize: 12 }}>
                 {phase === 'betting' && round && `betting closes in ${Math.max(0, Math.ceil((Number(BigInt(round.phase_deadline) / 1_000_000n) - Date.now()) / 1000))}s`}
                 {phase === 'running' && <span><LiveDot color="var(--sprout)" /> live</span>}
-                {phase === 'crashed' && round && Number(round.crash_x100) >= 10000 && <span style={{ color: 'var(--haze)' }}>🌙 MOON</span>}
+                {phase === 'crashed' && round && Number(round.crash_x100) >= 10000 && <span style={{ color: 'var(--haze)' }}>\ud83c\udf19 MOON</span>}
                 {phase === 'crashed' && round && <span style={{ color: 'var(--ember)' }}> BUSTED @ {fmtX(Number(round.crash_x100))}×</span>}
                 {phase === 'intermission' && 'next round starting…'}
               </div>
@@ -277,11 +294,40 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
             })}
           </div>
 
-          {/* Bet panel */}
+          {/* Chat — directly below the game */}
+          <div style={card}>
+            <Eyebrow>Casino chat</Eyebrow>
+            <div className="col" style={{ gap: 3, marginTop: 8, maxHeight: 260, overflowY: 'auto', fontSize: 12 }}>
+              {chat.length === 0 && <span style={{ color: 'var(--fg-3)' }}>Say hi \ud83d\udc4b</span>}
+              {chat.map((m) => (
+                <div key={String(m.id)}>
+                  <span style={{ color: 'var(--fg-3)' }}>{formatPrincipal(Principal.fromText(m.author.toString()))}:</span>{' '}
+                  <span style={{ color: 'var(--fg-2)' }}>{m.text}</span>
+                </div>
+              ))}
+            </div>
+            {signedIn && (
+              <div className="row" style={{ gap: 6, marginTop: 8 }}>
+                <input value={chatText} onChange={(e) => setChatText(e.target.value)} maxLength={200}
+                  onKeyDown={(e) => { if (e.key === 'Enter') sendChat(); }} placeholder="message (200)"
+                  style={{ flex: 1, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
+                <Btn variant="secondary" sm disabled={busy} onClick={sendChat}>Send</Btn>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT: bet card, my result, players */}
+        <div className="col" style={{ gap: 16, flex: '1 1 300px', minWidth: 280 }}>
           <div style={card}>
             <Eyebrow>Bet</Eyebrow>
             {!signedIn ? (
               <Btn variant="primary" style={{ marginTop: 8 }} onClick={onSignIn}>Sign in to play</Btn>
+            ) : noVp ? (
+              <div className="col" style={{ gap: 8, marginTop: 8 }}>
+                <p style={{ color: 'var(--fg-2)', fontSize: 13 }}>You have no voting power yet. Chips are minted from staked ICP — stake to play (and you can unstake in full anytime).</p>
+                <Btn variant="primary" onClick={onGoStaking}>Stake ICP to mint chips →</Btn>
+              </div>
             ) : (
               <>
                 <div className="row" style={{ gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
@@ -296,15 +342,33 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                     <input value={targetX} onChange={(e) => setTargetX(e.target.value)} inputMode="decimal"
                       style={{ width: 90, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
                   </label>
-                  <div className="col" style={{ justifyContent: 'flex-end' }}>
-                    <Btn variant={btn.action === 'cashout' ? 'primary' : 'primary'} disabled={!btn.enabled || busy}
-                      onClick={btn.action === 'place' ? placeBet : btn.action === 'cashout' ? cashOut : undefined}>
-                      {btn.label}
-                    </Btn>
-                  </div>
                 </div>
+
+                {/* Big square, spacebar-driven action button */}
+                <button
+                  onClick={btn.action === 'place' ? placeBet : btn.action === 'cashout' ? cashOut : undefined}
+                  disabled={!btn.enabled || busy}
+                  style={{
+                    width: '100%', minHeight: 120, marginTop: 12, borderRadius: 16,
+                    cursor: btn.enabled && !busy ? 'pointer' : 'default',
+                    fontSize: 24, fontWeight: 800, letterSpacing: 0.5,
+                    color: btn.enabled ? 'var(--char-950)' : 'var(--fg-3)',
+                    background: btn.action === 'cashout' ? 'var(--sprout)' : btn.enabled ? 'var(--burn)' : 'var(--char-900)',
+                    border: '1px solid ' + (btn.action === 'cashout' ? 'var(--sprout)' : btn.enabled ? 'var(--burn)' : 'var(--border)'),
+                  }}>
+                  {btn.label}
+                  <div style={{ fontSize: 11, fontWeight: 500, opacity: 0.85, marginTop: 8 }}>press SPACE</div>
+                </button>
+
+                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
+                  <Btn variant="ghost" sm onClick={() => setAutopilotOpen(true)}>
+                    <Icon name="refresh" size={13} /> Auto-pilot{autopilot && autopilot.active ? ' · ON' : ''}
+                  </Btn>
+                  {me && <span style={{ color: 'var(--fg-3)', fontSize: 11 }}>{Number(me.available_chips).toLocaleString()} chips</span>}
+                </div>
+
                 <p style={{ color: 'var(--fg-3)', fontSize: 11, marginTop: 8 }}>
-                  Manual cash-outs take 1–3 s to land on-chain — set your auto target; the button is for nerves of steel. Your auto target is the latency-fair primary mechanism.
+                  Manual cash-outs take 1–3 s to land on-chain — set your auto target; the button is for nerves of steel.
                 </p>
                 {me && (
                   <p style={{ color: 'var(--fg-2)', fontSize: 12, marginTop: 4 }}>
@@ -347,7 +411,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                 const col = p.outcome === 'won' ? 'var(--sprout)' : p.outcome === 'lost' ? 'var(--ember)' : 'var(--fg-2)';
                 return (
                   <div key={i} className="row" style={{ justifyContent: 'space-between', fontSize: 12, color: col }}>
-                    <span>{formatPrincipal(Principal.fromText(p.user.toString()))} {p.auto_pilot && '🤖'}</span>
+                    <span>{formatPrincipal(Principal.fromText(p.user.toString()))} {p.auto_pilot && '\ud83e\udd16'}</span>
                     <span>{Number(p.wager_chips)} @ {fmtX(Number(p.target_x100))}× {p.outcome === 'won' ? `✓ ${fmtX(Number(p.payout_x100))}×` : m > 0 ? `out ${fmtX(m)}×` : ''}</span>
                   </div>
                 );
@@ -355,74 +419,44 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
             </div>
           </div>
         </div>
+      </div>
 
-        {/* Right rail: autopilot + chat + stats */}
-        <div className="col" style={{ gap: 16, flex: '1 1 280px', minWidth: 260 }}>
-          {signedIn && (
-            <div style={card}>
-              <Eyebrow>Auto-pilot</Eyebrow>
-              {autopilot && autopilot.active ? (
-                <div className="col" style={{ gap: 6, marginTop: 8 }}>
-                  <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                    Running · {Number(autopilot.rounds_played)} rounds · net {vpFromE8s(autopilot.session_pnl_e8s)} VP
-                  </span>
-                  <Btn variant="secondary" sm onClick={() => run('stopap', async () => { await actor.stop_autopilot(); })}>STOP</Btn>
-                </div>
-              ) : (
-                <div className="col" style={{ gap: 6, marginTop: 8 }}>
-                  {autopilot?.stop_reason && opt<string>(autopilot.stop_reason) && (
-                    <span style={{ fontSize: 11, color: 'var(--haze)' }}>stopped: {opt<string>(autopilot.stop_reason)}</span>
-                  )}
-                  {strategies.map((s) => (
-                    <div key={String(s.id)} className="row" style={{ justifyContent: 'space-between', fontSize: 12 }}>
-                      <span>{s.name} {s.builtin && <Chip tone="muted">builtin</Chip>}</span>
-                      <Btn variant="ghost" sm onClick={() => run('startap', async () => {
-                        const res = await actor.start_autopilot(s.id);
-                        if (res.__kind__ === 'Err') throw new Error(res.Err);
-                      })}>Run</Btn>
-                    </div>
-                  ))}
-                  <p style={{ color: 'var(--fg-3)', fontSize: 11 }}>Past variance is not edge — every strategy has −1% expectation. Buy style, not magic.</p>
-                </div>
-              )}
+      {/* Auto-pilot modal */}
+      {autopilotOpen && (
+        <div onClick={() => setAutopilotOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ ...card, maxWidth: 440, width: '90%' }}>
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <Eyebrow accent>Auto-pilot</Eyebrow>
+              <Btn variant="ghost" sm onClick={() => setAutopilotOpen(false)}><Icon name="x" size={13} /></Btn>
             </div>
-          )}
-
-          {/* Chat */}
-          <div style={card}>
-            <Eyebrow>Casino chat</Eyebrow>
-            <div className="col" style={{ gap: 3, marginTop: 8, maxHeight: 220, overflowY: 'auto', fontSize: 12 }}>
-              {chat.length === 0 && <span style={{ color: 'var(--fg-3)' }}>Say hi 👋</span>}
-              {chat.map((m) => (
-                <div key={String(m.id)}>
-                  <span style={{ color: 'var(--fg-3)' }}>{formatPrincipal(Principal.fromText(m.author.toString()))}:</span>{' '}
-                  <span style={{ color: 'var(--fg-2)' }}>{m.text}</span>
-                </div>
-              ))}
-            </div>
-            {signedIn && (
-              <div className="row" style={{ gap: 6, marginTop: 8 }}>
-                <input value={chatText} onChange={(e) => setChatText(e.target.value)} maxLength={200}
-                  onKeyDown={(e) => { if (e.key === 'Enter') sendChat(); }} placeholder="message (200)"
-                  style={{ flex: 1, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
-                <Btn variant="secondary" sm disabled={busy} onClick={sendChat}>Send</Btn>
+            {autopilot && autopilot.active ? (
+              <div className="col" style={{ gap: 8, marginTop: 10 }}>
+                <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>
+                  Running · {Number(autopilot.rounds_played)} rounds · net {vpFromE8s(autopilot.session_pnl_e8s)} VP
+                </span>
+                <Btn variant="secondary" onClick={() => run('stopap', async () => { await actor.stop_autopilot(); })}>STOP auto-pilot</Btn>
+              </div>
+            ) : (
+              <div className="col" style={{ gap: 6, marginTop: 10 }}>
+                {autopilot?.stop_reason && opt<string>(autopilot.stop_reason) && (
+                  <span style={{ fontSize: 11, color: 'var(--haze)' }}>stopped: {opt<string>(autopilot.stop_reason)}</span>
+                )}
+                {strategies.map((s) => (
+                  <div key={String(s.id)} className="row" style={{ justifyContent: 'space-between', fontSize: 13, alignItems: 'center' }}>
+                    <span>{s.name} {s.builtin && <Chip tone="muted">builtin</Chip>}</span>
+                    <Btn variant="ghost" sm onClick={() => run('startap', async () => {
+                      const res = await actor.start_autopilot(s.id);
+                      if (res.__kind__ === 'Err') throw new Error(res.Err);
+                      setAutopilotOpen(false);
+                    })}>Run</Btn>
+                  </div>
+                ))}
+                <p style={{ color: 'var(--fg-3)', fontSize: 11, marginTop: 4 }}>Past variance is not edge — every strategy has −1% expectation. Buy style, not magic.</p>
               </div>
             )}
           </div>
-
-          {/* Stats */}
-          {stats && (
-            <div style={card}>
-              <Eyebrow>House</Eyebrow>
-              <div className="col" style={{ gap: 4, marginTop: 8, fontSize: 12, color: 'var(--fg-2)' }}>
-                <div className="row" style={{ justifyContent: 'space-between' }}><span>Lifetime burned</span><b>{vpFromE8s(stats.lifetime_burned_vp_e8s)} VP</b></div>
-                <div className="row" style={{ justifyContent: 'space-between' }}><span>House balance</span><span>{vpFromE8s(stats.house_vp_e8s)} VP</span></div>
-                <p style={{ color: 'var(--fg-3)', fontSize: 11, marginTop: 4 }}>The 1% house edge is destroyed forever, not collected.</p>
-              </div>
-            </div>
-          )}
         </div>
-      </div>
+      )}
 
       {/* Verify dialog */}
       {verify && (

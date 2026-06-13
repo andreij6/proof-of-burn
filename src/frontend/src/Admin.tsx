@@ -350,6 +350,12 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     return 'Sweep triggered — settlements, retries and timers all ran.';
   });
 
+  const seedCasino = () => run('seedcasino', async () => {
+    const res = await actor.dev_seed_casino_play();
+    if (res.__kind__ === "Err") { setError(res.Err); return null; }
+    return (res.Ok as string) + ' — open Play → Casino.';
+  });
+
   const refreshSplitNeurons = async () => {
     if (!actor) return;
     try {
@@ -811,6 +817,22 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             </span>
             <CourseEditor actor={actor} />
           </div>
+
+          {config?.is_local && (
+            <div className="col" style={{ ...card, gap: 10 }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="zap" size={13} stroke="var(--burn)" />
+                <Eyebrow>Casino — local playtest</Eyebrow>
+              </span>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                Grants you 5,000 ICP of dev stake (so you have chips) and seeds 6 auto-pilot
+                bots that bet &amp; chat every round. Local only — needs the <span className="mono">crash</span> flag on.
+              </span>
+              <Btn variant="secondary" sm onClick={seedCasino} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                <Icon name="gamepad" size={12} /> Seed bots &amp; grant me chips
+              </Btn>
+            </div>
+          )}
         </>
       )}
 
