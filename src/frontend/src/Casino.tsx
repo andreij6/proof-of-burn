@@ -58,6 +58,13 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
       window.location.hash = s === 'hub' ? '#/casino' : `#/casino/${s}`;
     }
   };
+  // React to hash changes (back/forward, or the Casino nav button resetting to
+  // the hub from a game screen).
+  useEffect(() => {
+    const onHash = () => setScreenState(screenFromHash());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
   const [pokerLobby, setPokerLobby] = useState<{ tables: number; players: number; live: number } | null>(null);
   const [round, setRound] = useState<CrashRoundView | null>(null);
   const [history, setHistory] = useState<CrashHistoryItem[]>([]);

@@ -1824,7 +1824,11 @@ export default function App() {
           </Btn>
         )}
         {casinoEnabled && (
-          <Btn variant={page === 'casino' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('casino')}>
+          <Btn variant={page === 'casino' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => {
+            // Always land on the Casino hub, even from /casino/crash|poker.
+            if (typeof window !== 'undefined' && window.location.hash !== '#/casino') window.location.hash = '#/casino';
+            go('casino');
+          }}>
             <Icon name="zap" size={14} stroke={page === 'casino' ? 'var(--char-950)' : 'currentColor'} />
             Casino
           </Btn>
