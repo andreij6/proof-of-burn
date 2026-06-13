@@ -425,7 +425,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                 else if (cashedRunning) { state = 'cashed'; cashMult = manual > 0 ? manual : effStop; }
                 if (state === 'cashed') profitVp = (wagerChips * (cashMult - 100)) / 100 / 1000;
                 const done = state !== 'riding';
-                return { key: p.user.toString() + i, p, wagerChips, effStop, state, profitVp, done };
+                return { key: p.user.toString() + i, p, wagerChips, cashMult, state, profitVp, done };
               });
               rows.sort((a, b) => {
                 if (a.done !== b.done) return a.done ? 1 : -1;          // riding first
@@ -435,10 +435,12 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                 return b.profitVp - a.profitVp;                        // best cashouts first
               });
               const fmtVp = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-              const colFor = (s: string) => s === 'cashed' ? 'var(--sprout)' : s === 'busted' ? 'var(--ember)' : 'var(--fg-2)';
+              // Row highlight: profited = green, lost = red, still riding = gray.
+              const bgFor = (s: string) => s === 'cashed' ? 'var(--sprout-dim)' : s === 'busted' ? 'var(--ember-dim)' : 'transparent';
+              const fgFor = (s: string) => s === 'cashed' ? 'var(--sprout)' : s === 'busted' ? 'var(--ember)' : 'var(--fg-2)';
               return (
                 <div className="col" style={{ marginTop: 8, fontSize: 12, flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                  <div className="row" style={{ color: 'var(--fg-3)', padding: '2px 0', borderBottom: '1px solid var(--border)' }}>
+                  <div className="row" style={{ color: 'var(--fg-3)', padding: '2px 6px', borderBottom: '1px solid var(--border)' }}>
                     <span style={{ flex: '2 1 0' }}>Principal</span>
                     <span style={{ flex: '1 1 0', textAlign: 'right' }}>Stop</span>
                     <span style={{ flex: '1 1 0', textAlign: 'right' }}>Bet</span>
@@ -446,11 +448,12 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                   </div>
                   {rows.length === 0 && <span style={{ color: 'var(--fg-3)', padding: '6px 0' }}>No bets yet.</span>}
                   {rows.map((r) => (
-                    <div key={r.key} className="row" style={{ padding: '3px 0', color: colFor(r.state), fontVariantNumeric: 'tabular-nums', transition: 'background 0.2s' }}>
+                    <div key={r.key} className="row" style={{ padding: '3px 6px', borderRadius: 4, color: fgFor(r.state), background: bgFor(r.state), fontVariantNumeric: 'tabular-nums', transition: 'background 0.2s' }}>
                       <span style={{ flex: '2 1 0', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                         {formatPrincipal(Principal.fromText(r.p.user.toString()))}{r.p.auto_pilot ? ' 🤖' : ''}
                       </span>
-                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>{fmtX(r.effStop)}×</span>
+                      {/* Stop hidden until the player has actually cashed out. */}
+                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>{r.state === 'cashed' ? `${fmtX(r.cashMult)}×` : '—'}</span>
                       <span style={{ flex: '1 1 0', textAlign: 'right' }}>{fmtVp(r.wagerChips / 1000)}</span>
                       <span style={{ flex: '1 1 0', textAlign: 'right' }}>
                         {r.state === 'riding' ? '—' : `${r.profitVp >= 0 ? '+' : ''}${fmtVp(r.profitVp)}`}
