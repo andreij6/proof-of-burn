@@ -4437,11 +4437,14 @@ pub const FLAG_CRASH: &str = "crash";
 /// casino VP chips; humans spectate while their claimed agent plays. Ships dark
 /// (default OFF) until the owner enables it after a playtest.
 pub const FLAG_POKER: &str = "poker";
-const KNOWN_FEATURE_FLAGS: [&str; 11] = [
+/// Global scrolling ticker (open votes · feature promo · crypto prices) below
+/// the top bar. Ships dark (default OFF) — a work-in-progress UI element.
+pub const FLAG_TICKER: &str = "ticker";
+const KNOWN_FEATURE_FLAGS: [&str; 12] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_TURBORUSH,
-    FLAG_CRASH, FLAG_POKER,
+    FLAG_CRASH, FLAG_POKER, FLAG_TICKER,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;

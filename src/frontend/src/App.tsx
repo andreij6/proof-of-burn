@@ -554,6 +554,7 @@ export default function App() {
   const arcadeEnabled = featureFlags.find(f => f.key === 'arcade')?.enabled ?? false;
   const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
   const pokerEnabled = featureFlags.find(f => f.key === 'poker')?.enabled ?? false;
+  const tickerEnabled = featureFlags.find(f => f.key === 'ticker')?.enabled ?? false;
   const casinoEnabled = crashEnabled || pokerEnabled;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
 
@@ -2056,8 +2057,9 @@ export default function App() {
         </button>
       </header>
 
-      {/* ── Global scrolling ticker: open votes · feature promo · crypto ── */}
-      <Ticker
+      {/* ── Global scrolling ticker: open votes · feature promo · crypto ──
+          Behind the `ticker` feature flag (WIP). */}
+      {tickerEnabled && <Ticker
         proposals={proposals}
         usdRates={usdRates}
         onVote={(id) => { window.location.hash = `#proposal-${id}`; }}
@@ -2068,7 +2070,7 @@ export default function App() {
           ...(explorerEnabled ? [{ emoji: '🧭', label: 'Explore the ICP ecosystem', go: () => setPage('explorer') }] : []),
           ...(ideaBoardEnabled ? [{ emoji: '💡', label: 'Community R&D — fund the roadmap', go: () => setPage('ideas') }] : []),
         ]}
-      />
+      />}
 
       {/* ── Main Layout (Nav Sidebar + Content + Tweak Panel) ── */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
