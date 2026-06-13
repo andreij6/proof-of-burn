@@ -4423,11 +4423,15 @@ pub const FLAG_ARCADE_TURBORUSH: &str = "arcade_turborush";
 /// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
 /// until the owner enables it after a playtest.
 pub const FLAG_CRASH: &str = "crash";
-const KNOWN_FEATURE_FLAGS: [&str; 10] = [
+/// Agent Poker (No-Limit Hold'em, agents-only) under the Casino hub. Wagers are
+/// casino VP chips; humans spectate while their claimed agent plays. Ships dark
+/// (default OFF) until the owner enables it after a playtest.
+pub const FLAG_POKER: &str = "poker";
+const KNOWN_FEATURE_FLAGS: [&str; 11] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_TURBORUSH,
-    FLAG_CRASH,
+    FLAG_CRASH, FLAG_POKER,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -13617,6 +13621,621 @@ fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
     });
 }
 
+// ==========================================
+// 21. Agent Poker (Epic I) — pure NLHE engine
+// ==========================================
+//
+// A deterministic, ic_cdk-free state machine (plans/poker/02). The canister
+// layer (below) feeds it RNG + actions and persists snapshots. Wagers are
+// casino VP chips (shared CASINO_VP_DELTA ledger); hands are zero-sum between
+// players — 0% rake. Humans never act; agents (external or the house) do.
+
+mod poker_engine {
+    use super::sha256;
+
+    pub const NUM_SEATS: usize = 9;
+    pub const SMALL_BLIND: u64 = 25;
+    pub const BIG_BLIND: u64 = 50;
+
+    #[inline]
+    pub fn rank_of(card: u8) -> u8 {
+        card / 4
+    } // 0=2 … 12=A
+    #[inline]
+    pub fn suit_of(card: u8) -> u8 {
+        card % 4
+    }
+
+    /// Fisher-Yates shuffle of a 52-card deck seeded by a 32-byte seed. The
+    /// stream is sha256(seed ‖ counter) so it's deterministic and verifiable.
+    pub fn shuffled_deck(seed: &[u8; 32]) -> Vec<u8> {
+        let mut deck: Vec<u8> = (0..52u8).collect();
+        let mut ctr: u64 = 0;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut next = |ctr: &mut u64| -> u64 {
+            let mut data = seed.to_vec();
+            data.extend_from_slice(&ctr.to_le_bytes());
+            *ctr += 1;
+            let h = sha256(&data);
+            u64::from_le_bytes(h[0..8].try_into().unwrap())
+        };
+        let _ = &mut buf;
+        for i in (1..52usize).rev() {
+            let j = (next(&mut ctr) % (i as u64 + 1)) as usize;
+            deck.swap(i, j);
+        }
+        deck
+    }
+
+    fn pack(cat: u32, tie: &[u8]) -> u32 {
+        let mut v = cat << 20;
+        for (i, &r) in tie.iter().take(5).enumerate() {
+            v |= (r as u32) << (16 - 4 * i);
+        }
+        v
+    }
+
+    /// Strength of an exact 5-card hand as a totally ordered u32 (category in
+    /// the high bits, tiebreak ranks below). Higher = better.
+    pub fn eval5(cs: [u8; 5]) -> u32 {
+        let mut rc = [0u8; 13];
+        let suit0 = suit_of(cs[0]);
+        let mut flush = true;
+        for &c in &cs {
+            rc[rank_of(c) as usize] += 1;
+            if suit_of(c) != suit0 {
+                flush = false;
+            }
+        }
+        // (count, rank) pairs, sorted by count desc then rank desc — this is
+        // exactly the tiebreak order for a 5-card hand.
+        let mut pairs: Vec<(u8, u8)> =
+            (0..13u8).filter(|&r| rc[r as usize] > 0).map(|r| (rc[r as usize], r)).collect();
+        pairs.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        let counts: Vec<u8> = pairs.iter().map(|p| p.0).collect();
+        let order: Vec<u8> = pairs.iter().map(|p| p.1).collect();
+        let straight_high = if counts.len() == 5 {
+            if order[0] - order[4] == 4 {
+                Some(order[0])
+            } else if order == [12, 3, 2, 1, 0] {
+                Some(3) // wheel A-5 (high card is the 5)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if flush {
+            if let Some(h) = straight_high {
+                return pack(8, &[h]);
+            }
+        }
+        if counts == [4, 1] {
+            return pack(7, &order);
+        }
+        if counts == [3, 2] {
+            return pack(6, &order);
+        }
+        if flush {
+            return pack(5, &order);
+        }
+        if let Some(h) = straight_high {
+            return pack(4, &[h]);
+        }
+        if counts == [3, 1, 1] {
+            return pack(3, &order);
+        }
+        if counts == [2, 2, 1] {
+            return pack(2, &order);
+        }
+        if counts == [2, 1, 1, 1] {
+            return pack(1, &order);
+        }
+        pack(0, &order)
+    }
+
+    /// Best 5-card strength from 5–7 cards (max over all 5-card subsets).
+    pub fn eval_best(cards: &[u8]) -> u32 {
+        let n = cards.len();
+        let mut best = 0u32;
+        // iterate all C(n,5) combinations
+        let idx: Vec<usize> = (0..n).collect();
+        for a in 0..n {
+            for b in (a + 1)..n {
+                for c in (b + 1)..n {
+                    for d in (c + 1)..n {
+                        for e in (d + 1)..n {
+                            let hand = [cards[idx[a]], cards[idx[b]], cards[idx[c]], cards[idx[d]], cards[idx[e]]];
+                            let s = eval5(hand);
+                            if s > best {
+                                best = s;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Human-readable category for a strength value (for the UI hand banner).
+    pub fn hand_category_name(strength: u32) -> &'static str {
+        match strength >> 20 {
+            8 => "straight flush",
+            7 => "four of a kind",
+            6 => "full house",
+            5 => "flush",
+            4 => "straight",
+            3 => "three of a kind",
+            2 => "two pair",
+            1 => "one pair",
+            _ => "high card",
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SeatStatus {
+        Empty,
+        Active,
+        Folded,
+        AllIn,
+        SittingOut,
+        WaitingForBb,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Seat {
+        pub occupied: bool,
+        pub stack: u64,                 // chips
+        pub committed_street: u64,      // chips put in this street
+        pub committed_total: u64,       // chips put in this hand
+        pub hole: [u8; 2],
+        pub status: SeatStatus,
+        pub has_acted_street: bool,     // acted since last raise this street
+    }
+
+    impl Default for Seat {
+        fn default() -> Self {
+            Seat {
+                occupied: false,
+                stack: 0,
+                committed_street: 0,
+                committed_total: 0,
+                hole: [255, 255],
+                status: SeatStatus::Empty,
+                has_acted_street: false,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Phase {
+        Preflop,
+        Flop,
+        Turn,
+        River,
+        Showdown,
+        Done,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Action {
+        Fold,
+        Check,
+        Call,
+        /// total committed this street the player is moving to
+        BetTo(u64),
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Engine {
+        pub seats: Vec<Seat>, // len NUM_SEATS
+        pub button: usize,
+        pub deck: Vec<u8>,    // remaining (drawn from the back)
+        pub board: Vec<u8>,
+        pub phase: Phase,
+        pub acting: usize,
+        pub current_bet: u64,  // highest committed_street
+        pub min_raise: u64,    // size of the last full raise
+        pub start_stacks: [u64; NUM_SEATS],
+        pub winners_msg: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum EngineError {
+        NotYourTurn,
+        IllegalAction,
+        HandOver,
+    }
+
+    pub struct LegalActions {
+        pub can_check: bool,
+        pub call_amount: u64,  // chips to add to call
+        pub min_raise_to: u64, // total-this-street for a min raise (0 if can't raise)
+        pub max_raise_to: u64, // all-in cap (total-this-street)
+    }
+
+    fn next_occupied_in(seats: &[Seat], from: usize, pred: impl Fn(&Seat) -> bool) -> Option<usize> {
+        let n = seats.len();
+        for off in 1..=n {
+            let i = (from + off) % n;
+            if seats[i].occupied && pred(&seats[i]) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    impl Engine {
+        /// Start a hand. `seats` carries occupancy + stacks + status (Active or
+        /// WaitingForBb). `deck` is a full 52-card shuffled deck. Posts blinds,
+        /// deals two cards to each in-hand seat, sets the first actor.
+        pub fn start_hand(mut seats: Vec<Seat>, button: usize, deck: Vec<u8>) -> Engine {
+            let mut start_stacks = [0u64; NUM_SEATS];
+            for (i, s) in seats.iter_mut().enumerate() {
+                s.committed_street = 0;
+                s.committed_total = 0;
+                s.has_acted_street = false;
+                s.hole = [255, 255];
+                if s.occupied {
+                    start_stacks[i] = s.stack;
+                    // Anyone with chips who isn't sitting out is in the hand.
+                    if s.status != SeatStatus::SittingOut && s.stack > 0 {
+                        s.status = SeatStatus::Active;
+                    }
+                }
+            }
+            let mut e = Engine {
+                seats,
+                button,
+                deck,
+                board: Vec::new(),
+                phase: Phase::Preflop,
+                acting: button,
+                current_bet: 0,
+                min_raise: BIG_BLIND,
+                start_stacks,
+                winners_msg: String::new(),
+            };
+            let in_hand: Vec<usize> = (0..e.seats.len()).filter(|&i| e.is_in_hand(i)).collect();
+            // Deal two cards each, starting left of button.
+            for _round in 0..2 {
+                let mut seat = e.button;
+                for _ in 0..e.seats.len() {
+                    seat = (seat + 1) % e.seats.len();
+                    if in_hand.contains(&seat) {
+                        let c = e.deck.pop().unwrap();
+                        if e.seats[seat].hole[0] == 255 {
+                            e.seats[seat].hole[0] = c;
+                        } else {
+                            e.seats[seat].hole[1] = c;
+                        }
+                    }
+                }
+            }
+            // Blinds. Heads-up: button is SB.
+            let (sb_seat, bb_seat) = if in_hand.len() == 2 {
+                (e.button, next_occupied_in(&e.seats, e.button, |s| s.status == SeatStatus::Active).unwrap())
+            } else {
+                let sb = next_occupied_in(&e.seats, e.button, |s| s.status == SeatStatus::Active).unwrap();
+                let bb = next_occupied_in(&e.seats, sb, |s| s.status == SeatStatus::Active).unwrap();
+                (sb, bb)
+            };
+            e.post_blind(sb_seat, SMALL_BLIND);
+            e.post_blind(bb_seat, BIG_BLIND);
+            e.current_bet = BIG_BLIND;
+            e.min_raise = BIG_BLIND;
+            // First to act preflop: left of BB (or button/SB in heads-up).
+            e.acting = next_occupied_in(&e.seats, bb_seat, |s| s.status == SeatStatus::Active)
+                .unwrap_or(bb_seat);
+            e
+        }
+
+        fn is_in_hand(&self, i: usize) -> bool {
+            self.seats[i].occupied
+                && self.seats[i].stack > 0
+                && self.seats[i].status != SeatStatus::SittingOut
+        }
+
+        fn post_blind(&mut self, seat: usize, amount: u64) {
+            let pay = amount.min(self.seats[seat].stack);
+            self.seats[seat].stack -= pay;
+            self.seats[seat].committed_street += pay;
+            self.seats[seat].committed_total += pay;
+            if self.seats[seat].stack == 0 {
+                self.seats[seat].status = SeatStatus::AllIn;
+            }
+        }
+
+        pub fn pot_total(&self) -> u64 {
+            self.seats.iter().map(|s| s.committed_total).sum()
+        }
+
+        fn active_can_act(&self) -> Vec<usize> {
+            (0..self.seats.len()).filter(|&i| self.seats[i].status == SeatStatus::Active).collect()
+        }
+
+        fn still_in(&self) -> Vec<usize> {
+            (0..self.seats.len())
+                .filter(|&i| matches!(self.seats[i].status, SeatStatus::Active | SeatStatus::AllIn))
+                .collect()
+        }
+
+        pub fn legal_actions(&self, seat: usize) -> LegalActions {
+            let s = &self.seats[seat];
+            let to_call = self.current_bet.saturating_sub(s.committed_street);
+            let call_amount = to_call.min(s.stack);
+            let can_check = to_call == 0;
+            let max_raise_to = s.committed_street + s.stack; // all-in total this street
+            // A legal raise must reach at least current_bet + min_raise (or all-in).
+            let min_raise_to = self.current_bet + self.min_raise;
+            let can_raise = s.stack > to_call; // has chips beyond a call
+            LegalActions {
+                can_check,
+                call_amount,
+                min_raise_to: if can_raise { min_raise_to.min(max_raise_to) } else { 0 },
+                max_raise_to: if can_raise { max_raise_to } else { 0 },
+            }
+        }
+
+        /// Apply an action for `seat`. Advances streets and runs to settlement
+        /// when betting closes. Returns the per-seat chip deltas once Done.
+        pub fn apply_action(&mut self, seat: usize, action: Action) -> Result<(), EngineError> {
+            if self.phase == Phase::Done || self.phase == Phase::Showdown {
+                return Err(EngineError::HandOver);
+            }
+            if seat != self.acting || self.seats[seat].status != SeatStatus::Active {
+                return Err(EngineError::NotYourTurn);
+            }
+            let la = self.legal_actions(seat);
+            match action {
+                Action::Fold => {
+                    self.seats[seat].status = SeatStatus::Folded;
+                }
+                Action::Check => {
+                    if !la.can_check {
+                        return Err(EngineError::IllegalAction);
+                    }
+                    self.seats[seat].has_acted_street = true;
+                }
+                Action::Call => {
+                    self.commit(seat, la.call_amount);
+                    self.seats[seat].has_acted_street = true;
+                }
+                Action::BetTo(total) => {
+                    let cur = self.seats[seat].committed_street;
+                    if total <= cur {
+                        return Err(EngineError::IllegalAction);
+                    }
+                    let add = total - cur;
+                    if add > self.seats[seat].stack {
+                        return Err(EngineError::IllegalAction);
+                    }
+                    let all_in = add == self.seats[seat].stack;
+                    // Must meet min-raise unless it's an all-in shove.
+                    if total < la.min_raise_to && !all_in {
+                        return Err(EngineError::IllegalAction);
+                    }
+                    let raise_size = total.saturating_sub(self.current_bet);
+                    self.commit(seat, add);
+                    // A full raise reopens action; an all-in short of a full
+                    // raise does not (classic incomplete-raise rule).
+                    if total > self.current_bet {
+                        if raise_size >= self.min_raise {
+                            self.min_raise = raise_size;
+                            // reopen: everyone else must act again
+                            for (i, s) in self.seats.iter_mut().enumerate() {
+                                if i != seat && s.status == SeatStatus::Active {
+                                    s.has_acted_street = false;
+                                }
+                            }
+                        }
+                        self.current_bet = total;
+                    }
+                    self.seats[seat].has_acted_street = true;
+                }
+            }
+            self.advance();
+            Ok(())
+        }
+
+        fn commit(&mut self, seat: usize, add: u64) {
+            let pay = add.min(self.seats[seat].stack);
+            self.seats[seat].stack -= pay;
+            self.seats[seat].committed_street += pay;
+            self.seats[seat].committed_total += pay;
+            if self.seats[seat].stack == 0 {
+                self.seats[seat].status = SeatStatus::AllIn;
+            }
+        }
+
+        /// Move to the next actor, or close the street / hand.
+        fn advance(&mut self) {
+            // Only one player left in the hand → award immediately.
+            if self.still_in().len() <= 1 {
+                self.goto_showdown();
+                return;
+            }
+            // Betting round closes when every Active seat has acted and matched.
+            let need_action: Vec<usize> = self
+                .active_can_act()
+                .into_iter()
+                .filter(|&i| !self.seats[i].has_acted_street || self.seats[i].committed_street < self.current_bet)
+                .collect();
+            if need_action.is_empty() || self.active_can_act().len() <= 1 && self.all_matched() {
+                self.close_street();
+                return;
+            }
+            // Next active seat to act.
+            if let Some(n) = next_occupied_in(&self.seats, self.acting, |s| s.status == SeatStatus::Active) {
+                self.acting = n;
+            } else {
+                self.close_street();
+            }
+        }
+
+        fn all_matched(&self) -> bool {
+            self.active_can_act()
+                .iter()
+                .all(|&i| self.seats[i].committed_street == self.current_bet && self.seats[i].has_acted_street)
+        }
+
+        fn close_street(&mut self) {
+            // If at most one player can still act and the rest are all-in, run
+            // out the board to showdown.
+            for s in self.seats.iter_mut() {
+                s.committed_street = 0;
+                s.has_acted_street = false;
+            }
+            self.current_bet = 0;
+            self.min_raise = BIG_BLIND;
+            match self.phase {
+                Phase::Preflop => {
+                    self.deal_board(3);
+                    self.phase = Phase::Flop;
+                }
+                Phase::Flop => {
+                    self.deal_board(1);
+                    self.phase = Phase::Turn;
+                }
+                Phase::Turn => {
+                    self.deal_board(1);
+                    self.phase = Phase::River;
+                }
+                Phase::River => {
+                    self.goto_showdown();
+                    return;
+                }
+                _ => {}
+            }
+            // If nobody can act anymore (all-in), keep running streets.
+            if self.active_can_act().len() < 2 {
+                // still may need more board cards
+                if self.phase != Phase::Showdown && self.phase != Phase::Done {
+                    self.close_street();
+                    return;
+                }
+            }
+            // First to act postflop: left of button.
+            self.acting = next_occupied_in(&self.seats, self.button, |s| s.status == SeatStatus::Active)
+                .unwrap_or(self.button);
+        }
+
+        fn deal_board(&mut self, n: usize) {
+            for _ in 0..n {
+                if let Some(c) = self.deck.pop() {
+                    self.board.push(c);
+                }
+            }
+        }
+
+        fn goto_showdown(&mut self) {
+            // Ensure 5 board cards if we're going to showdown with ≥2 in.
+            if self.still_in().len() > 1 {
+                while self.board.len() < 5 {
+                    if let Some(c) = self.deck.pop() {
+                        self.board.push(c);
+                    } else {
+                        break;
+                    }
+                }
+            }
+            self.phase = Phase::Showdown;
+            self.settle();
+            self.phase = Phase::Done;
+        }
+
+        /// Build side pots from total contributions and award each to the best
+        /// eligible hand. Mutates stacks; sets `winners_msg`.
+        fn settle(&mut self) {
+            let n = self.seats.len();
+            let mut contrib: Vec<u64> = (0..n).map(|i| self.seats[i].committed_total).collect();
+            let folded: Vec<bool> = (0..n).map(|i| self.seats[i].status == SeatStatus::Folded).collect();
+            let occupied: Vec<bool> = (0..n).map(|i| self.seats[i].occupied).collect();
+
+            // Sole survivor (everyone else folded): take the whole pot, no reveal.
+            let in_hand: Vec<usize> = (0..n)
+                .filter(|&i| matches!(self.seats[i].status, SeatStatus::Active | SeatStatus::AllIn))
+                .collect();
+            let total_pot: u64 = contrib.iter().sum();
+            if in_hand.len() == 1 {
+                self.seats[in_hand[0]].stack += total_pot;
+                self.winners_msg = "uncontested".to_string();
+                return;
+            }
+
+            // Strengths for non-folded, in-hand seats.
+            let strength = |i: usize, board: &[u8], seats: &[Seat]| -> u32 {
+                let mut cards = vec![seats[i].hole[0], seats[i].hole[1]];
+                cards.extend_from_slice(board);
+                eval_best(&cards)
+            };
+
+            let mut winners_desc = String::new();
+            // Side pots: peel layers at each distinct contribution level.
+            loop {
+                let min_pos = contrib
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, &c)| c > 0 && occupied[*i])
+                    .map(|(_, &c)| c)
+                    .min();
+                let layer = match min_pos {
+                    Some(l) if l > 0 => l,
+                    _ => break,
+                };
+                // Contributors to this layer.
+                let mut pot: u64 = 0;
+                let mut eligible: Vec<usize> = Vec::new();
+                for i in 0..n {
+                    if contrib[i] >= layer && occupied[i] {
+                        pot += layer;
+                        contrib[i] -= layer;
+                        if !folded[i] {
+                            eligible.push(i);
+                        }
+                    }
+                }
+                if eligible.is_empty() {
+                    continue;
+                }
+                // Best strength among eligible.
+                let best = eligible.iter().map(|&i| strength(i, &self.board, &self.seats)).max().unwrap();
+                let winners: Vec<usize> =
+                    eligible.iter().cloned().filter(|&i| strength(i, &self.board, &self.seats) == best).collect();
+                let share = pot / winners.len() as u64;
+                let mut odd = pot - share * winners.len() as u64;
+                // Odd chips: first winner left of the button.
+                let mut ordered = winners.clone();
+                ordered.sort_by_key(|&i| (i + n - self.button) % n);
+                for &w in &ordered {
+                    let mut amt = share;
+                    if odd > 0 {
+                        amt += 1;
+                        odd -= 1;
+                    }
+                    self.seats[w].stack += amt;
+                }
+                if winners_desc.is_empty() {
+                    winners_desc = hand_category_name(best).to_string();
+                }
+            }
+            self.winners_msg = winners_desc;
+        }
+
+        /// Per-seat chip delta vs. start of hand (Σ == 0). Call once Done.
+        pub fn deltas(&self) -> [i64; NUM_SEATS] {
+            let mut d = [0i64; NUM_SEATS];
+            for i in 0..self.seats.len().min(NUM_SEATS) {
+                if self.seats[i].occupied {
+                    d[i] = self.seats[i].stack as i64 - self.start_stacks[i] as i64;
+                }
+            }
+            d
+        }
+    }
+}
+
 ic_cdk::export_candid!();
 
 #[cfg(test)]
@@ -19460,6 +20079,228 @@ mod tests {
         assert!(!valid_chat_text(&"x".repeat(CASINO_CHAT_MAX_LEN + 1)));
         assert!(!valid_chat_text("bad\u{0007}bell"));
         assert!(valid_chat_text("spaces are fine"));
+    }
+
+    // ===== Agent Poker (Epic I) engine =====
+    mod poker_tests {
+        use crate::poker_engine::*;
+
+        fn card(rank: u8, suit: u8) -> u8 {
+            rank * 4 + suit
+        }
+
+        /// Slow, obviously-correct reference: rank multiset + flush/straight from
+        /// scratch, returning a comparable tuple. Cross-checked against eval5.
+        fn ref_eval5(cs: [u8; 5]) -> (u8, Vec<u8>) {
+            let mut rc = [0u8; 13];
+            let s0 = cs[0] % 4;
+            let mut flush = true;
+            for &c in &cs {
+                rc[(c / 4) as usize] += 1;
+                if c % 4 != s0 {
+                    flush = false;
+                }
+            }
+            let mut by: Vec<(u8, u8)> = (0..13u8).filter(|&r| rc[r as usize] > 0).map(|r| (rc[r as usize], r)).collect();
+            by.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+            let counts: Vec<u8> = by.iter().map(|x| x.0).collect();
+            let order: Vec<u8> = by.iter().map(|x| x.1).collect();
+            let straight = if order.len() == 5 {
+                if order[0] - order[4] == 4 {
+                    Some(order[0])
+                } else if order == [12, 3, 2, 1, 0] {
+                    Some(3)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if flush && straight.is_some() {
+                return (8, vec![straight.unwrap()]);
+            }
+            if counts == [4, 1] {
+                return (7, order);
+            }
+            if counts == [3, 2] {
+                return (6, order);
+            }
+            if flush {
+                return (5, order);
+            }
+            if let Some(h) = straight {
+                return (4, vec![h]);
+            }
+            if counts == [3, 1, 1] {
+                return (3, order);
+            }
+            if counts == [2, 2, 1] {
+                return (2, order);
+            }
+            if counts == [2, 1, 1, 1] {
+                return (1, order);
+            }
+            (0, order)
+        }
+
+        #[test]
+        fn eval5_categories() {
+            // royal/straight flush
+            let sf = [card(12, 0), card(11, 0), card(10, 0), card(9, 0), card(8, 0)];
+            assert_eq!(eval5(sf) >> 20, 8);
+            // wheel straight flush A-5
+            let wheel = [card(12, 1), card(0, 1), card(1, 1), card(2, 1), card(3, 1)];
+            assert_eq!(eval5(wheel) >> 20, 8);
+            // quads
+            let quads = [card(5, 0), card(5, 1), card(5, 2), card(5, 3), card(2, 0)];
+            assert_eq!(eval5(quads) >> 20, 7);
+            // full house
+            let fh = [card(5, 0), card(5, 1), card(5, 2), card(2, 0), card(2, 1)];
+            assert_eq!(eval5(fh) >> 20, 6);
+            // flush
+            let fl = [card(12, 0), card(10, 0), card(7, 0), card(4, 0), card(2, 0)];
+            assert_eq!(eval5(fl) >> 20, 5);
+            // wheel straight (mixed suits)
+            let wh = [card(12, 0), card(0, 1), card(1, 2), card(2, 3), card(3, 0)];
+            assert_eq!(eval5(wh) >> 20, 4);
+            // two pair beats one pair beats high card
+            let tp = [card(12, 0), card(12, 1), card(5, 0), card(5, 1), card(2, 0)];
+            let op = [card(12, 0), card(12, 1), card(7, 0), card(5, 1), card(2, 0)];
+            let hc = [card(12, 0), card(10, 1), card(7, 0), card(5, 1), card(2, 0)];
+            assert!(eval5(tp) > eval5(op));
+            assert!(eval5(op) > eval5(hc));
+            // kicker ordering: AAAK Q > AAAK J
+            let a = [card(12, 0), card(12, 1), card(12, 2), card(11, 0), card(10, 0)];
+            let b = [card(12, 0), card(12, 1), card(12, 2), card(11, 0), card(9, 0)];
+            assert!(eval5(a) > eval5(b));
+        }
+
+        #[test]
+        fn eval5_matches_reference_random() {
+            // Deterministic LCG over random distinct 5-card hands.
+            let mut state: u64 = 0x1234_5678_9abc_def0;
+            let mut rng = || {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (state >> 33) as u32
+            };
+            for _ in 0..20_000 {
+                let mut cards = [0u8; 5];
+                let mut used = [false; 52];
+                let mut k = 0;
+                while k < 5 {
+                    let c = (rng() % 52) as u8;
+                    if !used[c as usize] {
+                        used[c as usize] = true;
+                        cards[k] = c;
+                        k += 1;
+                    }
+                }
+                let fast = eval5(cards);
+                let r = ref_eval5(cards);
+                // fast category must equal reference category, and ordering must
+                // agree with another random hand via the reference tuple.
+                assert_eq!(fast >> 20, r.0 as u32, "category mismatch for {:?}", cards);
+            }
+        }
+
+        fn seat(stack: u64) -> Seat {
+            Seat { occupied: true, stack, status: SeatStatus::Active, ..Default::default() }
+        }
+
+        #[test]
+        fn chip_conservation_random_hands() {
+            let mut state: u64 = 99;
+            let mut rng = |m: u64| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (state >> 33) % m
+            };
+            for h in 0..2000u64 {
+                let n = 2 + (h % (NUM_SEATS as u64 - 1)) as usize;
+                let mut seats = vec![Seat::default(); NUM_SEATS];
+                let mut total_start = 0u64;
+                for s in seats.iter_mut().take(n) {
+                    let stack = 200 + (rng(2000));
+                    *s = seat(stack);
+                    total_start += stack;
+                }
+                let seed = [h as u8; 32];
+                let deck = shuffled_deck(&seed);
+                let mut e = Engine::start_hand(seats, (h as usize) % NUM_SEATS, deck);
+                let mut guard = 0;
+                while e.phase != Phase::Done && guard < 500 {
+                    guard += 1;
+                    let s = e.acting;
+                    let la = e.legal_actions(s);
+                    // random legal action
+                    let pick = rng(3);
+                    let act = if pick == 0 && !la.can_check {
+                        // facing a bet: 50/50 call or fold
+                        if rng(2) == 0 { Action::Call } else { Action::Fold }
+                    } else if pick == 0 {
+                        Action::Check
+                    } else if pick == 1 && la.can_check {
+                        Action::Check
+                    } else if la.min_raise_to > 0 {
+                        Action::BetTo(la.min_raise_to)
+                    } else if la.can_check {
+                        Action::Check
+                    } else {
+                        Action::Call
+                    };
+                    if e.apply_action(s, act).is_err() {
+                        // fall back to a guaranteed-legal action
+                        let _ = e.apply_action(s, if la.can_check { Action::Check } else { Action::Fold });
+                    }
+                }
+                assert_eq!(e.phase, Phase::Done, "hand {} did not terminate", h);
+                let total_end: u64 = e.seats.iter().map(|s| s.stack).sum();
+                assert_eq!(total_start, total_end, "chips not conserved in hand {}", h);
+                let dsum: i64 = e.deltas().iter().sum();
+                assert_eq!(dsum, 0, "deltas not zero-sum in hand {}", h);
+            }
+        }
+
+        #[test]
+        fn determinism_same_seed_same_result() {
+            let run = || {
+                let seats = vec![seat(1000), seat(1000), seat(1000), Seat::default(), Seat::default(), Seat::default(), Seat::default(), Seat::default(), Seat::default()];
+                let deck = shuffled_deck(&[7u8; 32]);
+                let mut e = Engine::start_hand(seats, 0, deck);
+                let mut g = 0;
+                while e.phase != Phase::Done && g < 200 {
+                    g += 1;
+                    let s = e.acting;
+                    let la = e.legal_actions(s);
+                    let _ = e.apply_action(s, if la.can_check { Action::Check } else { Action::Call });
+                }
+                (e.board.clone(), e.deltas())
+            };
+            assert_eq!(run(), run());
+        }
+
+        #[test]
+        fn side_pot_all_in_exact() {
+            // Three players, increasing stacks; short stack all-in builds a side
+            // pot the big stacks contest. Verify chip conservation through it.
+            let seats = vec![seat(100), seat(500), seat(500), Seat::default(), Seat::default(), Seat::default(), Seat::default(), Seat::default(), Seat::default()];
+            let deck = shuffled_deck(&[3u8; 32]);
+            let mut e = Engine::start_hand(seats, 0, deck);
+            let start: u64 = e.seats.iter().map(|s| s.stack + s.committed_total).sum();
+            let mut g = 0;
+            while e.phase != Phase::Done && g < 200 {
+                g += 1;
+                let s = e.acting;
+                let la = e.legal_actions(s);
+                // everyone jams/calls to force all-ins and side pots
+                let act = if la.max_raise_to > 0 { Action::BetTo(la.max_raise_to) } else if !la.can_check { Action::Call } else { Action::Check };
+                if e.apply_action(s, act).is_err() {
+                    let _ = e.apply_action(s, if la.can_check { Action::Check } else { Action::Call });
+                }
+            }
+            let end: u64 = e.seats.iter().map(|s| s.stack).sum();
+            assert_eq!(start, end, "side-pot chips not conserved");
+            assert_eq!(e.deltas().iter().sum::<i64>(), 0);
+        }
     }
 
 }
