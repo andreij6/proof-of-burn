@@ -189,7 +189,9 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
 
   const placeBet = () => run('bet', async () => {
     const chips = BigInt(Math.floor(Number(wager) * 1000)); // VP → chips
-    const t = BigInt(Math.round(Number(targetX) * 100));
+    // Blank / invalid target = 0 = no auto cash-out (cash out manually with SPACE).
+    const tNum = Number(targetX);
+    const t = !targetX.trim() || !isFinite(tNum) || tNum <= 0 ? 0n : BigInt(Math.round(tNum * 100));
     const res = await actor.crash_bet(chips, t);
     if (res.__kind__ === 'Err') throw new Error(res.Err);
   });
@@ -248,11 +250,12 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   const capNote = (() => {
     const wagerChips = Math.floor(Number(wager || 0) * 1000);
     const target = Math.round(Number(targetX || 0) * 100);
-    if (wagerChips <= 0 || target < 101) return 'max payout 10,000 VP/round';
+    if (!targetX.trim()) return 'No auto cash-out — hit SPACE to cash out live. Max payout 10,000 VP/round.';
+    if (wagerChips <= 0 || target < 101) return 'Max payout 10,000 VP/round.';
     const eff = effectiveTargetX100(wagerChips, target);
     return eff < target
-      ? `capped → auto-cash at ${fmtX(eff)}× (10,000 VP)`
-      : `payout ${((wagerChips * eff) / 100 / 1000).toLocaleString()} VP`;
+      ? `Capped → auto-cash at ${fmtX(eff)}× (10,000 VP cap).`
+      : `Payout if it hits: ${((wagerChips * eff) / 100 / 1000).toLocaleString()} VP (cap 10,000).`;
   })();
 
   if (stats && !stats.crash_enabled) {
@@ -281,9 +284,8 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
         </MoreInfo>
       </div>
 
-      <div className="row" style={{ gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        {/* LEFT: the game, history, and chat directly below it */}
-        <div className="col" style={{ gap: 16, flex: '2 1 520px', minWidth: 320 }}>
+      <div className="casino-grid">
+        <div className="casino-graph col" style={{ gap: 16, minWidth: 0 }}>
           <div style={{ ...card, position: 'relative' }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
               <div style={{ fontSize: 40, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: phase === 'crashed' ? 'var(--ember)' : 'var(--sprout)' }}>
@@ -314,6 +316,153 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
             })}
           </div>
 
+        </div>
+        <div className="casino-bet col" style={{ gap: 16, minWidth: 0 }}>
+          <div style={card}>
+            <Eyebrow>Bet</Eyebrow>
+            {!signedIn ? (
+              <Btn variant="primary" style={{ marginTop: 8 }} onClick={onSignIn}>Sign in to play</Btn>
+            ) : noVp ? (
+              <div className="col" style={{ gap: 8, marginTop: 8 }}>
+                <p style={{ color: 'var(--fg-2)', fontSize: 13 }}>You have no voting power yet. Chips are minted from staked ICP — stake to play (and you can unstake in full anytime).</p>
+                <Btn variant="primary" onClick={onGoStaking}>Stake ICP to mint chips →</Btn>
+              </div>
+            ) : (
+              <>
+                <div className="row" style={{ gap: 10, marginTop: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                  <label className="col" style={{ gap: 4, fontSize: 11, color: 'var(--fg-3)' }}>
+                    Wager (VP)
+                    <input value={wager} onChange={(e) => setWager(e.target.value)} inputMode="decimal"
+                      style={{ width: 120, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
+                  </label>
+                  <label className="col" style={{ gap: 4, fontSize: 11, color: 'var(--fg-3)' }}>
+                    Auto cash-out (× · optional)
+                    <input value={targetX} onChange={(e) => setTargetX(e.target.value)} inputMode="decimal" placeholder="none"
+                      style={{ width: 120, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
+                  </label>
+                </div>
+                <p style={{ color: 'var(--fg-3)', fontSize: 11, marginTop: 6 }}>{capNote}</p>
+
+                {/* Big square, spacebar-driven action button */}
+                <button
+                  onClick={btn.action === 'place' ? placeBet : btn.action === 'cashout' ? cashOut : undefined}
+                  disabled={!btn.enabled || busy}
+                  style={{
+                    width: '100%', minHeight: 120, marginTop: 12, borderRadius: 16,
+                    cursor: btn.enabled && !busy ? 'pointer' : 'default',
+                    fontSize: 24, fontWeight: 800, letterSpacing: 0.5,
+                    color: btn.enabled ? 'var(--char-950)' : 'var(--fg-3)',
+                    background: btn.action === 'cashout' ? 'var(--sprout)' : btn.enabled ? 'var(--burn)' : 'var(--char-900)',
+                    border: '1px solid ' + (btn.action === 'cashout' ? 'var(--sprout)' : btn.enabled ? 'var(--burn)' : 'var(--border)'),
+                  }}>
+                  {btn.label}
+                  {btn.enabled && <div style={{ fontSize: 11, fontWeight: 500, opacity: 0.85, marginTop: 8 }}>press SPACE</div>}
+                </button>
+
+                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
+                  <Btn variant="ghost" sm onClick={() => setAutopilotOpen(true)}>
+                    <Icon name="refresh" size={13} /> Auto-pilot{autopilot && autopilot.active ? ' · ON' : ''}
+                  </Btn>
+                  {me && <span style={{ color: 'var(--fg-3)', fontSize: 11 }}>{Number(me.available_chips).toLocaleString()} chips</span>}
+                </div>
+
+                <p style={{ color: 'var(--fg-3)', fontSize: 11, marginTop: 8 }}>
+                  Manual cash-outs take 1–3 s to land on-chain — set your auto target; the button is for nerves of steel.
+                </p>
+                {me && (
+                  <p style={{ color: 'var(--fg-2)', fontSize: 12, marginTop: 4 }}>
+                    Chips available: <b>{Number(me.available_chips).toLocaleString()}</b> ({vpFromE8s(me.effective_vp_e8s)} VP)
+                    {Number(me.reserved_chips) > 0 && <span style={{ color: 'var(--fg-3)' }}> · {Number(me.reserved_chips)} reserved this round</span>}
+                  </p>
+                )}
+                {error && <p style={{ color: 'var(--ember)', fontSize: 12, marginTop: 6 }}>{error}</p>}
+              </>
+            )}
+          </div>
+
+          {/* My result strip */}
+          {myBet && (
+            <div style={{ ...card, borderColor: myBet.outcome === 'won' ? 'var(--sprout)' : myBet.outcome === 'lost' ? 'var(--ember)' : 'var(--border)' }}>
+              <div className="row" style={{ justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--fg-2)', fontSize: 13 }}>
+                  Your bet: {Number(myBet.wager_chips)} chips @ {fmtX(Number(myBet.target_x100))}×
+                  {myBet.auto_pilot && <Chip tone="muted" style={{ marginLeft: 6 }}>auto-pilot</Chip>}
+                </span>
+                <span style={{ fontWeight: 700, color: myBet.outcome === 'won' ? 'var(--sprout)' : myBet.outcome === 'lost' ? 'var(--ember)' : 'var(--fg)' }}>
+                  {myBet.outcome === 'won' ? `WON @ ${fmtX(Number(myBet.payout_x100))}×` : myBet.outcome === 'lost' ? 'BUSTED' : 'riding…'}
+                </span>
+              </div>
+              {myBet.outcome === 'lost' && (
+                <p style={{ color: 'var(--fg-3)', fontSize: 12, marginTop: 6 }}>
+                  Your staked ICP is exactly where you left it. <button onClick={onGoStaking} style={{ background: 'none', border: 'none', color: 'var(--burn)', cursor: 'pointer', padding: 0 }}>Stake more to mint chips →</button>
+                </p>
+              )}
+            </div>
+          )}
+
+        </div>
+        <div className="casino-players" style={{ minWidth: 0 }}>
+          {/* Players table — riding at top (by bet), cashed-out stack at the
+              bottom and re-arrange live as players hit their stop. */}
+          <div style={{ ...card, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <Eyebrow>Players · this round</Eyebrow>
+            {(() => {
+              const rows = (round?.players ?? []).map((p, i) => {
+                const wagerChips = Number(p.wager_chips);
+                const target = Number(p.target_x100);
+                const manual = Number(opt<bigint>(p.manual_x100) ?? 0n);
+                const effStop = effectiveTargetX100(wagerChips, target);
+                const settledWon = p.outcome === 'won';
+                const settledLost = p.outcome === 'lost';
+                // Mid-run, a player has cashed once live passes their stop (or
+                // they manually bailed) — even though the canister settles at crash.
+                const cashedRunning = phase === 'running' && !settledWon && !settledLost && (manual > 0 || liveX100 >= effStop);
+                let state: 'riding' | 'cashed' | 'busted' = 'riding';
+                let cashMult = 0;
+                let profitVp = 0;
+                if (settledWon) { state = 'cashed'; cashMult = Number(p.payout_x100); }
+                else if (settledLost) { state = 'busted'; profitVp = -wagerChips / 1000; }
+                else if (cashedRunning) { state = 'cashed'; cashMult = manual > 0 ? manual : effStop; }
+                if (state === 'cashed') profitVp = (wagerChips * (cashMult - 100)) / 100 / 1000;
+                const done = state !== 'riding';
+                return { key: p.user.toString() + i, p, wagerChips, effStop, state, profitVp, done };
+              });
+              rows.sort((a, b) => {
+                if (a.done !== b.done) return a.done ? 1 : -1;          // riding first
+                if (!a.done) return b.wagerChips - a.wagerChips;        // riding by bet desc
+                const aBust = a.state === 'busted' ? 1 : 0, bBust = b.state === 'busted' ? 1 : 0;
+                if (aBust !== bBust) return aBust - bBust;              // cashed above busted
+                return b.profitVp - a.profitVp;                        // best cashouts first
+              });
+              const fmtVp = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+              const colFor = (s: string) => s === 'cashed' ? 'var(--sprout)' : s === 'busted' ? 'var(--ember)' : 'var(--fg-2)';
+              return (
+                <div className="col" style={{ marginTop: 8, fontSize: 12, flex: 1, minHeight: 0, overflowY: 'auto' }}>
+                  <div className="row" style={{ color: 'var(--fg-3)', padding: '2px 0', borderBottom: '1px solid var(--border)' }}>
+                    <span style={{ flex: '2 1 0' }}>Principal</span>
+                    <span style={{ flex: '1 1 0', textAlign: 'right' }}>Stop</span>
+                    <span style={{ flex: '1 1 0', textAlign: 'right' }}>Bet</span>
+                    <span style={{ flex: '1 1 0', textAlign: 'right' }}>Profit</span>
+                  </div>
+                  {rows.length === 0 && <span style={{ color: 'var(--fg-3)', padding: '6px 0' }}>No bets yet.</span>}
+                  {rows.map((r) => (
+                    <div key={r.key} className="row" style={{ padding: '3px 0', color: colFor(r.state), fontVariantNumeric: 'tabular-nums', transition: 'background 0.2s' }}>
+                      <span style={{ flex: '2 1 0', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {formatPrincipal(Principal.fromText(r.p.user.toString()))}{r.p.auto_pilot ? ' 🤖' : ''}
+                      </span>
+                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>{fmtX(r.effStop)}×</span>
+                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>{fmtVp(r.wagerChips / 1000)}</span>
+                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>
+                        {r.state === 'riding' ? '—' : `${r.profitVp >= 0 ? '+' : ''}${fmtVp(r.profitVp)}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+        <div className="casino-chat" style={{ minWidth: 0 }}>
           {/* Chat + History tabs — directly below the game */}
           <div style={card}>
             <div className="row" style={{ gap: 6 }}>
@@ -361,151 +510,6 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                 })}
               </div>
             )}
-          </div>
-        </div>
-
-        {/* RIGHT: bet card, my result, players */}
-        <div className="col" style={{ gap: 16, flex: '1 1 300px', minWidth: 280 }}>
-          <div style={card}>
-            <Eyebrow>Bet</Eyebrow>
-            {!signedIn ? (
-              <Btn variant="primary" style={{ marginTop: 8 }} onClick={onSignIn}>Sign in to play</Btn>
-            ) : noVp ? (
-              <div className="col" style={{ gap: 8, marginTop: 8 }}>
-                <p style={{ color: 'var(--fg-2)', fontSize: 13 }}>You have no voting power yet. Chips are minted from staked ICP — stake to play (and you can unstake in full anytime).</p>
-                <Btn variant="primary" onClick={onGoStaking}>Stake ICP to mint chips →</Btn>
-              </div>
-            ) : (
-              <>
-                <div className="row" style={{ gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
-                  <label className="col" style={{ gap: 4, fontSize: 11, color: 'var(--fg-3)' }}>
-                    Wager (VP)
-                    <input value={wager} onChange={(e) => setWager(e.target.value)} inputMode="decimal"
-                      style={{ width: 110, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
-                    <span style={{ color: 'var(--fg-3)' }}>{capNote}</span>
-                  </label>
-                  <label className="col" style={{ gap: 4, fontSize: 11, color: 'var(--fg-3)' }}>
-                    Auto cash-out (×)
-                    <input value={targetX} onChange={(e) => setTargetX(e.target.value)} inputMode="decimal"
-                      style={{ width: 90, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
-                  </label>
-                </div>
-
-                {/* Big square, spacebar-driven action button */}
-                <button
-                  onClick={btn.action === 'place' ? placeBet : btn.action === 'cashout' ? cashOut : undefined}
-                  disabled={!btn.enabled || busy}
-                  style={{
-                    width: '100%', minHeight: 120, marginTop: 12, borderRadius: 16,
-                    cursor: btn.enabled && !busy ? 'pointer' : 'default',
-                    fontSize: 24, fontWeight: 800, letterSpacing: 0.5,
-                    color: btn.enabled ? 'var(--char-950)' : 'var(--fg-3)',
-                    background: btn.action === 'cashout' ? 'var(--sprout)' : btn.enabled ? 'var(--burn)' : 'var(--char-900)',
-                    border: '1px solid ' + (btn.action === 'cashout' ? 'var(--sprout)' : btn.enabled ? 'var(--burn)' : 'var(--border)'),
-                  }}>
-                  {btn.label}
-                  <div style={{ fontSize: 11, fontWeight: 500, opacity: 0.85, marginTop: 8 }}>press SPACE</div>
-                </button>
-
-                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
-                  <Btn variant="ghost" sm onClick={() => setAutopilotOpen(true)}>
-                    <Icon name="refresh" size={13} /> Auto-pilot{autopilot && autopilot.active ? ' · ON' : ''}
-                  </Btn>
-                  {me && <span style={{ color: 'var(--fg-3)', fontSize: 11 }}>{Number(me.available_chips).toLocaleString()} chips</span>}
-                </div>
-
-                <p style={{ color: 'var(--fg-3)', fontSize: 11, marginTop: 8 }}>
-                  Manual cash-outs take 1–3 s to land on-chain — set your auto target; the button is for nerves of steel.
-                </p>
-                {me && (
-                  <p style={{ color: 'var(--fg-2)', fontSize: 12, marginTop: 4 }}>
-                    Chips available: <b>{Number(me.available_chips).toLocaleString()}</b> ({vpFromE8s(me.effective_vp_e8s)} VP)
-                    {Number(me.reserved_chips) > 0 && <span style={{ color: 'var(--fg-3)' }}> · {Number(me.reserved_chips)} reserved this round</span>}
-                  </p>
-                )}
-                {error && <p style={{ color: 'var(--ember)', fontSize: 12, marginTop: 6 }}>{error}</p>}
-              </>
-            )}
-          </div>
-
-          {/* My result strip */}
-          {myBet && (
-            <div style={{ ...card, borderColor: myBet.outcome === 'won' ? 'var(--sprout)' : myBet.outcome === 'lost' ? 'var(--ember)' : 'var(--border)' }}>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--fg-2)', fontSize: 13 }}>
-                  Your bet: {Number(myBet.wager_chips)} chips @ {fmtX(Number(myBet.target_x100))}×
-                  {myBet.auto_pilot && <Chip tone="muted" style={{ marginLeft: 6 }}>auto-pilot</Chip>}
-                </span>
-                <span style={{ fontWeight: 700, color: myBet.outcome === 'won' ? 'var(--sprout)' : myBet.outcome === 'lost' ? 'var(--ember)' : 'var(--fg)' }}>
-                  {myBet.outcome === 'won' ? `WON @ ${fmtX(Number(myBet.payout_x100))}×` : myBet.outcome === 'lost' ? 'BUSTED' : 'riding…'}
-                </span>
-              </div>
-              {myBet.outcome === 'lost' && (
-                <p style={{ color: 'var(--fg-3)', fontSize: 12, marginTop: 6 }}>
-                  Your staked ICP is exactly where you left it. <button onClick={onGoStaking} style={{ background: 'none', border: 'none', color: 'var(--burn)', cursor: 'pointer', padding: 0 }}>Stake more to mint chips →</button>
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Players table — riding at top (by bet), cashed-out stack at the
-              bottom and re-arrange live as players hit their stop. */}
-          <div style={card}>
-            <Eyebrow>Players · this round</Eyebrow>
-            {(() => {
-              const rows = (round?.players ?? []).map((p, i) => {
-                const wagerChips = Number(p.wager_chips);
-                const target = Number(p.target_x100);
-                const manual = Number(opt<bigint>(p.manual_x100) ?? 0n);
-                const effStop = effectiveTargetX100(wagerChips, target);
-                const settledWon = p.outcome === 'won';
-                const settledLost = p.outcome === 'lost';
-                // Mid-run, a player has cashed once live passes their stop (or
-                // they manually bailed) — even though the canister settles at crash.
-                const cashedRunning = phase === 'running' && !settledWon && !settledLost && (manual > 0 || liveX100 >= effStop);
-                let state: 'riding' | 'cashed' | 'busted' = 'riding';
-                let cashMult = 0;
-                let profitVp = 0;
-                if (settledWon) { state = 'cashed'; cashMult = Number(p.payout_x100); }
-                else if (settledLost) { state = 'busted'; profitVp = -wagerChips / 1000; }
-                else if (cashedRunning) { state = 'cashed'; cashMult = manual > 0 ? manual : effStop; }
-                if (state === 'cashed') profitVp = (wagerChips * (cashMult - 100)) / 100 / 1000;
-                const done = state !== 'riding';
-                return { key: p.user.toString() + i, p, wagerChips, effStop, state, profitVp, done };
-              });
-              rows.sort((a, b) => {
-                if (a.done !== b.done) return a.done ? 1 : -1;          // riding first
-                if (!a.done) return b.wagerChips - a.wagerChips;        // riding by bet desc
-                const aBust = a.state === 'busted' ? 1 : 0, bBust = b.state === 'busted' ? 1 : 0;
-                if (aBust !== bBust) return aBust - bBust;              // cashed above busted
-                return b.profitVp - a.profitVp;                        // best cashouts first
-              });
-              const fmtVp = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
-              const colFor = (s: string) => s === 'cashed' ? 'var(--sprout)' : s === 'busted' ? 'var(--ember)' : 'var(--fg-2)';
-              return (
-                <div className="col" style={{ marginTop: 8, fontSize: 12 }}>
-                  <div className="row" style={{ color: 'var(--fg-3)', padding: '2px 0', borderBottom: '1px solid var(--border)' }}>
-                    <span style={{ flex: '2 1 0' }}>Principal</span>
-                    <span style={{ flex: '1 1 0', textAlign: 'right' }}>Stop</span>
-                    <span style={{ flex: '1 1 0', textAlign: 'right' }}>Bet</span>
-                    <span style={{ flex: '1 1 0', textAlign: 'right' }}>Profit</span>
-                  </div>
-                  {rows.length === 0 && <span style={{ color: 'var(--fg-3)', padding: '6px 0' }}>No bets yet.</span>}
-                  {rows.map((r) => (
-                    <div key={r.key} className="row" style={{ padding: '3px 0', color: colFor(r.state), fontVariantNumeric: 'tabular-nums', transition: 'background 0.2s' }}>
-                      <span style={{ flex: '2 1 0', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {formatPrincipal(Principal.fromText(r.p.user.toString()))}{r.p.auto_pilot ? ' 🤖' : ''}
-                      </span>
-                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>{fmtX(r.effStop)}×</span>
-                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>{fmtVp(r.wagerChips / 1000)}</span>
-                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>
-                        {r.state === 'riding' ? '—' : `${r.profitVp >= 0 ? '+' : ''}${fmtVp(r.profitVp)}`}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              );
-            })()}
           </div>
         </div>
       </div>

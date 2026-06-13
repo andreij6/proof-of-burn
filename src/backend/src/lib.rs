@@ -12107,13 +12107,19 @@ fn crash_time_offset_nanos(crash_x100: u64) -> u64 {
 }
 
 /// The auto-cashout target a bet is actually settled at: the lesser of the
-/// player's chosen target and the multiplier at which `wager × multiplier`
-/// hits the per-round payout cap (10,000 VP). So a 5,000 VP bet is auto-cashed
-/// at 2.00× no matter how high the player set their target.
+/// player's chosen target and the multiplier at which `wager × multiplier` hits
+/// the per-round payout cap (10,000 VP). So a 5,000 VP bet is auto-cashed at
+/// 2.00× no matter how high the player set their target. `target_x100 == 0`
+/// means "no auto cash-out" (manual only) — the payout cap is the sole ceiling,
+/// which for small bets is far above the 50× curve cap (i.e. effectively none).
 fn effective_target_x100(wager_chips: u64, target_x100: u64) -> u64 {
     let cap_chips = CASINO_PAYOUT_CAP_VP.saturating_mul(1_000); // VP → chips
     let cap_target = (cap_chips.saturating_mul(100) / wager_chips.max(1)).max(100);
-    target_x100.min(cap_target)
+    if target_x100 == 0 {
+        cap_target
+    } else {
+        target_x100.min(cap_target)
+    }
 }
 
 /// Pure settlement of one bet against a sealed crash point. Returns the signed
@@ -12474,7 +12480,8 @@ fn crash_place_bet(
     if !(CRASH_MIN_BET_CHIPS..=CRASH_MAX_BET_CHIPS).contains(&wager_chips) {
         return Err("WAGER_OUT_OF_RANGE".to_string());
     }
-    if !(CRASH_MIN_TARGET_X100..=CRASH_MAX_TARGET_X100).contains(&target_x100) {
+    // target_x100 == 0 means "no auto cash-out" (manual only); otherwise rails.
+    if target_x100 != 0 && !(CRASH_MIN_TARGET_X100..=CRASH_MAX_TARGET_X100).contains(&target_x100) {
         return Err("TARGET_OUT_OF_RANGE".to_string());
     }
     if r.bets.iter().any(|b| b.user == user) {
@@ -12515,9 +12522,11 @@ fn crash_place_bet(
 
 // ── Bets API (plans/crash/01 C7/C9, PB-234) ─────────────────────────────────
 
-/// Place a crash bet. `wager_chips` 10..10_000, `target_x100` 101..10_000.
-/// Humans and agent principals are identical here — no registry, no claim step
-/// (C9). The auto target is the latency-fair primary mechanism (C7).
+/// Place a crash bet. `wager_chips` 10..10_000_000; `target_x100` is the auto
+/// cash-out (101..5_000) or **0 for no auto cash-out** (manual only — cash out
+/// with `crash_cashout`). Humans and agent principals are identical here — no
+/// registry, no claim step (C9). The auto target is the latency-fair primary
+/// mechanism (C7); the payout cap is always enforced.
 #[ic_cdk::update]
 fn crash_bet(wager_chips: u64, target_x100: u64) -> Result<(), String> {
     require_crash_enabled()?;
@@ -13465,8 +13474,9 @@ fn dev_seed_casino_play() -> Result<String, String> {
     for (i, (h, bet_vp, target)) in bots.iter().enumerate() {
         let p = Principal::from_slice(&[0xB0, i as u8, 0xCA, 0x51, 0x00]);
         let bet_chips = bet_vp * 1_000;
-        // ~2× headroom in chips (1 ICP ≈ 100 chips at the dev tenure multiplier).
-        dev_grant_stake(p, bet_vp * 20 * ONE_ICP_E8S, now);
+        // A deep bankroll (≈ 500× the bet) so bots don't bust mid-review and the
+        // table stays full. Local-dev only.
+        dev_grant_stake(p, bet_vp * 5_000 * ONE_ICP_E8S, now);
         CASINO_BOTS.with(|m| m.borrow_mut().insert(p, h.to_string()));
         // A per-bot flat strategy so the bet stays fixed each round.
         let sid = counters.next_strategy_id;
@@ -19174,6 +19184,18 @@ mod tests {
         let (d, p) = settle_crash_bet(5_000_000, 1000, None, 150); // crash 1.5× < 2×
         assert_eq!(p, 0);
         assert_eq!(d, -(5_000_000i128 * CHIP_E8S as i128));
+    }
+
+    #[test]
+    fn no_auto_target_is_manual_only() {
+        // target 0 = no auto cash-out: rides to the crash → loss unless the
+        // player manually cashed out.
+        let (_, p) = settle_crash_bet(100, 0, None, 300);
+        assert_eq!(p, 0, "no auto target never auto-cashes");
+        let (_, p2) = settle_crash_bet(100, 0, Some(250), 300);
+        assert_eq!(p2, 250, "manual cashout still wins");
+        // The payout cap still bounds a no-auto big bet.
+        assert_eq!(effective_target_x100(5_000_000, 0), 200);
     }
 
     #[test]

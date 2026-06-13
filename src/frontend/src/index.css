@@ -589,3 +589,25 @@ a:hover {
 .hub-card { transition: border-color var(--dur-fast, 120ms) var(--ease-out, ease-out), background var(--dur-fast, 120ms) var(--ease-out, ease-out); }
 .hub-card[role="link"]:hover { border-color: var(--border-hi); background: var(--surface-hi); }
 .hub-card[role="link"]:focus-visible { outline: 2px solid var(--burn); outline-offset: 1px; }
+
+/* Casino (Crash) — bustabit-style layout: graph + bet on top, chat beneath
+   them, and a full-height players column on the far right. */
+.casino-grid {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+  grid-template-columns: 1.5fr 1fr 1.1fr;
+  grid-template-areas:
+    "graph bet players"
+    "chat  chat players";
+}
+.casino-graph { grid-area: graph; }
+.casino-bet { grid-area: bet; }
+.casino-chat { grid-area: chat; }
+.casino-players { grid-area: players; align-self: stretch; }
+@media (max-width: 980px) {
+  .casino-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas: "graph" "bet" "players" "chat";
+  }
+}
