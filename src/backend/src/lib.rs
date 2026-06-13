@@ -14303,7 +14303,7 @@ mod poker_engine {
 
 use poker_engine::{Action as EngAction, Engine, Phase, Seat, SeatStatus};
 
-const POKER_NUM_TABLES: u8 = 10;
+const POKER_NUM_TABLES: u8 = 2;
 const POKER_MIN_SIT_CHIPS: u64 = 500; // 10 BB
 const POKER_ACTION_DEADLINE_NANOS: u64 = 30 * 1_000_000_000;
 const POKER_PACE_NANOS: u64 = 3 * 1_000_000_000; // "thinking" delay between actions

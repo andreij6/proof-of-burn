@@ -42,7 +42,23 @@ function vpFromE8s(e8s: bigint | number): string {
 
 export default function Casino({ actor, principal, isLocal, onSignIn, onGoStaking, crashEnabled = true, pokerEnabled = false }: CasinoProps) {
   const signedIn = !!principal && !principal.isAnonymous();
-  const [tab, setTab] = useState<'crash' | 'poker'>(crashEnabled ? 'crash' : 'poker');
+  // Casino is a hub: a landing page of game cards, each opening a dedicated
+  // screen. The active screen lives in the hash (/casino, /casino/crash,
+  // /casino/poker) so deep links and the browser back button work.
+  const screenFromHash = (): 'hub' | 'crash' | 'poker' => {
+    const h = typeof window !== 'undefined' ? window.location.hash : '';
+    if (h.includes('/casino/crash')) return 'crash';
+    if (h.includes('/casino/poker')) return 'poker';
+    return 'hub';
+  };
+  const [screen, setScreenState] = useState<'hub' | 'crash' | 'poker'>(screenFromHash());
+  const goScreen = (s: 'hub' | 'crash' | 'poker') => {
+    setScreenState(s);
+    if (typeof window !== 'undefined') {
+      window.location.hash = s === 'hub' ? '#/casino' : `#/casino/${s}`;
+    }
+  };
+  const [pokerLobby, setPokerLobby] = useState<{ tables: number; players: number; live: number } | null>(null);
   const [round, setRound] = useState<CrashRoundView | null>(null);
   const [history, setHistory] = useState<CrashHistoryItem[]>([]);
   const [stats, setStats] = useState<CasinoStatsView | null>(null);
@@ -96,13 +112,39 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
     } catch { /* flag raced off / transient — next poll recovers */ }
   }, [actor, signedIn, chat]);
 
-  // Poll: 1 s while a round runs, 3 s otherwise (the curve itself is local math).
+  // Poll the crash game only while its screen is open (1 s during a round).
   useEffect(() => {
+    if (screen !== 'crash') return;
     refresh();
     const ms = phase === 'running' || phase === 'betting' ? 1000 : 3000;
     const t = setInterval(refresh, ms);
     return () => clearInterval(t);
-  }, [refresh, phase]);
+  }, [refresh, phase, screen]);
+
+  // Light hub poll: a stat preview for each game card.
+  useEffect(() => {
+    if (screen !== 'hub' || !actor) return;
+    let stop = false;
+    const tickHub = async () => {
+      try {
+        if (crashEnabled) {
+          const h = await actor.get_crash_history(8n);
+          if (!stop) setHistory(h);
+        }
+        if (pokerEnabled) {
+          const rows = await actor.get_poker_lobby();
+          if (!stop) {
+            const players = rows.reduce((a: number, r: any) => a + Number(r.seats_taken), 0);
+            const live = rows.filter((r: any) => r.phase !== 'idle' && r.phase !== 'waiting').length;
+            setPokerLobby({ tables: rows.length, players, live });
+          }
+        }
+      } catch { /* transient */ }
+    };
+    tickHub();
+    const t = setInterval(tickHub, 4000);
+    return () => { stop = true; clearInterval(t); };
+  }, [screen, actor, crashEnabled, pokerEnabled]);
 
   // Local animation clock for the live curve / countdown.
   useEffect(() => {
@@ -267,27 +309,74 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
     return <div style={{ padding: 24 }}><Eyebrow>Casino</Eyebrow><p style={{ color: 'var(--fg-2)' }}>The Casino is currently closed.</p></div>;
   }
 
-  // Resolve the active tab against what's actually enabled.
-  const activeTab: 'crash' | 'poker' = pokerEnabled && (!crashEnabled || tab === 'poker') ? 'poker' : 'crash';
-  const tabBar = crashEnabled && pokerEnabled ? (
-    <div className="row" style={{ gap: 6 }}>
-      <Btn variant={activeTab === 'crash' ? 'primary' : 'ghost'} onClick={() => setTab('crash')}><Icon name="zap" size={13} /> Crash</Btn>
-      <Btn variant={activeTab === 'poker' ? 'primary' : 'ghost'} onClick={() => setTab('poker')}><Icon name="zap" size={13} /> Poker</Btn>
-    </div>
-  ) : null;
+  const backBar = (
+    <Btn variant="ghost" sm onClick={() => goScreen('hub')} style={{ alignSelf: 'flex-start' }}>
+      <Icon name="undo" size={13} /> Casino
+    </Btn>
+  );
 
-  if (activeTab === 'poker') {
+  // ── Hub: a landing page with one card per game ──
+  if (screen === 'hub' || (screen === 'crash' && !crashEnabled) || (screen === 'poker' && !pokerEnabled)) {
+    const recent = history.slice(0, 8);
     return (
-      <div className="col" style={{ gap: 16 }}>
-        {tabBar}
+      <div className="col" style={{ gap: 16, paddingBottom: 40 }}>
+        <div style={{ ...card, borderColor: 'var(--burn)' }}>
+          <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <Icon name="zap" size={18} stroke="var(--burn)" />
+            <Eyebrow accent>Casino</Eyebrow>
+          </div>
+          <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: '10px 0 0' }}>{NO_LOSS_DOCTRINE}</p>
+        </div>
+
+        <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
+          {crashEnabled && (
+            <button onClick={() => goScreen('crash')} style={{ ...card, flex: '1 1 280px', minWidth: 260, textAlign: 'left', cursor: 'pointer', borderColor: 'var(--border-hi)' }}>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                <span className="row" style={{ gap: 8, alignItems: 'center' }}><Icon name="zap" size={16} stroke="var(--sprout)" /><Eyebrow>Crash</Eyebrow></span>
+                <Chip tone="ok">live</Chip>
+              </div>
+              <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: '8px 0' }}>A rising multiplier — cash out before it crashes. Provably fair, 1% edge burned.</p>
+              <div className="row" style={{ gap: 5, flexWrap: 'wrap', minHeight: 22 }}>
+                {recent.map((h) => {
+                  const x = Number(h.crash_x100);
+                  const color = x >= 5000 ? 'var(--haze)' : x >= 200 ? 'var(--sprout)' : 'var(--ember)';
+                  return <span key={String(h.id)} style={{ border: `1px solid ${color}`, color, borderRadius: 6, padding: '1px 6px', fontSize: 11, fontVariantNumeric: 'tabular-nums' }}>{fmtX(x)}×</span>;
+                })}
+              </div>
+              <div style={{ marginTop: 12 }}><Btn variant="primary" sm onClick={() => goScreen('crash')}>Enter Crash →</Btn></div>
+            </button>
+          )}
+          {pokerEnabled && (
+            <button onClick={() => goScreen('poker')} style={{ ...card, flex: '1 1 280px', minWidth: 260, textAlign: 'left', cursor: 'pointer', borderColor: 'var(--border-hi)' }}>
+              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                <span className="row" style={{ gap: 8, alignItems: 'center' }}><Icon name="zap" size={16} stroke="var(--burn)" /><Eyebrow>Poker</Eyebrow></span>
+                <Chip tone="muted">agents only</Chip>
+              </div>
+              <p style={{ color: 'var(--fg-2)', fontSize: 13, margin: '8px 0' }}>Caldera Hold'em — your agent plays No-Limit 25/50 while you watch. 0% rake, forever.</p>
+              <div style={{ color: 'var(--fg-3)', fontSize: 12, minHeight: 22 }}>
+                {pokerLobby ? `${pokerLobby.players} player${pokerLobby.players === 1 ? '' : 's'} across ${pokerLobby.tables} table${pokerLobby.tables === 1 ? '' : 's'}${pokerLobby.live ? ` · ${pokerLobby.live} live` : ''}` : 'Loading tables…'}
+              </div>
+              <div style={{ marginTop: 12 }}><Btn variant="primary" sm onClick={() => goScreen('poker')}>Enter Poker →</Btn></div>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (screen === 'poker') {
+    return (
+      <div className="col" style={{ gap: 12 }}>
+        {backBar}
         <Poker actor={actor} principal={principal} onSignIn={onSignIn} onGoStaking={onGoStaking} />
       </div>
     );
   }
 
+  // ── Crash screen ──
   return (
     <div className="col" style={{ gap: 16, paddingBottom: 40 }}>
-      {tabBar}
+      {backBar}
       {/* Hub header + doctrine (C16) */}
       <div style={{ ...card, borderColor: 'var(--burn)' }}>
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
