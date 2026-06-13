@@ -109,7 +109,7 @@ adopt/reject pot + settlement saga code nearly verbatim, and it makes every
 NNS proposal a spectator event on our dashboard.
 
 **B8. Arcade majors — wagered weekend tournaments.**
-Mini Golf Gold becomes a venue: scheduled weekend tournaments, entry in any
+Mini Golf becomes a venue: scheduled weekend tournaments, entry in any
 supported ck-token, raw_rand-seeded brackets, prize split 70 winners /
 20 treasury / 10 burn. The planned replay validator (PB-169) makes wagers
 defensible. Weekly cadence = appointment viewing; spectator pages + X share

@@ -1,56 +1,178 @@
 // ==========================================
-// Arcade background music — an original, procedurally synthesized chiptune
-// loop (Web Audio square/triangle/noise voices). Synthesizing in-app instead
-// of bundling a track means the music is unambiguously royalty-free (it's
-// ours), adds zero asset weight, and loops seamlessly by construction.
-// Upbeat, lighthearted — classic arcade vibes at 112 BPM.
+// Arcade background music — original, procedurally synthesized chiptune
+// loops (Web Audio square/triangle/sine/noise voices). Synthesizing in-app
+// instead of bundling tracks means the music is unambiguously royalty-free
+// (it's ours), adds zero asset weight, and loops seamlessly by construction.
+//
+// Three songs: "fairway" (Mini Golf — upbeat, lighthearted, 112 BPM),
+// "pressure" (Field Goal — tense E-minor at 150 BPM: clock-tick hats, a
+// relentless bass, a heartbeat thump and sparse minor stabs) and "turbo"
+// (Turbo Rush — 164 BPM motorik four-on-the-floor highway driver).
 // ==========================================
 
-const BPM = 112;
-const EIGHTH = 60 / BPM / 2;           // seconds per 8th note
-const BARS = 8;
-const STEPS = BARS * 8;                // 8th-note grid, 64 steps per loop
 const LOOKAHEAD_MS = 30;
 const SCHEDULE_AHEAD = 0.12;           // seconds scheduled in advance
+const STORAGE_KEY = 'arcade_music_on'; // one mute switch for the whole arcade
 
-// A-major pentatonic-ish, bright and bouncy. 0 = rest.
-// Lead (square) — two 4-bar phrases, question/answer.
-const LEAD: number[] = [
-  440, 0, 554, 0, 659, 0, 554, 659,   // A C# E C# E
-  440, 0, 554, 659, 740, 0, 659, 554, // climb to F#
-  494, 0, 587, 0, 740, 0, 587, 740,   // B D F# (shift)
-  880, 740, 659, 0, 554, 0, 440, 0,   // tumble back home
-  440, 0, 554, 0, 659, 0, 554, 659,
-  440, 0, 554, 659, 740, 0, 880, 0,   // lift…
-  831, 0, 740, 0, 659, 0, 587, 554,   // …and resolve down
-  494, 554, 440, 0, 440, 0, 0, 0,     // land on the root, breathe
-];
+interface Song {
+  bpm: number;
+  /** Lead voice (square), Hz per 8th-note step; 0 = rest. */
+  lead: number[];
+  /** Bass voice (triangle), Hz per step; 0 = rest. */
+  bass: number[];
+  /** Hi-hat (filtered noise) hits per step. */
+  hat: number[];
+  /** Optional low sine thump (heartbeat / kick drum) per step. */
+  kick?: number[];
+  leadVol: number;
+  bassVol: number;
+}
 
-// Bass (triangle) — root/fifth bounce following A / A / B / E, A / A / F#m / E.
-const BASS: number[] = [
-  110, 0, 165, 0, 110, 0, 165, 0,
-  110, 0, 165, 0, 110, 0, 165, 0,
-  123, 0, 185, 0, 123, 0, 185, 0,
-  82, 0, 124, 0, 82, 0, 124, 0,
-  110, 0, 165, 0, 110, 0, 165, 0,
-  110, 0, 165, 0, 110, 0, 165, 0,
-  92, 0, 139, 0, 92, 0, 139, 0,
-  82, 0, 124, 0, 82, 124, 165, 0,
-];
+// ── Song 1: "fairway" — A-major pentatonic-ish, bright and bouncy ──
+const FAIRWAY: Song = {
+  bpm: 112,
+  lead: [
+    440, 0, 554, 0, 659, 0, 554, 659,   // A C# E C# E
+    440, 0, 554, 659, 740, 0, 659, 554, // climb to F#
+    494, 0, 587, 0, 740, 0, 587, 740,   // B D F# (shift)
+    880, 740, 659, 0, 554, 0, 440, 0,   // tumble back home
+    440, 0, 554, 0, 659, 0, 554, 659,
+    440, 0, 554, 659, 740, 0, 880, 0,   // lift…
+    831, 0, 740, 0, 659, 0, 587, 554,   // …and resolve down
+    494, 554, 440, 0, 440, 0, 0, 0,     // land on the root, breathe
+  ],
+  bass: [
+    110, 0, 165, 0, 110, 0, 165, 0,
+    110, 0, 165, 0, 110, 0, 165, 0,
+    123, 0, 185, 0, 123, 0, 185, 0,
+    82, 0, 124, 0, 82, 0, 124, 0,
+    110, 0, 165, 0, 110, 0, 165, 0,
+    110, 0, 165, 0, 110, 0, 165, 0,
+    92, 0, 139, 0, 92, 0, 139, 0,
+    82, 0, 124, 0, 82, 124, 165, 0,
+  ],
+  hat: [
+    0, 1, 0, 1, 0, 1, 0, 1,
+    0, 1, 0, 1, 0, 1, 1, 1,
+    0, 1, 0, 1, 0, 1, 0, 1,
+    0, 1, 0, 1, 0, 1, 1, 0,
+    0, 1, 0, 1, 0, 1, 0, 1,
+    0, 1, 0, 1, 0, 1, 1, 1,
+    0, 1, 0, 1, 0, 1, 0, 1,
+    0, 1, 1, 0, 0, 1, 1, 1,
+  ],
+  leadVol: 0.16,
+  bassVol: 0.30,
+};
 
-// Hat (noise) — off-beat tick with a few doubles for swing.
-const HAT: number[] = [
-  0, 1, 0, 1, 0, 1, 0, 1,
-  0, 1, 0, 1, 0, 1, 1, 1,
-  0, 1, 0, 1, 0, 1, 0, 1,
-  0, 1, 0, 1, 0, 1, 1, 0,
-  0, 1, 0, 1, 0, 1, 0, 1,
-  0, 1, 0, 1, 0, 1, 1, 1,
-  0, 1, 0, 1, 0, 1, 0, 1,
-  0, 1, 1, 0, 0, 1, 1, 1,
-];
+// ── Song 2: "pressure" — E minor, 150 BPM, clock-tick + heartbeat ──
+// E2 82.4 / F#2 92.5 / G2 98 / B2 123.5; lead row E4 329.6, G4 392,
+// A4 440, B4 493.9, C5 523.3, D#5 622.3 (the chromatic dread note), E5 659.3.
+const PRESSURE: Song = {
+  bpm: 150,
+  lead: [
+    // Bars 1–2: silence — just the clock and the heart.
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    // Bars 3–4: two-note dread motif, rising.
+    329.6, 0, 0, 0, 392, 0, 0, 0,
+    329.6, 0, 0, 0, 440, 0, 392, 0,
+    // Bars 5–6: tighten — minor third hammering.
+    493.9, 0, 392, 0, 493.9, 0, 392, 0,
+    523.3, 0, 493.9, 0, 392, 0, 329.6, 0,
+    // Bars 7–8: the leading-tone scream and fall, then hold breath.
+    622.3, 0, 659.3, 0, 622.3, 0, 493.9, 0,
+    392, 0, 329.6, 0, 0, 0, 0, 0,
+  ],
+  bass: [
+    // Relentless eighth-note E pedal with semitone lifts at phrase ends.
+    82.4, 82.4, 82.4, 82.4, 82.4, 82.4, 82.4, 82.4,
+    82.4, 82.4, 82.4, 82.4, 82.4, 82.4, 92.5, 98,
+    82.4, 82.4, 82.4, 82.4, 82.4, 82.4, 82.4, 82.4,
+    82.4, 82.4, 82.4, 82.4, 98, 98, 92.5, 92.5,
+    82.4, 82.4, 82.4, 82.4, 82.4, 82.4, 82.4, 82.4,
+    123.5, 123.5, 123.5, 123.5, 98, 98, 92.5, 92.5,
+    82.4, 82.4, 82.4, 82.4, 82.4, 82.4, 82.4, 82.4,
+    82.4, 82.4, 92.5, 92.5, 98, 98, 123.5, 0,
+  ],
+  hat: [
+    // A tick on EVERY eighth — the clock never stops.
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+  ],
+  kick: [
+    // Lub-dub heartbeat on beats 1 and the and-of-1.
+    1, 0, 1, 0, 0, 0, 0, 0,
+    1, 0, 1, 0, 0, 0, 0, 0,
+    1, 0, 1, 0, 0, 0, 0, 0,
+    1, 0, 1, 0, 0, 0, 0, 0,
+    1, 0, 1, 0, 0, 0, 0, 0,
+    1, 0, 1, 0, 0, 0, 0, 0,
+    1, 0, 1, 0, 0, 0, 0, 0,
+    1, 0, 1, 0, 1, 0, 1, 0, // racing at the loop turn
+  ],
+  leadVol: 0.13,
+  bassVol: 0.26,
+};
 
-const STORAGE_KEY = 'arcade_music_on';
+// ── Song 3: "turbo" — A-Mixolydian at 164 BPM, motorik and relentless.
+// Four-on-the-floor thump, droning eighth-note bass, a sawing two-bar
+// arpeggio that climbs and never quite rests — open-highway energy.
+const TURBO: Song = {
+  bpm: 164,
+  lead: [
+    // Arpeggio up A–C#–E–G (Mixolydian b7), answer down.
+    440, 554, 659, 784, 659, 554, 440, 554,
+    659, 784, 880, 784, 659, 554, 440, 0,
+    // Shift to G–B–D and back — gear change.
+    392, 494, 587, 740, 587, 494, 392, 494,
+    440, 554, 659, 784, 880, 0, 784, 659,
+    440, 554, 659, 784, 659, 554, 440, 554,
+    659, 784, 880, 784, 659, 554, 440, 0,
+    // Overdrive bar: high straight 8ths, then dive home.
+    880, 880, 784, 784, 659, 659, 554, 554,
+    440, 0, 392, 0, 440, 0, 0, 0,
+  ],
+  bass: [
+    110, 110, 110, 110, 110, 110, 110, 110,
+    110, 110, 110, 110, 110, 110, 98, 98,
+    98, 98, 98, 98, 98, 98, 98, 98,
+    110, 110, 110, 110, 110, 110, 110, 110,
+    110, 110, 110, 110, 110, 110, 110, 110,
+    147, 147, 147, 147, 131, 131, 124, 124,
+    110, 110, 110, 110, 110, 110, 110, 110,
+    110, 110, 98, 98, 110, 110, 110, 0,
+  ],
+  hat: [
+    0, 1, 0, 1, 0, 1, 0, 1,
+    0, 1, 0, 1, 0, 1, 0, 1,
+    0, 1, 0, 1, 0, 1, 0, 1,
+    0, 1, 0, 1, 0, 1, 1, 1,
+    0, 1, 0, 1, 0, 1, 0, 1,
+    0, 1, 0, 1, 0, 1, 0, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    0, 1, 0, 1, 0, 1, 1, 1,
+  ],
+  kick: [
+    // Four on the floor — the engine.
+    1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 1, 0, 1, 0,
+    1, 0, 1, 0, 1, 0, 1, 1,
+  ],
+  leadVol: 0.13,
+  bassVol: 0.26,
+};
 
 export class ArcadeMusic {
   private ctx: AudioContext | null = null;
@@ -59,6 +181,12 @@ export class ArcadeMusic {
   private timer: ReturnType<typeof setInterval> | null = null;
   private nextStepTime = 0;
   private step = 0;
+
+  private song: Song;
+
+  constructor(song: Song) {
+    this.song = song;
+  }
 
   get enabled(): boolean {
     try { return localStorage.getItem(STORAGE_KEY) !== '0'; } catch { return true; }
@@ -107,16 +235,23 @@ export class ArcadeMusic {
     return next;
   }
 
+  private get eighth(): number {
+    return 60 / this.song.bpm / 2;
+  }
+
   private schedule(): void {
     const ctx = this.ctx;
     if (!ctx || !this.master) return;
+    const s = this.song;
+    const steps = s.lead.length;
     while (this.nextStepTime < ctx.currentTime + SCHEDULE_AHEAD) {
-      const i = this.step % STEPS;
+      const i = this.step % steps;
       const t = this.nextStepTime;
-      if (LEAD[i]) this.voice('square', LEAD[i], t, EIGHTH * 0.9, 0.16);
-      if (BASS[i]) this.voice('triangle', BASS[i], t, EIGHTH * 0.95, 0.30);
-      if (HAT[i]) this.hat(t);
-      this.nextStepTime += EIGHTH;
+      if (s.lead[i]) this.voice('square', s.lead[i], t, this.eighth * 0.9, s.leadVol);
+      if (s.bass[i]) this.voice('triangle', s.bass[i], t, this.eighth * 0.95, s.bassVol);
+      if (s.hat[i]) this.hat(t);
+      if (s.kick && s.kick[i]) this.thump(t);
+      this.nextStepTime += this.eighth;
       this.step++;
     }
   }
@@ -148,6 +283,26 @@ export class ArcadeMusic {
     src.connect(hp).connect(gain).connect(this.master!);
     src.start(at);
   }
+
+  /** Low sine thump — the heartbeat under the pressure track. */
+  private thump(at: number): void {
+    const ctx = this.ctx!;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(95, at);
+    osc.frequency.exponentialRampToValueAtTime(45, at + 0.10);
+    gain.gain.setValueAtTime(0.5, at);
+    gain.gain.exponentialRampToValueAtTime(0.001, at + 0.14);
+    osc.connect(gain).connect(this.master!);
+    osc.start(at);
+    osc.stop(at + 0.16);
+  }
 }
 
-export const arcadeMusic = new ArcadeMusic();
+/** Mini Golf's lighthearted loop. */
+export const arcadeMusic = new ArcadeMusic(FAIRWAY);
+/** Field Goal's high-pressure loop. */
+export const pressureMusic = new ArcadeMusic(PRESSURE);
+/** Turbo Rush's motorik open-highway loop. */
+export const turboMusic = new ArcadeMusic(TURBO);

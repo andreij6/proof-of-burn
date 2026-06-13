@@ -286,12 +286,12 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
   // ── dial actions (unchanged mechanics, new homes) ─────────────────────────
   const setThreshold = () => run('threshold', async () => {
-    const icp = parseFloat(thresholdInput);
-    if (isNaN(icp) || icp < 1) { setError("Threshold must be at least 1 ICP."); return null; }
-    const res = await actor.admin_set_default_threshold(BigInt(Math.round(icp * 100_000_000)));
+    const usd = parseFloat(thresholdInput);
+    if (isNaN(usd) || usd < 0.1) { setError("Threshold must be at least $0.10."); return null; }
+    const res = await actor.admin_set_default_threshold_usd(BigInt(Math.round(usd * 100_000_000)));
     if (res.__kind__ === "Err") { setError(res.Err); return null; }
     setThresholdInput('');
-    return `Threshold set to ${icp} ICP — all open proposals re-thresholded.`;
+    return `Threshold set to $${usd.toFixed(2)} — all open proposals re-thresholded by dollar value.`;
   });
 
   const toggleFlag = (key: string, enabled: boolean) => run(`flag-${key}`, async () => {
@@ -631,19 +631,24 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
                 <Eyebrow>Voting threshold</Eyebrow>
                 <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                  {config ? fmtICP(config.default_threshold) : '…'} ICP
+                  {config
+                    ? (config.default_threshold_usd_e8s !== undefined && config.default_threshold_usd_e8s !== null
+                      ? `$${(Number(config.default_threshold_usd_e8s) / 1e8).toFixed(2)}`
+                      : `${fmtICP(config.default_threshold)} ICP (legacy)`)
+                    : '…'}
                 </span>
               </span>
               <div className="row" style={{ gap: 8 }}>
-                <input type="number" min="1" step="0.5" placeholder="New threshold (ICP)" className="burn-input" style={inputStyle}
+                <input type="number" min="0.1" step="0.5" placeholder="New threshold (USD)" className="burn-input" style={inputStyle}
                   value={thresholdInput} onChange={(e) => setThresholdInput(e.target.value)} />
                 <Btn variant="primary" sm onClick={setThreshold} disabled={busy !== null || !thresholdInput}>
                   {busy === 'threshold' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
                 </Btn>
               </div>
               <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Applies to new proposals and re-thresholds every open one. GROWTH_TARGETS.md holds
-                this at 2 ICP — the per-vote price cap is a product promise.
+                Dollar-denominated: pots are valued at the live ICP/USD rate, so the bar to settle
+                stays constant as the ICP price moves. Applies to new proposals and re-thresholds
+                every open one.
               </span>
             </div>
             <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
@@ -798,7 +803,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8 }}>
               <Icon name="gamepad" size={13} stroke="var(--burn)" />
-              <Eyebrow>Mini Golf Gold — course editor</Eyebrow>
+              <Eyebrow>Mini Golf — course editor</Eyebrow>
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Repaint any hole's voxel layout cell by cell. Saving stores the layout on-chain and
@@ -820,7 +825,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           </div>
 
           <Section icon="flame" title="Burn voting — conviction with skin in the game">
-            <Li>Users register a neuron, follow the community leader, then commit ICP to a tracked NNS proposal with an adopt or reject stance. Minimum 1 ICP; one commitment per proposal (top-ups allowed); 0.005 ICP protocol fee to the treasury at commit time.</Li>
+            <Li>Users register a neuron, follow the community leader, then commit ICP to a tracked NNS proposal with an adopt or reject stance. Minimum 1 ICP; one commitment per proposal (top-ups allowed); no fees — the treasury fronts all ledger fees so refunds are exact.</Li>
             <Li>Committed ICP sits in a per-user escrow subaccount until the proposal's deadline (commits close 1 hour before).</Li>
             <Li>At cutoff, if total commitments meet the threshold, the side with more committed ICP decides the NNS vote (ties go to the first stance cast). Staked voting power joins this balance of power but never counts toward the threshold.</Li>
             <Li><b>Vote succeeds → the escrow burns:</b> 50% to the treasury, 25% to backend cycles, 25% to frontend cycles. Burns are recorded per user and power the leaderboard stats.</Li>

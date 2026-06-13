@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
 import type { EarlyAdopterInfo, EarlyAdopterPublic, EarlyAdopterRound } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import { Icon, Eyebrow, Btn, Chip, LiveDot, formatPrincipal } from "./ui";
+import { Icon, Eyebrow, Btn, Chip, LiveDot, MoreInfo, formatPrincipal } from "./ui";
 import { fmtTokenAmount } from "./IdeaBoard";
 
 // ==========================================
@@ -370,7 +370,7 @@ export default function EarlyAdopters({ actor, identity, principal, host, rootKe
   });
 
   return (
-    <div className="idea-board-container">
+    <div className="dashboard-container">
       {/* ── Page header ── */}
       <div className="col" style={{ gap: 6 }}>
         <Eyebrow accent>Permanent seats, monthly yield</Eyebrow>
@@ -408,45 +408,52 @@ export default function EarlyAdopters({ actor, identity, principal, host, rootKe
         </div>
       )}
 
-      {/* ── The deal, both sides at equal weight: what you give (permanent
-            lock) and what everyone gets. Hidden once membership is closed —
-            nobody can take the deal anymore. ── */}
+      {/* ── The deal, both sides — one line each, details in dialogs. Hidden
+            once membership is closed: nobody can take the deal anymore. ── */}
       {!info.membership_closed && (
       <div className="row" style={{ gap: 14, flexWrap: 'wrap', alignItems: 'stretch' }}>
-        <div className="col" style={{ gap: 8, border: '1px solid var(--ember)', borderRadius: 10, padding: '14px 16px', background: 'var(--ember-dim)', flex: 1, minWidth: 300 }}>
-          <span className="row" style={{ gap: 8 }}>
-            <Icon name="lock" size={16} stroke="var(--ember)" />
-            <b style={{ fontSize: 14, color: 'var(--ember)' }}>What you give: your stake, permanently</b>
+        <div className="col" style={{ gap: 8, border: '1px solid var(--ember)', borderRadius: 10, padding: '12px 14px', background: 'var(--ember-dim)', flex: 1, minWidth: 280 }}>
+          <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <Icon name="lock" size={15} stroke="var(--ember)" />
+            <span style={{ fontSize: 13, color: 'var(--fg-2)', flex: 1 }}>
+              <b style={{ color: 'var(--ember)' }}>Your stake is permanent</b> — it can never be unstaked.
+            </span>
           </span>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-2)', flex: 1 }}>
-            ICP staked here goes into the platform's 2-year neuron and <b>can never be unstaked
-            or withdrawn — by anyone, ever.</b> There is no unstake function in the canister.
-            No admin override, no exceptions. Stake only what you'd commit to the platform
-            outright.
-          </span>
+          <MoreInfo label="What you give" title="What you give: your stake, permanently">
+            <p style={{ margin: 0 }}>
+              ICP staked here goes into the platform's 2-year neuron and <b>can never be unstaked
+              or withdrawn — by anyone, ever.</b> There is no unstake function in the canister.
+              No admin override, no exceptions. Stake only what you'd commit to the platform
+              outright.
+            </p>
+          </MoreInfo>
         </div>
-        <div className="col" style={{ gap: 8, border: '1px solid var(--burn)', borderRadius: 10, padding: '14px 16px', background: 'var(--burn-950)', flex: 1, minWidth: 300 }}>
-          <span className="row" style={{ gap: 8 }}>
-            <Icon name="spark" size={16} stroke="var(--burn)" />
-            <b style={{ fontSize: 14, color: 'var(--burn)' }}>What everyone gets: a founder's deal</b>
+        <div className="col" style={{ gap: 8, border: '1px solid var(--burn)', borderRadius: 10, padding: '12px 14px', background: 'var(--burn-950)', flex: 1, minWidth: 280 }}>
+          <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <Icon name="spark" size={15} stroke="var(--burn)" />
+            <span style={{ fontSize: 13, color: 'var(--fg-2)', flex: 1 }}>
+              <b style={{ color: 'var(--burn)' }}>A founder's deal</b> — a lifetime share of the neuron's monthly yield.
+            </span>
           </span>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-            <b>You:</b> a share of the neuron's monthly yield above the treasury's cut,{' '}
-            <b>proportional to your staked ICP</b> — for life. Low-yield months compound back
-            into the neuron, growing every future payout. <b>Seats are limited:</b> the moment a
-            month yields {fmtICP8(info.close_threshold_e8s)} ICP, membership closes forever.
-          </span>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-            <b>The platform:</b> {fmtICP8(info.treasury_cut_e8s)} ICP/month of guaranteed
-            treasury funding, plus a permanent 2-year neuron that <b>follows the platform's
-            primary voting neuron</b> — every early adopter stake multiplies its weight on every
-            NNS proposal.
-          </span>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-            <b>ICP holders at large:</b> every early adopter stake is supply locked away forever in
-            a max-commitment neuron that votes on every proposal — deflationary pressure and
-            long-horizon governance weight, funded voluntarily.
-          </span>
+          <MoreInfo label="What everyone gets" title="What everyone gets: a founder's deal">
+            <p style={{ margin: 0 }}>
+              <b>You:</b> a share of the neuron's monthly yield above the treasury's cut,{' '}
+              <b>proportional to your staked ICP</b> — for life. Low-yield months compound back
+              into the neuron, growing every future payout. <b>Seats are limited:</b> the moment a
+              month yields {fmtICP8(info.close_threshold_e8s)} ICP, membership closes forever.
+            </p>
+            <p style={{ margin: 0 }}>
+              <b>The platform:</b> {fmtICP8(info.treasury_cut_e8s)} ICP/month of guaranteed
+              treasury funding, plus a permanent 2-year neuron that <b>follows the platform's
+              primary voting neuron</b> — every early adopter stake multiplies its weight on every
+              NNS proposal.
+            </p>
+            <p style={{ margin: 0 }}>
+              <b>ICP holders at large:</b> every early adopter stake is supply locked away forever in
+              a max-commitment neuron that votes on every proposal — deflationary pressure and
+              long-horizon governance weight, funded voluntarily.
+            </p>
+          </MoreInfo>
         </div>
       </div>
       )}
@@ -454,20 +461,26 @@ export default function EarlyAdopters({ actor, identity, principal, host, rootKe
       {/* ── How it works ── */}
       <div className="row" style={{ gap: 14, flexWrap: 'wrap' }}>
         <div className="col" style={{ gap: 8, flex: 2, minWidth: 280 }}>
-          <Eyebrow accent>How the monthly settlement works</Eyebrow>
-          {[
-            `Each ~month (30-day periods) the neuron's yield is settled.`,
-            `Months under ${fmtICP8(info.restake_threshold_e8s)} ICP are restaked into the neuron — nothing pays out, the principal compounds for everyone.`,
-            `Otherwise the first ${fmtICP8(info.treasury_cut_e8s)} ICP of the month's yield goes to the protocol treasury.`,
-            `Everything above it is split among early adopters IN PROPORTION TO STAKED ICP, once at least ${fmtICP8(info.min_distribution_e8s)} ICP is available. Smaller pots roll over to next month.`,
-            `You must claim your share before the next monthly settlement. Unclaimed shares are forfeited to the treasury.`,
-            `The first month that yields ${fmtICP8(info.close_threshold_e8s)} ICP closes membership permanently — existing early adopters keep their seats and can still top up anytime.`,
-            `The early adopter neuron follows the platform's primary voting neuron (#${info.primary_neuron_id.toString()}) on all topics — it votes on every NNS proposal.`,
-          ].map((t, i) => (
-            <span key={i} className="row" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', alignItems: 'flex-start' }}>
-              <span style={{ color: 'var(--burn)' }}>·</span><span style={{ flex: 1 }}>{t}</span>
-            </span>
-          ))}
+          <Eyebrow accent>Monthly settlement</Eyebrow>
+          <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
+            Every ~30 days the neuron's yield is settled and split among early adopters in
+            proportion to staked ICP — claim your share before the next settlement.
+          </span>
+          <MoreInfo title="How the monthly settlement works">
+            {[
+              `Each ~month (30-day periods) the neuron's yield is settled.`,
+              `Months under ${fmtICP8(info.restake_threshold_e8s)} ICP are restaked into the neuron — nothing pays out, the principal compounds for everyone.`,
+              `Otherwise the first ${fmtICP8(info.treasury_cut_e8s)} ICP of the month's yield goes to the protocol treasury.`,
+              `Everything above it is split among early adopters IN PROPORTION TO STAKED ICP, once at least ${fmtICP8(info.min_distribution_e8s)} ICP is available. Smaller pots roll over to next month.`,
+              `You must claim your share before the next monthly settlement. Unclaimed shares are forfeited to the treasury.`,
+              `The first month that yields ${fmtICP8(info.close_threshold_e8s)} ICP closes membership permanently — existing early adopters keep their seats and can still top up anytime.`,
+              `The early adopter neuron follows the platform's primary voting neuron (#${info.primary_neuron_id.toString()}) on all topics — it votes on every NNS proposal.`,
+            ].map((t, i) => (
+              <span key={i} className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
+                <span style={{ color: 'var(--burn)' }}>·</span><span style={{ flex: 1 }}>{t}</span>
+              </span>
+            ))}
+          </MoreInfo>
           <button onClick={() => setIsTreeOpen(true)} style={{
             background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--burn)',
             fontSize: 12.5, textDecoration: 'underline dotted', textUnderlineOffset: 3,

@@ -129,6 +129,19 @@ else
   ok "Pool already has $ACTIVE_COUNT active neuron(s) — skipping pool seed"
 fi
 
+# ── 7. Swap-desk liquidity (multi-token voting) ──────────────────────────────
+# commit_token converts ck-tokens to ICP locally via an internal desk paying
+# from subaccount [8u8;32]. Seed it with 100 ICP once.
+SWAP_SUB='\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08\08'
+SWAP_BAL=$(icp canister call ledger icrc1_balance_of "(record { owner = principal \"$BACKEND_ID\"; subaccount = opt blob \"$SWAP_SUB\" })" --query -e "$ENV" | grep -oE '[0-9_]+' | head -1 | tr -d '_')
+if [[ "${SWAP_BAL:-0}" -lt 1000000000 ]]; then
+  note "Seeding swap-desk liquidity (100 ICP)…"
+  icp canister call ledger icrc1_transfer "(record { to = record { owner = principal \"$BACKEND_ID\"; subaccount = opt blob \"$SWAP_SUB\" }; amount = 10_000_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+  ok "Swap desk funded (token commits convert to ICP locally)"
+else
+  ok "Swap desk already funded ($SWAP_BAL e8s)"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo
 echo "──────────────────────────────────────────────────────────"

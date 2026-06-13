@@ -1,4 +1,5 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { Principal } from "@icp-sdk/core/principal";
 
 // ==========================================
@@ -37,6 +38,8 @@ export const iconPaths: Record<string, React.ReactNode> = {
   gamepad: <><rect x="2" y="7" width="20" height="10" rx="5" /><path d="M7.5 10v4M5.5 12h4M15.5 10.5h.01M18 13h.01" /></>,
   sound: <><path d="M11 5L6 9H2v6h4l5 4z" /><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13" /></>,
   soundOff: <><path d="M11 5L6 9H2v6h4l5 4z" /><path d="M22 9l-6 6M16 9l6 6" /></>,
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></>,
+  moon: <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />,
 };
 
 export interface IconProps {
@@ -135,6 +138,70 @@ export function Btn({ variant = 'secondary', sm, children, disabled, style, onCl
     >
       {children}
     </button>
+  );
+}
+
+/// Link-style trigger that opens a modal with the long-form explanation.
+/// The page keeps a one-line value prop; the details live in here.
+export function MoreInfo({ label = 'How it works', title, children, style }: {
+  label?: string;
+  title: string;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+}) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        style={{
+          background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+          color: 'var(--burn)', fontSize: 12, textDecoration: 'underline',
+          display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'inherit',
+          ...style,
+        }}
+      >
+        <Icon name="info" size={11} stroke="var(--burn)" /> {label}
+      </button>
+      {/* Portaled: MoreInfo often sits inside <p>/<span>, where a block modal
+          would be invalid DOM. */}
+      {open && createPortal(
+        <div
+          onClick={() => setOpen(false)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(12, 10, 9, 0.85)',
+            backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex',
+            alignItems: 'center', justifyContent: 'center', padding: 16,
+          }}
+        >
+          <div
+            className="card col"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: 500, width: '100%', gap: 14, background: 'var(--surface)',
+              border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)',
+              maxHeight: '82vh', overflowY: 'auto',
+            }}
+          >
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <h4 style={{ margin: 0, fontSize: 15, color: 'var(--fg)' }}>{title}</h4>
+              <button
+                onClick={() => setOpen(false)}
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}
+                aria-label="Close"
+              >
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+            <div className="col" style={{ gap: 10, fontSize: 13, color: 'var(--fg-2)', lineHeight: 1.55 }}>
+              {children}
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
   );
 }
 

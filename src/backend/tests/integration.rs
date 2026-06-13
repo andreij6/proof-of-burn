@@ -528,8 +528,16 @@ fn setup_saga() -> Option<SagaEnv> {
     };
     pic.install_canister(backend, std::fs::read(&wasm).unwrap(), encode_one(init).unwrap(), None);
 
-    Some(SagaEnv { pic, backend, ledger, user, minter })
+    let env = SagaEnv { pic, backend, ledger, user, minter };
+    // Zero-fee commits: the treasury fronts every settlement/refund ledger
+    // fee, so the saga env needs a treasury float just like a real deploy.
+    env.mint_sub(backend, vec![1u8; 32], TREASURY_FLOAT_E8S);
+    Some(env)
 }
+
+/// Treasury float seeded into the saga env — covers the ledger fees the
+/// treasury fronts under zero-fee commits.
+const TREASURY_FLOAT_E8S: u64 = 100_000_000;
 
 fn balance_of(env: &SagaEnv, owner: Principal, sub: Option<Vec<u8>>) -> u64 {
     let acct = LAccount { owner, subaccount: sub };
@@ -569,9 +577,9 @@ fn do_commit_as(env: &SagaEnv, user: Principal, proposal_id: u64, stance: Stance
         .expect("get_deposit_address");
     let escrow: LAccountDe = decode_one(&reply).unwrap();
 
-    // 3. user deposits target + 540_000 into escrow (covers the commit fee +
-    //    the three settlement-split transfers' ledger fees)
-    let deposit = target_e8s + 540_000;
+    // 3. user deposits EXACTLY the target into escrow — zero-fee commits:
+    //    the treasury fronts all settlement/refund ledger fees.
+    let deposit = target_e8s;
     let xfer = TransferArg {
         from_subaccount: None,
         to: LAccount { owner: escrow.owner, subaccount: escrow.subaccount },
@@ -662,8 +670,8 @@ fn saga_refund_when_threshold_missed() {
     let commits = my_commitments(&env);
     assert_eq!(commits[0].status, CommitmentStatus::Returned, "unmet threshold must refund");
 
-    // Refund returns exactly the target to the user (the refund's ledger fee is
-    // covered by the extra reserve held in escrow, not the returned amount).
+    // Refund returns exactly the target to the user — the treasury fronts the
+    // refund's ledger fee (zero-fee commits).
     let after = balance_of(&env, env.user, None);
     assert_eq!(after, mid + target, "refund must return exactly the committed target");
 
@@ -674,9 +682,9 @@ fn saga_refund_when_threshold_missed() {
         .expect("get_deposit_address");
     let escrow: LAccountDe = decode_one(&reply).unwrap();
     let escrow_bal = balance_of(&env, escrow.owner, escrow.subaccount);
-    // The refund returns the target; the unused settlement-fee reserve (~20_000)
-    // remains as dust in the escrow subaccount (sweepable later).
-    assert_eq!(escrow_bal, 20_000, "only the unused fee reserve remains after refund");
+    // The treasury tops the escrow up by exactly the refund fee, so the
+    // refund drains it to zero — no dust.
+    assert_eq!(escrow_bal, 0, "escrow fully drained after refund");
 
     // Verify that the proposal status in backend is "abstained"
     let reply = env
@@ -748,8 +756,13 @@ fn saga_burn_is_idempotent_on_cmc_failure() {
 
     let cmc_after_first = balance_of(&env, cmc, backend_sub.clone());
     assert_eq!(cmc_after_first, total / 4, "25% backend share reached the CMC once");
-    // treasury = 50% of proceeds + the per-commit protocol fee (500_000 each).
-    assert_eq!(treasury_after_first, total / 2 + n_users * 500_000, "50% + protocol fees in treasury");
+    // treasury = float + 50% of proceeds − the fee cover it fronted per
+    // commitment (30_000 into escrow + 10_000 to move it).
+    assert_eq!(
+        treasury_after_first,
+        TREASURY_FLOAT_E8S + total / 2 - n_users * 40_000,
+        "50% lands in treasury net of fronted fees"
+    );
 
     // Retry: completed transfers (treasury, backend CMC) are skipped — only the
     // failing notify re-runs. No funds move again.
@@ -1465,7 +1478,7 @@ fn test_admin_withdraw_treasury_integration() {
 
     // A non-admin must NOT be able to withdraw.
     let stranger = Principal::from_slice(&[9, 9, 9, 9]);
-    let res = env.pic.update_call(env.backend, stranger, "admin_withdraw_treasury", encode_args((recipient, 1_000_000_000u64)).unwrap());
+    let res = env.pic.update_call(env.backend, stranger, "admin_withdraw_treasury", encode_args((recipient, 1_000_000_000u64, true)).unwrap());
     if let Ok(bytes) = res {
         assert!(matches!(decode_one::<UnitResult>(&bytes).unwrap(), UnitResult::Err(_)), "non-admin withdraw must Err");
     }
@@ -1473,14 +1486,18 @@ fn test_admin_withdraw_treasury_integration() {
 
     // Admin happy path: withdraw 50 ICP.
     let amount = 5_000_000_000u64;
-    let r = env.pic.update_call(env.backend, owner, "admin_withdraw_treasury", encode_args((recipient, amount)).unwrap()).expect("withdraw");
+    let r = env.pic.update_call(env.backend, owner, "admin_withdraw_treasury", encode_args((recipient, amount, true)).unwrap()).expect("withdraw");
     let res: UnitResult = decode_one(&r).unwrap();
     assert!(matches!(res, UnitResult::Ok), "admin withdraw should succeed: {:?}", res);
     assert_eq!(balance_of(&env, recipient, None), amount, "recipient received exactly the amount");
-    assert_eq!(balance_of(&env, env.backend, Some(treasury_sub)), 10_000_000_000 - amount - 10_000, "treasury debited amount + ledger fee");
+    assert_eq!(
+        balance_of(&env, env.backend, Some(treasury_sub)),
+        TREASURY_FLOAT_E8S + 10_000_000_000 - amount - 10_000,
+        "treasury debited amount + ledger fee"
+    );
 
     // Edge: zero amount is rejected even for an admin.
-    let r = env.pic.update_call(env.backend, owner, "admin_withdraw_treasury", encode_args((recipient, 0u64)).unwrap()).expect("zero");
+    let r = env.pic.update_call(env.backend, owner, "admin_withdraw_treasury", encode_args((recipient, 0u64, true)).unwrap()).expect("zero");
     assert!(matches!(decode_one::<UnitResult>(&r).unwrap(), UnitResult::Err(_)), "zero-amount withdraw must Err");
 }
 
@@ -2082,9 +2099,9 @@ fn test_yield_distribution_integration() {
     let treasury = balance_of(&env, env.backend, Some(vec![1u8; 32]));
     let lottery = balance_of(&env, env.backend, Some(vec![3u8; 32]));
     assert_eq!(lottery, spendable * 4 / 5, "80% → lottery prize pot");
-    // Treasury = its yield share + the seeded fee-cover float (minted in
-    // do_stake_as) minus the 2 fees it fronted for the zero-loss stake.
-    let treasury_float = 1_000_000 - 20_000;
+    // Treasury = its yield share + the env float + the seeded fee-cover
+    // (minted in do_stake_as) minus the 2 fees fronted for the zero-loss stake.
+    let treasury_float = TREASURY_FLOAT_E8S + 1_000_000 - 20_000;
     assert_eq!(
         treasury,
         (spendable - spendable * 4 / 5) + treasury_float,

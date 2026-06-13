@@ -304,6 +304,19 @@ pub struct Commitment {
     pub treasury_block: Option<u64>,
     #[serde(default)]
     pub frontend_cmc_block: Option<u64>,
+    /// Token-denominated commitment (multi-token voting): the committed
+    /// token + amount sit in THEIR ledger's escrow until settlement.
+    /// None = plain ICP commitment. amount_e8s holds the oracle
+    /// ICP-equivalent for pots/threshold maths until the settlement swap
+    /// replaces it with real proceeds.
+    #[serde(default)]
+    pub token: Option<ExplorerToken>,
+    #[serde(default)]
+    pub token_amount: Option<u64>,
+    /// ICP received by the settlement swap (idempotency journal — a retry
+    /// must never swap twice). Set together with the amount_e8s update.
+    #[serde(default)]
+    pub swapped_icp_e8s: Option<u64>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -398,6 +411,11 @@ pub struct Config {
     /// ── Lossless lottery ──
     #[serde(default = "default_lottery_tickets_per_day")]
     pub lottery_tickets_per_day: u64,
+    /// USD-denominated voting threshold (e8s of USD, i.e. $1 = 100_000_000).
+    /// When set it supersedes `default_threshold` for new proposals; pots are
+    /// valued at the cached ICP/USD rate. None = legacy ICP thresholds.
+    #[serde(default)]
+    pub default_threshold_usd_e8s: Option<u64>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -413,6 +431,10 @@ pub struct Proposal {
     pub nns_proposal_id: Option<u64>,
     pub status: String, // "open" | "met" | "voted" | "failed" | "settled" | "abstained"
     pub threshold_e8s: u64,
+    /// USD threshold (e8s of USD) — when present the proposal meets its
+    /// threshold by the USD VALUE of its pots, not raw ICP.
+    #[serde(default)]
+    pub threshold_usd_e8s: Option<u64>,
     pub total_committed_e8s: u64,
     pub adopt_pot_e8s: u64,
     pub reject_pot_e8s: u64,
@@ -571,6 +593,7 @@ thread_local! {
             min_unstake_e8s: default_min_unstake_e8s(),
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
             lottery_tickets_per_day: default_lottery_tickets_per_day(),
+            default_threshold_usd_e8s: None,
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -744,6 +767,7 @@ fn init(payload: InitPayload) {
         min_unstake_e8s: default_min_unstake_e8s(),
         maturity_threshold_e8s: default_maturity_threshold_e8s(),
         lottery_tickets_per_day: default_lottery_tickets_per_day(),
+        default_threshold_usd_e8s: None,
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
@@ -776,6 +800,12 @@ fn post_upgrade() {
         seed_mock_ideas();
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
+        // The USD-rate cache is heap state and resets on upgrade — re-warm it
+        // immediately so threshold valuations never run on static defaults.
+        ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), async {
+            let config = CONFIG.with(|cell| cell.borrow().get().clone());
+            refresh_icp_rate(&config).await;
+        });
     }
     seed_default_dapps();
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
@@ -1045,6 +1075,45 @@ fn admin_set_proposal_deadline(proposal_id: u64, deadline: u64) -> Result<(), St
 /// new threshold to every currently open/met proposal, recomputing their
 /// open↔met status. Terminal proposals (voted/settled/abstained/failed) are left
 /// untouched so in-flight settlement is never disturbed.
+/// Admin: dollar-denominated voting threshold (e8s of USD; $1 = 100_000_000).
+/// Applies to every open/met proposal immediately and to all future ones.
+/// Pots are valued at the cached ICP/USD rate (XRC on mainnet).
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_set_default_threshold_usd(new_threshold_usd_e8s: u64) -> Result<(), String> {
+    // $0.10 minimum, $1M maximum — sanity rails.
+    if new_threshold_usd_e8s < 10_000_000 {
+        return Err("THRESHOLD_BELOW_MIN".to_string());
+    }
+    if new_threshold_usd_e8s > 100_000_000_000_000 {
+        return Err("THRESHOLD_ABOVE_MAX".to_string());
+    }
+    let config = CONFIG.with(|cell| {
+        let mut cfg = cell.borrow().get().clone();
+        cfg.default_threshold_usd_e8s = Some(new_threshold_usd_e8s);
+        cell.borrow_mut().set(cfg.clone());
+        cfg
+    });
+    refresh_icp_rate(&config).await;
+    PROPOSALS.with(|map| {
+        let mut map = map.borrow_mut();
+        let ids: Vec<u64> = map.iter().map(|e| *e.key()).collect();
+        for id in ids {
+            if let Some(mut p) = map.get(&id) {
+                if p.status == "open" || p.status == "met" {
+                    p.threshold_usd_e8s = Some(new_threshold_usd_e8s);
+                    p.status = if proposal_threshold_met(&p) {
+                        "met".to_string()
+                    } else {
+                        "open".to_string()
+                    };
+                    map.insert(id, p);
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
 #[ic_cdk::update(guard = "require_admin")]
 fn admin_set_default_threshold(new_threshold_e8s: u64) -> Result<(), String> {
     if new_threshold_e8s < MIN_COMMIT_E8S {
@@ -1055,9 +1124,11 @@ fn admin_set_default_threshold(new_threshold_e8s: u64) -> Result<(), String> {
     }
 
     // 1. Update the config default (used for future / live proposals).
+    // Setting an ICP threshold returns the protocol to legacy ICP mode.
     CONFIG.with(|cell| {
         let mut cfg = cell.borrow().get().clone();
         cfg.default_threshold = new_threshold_e8s;
+        cfg.default_threshold_usd_e8s = None;
         cell.borrow_mut().set(cfg);
     });
 
@@ -1069,6 +1140,7 @@ fn admin_set_default_threshold(new_threshold_e8s: u64) -> Result<(), String> {
             if let Some(mut p) = map.get(&id) {
                 if p.status == "open" || p.status == "met" {
                     p.threshold_e8s = new_threshold_e8s;
+                    p.threshold_usd_e8s = None;
                     p.status = if proposal_threshold_met(&p) {
                         "met".to_string()
                     } else {
@@ -1194,6 +1266,7 @@ fn seed_mock_proposals() {
                 vote_executed_at: None,
                 total_burned_e8s: None,
                 first_stance: None,
+            threshold_usd_e8s: CONFIG.with(|c| c.borrow().get().default_threshold_usd_e8s),
                 pool_distributed: false,
                 lossless_adopt_e8s: 0,
                 lossless_reject_e8s: 0,
@@ -1214,6 +1287,7 @@ fn seed_mock_proposals() {
                 vote_executed_at: None,
                 total_burned_e8s: None,
                 first_stance: None,
+            threshold_usd_e8s: CONFIG.with(|c| c.borrow().get().default_threshold_usd_e8s),
                 pool_distributed: false,
                 lossless_adopt_e8s: 0,
                 lossless_reject_e8s: 0,
@@ -1234,6 +1308,7 @@ fn seed_mock_proposals() {
                 vote_executed_at: None,
                 total_burned_e8s: None,
                 first_stance: None,
+            threshold_usd_e8s: CONFIG.with(|c| c.borrow().get().default_threshold_usd_e8s),
                 pool_distributed: false,
                 lossless_adopt_e8s: 0,
                 lossless_reject_e8s: 0,
@@ -1982,6 +2057,85 @@ async fn notify_cmc_topup(
     Ok(())
 }
 
+fn idea_token_of(token: ExplorerToken) -> IdeaToken {
+    match token {
+        ExplorerToken::ICP => IdeaToken::ICP,
+        ExplorerToken::CkBTC => IdeaToken::CkBTC,
+        ExplorerToken::CkETH => IdeaToken::CkETH,
+        ExplorerToken::CkUSDC => IdeaToken::CkUSDC,
+        ExplorerToken::CkUSDT => IdeaToken::CkUSDT,
+    }
+}
+
+/// Multi-token voting, settlement leg: convert a token commitment's escrow
+/// into ICP exactly once (journaled via swapped_icp_e8s). On success
+/// amount_e8s becomes the REAL proceeds minus the 3 split fees, so the
+/// standard burn split works unchanged. Callers must persist the commitment
+/// immediately after this returns Ok (the swap must never run twice).
+async fn ensure_commitment_swapped(
+    config: &Config,
+    commitment: &mut Commitment,
+) -> Result<(), String> {
+    let (token, token_amount) = match (commitment.token, commitment.token_amount) {
+        (Some(t), Some(a)) => (t, a),
+        _ => return Ok(()), // plain ICP commitment
+    };
+    if commitment.swapped_icp_e8s.is_some() {
+        return Ok(());
+    }
+    let _ = explorer_usd_rate_e8s(token, config).await;
+    refresh_icp_rate(config).await;
+    let expected = expected_icp_for_token(token, token_amount);
+    let min_out = expected.saturating_mul(100 - SWAP_SLIPPAGE_PCT) / 100;
+    let out = swap_token_to_icp(config, commitment.subaccount, token, token_amount, min_out).await?;
+    commitment.swapped_icp_e8s = Some(out);
+    // Reserve the three split-transfer fees out of the proceeds, mirroring
+    // the ICP escrow accounting (escrow = amount + 30_000).
+    commitment.amount_e8s = out.saturating_sub(30_000);
+    canister_print(&format!(
+        "settlement swap: {:?} {} → {} ICP e8s for proposal {} user {}",
+        token, token_amount, out, commitment.proposal_id, commitment.principal
+    ));
+    Ok(())
+}
+
+/// Zero-fee refunds: top the escrow up from the treasury (on the refund
+/// token's own ledger) so the user receives back EXACTLY what they deposited.
+/// Returns the amount to refund. If the treasury can't cover (e.g. it holds
+/// none of this token) the refund falls back to a fee-deducted amount rather
+/// than stranding the escrow. Balance-checked, so retries never over-cover.
+async fn refundable_with_treasury_cover(
+    refund_ledger: Principal,
+    escrow_sub: [u8; 32],
+    deposited: u64,
+    fee: u64,
+) -> u64 {
+    let escrow_acct = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(escrow_sub),
+    };
+    let needed = deposited.saturating_add(fee);
+    match call_ledger_balance(refund_ledger, escrow_acct.clone()).await {
+        Ok(balance) if balance >= needed => deposited,
+        Ok(balance) => {
+            let shortfall = needed - balance;
+            match call_ledger_transfer(refund_ledger, Some(TREASURY_SUBACCOUNT), escrow_acct, shortfall, Some(fee)).await {
+                Ok(_) => deposited,
+                Err(e) => {
+                    canister_print(&format!(
+                        "refund fee cover failed on ledger {}: {}", refund_ledger, e
+                    ));
+                    balance.saturating_sub(fee)
+                }
+            }
+        }
+        Err(e) => {
+            canister_print(&format!("refund escrow balance check failed: {}", e));
+            deposited.saturating_sub(fee)
+        }
+    }
+}
+
 /// PB-125: distribute a settled commitment's proceeds — 50% → treasury,
 /// 25% → backend cycles, 25% → frontend cycles. Idempotent via three per-step
 /// block indices on the Commitment; a retry skips completed transfers and only
@@ -1999,14 +2153,10 @@ async fn settle_burn_split(
     let backend_amt = amount_e8s / 4;
     let frontend_amt = amount_e8s - treasury_amt - backend_amt; // remainder ≈ 25%
 
-    // 142135 post-mortem: a CMC refund returns a leg minus the ledger fee, so
-    // a retry of this zero-slack escrow can be a few fees short of finishing.
-    // On retries (some journal leg already done) the treasury fronts any
-    // shortfall — the same fee-cover pattern the staking flow uses.
-    let is_retry = commitment.treasury_block.is_some()
-        || commitment.cmc_block_index.is_some()
-        || commitment.frontend_cmc_block.is_some();
-    if is_retry {
+    // Zero-fee commits: the escrow holds exactly the amount, so the treasury
+    // fronts the split-transfer fees on EVERY settlement (and any retry
+    // shortfall — the 142135 post-mortem pattern, now the default path).
+    {
         let mut required: u64 = 0;
         if commitment.treasury_block.is_none() { required += treasury_amt + 10_000; }
         if commitment.cmc_block_index.is_none() { required += backend_amt + 10_000; }
@@ -2483,9 +2633,57 @@ fn unregister_leader_neuron(neuron_id: u64) -> Result<(), String> {
 async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(), String> {
     require_authenticated()?;
     let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    commit_inner(caller, proposal_id, stance, target_e8s, None).await
+}
 
+/// Commit a vote in ANY supported token. The token is ESCROWED — it only
+/// converts to ICP if the proposal passes its threshold and the vote is cast
+/// (settlement swap, then the standard burn split). If the threshold misses,
+/// the refund pays back the SAME token. Pots and threshold maths use the
+/// oracle ICP-equivalent at commit time. Fund the per-proposal escrow
+/// (get_deposit_address) on the TOKEN's ledger first. $1 minimum.
+#[ic_cdk::update]
+async fn commit_token(
+    proposal_id: u64,
+    stance: Stance,
+    token: ExplorerToken,
+    amount: u64,
+) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
 
+    if token == ExplorerToken::ICP {
+        // ICP needs no conversion: same semantics as commit(amount).
+        return commit_inner(caller, proposal_id, stance, amount, None).await;
+    }
+
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    // Keep the oracle caches warm: the ICP-equivalent below seeds the pots.
+    let _ = explorer_usd_rate_e8s(token, &config).await;
+    refresh_icp_rate(&config).await;
+
+    let icp_equiv = expected_icp_for_token(token, amount);
+    let entry = AuditLogEntry {
+        timestamp: current_time(),
+        event_type: "commit_token".to_string(),
+        proposal_id,
+        user: caller,
+        amount_e8s: icp_equiv,
+    };
+    AUDIT_LOG.with(|log| { let _ = log.borrow_mut().append(&entry); });
+
+    commit_inner(caller, proposal_id, stance, icp_equiv, Some((token, amount))).await
+}
+
+async fn commit_inner(
+    caller: Principal,
+    proposal_id: u64,
+    stance: Stance,
+    target_e8s: u64,
+    token_commit: Option<(ExplorerToken, u64)>,
+) -> Result<(), String> {
     let user_neuron = USER_NEURONS.with(|map| map.borrow().get(&caller));
     let user_neuron = match user_neuron {
         Some(state) => state,
@@ -2521,7 +2719,11 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         return Err("TOO_MANY_COMMITMENTS".to_string());
     }
 
-    if target_e8s < MIN_COMMIT_E8S {
+    if token_commit.is_none() && target_e8s < MIN_COMMIT_E8S {
+        return Err("BELOW_MINIMUM".to_string());
+    }
+    if token_commit.is_some() && icp_amount_usd_e8s(target_e8s) < USD_E8S_PER_USD {
+        // Token commits clear a $1 floor (presets start at $1).
         return Err("BELOW_MINIMUM".to_string());
     }
 
@@ -2557,31 +2759,29 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         subaccount: Some(subaccount),
     };
 
-    let balance = call_ledger_balance(ledger_id, escrow_account).await?;
-    // target + 500_000 protocol fee + 4×10_000 ledger fees (commit fee transfer +
-    // the three settlement-split transfers: treasury, backend CMC, frontend CMC).
-    let required_deposit = target_e8s + 540_000;
-
-    if balance < required_deposit {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    if let Some((token, token_amount)) = token_commit {
+        // Token commitment: the TOKEN sits in this proposal's escrow on its
+        // own ledger until settlement (swap on pass, in-kind refund on miss).
+        // No ICP protocol fee — the treasury's 50% on a successful burn is
+        // the protocol's take.
+        let token_ledger = explorer_token_ledger(token, &config);
+        let balance = call_ledger_balance(token_ledger, escrow_account).await?;
+        if balance < token_amount {
+            return Err("INSUFFICIENT_DEPOSIT".to_string());
+        }
+    } else {
+        // Zero-fee commits: the user deposits EXACTLY the amount. No protocol
+        // fee, and the treasury fronts every ledger fee at settlement or refund
+        // time, so a refunded commit returns the exact deposit.
+        let balance = call_ledger_balance(ledger_id, escrow_account).await?;
+        if balance < target_e8s {
+            return Err("INSUFFICIENT_DEPOSIT".to_string());
+        }
     }
-
-    let treasury_dest = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(TREASURY_SUBACCOUNT),
-    };
-
-    call_ledger_transfer(
-        ledger_id,
-        Some(subaccount),
-        treasury_dest,
-        500_000,
-        Some(10_000),
-    ).await.map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
 
     // F-105: compute pot updates with checked arithmetic BEFORE writing any state,
     // so an (effectively impossible) overflow returns an error without orphaning a
-    // Pending commitment. The fee transfer above is the saga point-of-no-return.
+    // Pending commitment. The escrow balance check above is the saga gate.
     // Record the first stance on this proposal — the tie-breaker at settlement.
     if proposal.first_stance.is_none() {
         proposal.first_stance = Some(stance.clone());
@@ -2616,6 +2816,9 @@ async fn commit(proposal_id: u64, stance: Stance, target_e8s: u64) -> Result<(),
         cmc_block_index: None,
         treasury_block: None,
         frontend_cmc_block: None,
+        token: token_commit.map(|(t, _)| t),
+        token_amount: token_commit.map(|(_, a)| a),
+        swapped_icp_e8s: None,
     };
 
     COMMITMENTS.with(|map| {
@@ -3403,6 +3606,7 @@ async fn fetch_live_proposals() {
             vote_executed_at: None,
             total_burned_e8s: None,
             first_stance: None,
+            threshold_usd_e8s: CONFIG.with(|c| c.borrow().get().default_threshold_usd_e8s),
             pool_distributed: false,
             lossless_adopt_e8s: 0,
             lossless_reject_e8s: 0,
@@ -3479,8 +3683,53 @@ async fn cast_nns_vote(leader_id: u64, proposal_id: u64, vote_choice: i32) -> Re
 /// carry a proposal — it is "met" when burn commitments reach the threshold
 /// OR when the combined staked voting weight (both sides) equals/exceeds the
 /// same ICP threshold.
+/// Cached USD price of one whole token (e8s of USD). Never async: uses the
+/// admin-set/XRC-cached explorer rate or the static default. Mainnet async
+/// paths refresh the cache via `refresh_icp_rate` before sync valuations.
+fn cached_usd_rate_e8s(token: ExplorerToken) -> u64 {
+    if token == ExplorerToken::CkUSDC || token == ExplorerToken::CkUSDT {
+        return USD_E8S_PER_USD;
+    }
+    let idx = explorer_token_index(token);
+    let cached = EXPLORER_USD_RATES.with(|r| r.borrow()[idx].0);
+    if cached > 0 { cached } else { default_usd_rate_e8s(token) }
+}
+
+/// USD value (e8s of USD) of an ICP amount (e8s), via the cached rate.
+fn icp_amount_usd_e8s(amount_e8s: u64) -> u64 {
+    let rate = cached_usd_rate_e8s(ExplorerToken::ICP) as u128;
+    u64::try_from(amount_e8s as u128 * rate / 100_000_000u128).unwrap_or(u64::MAX)
+}
+
+/// USD value (e8s of USD) of `amount` smallest units of `token`.
+fn token_amount_usd_e8s(token: ExplorerToken, amount: u64) -> u64 {
+    let rate = cached_usd_rate_e8s(token) as u128;
+    let scale = 10u128.pow(explorer_token_decimals(token));
+    u64::try_from(amount as u128 * rate / scale).unwrap_or(u64::MAX)
+}
+
+/// ICP (e8s) the market should pay for `amount` of `token`, via cached rates.
+fn expected_icp_for_token(token: ExplorerToken, amount: u64) -> u64 {
+    let usd = token_amount_usd_e8s(token, amount) as u128;
+    let icp_rate = cached_usd_rate_e8s(ExplorerToken::ICP).max(1) as u128;
+    u64::try_from(usd * 100_000_000u128 / icp_rate).unwrap_or(u64::MAX)
+}
+
+/// Mainnet: keep the ICP/USD cache warm before a sync threshold valuation.
+/// Local/tests: no-op (cached/static rates are authoritative there).
+async fn refresh_icp_rate(config: &Config) {
+    if !config.is_local && cfg!(target_arch = "wasm32") {
+        let _ = explorer_usd_rate_e8s(ExplorerToken::ICP, config).await;
+    }
+}
+
 fn proposal_threshold_met(p: &Proposal) -> bool {
     let staked = p.lossless_adopt_e8s.saturating_add(p.lossless_reject_e8s);
+    if let Some(threshold_usd) = p.threshold_usd_e8s {
+        // Dollar-denominated threshold: value the ICP pots at the cached rate.
+        return icp_amount_usd_e8s(p.total_committed_e8s) >= threshold_usd
+            || icp_amount_usd_e8s(staked) >= threshold_usd;
+    }
     p.total_committed_e8s >= p.threshold_e8s || staked >= p.threshold_e8s
 }
 
@@ -3619,6 +3868,16 @@ async fn settle_proposal_commitments(proposal_id: u64) {
         let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key)).unwrap();
 
         if is_voted {
+            // Token commitments convert to ICP NOW — the vote passed. The
+            // swap is journaled; persist before splitting so a trap can
+            // never re-swap.
+            if let Err(e) = ensure_commitment_swapped(&config, &mut commitment).await {
+                commitment.status = CommitmentStatus::FailedBurn;
+                canister_print(&format!("settlement swap failed for user {}: {}", user, e));
+                COMMITMENTS.with(|map| { map.borrow_mut().insert(key.clone(), commitment); });
+                continue;
+            }
+            COMMITMENTS.with(|map| { map.borrow_mut().insert(key.clone(), commitment.clone()); });
             // PB-125: split the proceeds — 50% treasury, 25% backend cycles,
             // 25% frontend cycles (idempotent across retries).
             match settle_burn_split(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
@@ -3667,12 +3926,25 @@ async fn settle_proposal_commitments(proposal_id: u64) {
                 owner: user,
                 subaccount: None,
             };
+            // Token commitments refund IN KIND: the token never left its
+            // escrow, so it goes straight back. The treasury fronts the
+            // transfer fee so the refund equals the exact deposit.
+            let (refund_ledger, deposited, refund_fee, refund_token) =
+                match (commitment.token, commitment.token_amount) {
+                    (Some(t), Some(a)) => {
+                        let fee = explorer_token_fee(t, &config);
+                        (explorer_token_ledger(t, &config), a, fee, idea_token_of(t))
+                    }
+                    _ => (ledger_id, commitment.amount_e8s, 10_000, IdeaToken::ICP),
+                };
+            let refund_amount =
+                refundable_with_treasury_cover(refund_ledger, commitment.subaccount, deposited, refund_fee).await;
             let transfer_res = call_ledger_transfer(
-                ledger_id,
+                refund_ledger,
                 Some(commitment.subaccount),
                 user_dest,
-                commitment.amount_e8s,
-                Some(10_000),
+                refund_amount,
+                Some(refund_fee),
             ).await;
 
             match transfer_res {
@@ -3696,7 +3968,7 @@ async fn settle_proposal_commitments(proposal_id: u64) {
                     AUDIT_LOG.with(|log| {
                         let _ = log.borrow_mut().append(&log_entry);
                     });
-                    record_payout(user, PayoutType::CommitmentRefund, IdeaToken::ICP, commitment.amount_e8s, proposal_id);
+                    record_payout(user, PayoutType::CommitmentRefund, refund_token, refund_amount, proposal_id);
                 }
                 Err(e) => {
                     commitment.status = CommitmentStatus::FailedRefund;
@@ -3787,6 +4059,19 @@ async fn retry_failed_settlements() {
         let mut commitment = COMMITMENTS.with(|map| map.borrow().get(&key)).unwrap();
 
         if commitment.status == CommitmentStatus::FailedBurn {
+            // Token commitments: make sure the settlement swap ran (journaled
+            // via swapped_icp_e8s — a retry never swaps twice). Persist the
+            // journal before splitting.
+            let config = CONFIG.with(|cell| cell.borrow().get().clone());
+            if let Err(e) = ensure_commitment_swapped(&config, &mut commitment).await {
+                canister_print(&format!(
+                    "retry_failed_settlements: settlement swap retry failed for proposal {} user {}: {}",
+                    proposal_id, user, e
+                ));
+                COMMITMENTS.with(|map| { map.borrow_mut().insert(key, commitment); });
+                continue;
+            }
+            COMMITMENTS.with(|map| { map.borrow_mut().insert(key.clone(), commitment.clone()); });
             // Idempotent retry — completed split transfers are skipped (their
             // block indices are Some); only the unfinished step/notify re-runs.
             match settle_burn_split(ledger_id, commitment.subaccount, commitment.amount_e8s, &mut commitment).await {
@@ -3824,18 +4109,29 @@ async fn retry_failed_settlements() {
         } else if commitment.status == CommitmentStatus::FailedRefund {
             // Refund path is naturally idempotent: the user's subaccount
             // balance is unchanged after a failed transfer, so a retry
-            // simply performs the transfer again. The balance check in
-            // commit() ensures we never refund more than was escrowed.
+            // simply performs the transfer again. Token commitments refund
+            // IN KIND from their own ledger's escrow.
+            let config = CONFIG.with(|cell| cell.borrow().get().clone());
+            let (refund_ledger, deposited, refund_fee) =
+                match (commitment.token, commitment.token_amount) {
+                    (Some(t), Some(a)) => {
+                        let fee = explorer_token_fee(t, &config);
+                        (explorer_token_ledger(t, &config), a, fee)
+                    }
+                    _ => (ledger_id, commitment.amount_e8s, 10_000),
+                };
+            let refund_amount =
+                refundable_with_treasury_cover(refund_ledger, commitment.subaccount, deposited, refund_fee).await;
             let user_dest = LedgerAccount {
                 owner: user,
                 subaccount: None,
             };
             let transfer_res = call_ledger_transfer(
-                ledger_id,
+                refund_ledger,
                 Some(commitment.subaccount),
                 user_dest,
-                commitment.amount_e8s,
-                Some(10_000),
+                refund_amount,
+                Some(refund_fee),
             ).await;
             match transfer_res {
                 Ok(_) => {
@@ -4108,8 +4404,16 @@ pub const FLAG_LOSSLESS_LOTTERY: &str = "lossless_lottery";
 pub const FLAG_EXPLORER: &str = "dapp_explorer";
 pub const FLAG_ARCADE: &str = "arcade";
 pub const FLAG_EARLY_ADOPTERS: &str = "early_adopters";
-const KNOWN_FEATURE_FLAGS: [&str; 6] =
-    [FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER, FLAG_ARCADE, FLAG_EARLY_ADOPTERS];
+// Per-game arcade kill switches — a game is live only when BOTH the parent
+// `arcade` flag and its own flag are on.
+pub const FLAG_ARCADE_MINIGOLF: &str = "arcade_minigolf";
+pub const FLAG_ARCADE_FIELDGOAL: &str = "arcade_fieldgoal";
+pub const FLAG_ARCADE_TURBORUSH: &str = "arcade_turborush";
+const KNOWN_FEATURE_FLAGS: [&str; 9] = [
+    FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
+    FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
+    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_TURBORUSH,
+];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
 const MAX_FLAG_KEY_LEN: usize = 64;
@@ -4146,6 +4450,10 @@ pub enum IdeaToken {
     ICP,
     CkBTC,
     CkETH,
+    /// Payout-record use only (token-vote refunds) — the idea board itself
+    /// does not accept stables.
+    CkUSDC,
+    CkUSDT,
 }
 
 /// An idea is implicitly Active while stored; the sweep DELETES ideas whose
@@ -4321,6 +4629,12 @@ fn feature_default(key: &str) -> bool {
         // Ships dark like the lottery — flips on locally via deploy-local.sh,
         // on mainnet via the admin flag panel after a playtest.
         FLAG_ARCADE => false,
+        // Per-game flags default ON — the parent `arcade` flag is the master
+        // kill switch; these let an admin pull ONE game without closing the
+        // whole arcade.
+        FLAG_ARCADE_MINIGOLF => true,
+        FLAG_ARCADE_FIELDGOAL => true,
+        FLAG_ARCADE_TURBORUSH => true,
         // Irreversible money-moving — ships dark until the owner enables it.
         FLAG_EARLY_ADOPTERS => false,
         _ => false,
@@ -4393,6 +4707,8 @@ fn admin_set_feature_flag(key: String, enabled: bool) -> Result<(), String> {
 fn token_ledger(token: IdeaToken, config: &Config) -> Principal {
     match token {
         IdeaToken::ICP => config.ledger_canister_id,
+        IdeaToken::CkUSDC => explorer_token_ledger(ExplorerToken::CkUSDC, config),
+        IdeaToken::CkUSDT => explorer_token_ledger(ExplorerToken::CkUSDT, config),
         IdeaToken::CkBTC => {
             if config.is_local {
                 config.ckbtc_ledger_canister_id.unwrap_or(config.ledger_canister_id)
@@ -4417,6 +4733,8 @@ fn token_ledger(token: IdeaToken, config: &Config) -> Principal {
 fn token_fee(token: IdeaToken, config: &Config) -> u64 {
     match token {
         IdeaToken::ICP => 10_000, // 0.0001 ICP
+        IdeaToken::CkUSDC => explorer_token_fee(ExplorerToken::CkUSDC, config),
+        IdeaToken::CkUSDT => explorer_token_fee(ExplorerToken::CkUSDT, config),
         IdeaToken::CkBTC => {
             if config.is_local && config.ckbtc_ledger_canister_id.is_none() {
                 10_000
@@ -4438,6 +4756,9 @@ fn token_fee(token: IdeaToken, config: &Config) -> u64 {
 /// (~$1 equivalent per token — see DEFAULT_MIN_UPVOTE_* rates).
 fn token_min_upvote(token: IdeaToken, config: &Config) -> u64 {
     match token {
+        // Stables are payout-record-only — an unreachable upvote minimum
+        // keeps them out of the idea board without touching call sites.
+        IdeaToken::CkUSDC | IdeaToken::CkUSDT => u64::MAX,
         IdeaToken::ICP => config.min_upvote_icp_e8s.unwrap_or(DEFAULT_MIN_UPVOTE_ICP_E8S),
         IdeaToken::CkBTC => config.min_upvote_ckbtc_e8s.unwrap_or(DEFAULT_MIN_UPVOTE_CKBTC_SATS),
         IdeaToken::CkETH => config.min_upvote_cketh_wei.unwrap_or(DEFAULT_MIN_UPVOTE_CKETH_WEI),
@@ -4458,6 +4779,7 @@ fn admin_set_token_ledger(token: IdeaToken, ledger: Principal) -> Result<(), Str
         }
         match token {
             IdeaToken::ICP => return Err("ICP_LEDGER_FIXED".to_string()),
+            IdeaToken::CkUSDC | IdeaToken::CkUSDT => return Err("USE_EXPLORER_LEDGER_SETTER".to_string()),
             IdeaToken::CkBTC => cfg.ckbtc_ledger_canister_id = Some(ledger),
             IdeaToken::CkETH => cfg.cketh_ledger_canister_id = Some(ledger),
         }
@@ -4477,6 +4799,7 @@ fn admin_set_min_upvote(token: IdeaToken, min: u64) -> Result<(), String> {
         let mut cfg = cell.borrow().get().clone();
         match token {
             IdeaToken::ICP => cfg.min_upvote_icp_e8s = Some(min),
+            IdeaToken::CkUSDC | IdeaToken::CkUSDT => return Err("UNSUPPORTED_TOKEN".to_string()),
             IdeaToken::CkBTC => cfg.min_upvote_ckbtc_e8s = Some(min),
             IdeaToken::CkETH => cfg.min_upvote_cketh_wei = Some(min),
         }
@@ -4770,6 +5093,7 @@ fn apply_upvote_to_idea(uv: &IdeaUpvote, now: u64) {
             idea.upvote_count = idea.upvote_count.saturating_add(1);
             idea.last_upvote_at = now;
             match uv.token {
+                IdeaToken::CkUSDC | IdeaToken::CkUSDT => {}
                 IdeaToken::ICP => {
                     idea.total_icp_e8s = idea.total_icp_e8s.saturating_add(uv.amount)
                 }
@@ -5101,6 +5425,7 @@ fn apply_funding_to_project(f: &ProjectFunding) {
         if let Some(mut project) = m.get(&f.project_id) {
             project.funding_count = project.funding_count.saturating_add(1);
             match f.token {
+                IdeaToken::CkUSDC | IdeaToken::CkUSDT => {}
                 IdeaToken::ICP => {
                     project.raised_icp_e8s = project.raised_icp_e8s.saturating_add(f.amount)
                 }
@@ -5138,6 +5463,7 @@ async fn fund_project(project_id: u64, token: IdeaToken, amount: u64) -> Result<
         .ok_or_else(|| "PROJECT_NOT_FOUND".to_string())?;
 
     let accepted = match token {
+        IdeaToken::CkUSDC | IdeaToken::CkUSDT => false,
         IdeaToken::ICP => project.accept_icp,
         IdeaToken::CkBTC => project.accept_ckbtc,
         IdeaToken::CkETH => project.accept_cketh,
@@ -5342,6 +5668,7 @@ async fn dev_faucet_token(token: IdeaToken) -> Result<(), String> {
         IdeaToken::ICP => 10_000_000_000,             // 100 ICP
         IdeaToken::CkBTC => 10_000_000,               // 0.1 ckBTC
         IdeaToken::CkETH => 1_000_000_000_000_000_000, // 1 ckETH
+        IdeaToken::CkUSDC | IdeaToken::CkUSDT => 100_000_000, // 100 USD (dev faucet)
     };
     let dest = LedgerAccount { owner: get_caller(), subaccount: None };
     call_ledger_transfer(ledger, None, dest, amount, Some(fee))
@@ -5429,6 +5756,28 @@ const STAKED_VP_DIVISOR: u64 = 10;
 /// Voting power contributed by `amount_e8s` of stake.
 fn staked_voting_power(amount_e8s: u64) -> u64 {
     amount_e8s / STAKED_VP_DIVISOR
+}
+
+// ── VP tenure doubling ──
+// Loyalty compounding: every 6 months a stake stays put, the voting power
+// it grants DOUBLES — 1× → 2× → 4× → 8× → 16×, capped after 2 years (4
+// doublings). Tenure is per tier-stake, anchored at `staked_at`; top-ups
+// move the anchor to the amount-weighted average (new capital can't borrow
+// old tenure), partial unstakes keep it. In the planned casino (Epics I/J)
+// the same 6-month tick also restores casino-lost VP (the "tenure
+// jubilee") — the base weight computed here is what that restoration
+// returns players to.
+const VP_TENURE_PERIOD_NANOS: u64 = 15_778_800 * 1_000_000_000; // 6 months
+const VP_TENURE_MAX_DOUBLINGS: u32 = 4; // capped at 16× after 2 years
+
+fn vp_tenure_multiplier(staked_at: u64, now: u64) -> u64 {
+    let periods = (now.saturating_sub(staked_at) / VP_TENURE_PERIOD_NANOS) as u32;
+    1u64 << periods.min(VP_TENURE_MAX_DOUBLINGS)
+}
+
+/// One tier-stake's voting power: (amount ÷ 10) × tenure multiplier.
+fn stake_weight_e8s(amount_e8s: u64, staked_at: u64, now: u64) -> u64 {
+    staked_voting_power(amount_e8s).saturating_mul(vp_tenure_multiplier(staked_at, now))
 }
 /// True zero-loss staking: the treasury reimburses every fee the user's
 /// stake/unstake cycle touches — the wallet→escrow deposit fee, the neuron
@@ -5660,11 +6009,15 @@ pub struct YieldDistribution {
 pub struct UserTierStake {
     pub tier: StakeTier,
     pub amount_e8s: u64,
-    /// amount × the tier's term multiplier — the voting power this position
-    /// contributes.
+    /// (amount ÷ 10) × tenure multiplier — the voting power this position
+    /// contributes right now.
     pub weight_e8s: u64,
     pub staked_at: u64,
     pub last_action_at: u64,
+    /// Current tenure multiplier (1/2/4/8/16 — doubles every 6 months).
+    pub tenure_multiplier: u64,
+    /// When the next doubling lands (ns); 0 once capped at 16×.
+    pub next_double_at: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -5827,16 +6180,17 @@ fn stake_key(tier: StakeTier, user: Principal) -> StakeKey {
 
 /// The caller's total voting weight: Σ stake × term multiplier over tiers.
 fn user_voting_weight(user: Principal) -> u64 {
-    // Voting power = total ICP staked ÷ 10 (10 staked ICP = 1 burned ICP of
-    // weight). The term multiplier scales lottery tickets, not voting power.
-    let total: u64 = StakeTier::all().iter().fold(0u64, |acc, &tier| {
-        let amount = STAKES
+    // Voting power = Σ per-tier (staked ICP ÷ 10) × tenure multiplier
+    // (doubles every 6 months staked, capped 16× — see vp_tenure_multiplier).
+    // The TERM multiplier (1×/2×/4×) still scales lottery tickets only.
+    let now = current_time();
+    StakeTier::all().iter().fold(0u64, |acc, &tier| {
+        let w = STAKES
             .with(|m| m.borrow().get(&stake_key(tier, user)))
-            .map(|s| s.amount_e8s)
+            .map(|s| stake_weight_e8s(s.amount_e8s, s.staked_at, now))
             .unwrap_or(0);
-        acc.saturating_add(amount)
-    });
-    staked_voting_power(total)
+        acc.saturating_add(w)
+    })
 }
 
 /// True when the user holds a stake in any tier (the lottery eligibility gate).
@@ -6423,6 +6777,15 @@ async fn stake(amount_e8s: u64, tier: StakeTier) -> Result<(), String> {
             staked_at: now,
             last_action_at: now,
         });
+        // Tenure anchor moves to the amount-weighted average on top-up:
+        // fresh capital starts its 6-month VP-doubling clock from now and
+        // can't ride the old stake's tenure (vp_tenure_multiplier).
+        if s.amount_e8s > 0 {
+            let old_amt = s.amount_e8s as u128;
+            let add_amt = amount_e8s as u128;
+            s.staked_at = ((s.staked_at as u128 * old_amt + now as u128 * add_amt)
+                / (old_amt + add_amt)) as u64;
+        }
         s.amount_e8s = s.amount_e8s.checked_add(amount_e8s).unwrap_or(u64::MAX);
         s.last_action_at = now;
         m.borrow_mut().insert(key, s);
@@ -7129,30 +7492,40 @@ async fn settle_yield_split(dist: &mut YieldDistribution) -> Result<(), String> 
 #[ic_cdk::query]
 fn get_my_stake() -> UserStakeInfo {
     let caller = get_caller();
+    let now = current_time();
     let mut tiers = Vec::new();
     let mut total = 0u64;
     let mut weight = 0u64;
     for tier in StakeTier::all() {
         if let Some(s) = STAKES.with(|m| m.borrow().get(&stake_key(tier, caller))) {
-            // Voting power = staked ICP ÷ 10 (10 staked = 1 burned of weight).
-            let w = staked_voting_power(s.amount_e8s);
+            // Voting power = (staked ICP ÷ 10) × tenure multiplier — same
+            // per-tier formula as the cast-time weight (user_voting_weight).
+            let w = stake_weight_e8s(s.amount_e8s, s.staked_at, now);
+            let mult = vp_tenure_multiplier(s.staked_at, now);
+            let periods = (now.saturating_sub(s.staked_at) / VP_TENURE_PERIOD_NANOS) as u32;
+            let next_double_at = if periods >= VP_TENURE_MAX_DOUBLINGS {
+                0
+            } else {
+                s.staked_at
+                    .saturating_add((periods as u64 + 1).saturating_mul(VP_TENURE_PERIOD_NANOS))
+            };
             tiers.push(UserTierStake {
                 tier,
                 amount_e8s: s.amount_e8s,
                 weight_e8s: w,
                 staked_at: s.staked_at,
                 last_action_at: s.last_action_at,
+                tenure_multiplier: mult,
+                next_double_at,
             });
             total = total.saturating_add(s.amount_e8s);
             weight = weight.saturating_add(w);
         }
     }
-    let _ = weight; // per-tier sum kept for the rows; the headline total uses
-    // the same single-division formula as the cast-time weight.
     UserStakeInfo {
         tiers,
         total_staked_e8s: total,
-        total_weight_e8s: staked_voting_power(total),
+        total_weight_e8s: weight,
     }
 }
 
@@ -8681,6 +9054,311 @@ async fn explorer_usd_rate_e8s(token: ExplorerToken, config: &Config) -> Result<
     }
 }
 
+// ==========================================
+// Token→ICP swaps (multi-token voting)
+// ==========================================
+//
+// Commits in ck-tokens convert to ICP AT COMMIT TIME, then ride the existing
+// ICP machinery untouched (escrow, pots, burns, refunds — refunds are ICP).
+// Three execution paths:
+//   • host tests   — TEST_MOCK_SWAP / rate-derived, no ledgers
+//   • local wasm   — "internal desk": token → treasury, ICP paid from the
+//                    SWAP_LIQUIDITY_SUBACCOUNT at the cached rates
+//   • mainnet wasm — ICPSwap pool saga: approve → depositFrom → swap →
+//                    withdraw (pool ids admin-configured per token)
+
+/// Local internal-swap ICP float (seeded by deploy-local / admin deposits).
+const SWAP_LIQUIDITY_SUBACCOUNT: [u8; 32] = [8u8; 32];
+
+/// Max slippage vs the cached oracle rates on mainnet swaps: 2%.
+const SWAP_SLIPPAGE_PCT: u64 = 2;
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SwapPoolCfg {
+    pub pool: Principal,
+    /// True when the vote token is token0 in the pool (swap zeroForOne=true
+    /// converts token→ICP); false when ICP is token0.
+    pub token_is_token0: bool,
+}
+impl_storable!(SwapPoolCfg);
+
+thread_local! {
+    /// token index (explorer_token_index) → ICPSwap pool wiring. Mainnet only.
+    static SWAP_POOLS: RefCell<StableBTreeMap<u8, SwapPoolCfg, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(51))))
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// Host-test override for swap results (None = rate-derived success).
+    static TEST_MOCK_SWAP: RefCell<Option<Result<u64, String>>> = const { RefCell::new(None) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+fn set_mock_swap(res: Option<Result<u64, String>>) {
+    TEST_MOCK_SWAP.with(|c| *c.borrow_mut() = res);
+}
+
+/// Admin: wire a vote token to its ICPSwap pool (mainnet swap path).
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_swap_pool(token: ExplorerToken, pool: Principal, token_is_token0: bool) -> Result<(), String> {
+    if token == ExplorerToken::ICP {
+        return Err("ICP_NEEDS_NO_POOL".to_string());
+    }
+    SWAP_POOLS.with(|m| {
+        m.borrow_mut().insert(
+            explorer_token_index(token) as u8,
+            SwapPoolCfg { pool, token_is_token0 },
+        );
+    });
+    Ok(())
+}
+
+// ── ICRC-2 approve (for ICPSwap depositFrom) ──
+#[derive(CandidType, Serialize)]
+struct Icrc2ApproveArgs {
+    from_subaccount: Option<[u8; 32]>,
+    spender: LedgerAccount,
+    amount: candid::Nat,
+    expected_allowance: Option<candid::Nat>,
+    expires_at: Option<u64>,
+    fee: Option<candid::Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+enum Icrc2ApproveResult {
+    Ok(candid::Nat),
+    Err(TransferError),
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn call_icrc2_approve(
+    ledger: Principal,
+    from_sub: [u8; 32],
+    spender: Principal,
+    amount: u64,
+    fee: u64,
+) -> Result<(), String> {
+    let args = Icrc2ApproveArgs {
+        from_subaccount: Some(from_sub),
+        spender: LedgerAccount { owner: spender, subaccount: None },
+        amount: candid::Nat::from(amount),
+        expected_allowance: None,
+        expires_at: None,
+        fee: Some(candid::Nat::from(fee)),
+        memo: None,
+        created_at_time: None,
+    };
+    let res: Result<(Icrc2ApproveResult,), _> = ic_cdk::call(ledger, "icrc2_approve", (args,)).await;
+    match res {
+        Ok((Icrc2ApproveResult::Ok(_),)) => Ok(()),
+        Ok((Icrc2ApproveResult::Err(e),)) => Err(format!("APPROVE_FAILED: {:?}", e)),
+        Err((code, msg)) => Err(format!("APPROVE_REJECTED ({:?}): {}", code, msg)),
+    }
+}
+
+// ── ICPSwap pool surface (per ICPSwap-Labs/docs) ──
+#[derive(CandidType, Serialize)]
+struct IcpswapDepositArgs {
+    fee: candid::Nat,
+    token: String,
+    amount: candid::Nat,
+}
+
+#[derive(CandidType, Serialize)]
+struct IcpswapSwapArgs {
+    #[serde(rename = "amountIn")]
+    amount_in: String,
+    #[serde(rename = "zeroForOne")]
+    zero_for_one: bool,
+    #[serde(rename = "amountOutMinimum")]
+    amount_out_minimum: String,
+}
+
+/// ICPSwap's Error variant (icpswap-v3-service candid).
+#[derive(CandidType, Deserialize, Debug)]
+enum IcpswapError {
+    CommonError,
+    InternalError(String),
+    UnsupportedToken(String),
+    InsufficientFunds,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+enum IcpswapResult {
+    #[serde(rename = "ok")]
+    Ok(candid::Nat),
+    #[serde(rename = "err")]
+    Err(IcpswapError),
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn icpswap_call_nat(
+    pool: Principal,
+    method: &str,
+    args_deposit: Option<IcpswapDepositArgs>,
+    args_swap: Option<IcpswapSwapArgs>,
+) -> Result<u64, String> {
+    let res: Result<(IcpswapResult,), _> = if let Some(a) = args_deposit {
+        ic_cdk::call(pool, method, (a,)).await
+    } else {
+        ic_cdk::call(pool, method, (args_swap.unwrap(),)).await
+    };
+    match res {
+        Ok((IcpswapResult::Ok(n),)) => Ok(u64::try_from(n.0).unwrap_or(u64::MAX)),
+        Ok((IcpswapResult::Err(e),)) => Err(format!("{}_FAILED: {:?}", method.to_uppercase(), e)),
+        Err((code, msg)) => Err(format!("{}_REJECTED ({:?}): {}", method.to_uppercase(), code, msg)),
+    }
+}
+
+/// Swap `amount` of `token` (held in the user's per-proposal escrow
+/// subaccount on the token's ledger) into ICP, delivered to the SAME
+/// subaccount on the ICP ledger. Returns the ICP received (e8s).
+async fn swap_token_to_icp(
+    config: &Config,
+    sub: [u8; 32],
+    token: ExplorerToken,
+    amount: u64,
+    min_icp_out: u64,
+) -> Result<u64, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Host tests: honour the override, else pay the rate-derived amount.
+        if let Some(res) = TEST_MOCK_SWAP.with(|c| c.borrow().clone()) {
+            let _ = (config, sub); // host path uses mocked ledgers
+            return res.and_then(|out| {
+                if out < min_icp_out { Err("SLIPPAGE".to_string()) } else { Ok(out) }
+            });
+        }
+        let out = expected_icp_for_token(token, amount);
+        if out < min_icp_out {
+            return Err("SLIPPAGE".to_string());
+        }
+        return Ok(out);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let token_ledger = explorer_token_ledger(token, config);
+        let token_fee = explorer_token_fee(token, config);
+        if config.is_local {
+            // Internal desk: token → treasury; ICP from the liquidity float.
+            let icp_out = expected_icp_for_token(token, amount);
+            if icp_out < min_icp_out {
+                return Err("SLIPPAGE".to_string());
+            }
+            let liquidity = LedgerAccount {
+                owner: get_canister_id(),
+                subaccount: Some(SWAP_LIQUIDITY_SUBACCOUNT),
+            };
+            let float = call_ledger_balance(config.ledger_canister_id, liquidity).await?;
+            if float < icp_out.saturating_add(ICP_FEE_E8S) {
+                return Err("SWAP_LIQUIDITY_EMPTY".to_string());
+            }
+            let treasury_tok = LedgerAccount {
+                owner: get_canister_id(),
+                subaccount: Some(TREASURY_SUBACCOUNT),
+            };
+            call_ledger_transfer(token_ledger, Some(sub), treasury_tok, amount.saturating_sub(token_fee), Some(token_fee))
+                .await
+                .map_err(|e| format!("SWAP_TOKEN_LEG: {}", e))?;
+            let escrow_icp = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
+            call_ledger_transfer(config.ledger_canister_id, Some(SWAP_LIQUIDITY_SUBACCOUNT), escrow_icp, icp_out, Some(ICP_FEE_E8S))
+                .await
+                .map_err(|e| format!("SWAP_ICP_LEG: {}", e))?;
+            return Ok(icp_out);
+        }
+
+        // Mainnet: ICPSwap pool saga.
+        let cfg = SWAP_POOLS
+            .with(|m| m.borrow().get(&(explorer_token_index(token) as u8)))
+            .ok_or("SWAP_POOL_UNSET")?;
+        // 1. Allow the pool to pull the tokens from our escrow subaccount.
+        call_icrc2_approve(token_ledger, sub, cfg.pool, amount.saturating_add(token_fee), token_fee).await?;
+        // 2. Move them into the pool (depositFrom charges the ledger fee).
+        let deposited = icpswap_call_nat(
+            cfg.pool,
+            "depositFrom",
+            Some(IcpswapDepositArgs {
+                fee: candid::Nat::from(token_fee),
+                token: token_ledger.to_text(),
+                amount: candid::Nat::from(amount),
+            }),
+            None,
+        )
+        .await?;
+        // 3. Swap. On failure, best-effort recover the deposit back to us.
+        let swap_res = icpswap_call_nat(
+            cfg.pool,
+            "swap",
+            None,
+            Some(IcpswapSwapArgs {
+                amount_in: deposited.to_string(),
+                zero_for_one: cfg.token_is_token0,
+                amount_out_minimum: min_icp_out.to_string(),
+            }),
+        )
+        .await;
+        let icp_out = match swap_res {
+            Ok(out) => out,
+            Err(e) => {
+                let _ = icpswap_call_nat(
+                    cfg.pool,
+                    "withdraw",
+                    Some(IcpswapDepositArgs {
+                        fee: candid::Nat::from(token_fee),
+                        token: token_ledger.to_text(),
+                        amount: candid::Nat::from(deposited),
+                    }),
+                    None,
+                )
+                .await;
+                return Err(e);
+            }
+        };
+        // 4. Withdraw the ICP (lands in our default account), then move it
+        //    into the user's escrow subaccount for the normal commit flow.
+        icpswap_call_nat(
+            cfg.pool,
+            "withdraw",
+            Some(IcpswapDepositArgs {
+                fee: candid::Nat::from(ICP_FEE_E8S),
+                token: config.ledger_canister_id.to_text(),
+                amount: candid::Nat::from(icp_out),
+            }),
+            None,
+        )
+        .await?;
+        let escrow_icp = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
+        let net = icp_out.saturating_sub(2 * ICP_FEE_E8S); // pool withdraw fee + our transfer fee
+        call_ledger_transfer(config.ledger_canister_id, None, escrow_icp, net, Some(ICP_FEE_E8S))
+            .await
+            .map_err(|e| format!("SWAP_DELIVERY_LEG: {}", e))?;
+        Ok(net)
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TokenUsdRate {
+    pub token: ExplorerToken,
+    /// USD value of one whole token, e8s of USD ($1 = 100_000_000).
+    pub rate_usd_e8s: u64,
+}
+
+/// Cached USD rates for every supported token — what the UI uses to render
+/// dollar thresholds and conversion previews. Same source the canister uses
+/// for valuations (XRC-cached on mainnet, admin/static locally).
+#[ic_cdk::query]
+fn get_usd_rates() -> Vec<TokenUsdRate> {
+    [ExplorerToken::ICP, ExplorerToken::CkBTC, ExplorerToken::CkETH, ExplorerToken::CkUSDC, ExplorerToken::CkUSDT]
+        .iter()
+        .map(|&t| TokenUsdRate { token: t, rate_usd_e8s: cached_usd_rate_e8s(t) })
+        .collect()
+}
+
 fn dapp_is_live(d: &DappListing, now: u64) -> bool {
     d.status == DappStatus::Approved && d.expires_at.map(|x| now <= x).unwrap_or(true)
 }
@@ -8736,7 +9414,7 @@ fn seed_default_dapps() {
         c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
     });
     let now = current_time();
-    let samples: [(&str, &str, &str); 8] = [
+    let samples: [(&str, &str, &str); 9] = [
         (
             "idGeek 2.0",
             "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
@@ -8776,6 +9454,11 @@ fn seed_default_dapps() {
             "onicai",
             "https://www.onicai.com/",
             "AI-as-a-Service platform pioneering on-chain artificial intelligence: run large language models entirely inside ICP canisters, compete in incentivized AI tournaments via funnAI, and build with open-source GGUF tooling — no off-chain inference required.",
+        ),
+        (
+            "DGDG",
+            "https://dgdg.app/",
+            "NFT marketplace and aggregator for the Internet Computer: browse, buy and list collections like ICP.DOG, ICP Punks and ICP Flower with transparent creator fees and royalties, connecting via Internet Identity, Plug, Stoic or Bitfinity.",
         ),
     ];
     let existing: Vec<String> = DAPPS.with(|m| m.borrow().iter().map(|e| e.value().name.clone()).collect());
@@ -9221,7 +9904,7 @@ fn admin_set_usd_rate(token: ExplorerToken, rate_usd_e8s: u64) -> Result<(), Str
 // 17. Arcade (skill games, participation-gated)
 // ==========================================
 //
-// A section of one-player skill games — first title: "Mini Golf Gold", a
+// A section of one-player skill games — first title: "Mini Golf", a
 // 9-hole mini golf game. Playing is free, but it's a reward for protocol
 // participation: everyone signed-in may play hole 1; finishing a round (and
 // landing on the leaderboard) requires an active stake OR a vote cast in the
@@ -9242,11 +9925,38 @@ const MINIGOLF_MAX_STROKES_PER_HOLE: u8 = 12;
 /// Wall-clock sanity bounds for a submitted round.
 const MINIGOLF_MIN_MILLIS: u64 = 20_000; // nobody putts 9 holes in <20 s
 const MINIGOLF_MAX_MILLIS: u64 = 2 * 60 * 60 * 1000; // 2 h
+// Game 2: "Field Goal" — 5 kicks from random spots, 3-second pressure clock.
+// per_hole carries POINTS per kick (the kick distance in yards on a make,
+// 0 on a miss), so the board ranks by MOST points — see arcade_rank_key.
+const ARCADE_GAME_FIELDGOAL: &str = "fieldgoal";
+const FIELDGOAL_ROUNDS: usize = 5;
+/// Longest possible make is 20–58 yds in the frontend; 70 leaves headroom.
+const FIELDGOAL_MAX_POINTS_PER_KICK: u8 = 70;
+const FIELDGOAL_MIN_MILLIS: u64 = 5_000; // 5 snaps can't finish in <5 s
+const FIELDGOAL_MAX_MILLIS: u64 = 30 * 60 * 1000; // 30 min
+// Game 3: "Turbo Rush" — an original Atari-era pseudo-3D lane racer. One
+// 60-second run split into 5 stages; per_hole carries CARS PASSED per stage,
+// MOST total wins (arcade_rank_key inverts like Field Goal).
+const ARCADE_GAME_TURBORUSH: &str = "turborush";
+const TURBORUSH_STAGES: usize = 5;
+/// Physically ~1 pass/sec tops; 60/stage leaves headroom.
+const TURBORUSH_MAX_POINTS_PER_STAGE: u8 = 60;
+const TURBORUSH_MIN_MILLIS: u64 = 50_000; // the run itself is 60 s
+const TURBORUSH_MAX_MILLIS: u64 = 30 * 60 * 1000;
 const ARCADE_LEADERBOARD_LIMIT: usize = 100;
 // Palette sizes — the frontend mirrors these (index = palette entry).
 const CHARACTER_HAIR_OPTIONS: u8 = 6;
 const CHARACTER_SKIN_OPTIONS: u8 = 6;
 const CHARACTER_OUTFIT_OPTIONS: u8 = 8;
+// Kicker persona palettes (Field Goal): helmet/jersey share the 8-color
+// outfit palette, skin shares the 6-tone skin palette.
+const KICKER_HELMET_OPTIONS: u8 = 8;
+const KICKER_JERSEY_OPTIONS: u8 = 8;
+// Car palettes (Turbo Rush): body/stripe share the 8-color outfit palette,
+// wheels have their own 6-entry palette in the frontend.
+const CAR_BODY_OPTIONS: u8 = 8;
+const CAR_STRIPE_OPTIONS: u8 = 8;
+const CAR_WHEEL_OPTIONS: u8 = 6;
 
 /// Palette indices for the low-poly golfer (defaults are all 0).
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -9287,6 +9997,10 @@ pub struct ArcadeLeaderboardRow {
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct ArcadeInfo {
     pub enabled: bool,
+    /// Per-game kill switches (only meaningful when `enabled` is true).
+    pub minigolf_enabled: bool,
+    pub fieldgoal_enabled: bool,
+    pub turborush_enabled: bool,
     /// Caller may finish full rounds + submit scores (stake or recent vote).
     pub full_access: bool,
     pub has_stake: bool,
@@ -9294,6 +10008,10 @@ pub struct ArcadeInfo {
     /// $1.00 in USD e8s — convert with get_arcade_customize_quote.
     pub customize_fee_usd_e8s: u64,
     pub my_character: Option<ArcadeCharacter>,
+    /// Field Goal kicker persona — fields map hair→helmet, outfit→jersey.
+    pub my_kicker: Option<ArcadeCharacter>,
+    /// Turbo Rush car — fields map hair→body, skin→wheels, outfit→stripe.
+    pub my_car: Option<ArcadeCharacter>,
     pub hair_options: u8,
     pub skin_options: u8,
     pub outfit_options: u8,
@@ -9317,6 +10035,18 @@ thread_local! {
     static ARCADE_QUOTES: RefCell<StableBTreeMap<Principal, ExplorerQuote, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(50))))
     });
+
+    // Field Goal kicker personas — reuses ArcadeCharacter with the mapping
+    // hair→helmet, outfit→jersey (skin is skin).
+    static ARCADE_KICKERS: RefCell<StableBTreeMap<Principal, ArcadeCharacter, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(52))))
+    });
+
+    // Turbo Rush cars — reuses ArcadeCharacter with the mapping hair→body,
+    // skin→wheels, outfit→stripe.
+    static ARCADE_CARS: RefCell<StableBTreeMap<Principal, ArcadeCharacter, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(53))))
+    });
 }
 
 fn require_arcade_enabled() -> Result<(), String> {
@@ -9326,9 +10056,31 @@ fn require_arcade_enabled() -> Result<(), String> {
     Ok(())
 }
 
+/// Each game's own kill switch (on top of the parent `arcade` flag).
+fn arcade_game_flag(game: &str) -> &'static str {
+    match game {
+        ARCADE_GAME_FIELDGOAL => FLAG_ARCADE_FIELDGOAL,
+        ARCADE_GAME_TURBORUSH => FLAG_ARCADE_TURBORUSH,
+        _ => FLAG_ARCADE_MINIGOLF,
+    }
+}
+
+fn require_arcade_game_enabled(game: &str) -> Result<(), String> {
+    require_arcade_enabled()?;
+    if !feature_enabled(arcade_game_flag(game)) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
 /// Full access = active stake in any tier OR a vote (staked or burn commit)
 /// within the last 30 days. Everyone else is limited to hole 1.
+/// Admins bypass the preview gate outright (they run the games; reported as
+/// has_stake so the UI shows "unlocked").
 fn arcade_access(user: Principal) -> (bool, bool) {
+    if is_admin_principal(user) {
+        return (true, false);
+    }
     let has_stake = user_has_stake(user);
     if has_stake {
         // Access is already decided — skip the full-history scans below
@@ -9351,10 +10103,22 @@ fn arcade_access(user: Principal) -> (bool, bool) {
     (has_stake, voted_recently)
 }
 
-/// True when `a` beats `b`: fewer strokes, ties broken by faster time, then
-/// by earlier submission.
-fn arcade_score_beats(a: (u32, u64, u64), b: (u32, u64, u64)) -> bool {
-    a < b
+/// Leaderboard ordering key — LOWER key ranks higher for every game.
+/// Mini golf ranks by fewest strokes; Field Goal stores POINTS in the same
+/// slot and ranks by most, so its key inverts the score. Ties break by
+/// faster time, then earlier submission.
+fn arcade_rank_key(game: &str, score: u32, millis: u64, at: u64) -> (u32, u64, u64) {
+    // Field Goal + Turbo Rush rank by MOST points; mini golf by fewest strokes.
+    if game == ARCADE_GAME_FIELDGOAL || game == ARCADE_GAME_TURBORUSH {
+        (u32::MAX - score, millis, at)
+    } else {
+        (score, millis, at)
+    }
+}
+
+/// True when `a` beats `b` on `game`'s board.
+fn arcade_score_beats(game: &str, a: (u32, u64, u64), b: (u32, u64, u64)) -> bool {
+    arcade_rank_key(game, a.0, a.1, a.2) < arcade_rank_key(game, b.0, b.1, b.2)
 }
 
 /// Caller-bound deposit subaccount for arcade fees (character customization).
@@ -9379,11 +10143,16 @@ fn get_arcade_info() -> ArcadeInfo {
     };
     ArcadeInfo {
         enabled: feature_enabled(FLAG_ARCADE),
+        minigolf_enabled: feature_enabled(FLAG_ARCADE_MINIGOLF),
+        fieldgoal_enabled: feature_enabled(FLAG_ARCADE_FIELDGOAL),
+        turborush_enabled: feature_enabled(FLAG_ARCADE_TURBORUSH),
         full_access: has_stake || voted_recently,
         has_stake,
         voted_recently,
         customize_fee_usd_e8s: ARCADE_CUSTOMIZE_FEE_USD_E8S,
         my_character: ARCADE_CHARACTERS.with(|m| m.borrow().get(&caller)),
+        my_kicker: ARCADE_KICKERS.with(|m| m.borrow().get(&caller)),
+        my_car: ARCADE_CARS.with(|m| m.borrow().get(&caller)),
         hair_options: CHARACTER_HAIR_OPTIONS,
         skin_options: CHARACTER_SKIN_OPTIONS,
         outfit_options: CHARACTER_OUTFIT_OPTIONS,
@@ -9433,7 +10202,7 @@ async fn get_arcade_customize_quote(token: ExplorerToken) -> Result<ExplorerQuot
 #[ic_cdk::update]
 async fn customize_character(hair: u8, skin: u8, outfit: u8, token: ExplorerToken) -> Result<(), String> {
     require_authenticated()?;
-    require_arcade_enabled()?;
+    require_arcade_game_enabled(ARCADE_GAME_MINIGOLF)?;
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
 
@@ -9491,6 +10260,134 @@ async fn customize_character(hair: u8, skin: u8, outfit: u8, token: ExplorerToke
     Ok(())
 }
 
+/// Change the Field Goal kicker's look for $1, paid in any supported token
+/// at the quoted rate — the same quote + deposit flow as the golfer
+/// (get_arcade_customize_quote / get_arcade_deposit_address).
+#[ic_cdk::update]
+async fn customize_kicker(helmet: u8, skin: u8, jersey: u8, token: ExplorerToken) -> Result<(), String> {
+    require_authenticated()?;
+    require_arcade_game_enabled(ARCADE_GAME_FIELDGOAL)?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    if helmet >= KICKER_HELMET_OPTIONS || skin >= CHARACTER_SKIN_OPTIONS || jersey >= KICKER_JERSEY_OPTIONS {
+        return Err("INVALID_CHARACTER_OPTION".to_string());
+    }
+    let now = current_time();
+    let quote = ARCADE_QUOTES
+        .with(|m| m.borrow().get(&caller))
+        .ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.token != token {
+        return Err("QUOTE_MISMATCH".to_string());
+    }
+    if now > quote.expires_at {
+        return Err("QUOTE_EXPIRED".to_string());
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    let sub = derive_arcade_subaccount(&caller);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    if balance < quote.amount.saturating_add(fee) {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+    let treasury_dest = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
+        .await
+        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
+
+    ARCADE_KICKERS.with(|m| {
+        m.borrow_mut().insert(caller, ArcadeCharacter { hair: helmet, skin, outfit: jersey });
+    });
+    ARCADE_QUOTES.with(|m| {
+        m.borrow_mut().remove(&caller);
+    });
+
+    let entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "arcade_customize_kicker".to_string(),
+        proposal_id: 0,
+        user: caller,
+        amount_e8s: quote.amount,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&entry);
+    });
+    Ok(())
+}
+
+/// Change the Turbo Rush car's look (body/wheels/stripe palette indices)
+/// for $1, paid in any supported token — same quote + deposit flow as the
+/// golfer and kicker.
+#[ic_cdk::update]
+async fn customize_car(body: u8, wheels: u8, stripe: u8, token: ExplorerToken) -> Result<(), String> {
+    require_authenticated()?;
+    require_arcade_game_enabled(ARCADE_GAME_TURBORUSH)?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    if body >= CAR_BODY_OPTIONS || wheels >= CAR_WHEEL_OPTIONS || stripe >= CAR_STRIPE_OPTIONS {
+        return Err("INVALID_CHARACTER_OPTION".to_string());
+    }
+    let now = current_time();
+    let quote = ARCADE_QUOTES
+        .with(|m| m.borrow().get(&caller))
+        .ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.token != token {
+        return Err("QUOTE_MISMATCH".to_string());
+    }
+    if now > quote.expires_at {
+        return Err("QUOTE_EXPIRED".to_string());
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    let sub = derive_arcade_subaccount(&caller);
+    let escrow = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(sub),
+    };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    if balance < quote.amount.saturating_add(fee) {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+    let treasury_dest = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
+        .await
+        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
+
+    ARCADE_CARS.with(|m| {
+        m.borrow_mut().insert(caller, ArcadeCharacter { hair: body, skin: wheels, outfit: stripe });
+    });
+    ARCADE_QUOTES.with(|m| {
+        m.borrow_mut().remove(&caller);
+    });
+
+    let entry = AuditLogEntry {
+        timestamp: now,
+        event_type: "arcade_customize_car".to_string(),
+        proposal_id: 0,
+        user: caller,
+        amount_e8s: quote.amount,
+    };
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&entry);
+    });
+    Ok(())
+}
+
 /// Submit a finished round. Requires full access (the hole-1 preview can't
 /// produce a 9-hole score). Insert-if-better per (game, player); returns the
 /// caller's resulting 1-based rank on that game's board.
@@ -9500,22 +10397,50 @@ fn submit_arcade_score(game: String, millis: u64, per_hole: Vec<u8>) -> Result<u
     require_arcade_enabled()?;
     let caller = get_caller();
 
-    if game != ARCADE_GAME_MINIGOLF {
-        return Err("UNKNOWN_GAME".to_string());
-    }
     let (has_stake, voted_recently) = arcade_access(caller);
     if !has_stake && !voted_recently {
         return Err("PARTICIPATION_REQUIRED".to_string());
     }
-    if per_hole.len() != MINIGOLF_HOLES {
-        return Err("INVALID_HOLE_COUNT".to_string());
+    match game.as_str() {
+        ARCADE_GAME_MINIGOLF => {
+            if per_hole.len() != MINIGOLF_HOLES {
+                return Err("INVALID_HOLE_COUNT".to_string());
+            }
+            if per_hole.iter().any(|&s| s == 0 || s > MINIGOLF_MAX_STROKES_PER_HOLE) {
+                return Err("INVALID_STROKES".to_string());
+            }
+            if !(MINIGOLF_MIN_MILLIS..=MINIGOLF_MAX_MILLIS).contains(&millis) {
+                return Err("INVALID_TIME".to_string());
+            }
+        }
+        ARCADE_GAME_FIELDGOAL => {
+            // per_hole = points per kick: the distance in yards on a make,
+            // 0 on a miss (so an all-miss round is a valid 0-point entry).
+            if per_hole.len() != FIELDGOAL_ROUNDS {
+                return Err("INVALID_HOLE_COUNT".to_string());
+            }
+            if per_hole.iter().any(|&p| p > FIELDGOAL_MAX_POINTS_PER_KICK) {
+                return Err("INVALID_STROKES".to_string());
+            }
+            if !(FIELDGOAL_MIN_MILLIS..=FIELDGOAL_MAX_MILLIS).contains(&millis) {
+                return Err("INVALID_TIME".to_string());
+            }
+        }
+        ARCADE_GAME_TURBORUSH => {
+            // per_hole = cars passed per 12-second stage (0 is valid).
+            if per_hole.len() != TURBORUSH_STAGES {
+                return Err("INVALID_HOLE_COUNT".to_string());
+            }
+            if per_hole.iter().any(|&p| p > TURBORUSH_MAX_POINTS_PER_STAGE) {
+                return Err("INVALID_STROKES".to_string());
+            }
+            if !(TURBORUSH_MIN_MILLIS..=TURBORUSH_MAX_MILLIS).contains(&millis) {
+                return Err("INVALID_TIME".to_string());
+            }
+        }
+        _ => return Err("UNKNOWN_GAME".to_string()),
     }
-    if per_hole.iter().any(|&s| s == 0 || s > MINIGOLF_MAX_STROKES_PER_HOLE) {
-        return Err("INVALID_STROKES".to_string());
-    }
-    if !(MINIGOLF_MIN_MILLIS..=MINIGOLF_MAX_MILLIS).contains(&millis) {
-        return Err("INVALID_TIME".to_string());
-    }
+    require_arcade_game_enabled(&game)?;
     let strokes: u32 = per_hole.iter().map(|&s| s as u32).sum();
 
     let now = current_time();
@@ -9526,7 +10451,7 @@ fn submit_arcade_score(game: String, millis: u64, per_hole: Vec<u8>) -> Result<u
         let mut m = m.borrow_mut();
         let prev = m.get(&key).map(|p| (p.strokes, p.millis, p.submitted_at));
         let keep_new = match prev {
-            Some(p) => arcade_score_beats((strokes, millis, now), p),
+            Some(p) => arcade_score_beats(&game, (strokes, millis, now), p),
             None => true,
         };
         if keep_new {
@@ -9561,7 +10486,7 @@ fn submit_arcade_score(game: String, millis: u64, per_hole: Vec<u8>) -> Result<u
             .iter()
             .filter(|e| {
                 let s = e.value();
-                s.game == game && arcade_score_beats((s.strokes, s.millis, s.submitted_at), best)
+                s.game == game && arcade_score_beats(&game, (s.strokes, s.millis, s.submitted_at), best)
             })
             .count() as u32
             + 1
@@ -9571,7 +10496,7 @@ fn submit_arcade_score(game: String, millis: u64, per_hole: Vec<u8>) -> Result<u
 
 // ── Course editor (admin-built voxel hole layouts) ──
 //
-// Mini Golf Gold holes are 22×14 tile grids ("voxels" — each cell renders as
+// Mini Golf holes are 22×14 tile grids ("voxels" — each cell renders as
 // a flat-shaded cube). The 9 defaults ship in the frontend; admins can
 // override any hole from the Admin console (admin_set_arcade_hole). The game
 // merges on-chain overrides over the built-ins at load, so an edited hole is
@@ -9712,7 +10637,7 @@ fn get_arcade_leaderboard(game: String) -> Vec<ArcadeLeaderboardRow> {
             .filter(|s| s.game == game)
             .collect()
     });
-    scores.sort_by_key(|s| (s.strokes, s.millis, s.submitted_at));
+    scores.sort_by_key(|s| arcade_rank_key(&game, s.strokes, s.millis, s.submitted_at));
     scores
         .into_iter()
         .take(ARCADE_LEADERBOARD_LIMIT)
@@ -10707,6 +11632,9 @@ mod tests {
             cmc_block_index: None,
             treasury_block: None,
             frontend_cmc_block: None,
+            token: None,
+            token_amount: None,
+            swapped_icp_e8s: None,
         }
     }
 
@@ -10726,6 +11654,7 @@ mod tests {
             total_burned_e8s: None,
             vote_executed_at: None,
             first_stance: Some(Stance::Adopt),
+            threshold_usd_e8s: None,
             pool_distributed: false,
             lossless_adopt_e8s: 0,
             lossless_reject_e8s: 0,
@@ -10900,6 +11829,7 @@ mod tests {
             min_unstake_e8s: default_min_unstake_e8s(),
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
             lottery_tickets_per_day: default_lottery_tickets_per_day(),
+            default_threshold_usd_e8s: None,
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -10928,6 +11858,7 @@ mod tests {
             total_burned_e8s: None,
             vote_executed_at: Some(1_749_000_000_000_000_000),
             first_stance: Some(Stance::Adopt),
+            threshold_usd_e8s: None,
             pool_distributed: false,
             lossless_adopt_e8s: 0,
             lossless_reject_e8s: 0,
@@ -10958,6 +11889,9 @@ mod tests {
             cmc_block_index: Some(123_456),
             treasury_block: Some(123_455),
             frontend_cmc_block: Some(123_457),
+            token: None,
+            token_amount: None,
+            swapped_icp_e8s: None,
         };
         let bytes = commitment.to_bytes();
         let decoded = Commitment::from_bytes(bytes);
@@ -11137,6 +12071,7 @@ mod tests {
                 min_unstake_e8s: default_min_unstake_e8s(),
                 maturity_threshold_e8s: default_maturity_threshold_e8s(),
                 lottery_tickets_per_day: default_lottery_tickets_per_day(),
+                default_threshold_usd_e8s: None,
             }
         };
         let mainnet = Config {
@@ -11918,6 +12853,7 @@ mod tests {
             vote_executed_at: Some(0),
             total_burned_e8s: Some(100_000_000_000),
             first_stance: Some(Stance::Adopt),
+            threshold_usd_e8s: None,
             pool_distributed: false,
             lossless_adopt_e8s: 0,
             lossless_reject_e8s: 0,
@@ -12311,7 +13247,7 @@ mod tests {
         seed_default_dapps();
         seed_default_dapps(); // re-run inserts nothing new
         let listed = list_dapps();
-        assert_eq!(listed.len(), 8);
+        assert_eq!(listed.len(), 9);
         assert_eq!(listed[0].name, "idGeek 2.0");
         assert_eq!(listed[1].name, "Liquidium");
         assert_eq!(listed[2].name, "ICPSwap");
@@ -12320,6 +13256,7 @@ mod tests {
         assert_eq!(listed[5].name, "Partyhats");
         assert_eq!(listed[6].name, "Dyvr");
         assert_eq!(listed[7].name, "onicai");
+        assert_eq!(listed[8].name, "DGDG");
         assert!(listed.iter().all(|d| !d.community && d.expires_at.is_none()));
     }
 
@@ -12330,10 +13267,10 @@ mod tests {
         // Simulate a directory seeded before the newer curated entries existed.
         let icpswap_id = list_dapps().iter().find(|d| d.name == "ICPSwap").unwrap().id;
         DAPPS.with(|m| { m.borrow_mut().remove(&icpswap_id); });
-        assert_eq!(list_dapps().len(), 7);
+        assert_eq!(list_dapps().len(), 8);
         seed_default_dapps();
         let listed = list_dapps();
-        assert_eq!(listed.len(), 8, "missing curated entry is backfilled");
+        assert_eq!(listed.len(), 9, "missing curated entry is backfilled");
         assert_eq!(listed.iter().filter(|d| d.name == "ICPSwap").count(), 1, "no duplicates");
     }
 
@@ -12475,6 +13412,14 @@ mod tests {
 
         assert_eq!(arcade_access(nobody), (false, false), "no stake, no vote → hole 1 only");
 
+        // Admins bypass the preview gate without staking or voting.
+        let admin = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let mut cfg = test_config(true);
+        cfg.admins = vec![admin];
+        CONFIG.with(|c| { c.borrow_mut().set(cfg); });
+        assert_eq!(arcade_access(admin), (true, false), "admin → full access");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+
         STAKES.with(|m| {
             m.borrow_mut().insert(
                 StakeKey { tier: 0, user: staker },
@@ -12560,6 +13505,106 @@ mod tests {
         for u in [alice, bob] {
             STAKES.with(|m| { m.borrow_mut().remove(&StakeKey { tier: 0, user: u }); });
         }
+        clear_arcade();
+    }
+
+    #[test]
+    fn test_submit_fieldgoal_score_points_ranking() {
+        clear_arcade();
+        enable_arcade_flag();
+        let now = current_time();
+        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        for u in [alice, bob] {
+            STAKES.with(|m| {
+                m.borrow_mut().insert(
+                    StakeKey { tier: 0, user: u },
+                    UserStake { amount_e8s: 100_000_000, staked_at: now, last_action_at: now },
+                );
+            });
+        }
+        set_mock_caller(alice);
+
+        // Validation: 5 kicks, per-kick points cap, time bounds. Misses (0)
+        // are valid — an all-miss round is a legitimate 0-point entry.
+        assert_eq!(submit_arcade_score("fieldgoal".into(), 60_000, vec![40; 4]).unwrap_err(), "INVALID_HOLE_COUNT");
+        assert_eq!(submit_arcade_score("fieldgoal".into(), 60_000, vec![71; 5]).unwrap_err(), "INVALID_STROKES");
+        assert_eq!(submit_arcade_score("fieldgoal".into(), 1_000, vec![40; 5]).unwrap_err(), "INVALID_TIME");
+        assert_eq!(submit_arcade_score("fieldgoal".into(), 60_000, vec![0; 5]).unwrap(), 1);
+
+        // MOST points ranks first — Bob's 200 beats Alice's 0.
+        set_mock_caller(bob);
+        assert_eq!(submit_arcade_score("fieldgoal".into(), 90_000, vec![40; 5]).unwrap(), 1);
+        let board = get_arcade_leaderboard("fieldgoal".into());
+        assert_eq!(board[0].player, bob);
+        assert_eq!(board[0].strokes, 200, "points live in the strokes slot");
+        assert_eq!(board[1].player, alice);
+
+        // Equal points → faster time wins the tiebreak.
+        set_mock_caller(alice);
+        assert_eq!(submit_arcade_score("fieldgoal".into(), 60_000, vec![40; 5]).unwrap(), 1);
+        let board = get_arcade_leaderboard("fieldgoal".into());
+        assert_eq!(board[0].player, alice);
+        assert_eq!(board[0].millis, 60_000);
+
+        // A LOWER-point round never overwrites the player's best.
+        assert_eq!(submit_arcade_score("fieldgoal".into(), 30_000, vec![10; 5]).unwrap(), 1);
+        let board = get_arcade_leaderboard("fieldgoal".into());
+        assert_eq!(board[0].strokes, 200);
+
+        // The games keep separate boards.
+        assert_eq!(get_arcade_leaderboard("minigolf".into()).len(), 0);
+
+        for u in [alice, bob] {
+            STAKES.with(|m| { m.borrow_mut().remove(&StakeKey { tier: 0, user: u }); });
+        }
+        clear_arcade();
+    }
+
+    #[test]
+    fn test_submit_turborush_score_and_per_game_flags() {
+        clear_arcade();
+        enable_arcade_flag();
+        let now = current_time();
+        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        for u in [alice, bob] {
+            STAKES.with(|m| {
+                m.borrow_mut().insert(
+                    StakeKey { tier: 0, user: u },
+                    UserStake { amount_e8s: 100_000_000, staked_at: now, last_action_at: now },
+                );
+            });
+        }
+        set_mock_caller(alice);
+
+        // Validation: 5 stages, per-stage cap, time bounds.
+        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![10; 4]).unwrap_err(), "INVALID_HOLE_COUNT");
+        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![61; 5]).unwrap_err(), "INVALID_STROKES");
+        assert_eq!(submit_arcade_score("turborush".into(), 10_000, vec![10; 5]).unwrap_err(), "INVALID_TIME");
+
+        // MOST cars passed wins (same descending rule as Field Goal).
+        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![8, 9, 10, 11, 12]).unwrap(), 1);
+        set_mock_caller(bob);
+        assert_eq!(submit_arcade_score("turborush".into(), 61_000, vec![3; 5]).unwrap(), 2);
+        let board = get_arcade_leaderboard("turborush".into());
+        assert_eq!(board[0].player, alice);
+        assert_eq!(board[0].strokes, 50);
+
+        // Per-game kill switch: turning the game's own flag off blocks
+        // submissions while the rest of the arcade stays open.
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE_TURBORUSH.to_string(), 0u8); });
+        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![5; 5]).unwrap_err(), "FEATURE_DISABLED");
+        assert_eq!(submit_arcade_score("minigolf".into(), 120_000, vec![3; 9]).unwrap(), 1, "other games unaffected");
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE_TURBORUSH.to_string(), 1u8); });
+        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![20; 5]).unwrap(), 1);
+
+        for u in [alice, bob] {
+            STAKES.with(|m| { m.borrow_mut().remove(&StakeKey { tier: 0, user: u }); });
+        }
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_ARCADE_TURBORUSH.to_string()); });
         clear_arcade();
     }
 
@@ -13007,6 +14052,7 @@ mod tests {
             min_unstake_e8s: default_min_unstake_e8s(),
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
             lottery_tickets_per_day: default_lottery_tickets_per_day(),
+            default_threshold_usd_e8s: None,
         }
     }
 
@@ -13568,6 +14614,44 @@ mod tests {
         assert_eq!(StakeTier::SixMonths.weight_multiplier(), 1);
         assert_eq!(StakeTier::OneYear.weight_multiplier(), 2);
         assert_eq!(StakeTier::TwoYears.weight_multiplier(), 4);
+    }
+
+    #[test]
+    fn test_vp_tenure_doubling() {
+        const P: u64 = VP_TENURE_PERIOD_NANOS;
+        let t0 = 1_000_000_000_000u64;
+        // Doubles every 6 months: 1× → 2× → 4× → 8× → 16×, capped at 16×.
+        assert_eq!(vp_tenure_multiplier(t0, t0), 1);
+        assert_eq!(vp_tenure_multiplier(t0, t0 + P - 1), 1);
+        assert_eq!(vp_tenure_multiplier(t0, t0 + P), 2);
+        assert_eq!(vp_tenure_multiplier(t0, t0 + 2 * P), 4);
+        assert_eq!(vp_tenure_multiplier(t0, t0 + 3 * P), 8);
+        assert_eq!(vp_tenure_multiplier(t0, t0 + 4 * P), 16);
+        assert_eq!(vp_tenure_multiplier(t0, t0 + 9 * P), 16, "capped after 2 years");
+        // Weight: 100 ICP staked, 1 year of tenure → 100/10 × 4 = 40 VP.
+        assert_eq!(
+            stake_weight_e8s(10_000_000_000, t0, t0 + 2 * P),
+            4_000_000_000
+        );
+        // user_voting_weight picks tenure up per tier.
+        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let now = current_time();
+        STAKES.with(|m| {
+            m.borrow_mut().insert(
+                StakeKey { tier: 0, user: alice },
+                UserStake { amount_e8s: 100_000_000, staked_at: now.saturating_sub(P), last_action_at: now },
+            );
+            m.borrow_mut().insert(
+                StakeKey { tier: 2, user: alice },
+                UserStake { amount_e8s: 100_000_000, staked_at: now, last_action_at: now },
+            );
+        });
+        // tier0: 0.1 VP × 2 (6 months in) + tier2: 0.1 VP × 1 = 0.3 VP.
+        assert_eq!(user_voting_weight(alice), 30_000_000);
+        STAKES.with(|m| {
+            m.borrow_mut().remove(&StakeKey { tier: 0, user: alice });
+            m.borrow_mut().remove(&StakeKey { tier: 2, user: alice });
+        });
     }
 
     #[test]
@@ -14365,12 +15449,12 @@ mod tests {
         });
         assert_eq!(commit(700_002, Stance::Adopt, 200_000_000).await.unwrap_err(), "COMMITMENT_CLOSED");
 
-        // Escrow must hold amount + 540_000 (protocol fee + 4 ledger fees).
-        set_mock_ledger_balance(200_000_000);
+        // Zero-fee commits: escrow must hold EXACTLY the amount, no more.
+        set_mock_ledger_balance(199_999_999);
         assert_eq!(commit(pid, Stance::Adopt, 200_000_000).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
-        set_mock_ledger_balance(200_540_000);
+        set_mock_ledger_balance(200_000_000);
 
-        // Success: fee charged, pot credited, commitment journaled.
+        // Success: no protocol fee, pot credited, commitment journaled.
         commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(prop.adopt_pot_e8s, 200_000_000);
@@ -14446,6 +15530,230 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         add_to_commitment(pid, 200_000_000).await.unwrap();
         assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "met");
+    }
+
+    #[test]
+    fn test_usd_valuation_helpers() {
+        install_staking_test_config();
+        // Static local rates: ICP $5, BTC $100k, ETH $3k, stables $1.
+        assert_eq!(icp_amount_usd_e8s(100_000_000), 500_000_000, "1 ICP = $5");
+        assert_eq!(token_amount_usd_e8s(ExplorerToken::CkBTC, 100_000_000), 10_000_000_000_000, "1 BTC = $100k");
+        assert_eq!(token_amount_usd_e8s(ExplorerToken::CkETH, 1_000_000_000_000_000_000), 300_000_000_000, "1 ETH = $3k");
+        assert_eq!(token_amount_usd_e8s(ExplorerToken::CkUSDC, 1_000_000), 100_000_000, "1 USDC = $1");
+        // $5 of USDC buys exactly 1 ICP at $5.
+        assert_eq!(expected_icp_for_token(ExplorerToken::CkUSDC, 5_000_000), 100_000_000);
+        // 0.001 ckBTC = $100 = 20 ICP.
+        assert_eq!(expected_icp_for_token(ExplorerToken::CkBTC, 100_000), 2_000_000_000);
+        // Admin rate override moves valuations.
+        admin_set_usd_rate(ExplorerToken::ICP, 1_000_000_000).unwrap(); // $10
+        assert_eq!(icp_amount_usd_e8s(100_000_000), 1_000_000_000);
+        admin_set_usd_rate(ExplorerToken::ICP, 500_000_000).unwrap(); // restore $5
+    }
+
+    #[tokio::test]
+    async fn test_usd_threshold_lifecycle() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(7));
+
+        // Rails.
+        assert_eq!(admin_set_default_threshold_usd(1_000_000).await.unwrap_err(), "THRESHOLD_BELOW_MIN");
+        assert_eq!(
+            admin_set_default_threshold_usd(200_000_000_000_000).await.unwrap_err(),
+            "THRESHOLD_ABOVE_MAX"
+        );
+
+        // A $10 threshold supersedes a sky-high ICP threshold.
+        let pid = 770_001u64;
+        open_proposal(pid, 20_000_000_000); // 200 ICP — unreachable in ICP terms
+        admin_set_default_threshold_usd(1_000_000_000).await.unwrap(); // $10
+        let p1 = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(p1.threshold_usd_e8s, Some(1_000_000_000));
+
+        // 2 ICP committed = $10 at the $5 static rate → met by VALUE.
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+        let p2 = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(p2.status, "met", "USD threshold met despite huge ICP threshold");
+
+        // Halve the ICP price → same pot is now $5 → recompute flips to open.
+        admin_set_usd_rate(ExplorerToken::ICP, 250_000_000).unwrap(); // $2.50
+        admin_set_default_threshold_usd(1_000_000_000).await.unwrap();
+        let p3 = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(p3.status, "open", "valuation reflects the new rate");
+
+        // Legacy ICP setter clears USD mode entirely.
+        admin_set_default_threshold(100_000_000).unwrap(); // 1 ICP
+        let p4 = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(p4.threshold_usd_e8s, None);
+        assert_eq!(p4.status, "met", "2 ICP ≥ 1 ICP legacy threshold");
+        assert!(CONFIG.with(|c| c.borrow().get().default_threshold_usd_e8s).is_none());
+        admin_set_usd_rate(ExplorerToken::ICP, 500_000_000).unwrap(); // restore
+    }
+
+    #[tokio::test]
+    async fn test_commit_token_escrows_without_swapping() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(9));
+        set_mock_swap(Some(Err("MUST_NOT_SWAP_AT_COMMIT".to_string())));
+
+        let pid = 770_010u64;
+        open_proposal(pid, 100_000_000);
+
+        // $10 of ckUSDC: escrowed as TOKEN; pots carry the 2 ICP equivalent.
+        commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap();
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.token, Some(ExplorerToken::CkUSDC));
+        assert_eq!(c.token_amount, Some(10_000_000));
+        assert_eq!(c.swapped_icp_e8s, None, "no swap until settlement");
+        assert_eq!(c.amount_e8s, 200_000_000, "pots use the oracle ICP-equivalent");
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.adopt_pot_e8s, 200_000_000);
+        assert_eq!(prop.status, "met");
+        let log = get_audit_log(0, 1000);
+        assert!(log.iter().any(|e| e.event_type == "commit_token" && e.proposal_id == pid));
+        set_mock_swap(None);
+
+        // ICP passthrough still behaves like commit().
+        let pid2 = 770_011u64;
+        open_proposal(pid2, 100_000_000);
+        commit_token(pid2, Stance::Reject, ExplorerToken::ICP, 150_000_000).await.unwrap();
+        let c2 = COMMITMENTS.with(|m| m.borrow().get(&CommitmentKey { proposal_id: pid2, principal: alice })).unwrap();
+        assert_eq!(c2.token, None);
+        assert_eq!(c2.amount_e8s, 150_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_commit_token_settlement_swaps_then_burns() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(11));
+        set_mock_swap(None); // rate-derived swap at settlement
+
+        let pid = 770_030u64;
+        open_proposal(pid, 100_000_000);
+        commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap(); // $10 → 2 ICP
+
+        process_proposal_cutoff(pid).await.unwrap();
+
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.status, CommitmentStatus::Burned);
+        assert_eq!(c.swapped_icp_e8s, Some(200_000_000), "settlement swap ran exactly once");
+        assert_eq!(c.amount_e8s, 200_000_000 - 30_000, "real proceeds minus split fees");
+        assert!(c.treasury_block.is_some() && c.cmc_block_index.is_some() && c.frontend_cmc_block.is_some());
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "settled");
+        assert_eq!(prop.total_burned_e8s, Some(200_000_000 - 30_000));
+    }
+
+    #[tokio::test]
+    async fn test_commit_token_settlement_swap_failure_retries_without_double_swap() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(12));
+
+        let pid = 770_040u64;
+        open_proposal(pid, 100_000_000);
+        commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap();
+
+        // Swap down at cutoff → FailedBurn, nothing journaled.
+        set_mock_swap(Some(Err("DEX_DOWN".to_string())));
+        process_proposal_cutoff(pid).await.unwrap();
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c1 = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c1.status, CommitmentStatus::FailedBurn);
+        assert_eq!(c1.swapped_icp_e8s, None);
+
+        // Recovery: the sweep retries — swap succeeds, burn completes.
+        set_mock_swap(None);
+        retry_failed_settlements().await;
+        let c2 = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c2.status, CommitmentStatus::Burned);
+        assert_eq!(c2.swapped_icp_e8s, Some(200_000_000));
+
+        // A further retry pass must NOT swap again (journal holds).
+        set_mock_swap(Some(Err("WOULD_DOUBLE_SWAP".to_string())));
+        retry_failed_settlements().await;
+        let c3 = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c3.status, CommitmentStatus::Burned);
+        assert_eq!(c3.swapped_icp_e8s, Some(200_000_000));
+        set_mock_swap(None);
+    }
+
+    #[tokio::test]
+    async fn test_commit_token_threshold_miss_refunds_in_kind() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(13));
+        set_mock_swap(Some(Err("MUST_NOT_SWAP_ON_REFUND".to_string())));
+
+        let pid = 770_050u64;
+        open_proposal(pid, 100_000_000_000); // 1,000 ICP — unreachable
+        commit_token(pid, Stance::Adopt, ExplorerToken::CkBTC, 100_000).await.unwrap(); // 0.001 ckBTC ($100)
+
+        process_proposal_cutoff(pid).await.unwrap();
+
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.status, CommitmentStatus::Returned, "threshold missed → refunded");
+        assert_eq!(c.swapped_icp_e8s, None, "refunds never swap");
+        // The refund payout is recorded in the COMMITTED token, and the
+        // treasury fronts the transfer fee — the user gets back the EXACT
+        // deposit (zero-fee commits).
+        let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+        assert!(payouts.iter().any(|po| po.user == alice
+            && po.payout_type == PayoutType::CommitmentRefund
+            && po.token == IdeaToken::CkBTC
+            && po.amount == 100_000));
+        set_mock_swap(None);
+    }
+
+    #[tokio::test]
+    async fn test_commit_token_guards() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(9));
+        let pid = 770_020u64;
+        open_proposal(pid, 100_000_000);
+
+        // $0.50 of USDC is under the $1 floor.
+        assert_eq!(
+            commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 500_000).await.unwrap_err(),
+            "BELOW_MINIMUM"
+        );
+
+        // Empty token escrow refuses.
+        set_mock_ledger_balance(0);
+        assert_eq!(
+            commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap_err(),
+            "INSUFFICIENT_DEPOSIT"
+        );
+        set_mock_ledger_balance(100_000_000_000);
+
+        // Settled proposals refuse.
+        PROPOSALS.with(|m| {
+            let mut p = m.borrow().get(&pid).unwrap();
+            p.status = "settled".to_string();
+            m.borrow_mut().insert(pid, p);
+        });
+        assert_eq!(
+            commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap_err(),
+            "COMMITMENT_CLOSED"
+        );
     }
 
     #[tokio::test]

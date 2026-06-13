@@ -25,7 +25,7 @@ Don't try to read it whole — navigate by its numbered section banners
 | 13 | Lossless voting / pooled staking | 4987 |
 | 14 | Lossless lottery + payout history | 6660 |
 | 16 | Dapp Explorer (paid listings, XRC oracle) | 7570 |
-| 17 | Arcade (Mini Golf Gold, course editor) | 8468 |
+| 17 | Arcade (Mini Golf, course editor) | 8468 |
 | 18 | Early Adopters (permanent stake — deliberately NO unstake) | 8978 |
 | 19 | Social profile (X handle) | 9890 |
 | – | `mod tests` (native unit tests) | 9931 |

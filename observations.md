@@ -1,0 +1,14 @@
+- Change "Staked vote - free" to "Staked Vote"
+- Change "Burn ICP" to "Burn"
+- Remove Protocol & Ledger fees - treasury should pay those for the user ensuring that if money is refunded they get exactly what they put in.
+- in the "Confirm Conviction Burn" dialog the button to finalize the commitment should say "Submit" and not add a quantity for amount to burn.
+- a lot of ui has info with text explaining how something works. it is cluttering the UI - go thru these and make them less prominent - in most cases it should be a link style text that opens a dialog with more detail.
+- Some of the page descriptions are way to long.  make the descriptions focus on the value proposition to the user and link to a dialog for more details to keep text on screen limited.
+- on the early adopters page.  "**What you give: your stake, permanently**" & "**What everyone gets: a founder's deal**" could be in dialogs
+- remove eth, usdc, usdt from withdrawal list in the wallet.
+- put the deposit section above the withdrawal section in the wallet.  there does not need to be a "send" section in the wallet.
+- Users dont send tokens to a principal they send tokens to the account id.
+- Remove the view for "Pool Nuerons" we will move it to a new screen "Earn". the Earn screen will have Pool Nuerons, Staking, & Early Adopters consilidated as subsctions.
+- Make a new section in the navigation "Play" it below it should be Arcade & Lottery.  Make sure Lottery has a card to link users directly to the Staking page so they can participate and earn tickets.
+- New section "Participate" should have "Voting", "Community R&D", & "Explorer"
+- Move the "Theme" toggle to the top app bar - on the right of the screen. also make it a moon & sun toggle with no text.

@@ -1,5 +1,5 @@
 // ==========================================
-// Mini Golf Gold — game engine (pure logic, no DOM)
+// Mini Golf — game engine (pure logic, no DOM)
 // Voxel-tile edition: every hole is a 22×14 cell grid (each cell renders as
 // a flat-shaded isometric cube). Slingshot putt, rolling-ball physics with
 // wall cubes / sand / water / slopes / posts / a windmill bar, par-rated

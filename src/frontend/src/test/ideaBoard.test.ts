@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { Principal } from '@icp-sdk/core/principal';
 import { parseTokenAmount, fmtTokenAmount, ideaDaysLeft, tokenMeta, sortIdeas, goalPct } from '../IdeaBoard';
-import { IdeaToken } from '../bindings/backend';
+import { IdeaToken } from '../tokens';
 import type { Idea, IdeaBoardInfo } from '../bindings/backend';
 
 const ICP_LEDGER = Principal.fromText('ryjl3-tyaaa-aaaaa-aaaba-cai');

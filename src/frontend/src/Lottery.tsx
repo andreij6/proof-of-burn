@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
 import { DrawStatus } from "./bindings/backend";
 import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, formatPrincipal } from "./ui";
 
 // ==========================================
 // Lossless Lottery — stake-weighted tickets, dynamic odds (one winner a month
@@ -19,6 +19,8 @@ interface LotteryProps {
   principal: Principal | null;
   isLocal: boolean;
   onSignIn: () => void;
+  /** Jump to the Staking tab of the Earn page — where tickets come from. */
+  onGoStaking: () => void;
 }
 
 /** "2d 14:03:22" countdown to a nanosecond timestamp; null when passed. */
@@ -39,7 +41,7 @@ function drawDate(atNs: bigint): string {
   });
 }
 
-export default function Lottery({ actor, principal, isLocal, onSignIn }: LotteryProps) {
+export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaking }: LotteryProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [info, setInfo] = useState<LotteryInfo | null>(null);
@@ -139,16 +141,25 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
         </span>
         <b style={{ fontSize: 17 }}>Stake to play. A winner about once a month. Nobody loses.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
-          Stakers collect free tickets daily — 5 for a 6-month stake, 10 for 1 year, 20 for 2 years
-          (tiers add up), and the grant scales with how much you stake — 1 ICP for 6 months earns
-          5 tickets a day, 500 ICP for 2 years earns 10,000. Every drawing has a fixed 1-in-13
-          chance of crowning a winner no matter how many tickets exist (three drawings a week ≈ one
-          jackpot a month on average, and a 96% chance of at least one within 3 months); your
-          tickets are your share of that chance. Tickets pile up until someone wins — then the winner takes
-          80% of the prize pool, 20% seeds the next round, and everyone's tickets reset. The pool is
-          funded by staking yield (half of every harvest), so no one ever pays in. Win and the ICP
-          lands straight in your wallet — nothing to claim, ever. Staying staked is the deal:
-          unstake everything and your tickets void on the spot.
+          Stakers collect free tickets every day — win and the ICP lands straight in your wallet.{' '}
+          <MoreInfo title="How the lossless lottery works">
+            <p style={{ margin: 0 }}>
+              Stakers collect free tickets daily — 5 for a 6-month stake, 10 for 1 year, 20 for 2 years
+              (tiers add up), and the grant scales with how much you stake: 1 ICP for 6 months earns
+              5 tickets a day, 500 ICP for 2 years earns 10,000.
+            </p>
+            <p style={{ margin: 0 }}>
+              Every drawing has a fixed 1-in-13 chance of crowning a winner no matter how many tickets
+              exist (three drawings a week ≈ one jackpot a month on average, and a 96% chance of at
+              least one within 3 months); your tickets are your share of that chance.
+            </p>
+            <p style={{ margin: 0 }}>
+              Tickets pile up until someone wins — then the winner takes 80% of the prize pool, 20%
+              seeds the next round, and everyone's tickets reset. The pool is funded by staking yield,
+              so no one ever pays in. Win and the ICP lands straight in your wallet — nothing to claim,
+              ever. Staying staked is the deal: unstake everything and your tickets void on the spot.
+            </p>
+          </MoreInfo>
         </span>
         <button onClick={copyAgentSkill} style={{
           background: 'transparent', border: '1px solid var(--border)', borderRadius: 6,
@@ -255,10 +266,12 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
           ) : info && !info.eligible ? (
             <div className="col" style={{ gap: 8, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Staking is the entry ticket: stake ICP on the Staking page to start
-                collecting 5 / 10 / 20 free tickets a day (6-month / 1-year / 2-year terms).
+                Staking is the entry ticket: stake ICP to start collecting
+                5 / 10 / 20 free tickets a day (6-month / 1-year / 2-year terms).
               </span>
-              <Chip tone="muted"><Icon name="zap" size={11} /> Not staked yet</Chip>
+              <Btn variant="primary" sm onClick={onGoStaking}>
+                <Icon name="zap" size={13} stroke="var(--char-950)" /> Stake to earn tickets
+              </Btn>
             </div>
           ) : (
             <>
@@ -278,6 +291,18 @@ export default function Lottery({ actor, principal, isLocal, onSignIn }: Lottery
               </span>
             </>
           )}
+        </div>
+
+        {/* ── Earn tickets → Staking ── */}
+        <div className="col" style={{ ...card, gap: 10, flex: '1 1 240px', minWidth: 240, border: '1px solid var(--burn)', background: 'var(--burn-950)' }}>
+          <Eyebrow accent>Earn tickets</Eyebrow>
+          <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+            Tickets come from lossless staking — your ICP keeps earning, and every
+            staked day mints new chances to win.
+          </span>
+          <Btn variant="primary" sm style={{ alignSelf: 'flex-start' }} onClick={onGoStaking}>
+            <Icon name="zap" size={13} stroke="var(--char-950)" /> Go to Staking
+          </Btn>
         </div>
       </div>
 

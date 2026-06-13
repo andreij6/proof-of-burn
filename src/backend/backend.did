@@ -32,6 +32,13 @@ type Commitment = record {
   cmc_block_index : opt nat64;
   treasury_block : opt nat64;
   frontend_cmc_block : opt nat64;
+  // Multi-token voting: the committed token + amount stay escrowed on THEIR
+  // ledger until settlement (swap to ICP on pass, in-kind refund on miss).
+  // amount_e8s holds the oracle ICP-equivalent until the settlement swap
+  // replaces it with real proceeds; swapped_icp_e8s journals that swap.
+  token : opt ExplorerToken;
+  token_amount : opt nat64;
+  swapped_icp_e8s : opt nat64;
   stance : Stance;
   status : CommitmentStatus;
   "principal" : principal;
@@ -80,6 +87,9 @@ type Config = record {
   maturity_threshold_e8s : nat64;
   // ── Lossless lottery ──
   lottery_tickets_per_day : nat64;
+  // Dollar-denominated voting threshold (e8s of USD; $1 = 100_000_000).
+  // When set it supersedes default_threshold; pots valued at the ICP/USD rate.
+  default_threshold_usd_e8s : opt nat64;
 };
 type EligibilityInfo = record {
   holdings_e8s : nat64;
@@ -148,6 +158,8 @@ type InitPayload = record {
   ledger_canister_id : opt principal;
 };
 type LedgerAccount = record { owner : principal; subaccount : opt blob };
+// Cached USD value of one whole token (e8s of USD; $1 = 100_000_000).
+type TokenUsdRate = record { token : ExplorerToken; rate_usd_e8s : nat64 };
 // Live NNS follow status of a platform-owned neuron (admin diagnostic).
 type NeuronFollowStatus = record {
   label : text;
@@ -170,6 +182,9 @@ type Proposal = record {
   deadline : nat64;
   adopt_pot_e8s : nat64;
   threshold_e8s : nat64;
+  // USD threshold (e8s of USD) — when present the proposal meets threshold by
+  // the dollar VALUE of its pots rather than raw ICP.
+  threshold_usd_e8s : opt nat64;
   total_burned_e8s : opt nat64;
   vote_executed_at : opt nat64;
   category : text;
@@ -187,7 +202,7 @@ type IdeaIdResult = variant { Ok : nat64; Err : text };
 type Stance = variant { Reject; Adopt };
 // Tokens accepted for idea upvotes. On mainnet ckBTC/ckETH use their
 // canonical ledger canisters; locally they use admin-configured test ledgers.
-type IdeaToken = variant { ICP; CkBTC; CkETH };
+type IdeaToken = variant { ICP; CkBTC; CkETH; CkUSDC; CkUSDT };
 // Ideas are implicitly active while stored — the sweep DELETES ideas that go
 // 30 days without an upvote, so no expired state is ever returned.
 type Idea = record {
@@ -258,10 +273,15 @@ type MaturityDisbursement = record {
 type UserTierStake = record {
   tier : StakeTier;
   amount_e8s : nat64;
-  // amount × the tier's multiplier — this position's voting power.
+  // (amount ÷ 10) × tenure multiplier — this position's voting power now.
   weight_e8s : nat64;
   staked_at : nat64;
   last_action_at : nat64;
+  // VP tenure: doubles every 6 months staked, capped at 16× (2 years).
+  // Top-ups move staked_at to the amount-weighted average.
+  tenure_multiplier : nat64;
+  // When the next doubling lands (ns since epoch); 0 once capped.
+  next_double_at : nat64;
 };
 type UserStakeInfo = record {
   tiers : vec UserTierStake;
@@ -471,6 +491,10 @@ type EscrowKind = variant { Explorer; Arcade; EarlyAdopter };
 type ArcadeCharacter = record { hair : nat8; skin : nat8; outfit : nat8 };
 type ArcadeInfo = record {
   enabled : bool;
+  // Per-game kill switches (only meaningful when `enabled` is true).
+  minigolf_enabled : bool;
+  fieldgoal_enabled : bool;
+  turborush_enabled : bool;
   // Caller may finish full rounds + submit scores (stake or vote ≤30 days old).
   full_access : bool;
   has_stake : bool;
@@ -478,6 +502,10 @@ type ArcadeInfo = record {
   // $1.00 in USD e8s — convert with get_arcade_customize_quote.
   customize_fee_usd_e8s : nat64;
   my_character : opt ArcadeCharacter;
+  // Field Goal kicker persona — fields map hair→helmet, outfit→jersey.
+  my_kicker : opt ArcadeCharacter;
+  // Turbo Rush car — fields map hair→body, skin→wheels, outfit→stripe.
+  my_car : opt ArcadeCharacter;
   hair_options : nat8;
   skin_options : nat8;
   outfit_options : nat8;
@@ -490,7 +518,7 @@ type ArcadeLeaderboardRow = record {
   submitted_at : nat64;
 };
 type RankResult = variant { Ok : nat32; Err : text };
-// One Mini Golf Gold hole as an admin-editable voxel layout: a 22×14
+// One Mini Golf hole as an admin-editable voxel layout: a 22×14
 // row-major tile grid (0 void, 1 grass, 2 wall, 3 sand, 4 water, 5..8 slope
 // N/S/E/W, 9 post), tee/cup cell coords, par, optional windmill bars.
 type ArcadeBarDef = record { cx : nat8; cy : nat8; len_cells : nat8; speed_mrad : nat32 };
@@ -578,6 +606,10 @@ service : (InitPayload) -> {
   // config default for future proposals AND re-applies + recomputes status for
   // all currently open/met proposals. Rejects values below MIN_COMMIT (1 ICP).
   admin_set_default_threshold : (nat64) -> (Result);
+  // Dollar-denominated threshold (e8s of USD); re-thresholds open proposals.
+  admin_set_default_threshold_usd : (nat64) -> (Result);
+  // Wire a vote token to its ICPSwap pool for mainnet commit conversions.
+  admin_set_swap_pool : (ExplorerToken, principal, bool) -> (Result);
   // Admin: set the frontend canister id that receives the 25% cycles share.
   admin_set_frontend_canister : (principal) -> (Result);
   admin_set_pool_fee : (nat64) -> (Result);
@@ -594,6 +626,12 @@ service : (InitPayload) -> {
   // Frontend canister's live cycle balance (backend must control the frontend).
   admin_get_frontend_cycles : () -> (variant { Ok : nat64; Err : text });
   commit : (nat64, Stance, nat64) -> (Result);
+  // Vote in any supported token. The token stays ESCROWED until settlement:
+  // if the vote passes its threshold it converts to ICP (mainnet: ICPSwap;
+  // local: oracle-rate desk) and burns per the standard rules; if the
+  // threshold misses, the refund pays back the SAME token. Fund the proposal
+  // escrow on the TOKEN's ledger first. $1 minimum.
+  commit_token : (nat64, Stance, ExplorerToken, nat64) -> (Result);
   create_pool_draft : (nat64) -> (Result);
   cancel_pool_draft : (nat64) -> (Result);
   finalize_pool_registration : (nat64) -> (Result);
@@ -760,6 +798,8 @@ service : (InitPayload) -> {
   // ── Dapp Explorer (paid directory listings) ──
   // The flag + per-token ledgers/fees + pricing constants, in one query.
   get_explorer_info : () -> (ExplorerInfo) query;
+  // Cached USD rates for all supported tokens (UI: $ thresholds + previews).
+  get_usd_rates : () -> (vec TokenUsdRate) query;
   // All live (approved, unexpired) listings: admin-curated first, then
   // community listings in approval order.
   list_dapps : () -> (vec DappListing) query;
@@ -805,11 +845,22 @@ service : (InitPayload) -> {
   // Change the golfer's look (hair/skin/outfit palette indices); costs $1,
   // paid to the treasury in any supported token at the quoted rate.
   customize_character : (nat8, nat8, nat8, ExplorerToken) -> (Result);
-  // Submit a finished 9-hole round (per-hole strokes + elapsed millis).
-  // Requires an active stake or a vote in the last 30 days. Keeps only the
-  // caller's best round (fewest strokes, then fastest); returns their rank.
+  // Change the Field Goal kicker's look (helmet/skin/jersey palette
+  // indices); same $1 quote + deposit flow as customize_character.
+  customize_kicker : (nat8, nat8, nat8, ExplorerToken) -> (Result);
+  // Change the Turbo Rush car's look (body/wheels/stripe palette indices);
+  // same $1 quote + deposit flow as customize_character.
+  customize_car : (nat8, nat8, nat8, ExplorerToken) -> (Result);
+  // Submit a finished round (per-hole values + elapsed millis). Games:
+  // "minigolf" — 9 per-hole stroke counts, fewest total wins;
+  // "fieldgoal" — 5 per-kick point values (kick distance in yards on a
+  // make, 0 on a miss), MOST points wins;
+  // "turborush" — 5 per-stage cars-passed counts, MOST points wins.
+  // Ties: fastest time. Requires an active stake or a vote in the last 30
+  // days, plus the game's own feature flag. Keeps only the caller's best
+  // round; returns their rank.
   submit_arcade_score : (text, nat64, vec nat8) -> (RankResult);
-  // Top 100 for one game: fewest strokes, fastest time, earliest submission.
+  // Top 100 for one game, ordered by that game's ranking rule.
   get_arcade_leaderboard : (text) -> (vec ArcadeLeaderboardRow) query;
   // On-chain hole overrides (defaults ship in the frontend; the game merges
   // these over them at load).

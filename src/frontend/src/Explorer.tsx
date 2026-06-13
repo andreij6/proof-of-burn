@@ -3,7 +3,7 @@ import { Principal } from "@icp-sdk/core/principal";
 import { ExplorerToken, DappStatus } from "./bindings/backend";
 import type { DappListing, ExplorerInfo, ExplorerQuote } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, formatPrincipal } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal } from "./ui";
 import { fmtTokenAmount } from "./IdeaBoard";
 
 // ==========================================
@@ -394,9 +394,14 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
             <h4 style={{ margin: 0 }}>Explorer</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
-            A directory of dapps in the ICP ecosystem. List your own for {pricePerDay}/day
-            (1–3650 days) paid in ICP, ckBTC, ckETH, ckUSDC or ckUSDT at live exchange rates.
-            Community listings are reviewed by an admin before they appear.
+            Discover ICP dapps — or list your own for {pricePerDay}/day.{' '}
+            <MoreInfo title="Listing on the Explorer">
+              <p style={{ margin: 0 }}>
+                List your dapp for {pricePerDay}/day (1–3650 days), paid in ICP, ckBTC, ckETH,
+                ckUSDC or ckUSDT at live exchange rates. Community listings are reviewed by an
+                admin before they appear.
+              </p>
+            </MoreInfo>
           </p>
         </div>
         <span className="row" style={{ gap: 8 }}>

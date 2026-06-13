@@ -21,7 +21,7 @@ As an AI agent, this protocol gives you the ability to **"rent or buy" immediate
 2. **Threshold Mechanics**: If the sum of all committed ICP from all users reaches the proposal's `threshold_e8s`, the proposal is marked as `met`.
 3. **Settlement**: When the proposal deadline is reached, the backend canister sweeps the escrow:
    * **If the Threshold was MET**: The NNS vote is cast matching the winning stance (Adopt vs Reject based on the balance of power). Your committed ICP is converted to cycles via the Cycles Minting Canister (CMC) to fund the canister's operations, meaning it is **permanently burned** from the ledger supply (conviction burn).
-   * **If the Threshold was MISSED**: No NNS vote is cast. The proposal is marked `abstained`, and **100% of your committed ICP is returned** to your principal (minus a standard 0.0001 ICP ledger transfer fee).
+   * **If the Threshold was MISSED**: No NNS vote is cast. The proposal is marked `abstained`, and **100% of your committed ICP is returned** to your principal — exactly what you deposited; the treasury fronts the refund's ledger fee.
 
 ## Scheduling & Staying Updated
 To make effective decisions, agents should run a scheduled script (e.g. hourly via cron) to:
@@ -91,7 +91,7 @@ To burn ICP to commit voting weight on a proposal:
    This returns the secure escrow account record (owner principal and subaccount blob).
 
 3. **Transfer ICP to the Escrow Subaccount:**
-   The total debit must equal: `Commitment Amount + 540_000 e8s` (0.005 ICP protocol fee + 0.0004 ICP ledger fees).
+   The escrow deposit must equal the commitment amount EXACTLY — there is no protocol fee, and the treasury fronts all settlement/refund ledger fees (zero-fee commits). Your wallet only pays the single 10_000 e8s ledger fee on the deposit transfer.
    ```bash
    icp canister call ledger icrc1_transfer '(record { to = record { owner = principal "a2cb4-hh777-77775-aaaba-cai"; subaccount = opt blob "<subaccount_bytes_here>" }; amount = <total_debit_in_e8s> })' -e local
    ```
@@ -115,7 +115,7 @@ To add to your commitment:
    icp canister call backend get_deposit_address '(<proposal_id> : nat64)' --query -e local
    ```
 2. **Transfer additional ICP to the escrow subaccount**:
-   Top-ups are charged **only the 10,000 e8s (0.0001 ICP) ledger transfer fee** (the protocol fee is waived).
+   Top-ups likewise deposit the exact additional amount; your wallet pays only the 10,000 e8s ledger fee on the transfer.
    The transfer amount must equal: `Additional Amount + 10_000 e8s`.
    ```bash
    icp canister call ledger icrc1_transfer '(record { to = record { owner = principal "a2cb4-hh777-77775-aaaba-cai"; subaccount = opt blob "<subaccount_bytes_here>" }; amount = <additional_total_debit_in_e8s> })' -e local
@@ -124,3 +124,12 @@ To add to your commitment:
    ```bash
    icp canister call backend add_to_commitment '(<proposal_id> : nat64, <additional_amount_in_e8s> : nat64)' -e local
    ```
+
+## Multi-token voting (June 2026)
+You can commit in ckBTC/ckETH/ckUSDC/ckUSDT, not just ICP: fund the proposal's
+escrow subaccount (get_deposit_address) on the TOKEN's ledger, then call
+`commit_token(proposal_id, stance, token_variant, amount_in_smallest_units)`.
+The canister converts to ICP at commit (2% max slippage vs oracle rates);
+everything downstream — pots, burns, refunds — is ICP. Refunds pay ICP.
+Thresholds may be dollar-denominated (`threshold_usd_e8s` on the proposal);
+`get_usd_rates` returns the rates used for valuation.

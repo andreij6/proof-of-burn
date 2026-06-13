@@ -7,8 +7,9 @@ import {
   Vote,
   Stance,
   CommitmentStatus,
-  IdeaToken,
+  ExplorerToken,
 } from "./bindings/backend";
+import { IdeaToken } from "./tokens";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import type {
   Proposal,
@@ -38,16 +39,20 @@ import Admin from "./Admin";
 import Landing from "./Landing";
 import Dashboard from "./Dashboard";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
-import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal, DiscordMark, DISCORD_INVITE } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, formatPrincipal, DiscordMark, DISCORD_INVITE } from "./ui";
+import { WALLET_TOKEN_META, parseTokenUnits, fmtUsd, thresholdProgress } from "./tokens";
 
 // ── Shareable URL routing (hash-based; this is a static asset canister) ──
 // Each in-app page maps to a stable hash path so links are copy-pasteable.
-export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'early_adopters' | 'payouts' | 'admin';
+// 'earn', 'staking' and 'early_adopters' are the three tabs of the Earn page —
+// each keeps its own path so old deep links keep working.
+export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'early_adopters' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
   voting: '/voting',
   ideas: '/community',
+  earn: '/earn',
   staking: '/staking',
   lottery: '/lottery',
   explorer: '/explorer',
@@ -56,6 +61,8 @@ export const PAGE_PATH: Record<AppPage, string> = {
   payouts: '/profile',
   admin: '/admin',
 };
+/** The Earn page renders for these three (tab = which one is active). */
+const EARN_PAGES: AppPage[] = ['earn', 'staking', 'early_adopters'];
 const PATH_PAGE: Record<string, AppPage> = Object.fromEntries(
   Object.entries(PAGE_PATH).map(([p, path]) => [path, p as AppPage])
 ) as Record<string, AppPage>;
@@ -420,10 +427,6 @@ export default function App() {
   const [leaderInfo, setLeaderInfo] = useState<LeaderNeuronInfo | null>(null);
   const [poolInfo, setPoolInfo] = useState<PoolInfo | null>(null);
   const [myPoolNeuron, setMyPoolNeuron] = useState<PoolNeuron | null>(null);
-  const [poolSidebarCollapsed, setPoolSidebarCollapsed] = useState<boolean>(() => {
-    try { return localStorage.getItem('pool-sidebar-collapsed') === 'true'; } catch { return false; }
-  });
-  const [poolMobileOpen, setPoolMobileOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [poolDetailsOpen, setPoolDetailsOpen] = useState(false);
   const [dashControlsOpen, setDashControlsOpen] = useState(true);
@@ -463,6 +466,12 @@ export default function App() {
   const [confirmStance, setConfirmStance] = useState<Stance | null>(null);
   // Vote dialog mode: free staked voting power vs. conviction burn.
   const [voteMode, setVoteMode] = useState<'stake' | 'burn'>('burn');
+  // Multi-token voting: which token funds the burn commitment.
+  const [voteToken, setVoteToken] = useState<WalletToken>('ICP');
+  // Cached USD rates (e8s of USD per whole token) for $ thresholds/previews.
+  const [usdRates, setUsdRates] = useState<Record<string, bigint>>({});
+  // Bumping this opens the Profile page on its Wallet tab.
+  const [walletRequest, setWalletRequest] = useState(0);
 
   // Add-more modal state (top up existing commitment)
   const [isAddingMore, setIsAddingMore] = useState(false);
@@ -522,6 +531,14 @@ export default function App() {
       ? window.location.hash.slice('#proposal-'.length) : null
   );
   const [featureFlags, setFeatureFlags] = useState<FeatureFlag[]>([]);
+  const refreshUsdRates = async (a: { get_usd_rates: () => Promise<{ token: string; rate_usd_e8s: bigint }[]> }) => {
+    try {
+      const rates = await a.get_usd_rates();
+      const map: Record<string, bigint> = {};
+      for (const r of rates) map[r.token] = r.rate_usd_e8s;
+      setUsdRates(map);
+    } catch { /* transient */ }
+  };
 
   // Feature flag: the Community R&D page + nav are fully hidden when disabled
   // (the backend also rejects its update methods, so this is belt + braces).
@@ -718,6 +735,7 @@ export default function App() {
     if (!currentActor) return;
     try {
       const info = await currentActor.get_leader_neuron_info();
+      refreshUsdRates(currentActor);
       setLeaderInfo(info);
     } catch (err) {
       console.error("Failed to fetch leader neuron info:", err);
@@ -1340,6 +1358,63 @@ export default function App() {
   const executeTransaction = async () => {
     if (!actor || !confirmProposalId || !confirmStance) return;
 
+    // ── Non-ICP commitment: deposit the token, the canister swaps to ICP ──
+    if (voteToken !== 'ICP') {
+      const meta = WALLET_TOKEN_META[voteToken];
+      const smallest = parseTokenUnits(confirmAmount, meta.decimals);
+      if (!smallest || smallest <= 0n) {
+        setTxError(`Enter a valid ${voteToken} amount.`);
+        return;
+      }
+      const rate = usdRates[meta.variant] ?? 0n;
+      if (rate > 0n) {
+        const usd = smallest * rate / BigInt(10) ** BigInt(meta.decimals);
+        if (usd < 100_000_000n) {
+          setTxError(`Too small — ${voteToken} commitments start at $1.`);
+          return;
+        }
+      }
+      const ledgers: Record<string, string | undefined> = {
+        ckBTC: explorerInfo?.ckbtc_ledger.toText(),
+        ckETH: explorerInfo?.cketh_ledger.toText(),
+        ckUSDC: explorerInfo?.ckusdc_ledger.toText(),
+        ckUSDT: explorerInfo?.ckusdt_ledger.toText(),
+      };
+      const tokenLedger = ledgers[voteToken];
+      if (!tokenLedger) { setTxError('Token ledger unavailable — try again shortly.'); return; }
+      setIsTransacting(true);
+      setTxError(null);
+      try {
+        setTxStep("Deriving secure escrow subaccount...");
+        const depositAccount = await actor.get_deposit_address(confirmProposalId);
+        setTxStep(`Step 1/2: Depositing ${voteToken} into escrow...`);
+        const tokenActor = createLedgerActor(tokenLedger, {
+          agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
+        });
+        const xfer = await tokenActor.icrc1_transfer({
+          to: { owner: depositAccount.owner, subaccount: depositAccount.subaccount ? depositAccount.subaccount : undefined },
+          amount: smallest,
+        });
+        if (xfer.__kind__ === "Err") {
+          throw new Error(`Token transfer failed: ${JSON.stringify(xfer.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
+        }
+        setTxStep("Step 2/2: Locking the escrow and registering your stance...");
+        const res = await actor.commit_token(confirmProposalId, confirmStance, meta.variant, smallest);
+        if (res.__kind__ === "Err") {
+          throw new Error(`Commit failed: ${res.Err}`);
+        }
+        setTxSuccess(true);
+        setTxStep(`Committed! Your ${voteToken} stays escrowed — it converts to ICP only if the vote passes; otherwise it comes back as ${voteToken}.`);
+        await refreshAllData();
+      } catch (err: any) {
+        console.error("Token commitment error:", err);
+        setTxError(err.message || String(err));
+      } finally {
+        setIsTransacting(false);
+      }
+      return;
+    }
+
     const amount = parseFloat(confirmAmount);
     if (isNaN(amount) || amount < 1.0) {
       setTxError("Please enter a valid amount (minimum 1.0 ICP).");
@@ -1347,14 +1422,15 @@ export default function App() {
     }
     const amountE8s = BigInt(Math.floor(amount * 100_000_000));
     // Option C: capped by wallet balance only (no neuron stake cap).
-    // 0.005 protocol fee + 5×0.0001 ledger fees (deposit + commit-fee + 3 split transfers).
-    const requiredTotal = amountE8s + 550_000n;
+    // Zero-fee commits: escrow receives exactly the amount; the wallet only
+    // pays the one 0.0001 ICP ledger fee on the deposit transfer itself.
+    const requiredTotal = amountE8s + 10_000n;
     if (requiredTotal > holdings) {
-      setTxError(`Insufficient wallet balance — need at least ${fmtICP(requiredTotal)} ICP (amount + fees).`);
+      setTxError(`Insufficient wallet balance — need at least ${fmtICP(requiredTotal)} ICP (amount + deposit fee).`);
       return;
     }
 
-    const requiredDeposit = amountE8s + 540_000n;
+    const requiredDeposit = amountE8s;
     setIsTransacting(true);
     setTxError(null);
     
@@ -1523,10 +1599,6 @@ export default function App() {
       document.documentElement.removeAttribute('data-theme');
     }
   }, [theme]);
-
-  useEffect(() => {
-    try { localStorage.setItem('pool-sidebar-collapsed', poolSidebarCollapsed ? 'true' : 'false'); } catch {}
-  }, [poolSidebarCollapsed]);
 
   const openPoolWizard = () => {
     // Draft and Inactive neurons both resume at the finalize/pay step — the
@@ -1697,33 +1769,24 @@ export default function App() {
   }, [page, isAdmin, principal, config]);
 
   // Single source of truth for site navigation — rendered in the persistent
-  // desktop sidebar AND the mobile drawer. Order is deliberate:
-  // Voting → Staking → Lottery → Community R&D → Explorer → Arcade → Early Adopters → Profile (→ Admin).
+  // desktop sidebar AND the mobile drawer. Grouped by intent:
+  // Dashboard → Participate (Voting / R&D / Explorer / Earn) → Play (Arcade / Lottery).
   const renderNavLinks = (onNavigate?: () => void) => {
     const go = (p: typeof page) => { setPage(p); onNavigate?.(); };
     const linkStyle: React.CSSProperties = { justifyContent: 'flex-start', width: '100%', height: 38 };
+    const onEarn = (EARN_PAGES as string[]).includes(page);
     return (
       <>
         <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('dashboard')}>
           <Icon name="list" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
           Dashboard
         </Btn>
+
+        <Eyebrow style={{ margin: '14px 0 4px' }}>Participate</Eyebrow>
         <Btn variant={page === 'voting' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('voting')}>
           <Icon name="flame" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
           Voting
         </Btn>
-        {losslessEnabled && (
-          <Btn variant={page === 'staking' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('staking')}>
-            <Icon name="zap" size={14} stroke={page === 'staking' ? 'var(--char-950)' : 'currentColor'} />
-            Staking
-          </Btn>
-        )}
-        {lotteryEnabled && (
-          <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
-            <Icon name="target" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
-            Lottery
-          </Btn>
-        )}
         {ideaBoardEnabled && (
           <Btn variant={page === 'ideas' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ideas')}>
             <Icon name="bulb" size={14} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
@@ -1736,16 +1799,24 @@ export default function App() {
             Explorer
           </Btn>
         )}
+        <Btn variant={onEarn ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('earn')}>
+          <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
+          Earn
+        </Btn>
+
+        {(arcadeEnabled || lotteryEnabled) && (
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Play</Eyebrow>
+        )}
         {arcadeEnabled && (
           <Btn variant={page === 'arcade' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('arcade')}>
             <Icon name="gamepad" size={14} stroke={page === 'arcade' ? 'var(--char-950)' : 'currentColor'} />
             Arcade
           </Btn>
         )}
-        {earlyAdoptersEnabled && (
-          <Btn variant={page === 'early_adopters' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('early_adopters')}>
-            <Icon name="spark" size={14} stroke={page === 'early_adopters' ? 'var(--char-950)' : 'currentColor'} />
-            Early Adopters
+        {lotteryEnabled && (
+          <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
+            <Icon name="target" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
+            Lottery
           </Btn>
         )}
       </>
@@ -1802,15 +1873,6 @@ export default function App() {
 
         {renderAccountLinks(onNavigate)}
 
-        <Btn
-          variant="ghost"
-          style={{ justifyContent: 'flex-start', width: '100%', height: 38, marginBottom: 8 }}
-          onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-        >
-          <Icon name="spark" size={14} />
-          Theme: {theme.toUpperCase()}
-        </Btn>
-
         {!principal || principal.isAnonymous() ? (
           <Btn
             variant="primary"
@@ -1854,7 +1916,7 @@ export default function App() {
               <Btn
                 variant="primary"
                 style={{ flex: 1, height: 38 }}
-                onClick={() => { setIsWalletOpen(true); setWithdrawError(null); setWithdrawSuccess(false); onNavigate?.(); }}
+                onClick={() => { setPage('payouts'); setWalletRequest(n => n + 1); onNavigate?.(); }}
               >
                 <Icon name="wallet" size={14} stroke="var(--char-950)" /> Wallet
               </Btn>
@@ -1957,134 +2019,24 @@ export default function App() {
           </b>
 
         </div>
+
+        {/* Theme toggle — sun in dark mode (tap for light), moon in light mode */}
+        <button
+          onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+          style={{
+            background: 'transparent', border: '1px solid var(--border)', borderRadius: 8,
+            cursor: 'pointer', color: 'var(--fg-2)', padding: 7, display: 'flex',
+            alignItems: 'center', flexShrink: 0,
+          }}
+        >
+          <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
+        </button>
       </header>
 
-      {/* ── Mobile Pool FAB (dashboard only) ── */}
-      {page === 'voting' && (
-        <button
-          className="pool-mobile-fab"
-          onClick={() => setPoolMobileOpen(true)}
-        >
-          <Icon name="spark" size={14} stroke="var(--char-950)" />
-          Pool {poolInfo && poolInfo.active_count > 0n ? `· ${poolInfo.active_count}` : ''}
-        </button>
-      )}
 
-      {/* ── Mobile Pool Overlay (full-screen on narrow viewport) ── */}
-      {poolMobileOpen && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'var(--bg)', zIndex: 200,
-          display: 'flex', flexDirection: 'column',
-        }}>
-          <div className="row" style={{
-            justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px',
-            borderBottom: '1px solid var(--border)', background: 'var(--bg-alt)',
-          }}>
-            <span className="row" style={{ gap: 8, alignItems: 'center', minWidth: 0 }}>
-              <NeuronGlyph size={18} />
-              <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--fg)' }}>
-                Pool Neurons
-                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-3)', marginLeft: 8 }}>
-                  {poolInfo?.active_count.toString() ?? '0'} active
-                </span>
-              </span>
-            </span>
-            <button onClick={() => setPoolMobileOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
-              <Icon name="x" size={18} />
-            </button>
-          </div>
-          <div className="col" style={{ flex: 1, overflowY: 'auto', padding: 16, gap: 12 }}>
-            <Btn variant="secondary" sm style={{ width: '100%' }} onClick={() => setPoolDetailsOpen(true)}>
-              <Icon name="info" size={13} /> More details
-            </Btn>
-            {!myPoolNeuron && (
-              <Btn variant="primary" style={{ width: '100%' }}
-                onClick={() => { openPoolWizard(); setPoolMobileOpen(false); }}
-                disabled={!principal || principal.isAnonymous()}>
-                <Icon name="spark" size={14} stroke="var(--char-950)" />
-                {!principal || principal.isAnonymous() ? 'Sign in to join' : 'Join Pool'}
-              </Btn>
-            )}
-            {myPoolNeuron && (
-              <div className="col" style={{
-                gap: 8, padding: '10px 12px', borderRadius: 8,
-                border: '1px solid var(--border)', background: 'transparent',
-              }}>
-                <div className="row" style={{ justifyContent: 'space-between' }}>
-                  <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Your neuron</span>
-                  {poolIs(myPoolNeuron.status, 'Active')
-                    ? (myPoolRank != null && myPoolRank <= 25
-                        ? <Chip tone="ok"><Icon name="check" size={11} /> Active - Paid</Chip>
-                        : <Chip tone="muted">Active</Chip>)
-                    : poolIs(myPoolNeuron.status, 'Draft')
-                    ? <Chip tone="pending">Draft</Chip>
-                    : <Chip tone="muted">Inactive</Chip>}
-                </div>
-                <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg)', overflowWrap: 'anywhere' }}>
-                  #{myPoolNeuron.neuron_id.toString()}
-                </span>
-                {poolIs(myPoolNeuron.status, 'Active') && (
-                  <span className="mono" style={{ fontSize: 13, color: 'var(--sprout)' }}>
-                    {fmtVP(myPoolNeuron.voting_power)} VP
-                  </span>
-                )}
-                {(poolIs(myPoolNeuron.status, 'Draft') || poolIs(myPoolNeuron.status, 'Inactive')) && (
-                  <Btn variant="primary" sm style={{ width: '100%' }}
-                    onClick={() => { openPoolWizard(); setPoolMobileOpen(false); }}>
-                    <Icon name="arrowUp" size={13} stroke="var(--char-950)" />
-                    {poolIs(myPoolNeuron.status, 'Draft') ? ' Resume setup' : ' Finish activation'}
-                  </Btn>
-                )}
-                {poolIs(myPoolNeuron.status, 'Inactive') && (
-                  <button onClick={handleCancelPoolDraft} disabled={isCancellingDraft}
-                    style={{ background: 'none', border: 'none', cursor: isCancellingDraft ? 'default' : 'pointer', color: 'var(--ember)', fontSize: 12, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4, opacity: isCancellingDraft ? 0.5 : 1 }}>
-                    <Icon name="x" size={12} stroke="var(--ember)" /> {isCancellingDraft ? 'Clearing…' : 'Clear neuron'}
-                  </button>
-                )}
-                {poolIs(myPoolNeuron.status, 'Active') && (
-                  <button onClick={() => setConfirmLeaveId(myPoolNeuron.neuron_id)}
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ember)', fontSize: 12, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <Icon name="x" size={12} stroke="var(--ember)" /> Leave pool
-                  </button>
-                )}
-              </div>
-            )}
-            {(poolInfo?.active_neurons ?? [])
-              .filter(n => !myPoolNeuron || n.neuron_id !== myPoolNeuron.neuron_id)
-              .map(n => (
-                <div key={n.neuron_id.toString()} className="col" style={{
-                  gap: 6, padding: '10px 12px', borderRadius: 8,
-                  border: '1px solid var(--border)', background: 'transparent',
-                }}>
-                  <div className="row" style={{ justifyContent: 'space-between' }}>
-                    {isLocal ? (
-                      <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>#{n.neuron_id.toString()}</span>
-                    ) : (
-                      <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${n.neuron_id.toString()}`}
-                        target="_blank" rel="noreferrer"
-                        style={{ fontSize: 12, color: 'var(--sprout)', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                        title="View on the NNS dashboard">
-                        #{n.neuron_id.toString()} <Icon name="external" size={10} stroke="var(--sprout)" />
-                      </a>
-                    )}
-                    {n.rank <= 25
-                      ? <Chip tone="ok" style={{ height: 18, fontSize: 10 }}><Icon name="check" size={10} /> Active - Paid</Chip>
-                      : <Chip tone="muted" style={{ height: 18, fontSize: 10 }}>Active</Chip>}
-                  </div>
-                  <span className="mono" style={{ fontSize: 13, color: 'var(--sprout)' }}>{fmtVP(n.voting_power)} VP</span>
-                </div>
-              ))
-            }
-            {(poolInfo?.active_count ?? 0n) === 0n && !myPoolNeuron && (
-              <span style={{ fontSize: 13, color: 'var(--fg-3)', textAlign: 'center', padding: '24px 0', lineHeight: 1.6 }}>
-                No pool neurons yet. Join to amplify the syndicate's voting power.
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── Main Layout (Nav Sidebar + Content + Pool Sidebar + Tweak Panel) ── */}
+      {/* ── Main Layout (Nav Sidebar + Content + Tweak Panel) ── */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
 
         {/* Persistent navigation drawer — always open on desktop; the mobile
@@ -2108,24 +2060,223 @@ export default function App() {
               isAdmin={isAdmin}
               onSignIn={handleLogin}
             />
-          ) : page === 'staking' ? (
-            <Staking
-              actor={actor}
-              identity={identity}
-              principal={principal}
-              host={host}
-              rootKey={env?.IC_ROOT_KEY}
-              ledgerCanisterId={ledgerCanisterId}
-              isLocal={config?.is_local ?? false}
-              onSignIn={handleLogin}
-              onActivity={refreshAllData}
-            />
+          ) : (EARN_PAGES as string[]).includes(page) ? (
+            <div className="col" style={{ minHeight: '100%' }}>
+              {/* ── Earn hub: Pool Neurons / Staking / Early Adopters tabs.
+                  Each tab keeps its own URL so old deep links still land. ── */}
+              <div className="dashboard-container" style={{ paddingBottom: 0, gap: 14 }}>
+                <div className="col" style={{ gap: 6 }}>
+                  <span className="row" style={{ gap: 8 }}>
+                    <Icon name="coins" size={16} stroke="var(--burn)" />
+                    <Eyebrow accent>Earn</Eyebrow>
+                  </span>
+                  <b style={{ fontSize: 17 }}>Put your ICP to work.</b>
+                </div>
+                <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                  <Btn variant={page === 'earn' ? 'primary' : 'ghost'} sm onClick={() => setPage('earn')}>
+                    <NeuronGlyph size={13} color={page === 'earn' ? 'var(--char-950)' : 'currentColor'} />
+                    Pool Neurons
+                  </Btn>
+                  {losslessEnabled && (
+                    <Btn variant={page === 'staking' ? 'primary' : 'ghost'} sm onClick={() => setPage('staking')}>
+                      <Icon name="zap" size={13} stroke={page === 'staking' ? 'var(--char-950)' : 'currentColor'} />
+                      Staking
+                    </Btn>
+                  )}
+                  {earlyAdoptersEnabled && (
+                    <Btn variant={page === 'early_adopters' ? 'primary' : 'ghost'} sm onClick={() => setPage('early_adopters')}>
+                      <Icon name="spark" size={13} stroke={page === 'early_adopters' ? 'var(--char-950)' : 'currentColor'} />
+                      Early Adopters
+                    </Btn>
+                  )}
+                </div>
+                <hr style={{ margin: 0 }} />
+              </div>
+
+              {page === 'staking' ? (
+                <Staking
+                  actor={actor}
+                  identity={identity}
+                  principal={principal}
+                  host={host}
+                  rootKey={env?.IC_ROOT_KEY}
+                  ledgerCanisterId={ledgerCanisterId}
+                  isLocal={config?.is_local ?? false}
+                  onSignIn={handleLogin}
+                  onActivity={refreshAllData}
+                />
+              ) : page === 'early_adopters' ? (
+                <EarlyAdopters
+                  actor={actor}
+                  identity={identity}
+                  principal={principal}
+                  host={host}
+                  rootKey={env?.IC_ROOT_KEY}
+                  icpLedger={ledgerCanisterId}
+                  isLocal={config?.is_local ?? false}
+                  isAdmin={isAdmin}
+                  onSignIn={handleLogin}
+                />
+              ) : (
+                /* ── Pool Neurons tab (moved here from the voting-page sidebar) ── */
+                <div className="dashboard-container" style={{ paddingTop: 18 }}>
+                  <div className="row" style={{ gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                    <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+                      <NeuronGlyph size={18} />
+                      <b style={{ fontSize: 15, color: 'var(--fg)' }}>Pool Neurons</b>
+                      <span className="mono" style={{ fontSize: 12, color: 'var(--fg-3)' }}>
+                        {poolInfo?.active_count.toString() ?? '0'} active
+                      </span>
+                    </span>
+                    <Btn variant="secondary" sm onClick={() => setPoolDetailsOpen(true)}>
+                      <Icon name="info" size={12} /> More details
+                    </Btn>
+                  </div>
+                  <p style={{ margin: 0, fontSize: 13, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                    Lend your NNS neuron's voting power to the syndicate and earn a share of settled proceeds.
+                  </p>
+
+                  {!myPoolNeuron && (
+                    <Btn
+                      variant="primary"
+                      style={{ alignSelf: 'flex-start' }}
+                      onClick={() => openPoolWizard()}
+                      disabled={!principal || principal.isAnonymous()}
+                    >
+                      <Icon name="spark" size={14} stroke="var(--char-950)" />
+                      {!principal || principal.isAnonymous() ? 'Sign in to join' : 'Join Pool'}
+                    </Btn>
+                  )}
+
+                  {/* Member neuron cards — same format as the Staking term-pool
+                      neuron cards: title + status chip, labeled stat rows with
+                      the NNS link, public-audit hint. */}
+                  <div className="row" style={{ gap: 12, alignItems: 'stretch', flexWrap: 'wrap' }}>
+                    {myPoolNeuron && (
+                      <div className="col" style={{
+                        gap: 10, padding: '14px 16px', borderRadius: 10,
+                        flex: '1 1 240px', minWidth: 0,
+                        border: '1px solid var(--border-hi)',
+                        background: 'color-mix(in srgb, var(--burn-950) 40%, transparent)',
+                      }}>
+                        <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                          <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>Your neuron</b>
+                          {poolIs(myPoolNeuron.status, 'Active')
+                            ? (myPoolRank != null && myPoolRank <= 25
+                                ? <Chip tone="ok"><Icon name="check" size={11} /> Active - Paid</Chip>
+                                : <Chip tone="muted">Active</Chip>)
+                            : poolIs(myPoolNeuron.status, 'Draft')
+                            ? <Chip tone="pending">Draft</Chip>
+                            : <Chip tone="muted">Inactive</Chip>}
+                        </div>
+                        <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
+                          {poolIs(myPoolNeuron.status, 'Active') && (
+                            <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                              <span style={{ color: 'var(--fg-3)' }}>Voting power</span>
+                              <span className="mono" style={{ color: 'var(--sprout)' }}>{fmtVP(myPoolNeuron.voting_power)} VP</span>
+                            </div>
+                          )}
+                          <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
+                            <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
+                            {isLocal ? (
+                              <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
+                                #{myPoolNeuron.neuron_id.toString()}
+                              </span>
+                            ) : (
+                              <a
+                                className="mono"
+                                href={`https://dashboard.internetcomputer.org/neuron/${myPoolNeuron.neuron_id.toString()}`}
+                                target="_blank" rel="noreferrer"
+                                style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                                title="View this neuron on the NNS dashboard"
+                              >
+                                #{myPoolNeuron.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                        {(poolIs(myPoolNeuron.status, 'Draft') || poolIs(myPoolNeuron.status, 'Inactive')) && (
+                          <Btn variant="primary" sm style={{ alignSelf: 'flex-start' }} onClick={() => openPoolWizard()}>
+                            <Icon name="arrowUp" size={13} stroke="var(--char-950)" />
+                            {poolIs(myPoolNeuron.status, 'Draft') ? ' Resume setup' : ' Finish activation'}
+                          </Btn>
+                        )}
+                        {poolIs(myPoolNeuron.status, 'Inactive') && (
+                          <button onClick={handleCancelPoolDraft} disabled={isCancellingDraft}
+                            style={{ background: 'none', border: 'none', cursor: isCancellingDraft ? 'default' : 'pointer', color: 'var(--ember)', fontSize: 12, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4, opacity: isCancellingDraft ? 0.5 : 1 }}>
+                            <Icon name="x" size={12} stroke="var(--ember)" /> {isCancellingDraft ? 'Clearing…' : 'Clear neuron'}
+                          </button>
+                        )}
+                        {poolIs(myPoolNeuron.status, 'Active') && (
+                          <button onClick={() => setConfirmLeaveId(myPoolNeuron.neuron_id)}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ember)', fontSize: 12, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <Icon name="x" size={12} stroke="var(--ember)" /> Leave pool
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {(poolInfo?.active_neurons ?? [])
+                      .filter(n => !myPoolNeuron || n.neuron_id !== myPoolNeuron.neuron_id)
+                      .map(n => (
+                        <div key={n.neuron_id.toString()} className="col" style={{
+                          gap: 10, padding: '14px 16px', borderRadius: 10,
+                          flex: '1 1 240px', minWidth: 0,
+                          border: '1px solid var(--border)', background: 'transparent',
+                        }}>
+                          <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                            <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>Pool member</b>
+                            {n.rank <= 25
+                              ? <Chip tone="ok"><Icon name="check" size={11} /> Active - Paid</Chip>
+                              : <Chip tone="muted">Active</Chip>}
+                          </div>
+                          <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
+                            <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                              <span style={{ color: 'var(--fg-3)' }}>Voting power</span>
+                              <span className="mono" style={{ color: 'var(--sprout)' }}>{fmtVP(n.voting_power)} VP</span>
+                            </div>
+                            <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
+                              <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
+                              {isLocal ? (
+                                <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
+                                  #{n.neuron_id.toString()}
+                                </span>
+                              ) : (
+                                <a
+                                  className="mono"
+                                  href={`https://dashboard.internetcomputer.org/neuron/${n.neuron_id.toString()}`}
+                                  target="_blank" rel="noreferrer"
+                                  style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                                  title="View this neuron on the NNS dashboard"
+                                >
+                                  #{n.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                          <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout)' }}>
+                            <Icon name="eye" size={12} stroke="var(--sprout)" />
+                            Public on the NNS — audit it any time.
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+
+                  {(poolInfo?.active_count ?? 0n) === 0n && !myPoolNeuron && (
+                    <span style={{ fontSize: 13, color: 'var(--fg-3)', padding: '12px 0', lineHeight: 1.6 }}>
+                      No pool neurons yet. Join to amplify the syndicate's voting power.
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           ) : page === 'lottery' ? (
             <Lottery
               actor={actor}
               principal={principal}
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
+              onGoStaking={() => setPage('staking')}
             />
           ) : page === 'explorer' ? (
             <Explorer
@@ -2147,24 +2298,18 @@ export default function App() {
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'staking' : 'voting')}
             />
-          ) : page === 'early_adopters' ? (
-            <EarlyAdopters
-              actor={actor}
-              identity={identity}
-              principal={principal}
-              host={host}
-              rootKey={env?.IC_ROOT_KEY}
-              icpLedger={ledgerCanisterId}
-              isLocal={config?.is_local ?? false}
-              isAdmin={isAdmin}
-              onSignIn={handleLogin}
-            />
           ) : page === 'payouts' ? (
             <Payouts
+              key={walletRequest}
               actor={actor}
               principal={principal}
+              identity={identity}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
               isLocal={config?.is_local ?? false}
               backendCanisterId={backendCanisterId}
+              initialSection={walletRequest > 0 ? 'wallet' : 'overview'}
               onSignIn={handleLogin}
             />
           ) : page === 'admin' ? (
@@ -2321,7 +2466,20 @@ export default function App() {
                   </span>
                 </p>
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, maxWidth: 480 }}>
-                  Burn ICP to temporarily borrow the community leader neuron's voting power and steer the NNS proposals you care about. The more you commit, the more weight your side carries — your conviction decides which way the neuron votes.
+                  Burn ICP to steer the NNS proposals you care about — your conviction decides
+                  which way the community neuron votes.{' '}
+                  <MoreInfo title="How burn voting works">
+                    <p style={{ margin: 0 }}>
+                      Committing ICP temporarily borrows the community leader neuron's voting
+                      power. The more you commit, the more weight your side carries — adopt and
+                      reject commitments face off, and the heavier side decides the neuron's vote.
+                    </p>
+                    <p style={{ margin: 0 }}>
+                      Commitments are escrowed until the proposal's deadline. If the dollar
+                      threshold is met and the neuron votes, your commitment is spent; if not,
+                      it is returned in full — no fees either way.
+                    </p>
+                  </MoreInfo>
                 </p>
                 <div className="row" style={{ gap: 14, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
                   <button
@@ -2553,11 +2711,11 @@ export default function App() {
                       const aiReview = aiReviews[proposalIdStr];
                       const aiOpen = aiOpenMap[proposalIdStr] || (aiMode === 'expanded' && i === 0);
 
-                      const pct = Math.floor((Number(p.total_committed_e8s) / Number(p.threshold_e8s)) * 100);
-                      const met = p.status === 'met' || p.total_committed_e8s >= p.threshold_e8s;
+                      const { pct, reqSuffix } = thresholdProgress(p, usdRates[ExplorerToken.ICP] ?? 0n);
+                      const met = p.status === 'met' || pct >= 100;
 
                       const committedLabel = `${fmtICP(p.total_committed_e8s)} ICP committed`;
-                      const reqLabel = pct > 100 ? `${pct}% · oversubscribed` : met ? `${pct}% · met` : `${pct}% of ${fmtICP(p.threshold_e8s)} ICP`;
+                      const reqLabel = pct > 100 ? `${pct}% · oversubscribed` : met ? `${pct}% · met` : `${pct}% ${reqSuffix}`;
 
                       const statusChip = p.status === 'met' ? (
                         <Chip tone="pending"><Icon name="clock" size={11} /> Pending burn</Chip>
@@ -2758,8 +2916,8 @@ export default function App() {
                     ) : committedProposals.map(p => {
                       const myCommitment = myCommitments.find(c => c.proposal_id === p.id);
                       const myStakedVote = myLosslessVotes.find(v => v.proposal_id === p.id);
-                      const pct = Math.floor((Number(p.total_committed_e8s) / Number(p.threshold_e8s)) * 100);
-                      const met = p.status === 'met' || p.total_committed_e8s >= p.threshold_e8s;
+                      const { pct } = thresholdProgress(p, usdRates[ExplorerToken.ICP] ?? 0n);
+                      const met = p.status === 'met' || pct >= 100;
                       const remainingNs = Number(p.deadline) - Date.now() * 1_000_000;
                       const remainingH = Math.max(0, Math.floor(remainingNs / (3600 * 1_000_000_000)));
                       const remainingD = Math.floor(remainingH / 24);
@@ -2988,159 +3146,6 @@ export default function App() {
           )}
         </main>
 
-        {/* ── Pool Sidebar (desktop — hidden on mobile, use FAB instead) ── */}
-        {page === 'voting' && (
-        <aside
-          className="pool-sidebar-desktop"
-          style={{
-            width: poolSidebarCollapsed ? 44 : 280,
-            borderLeft: '1px solid var(--border)',
-            background: 'var(--bg-alt)',
-            flexDirection: 'column',
-            overflowY: 'auto',
-            overflowX: 'hidden',
-            transition: 'width 180ms var(--ease-out)',
-          }}
-        >
-          {/* Toggle header */}
-          <button
-            onClick={() => setPoolSidebarCollapsed(c => !c)}
-            style={{
-              padding: poolSidebarCollapsed ? '14px 0' : '11px 14px',
-              display: 'flex', alignItems: 'center',
-              justifyContent: poolSidebarCollapsed ? 'center' : 'space-between',
-              gap: 6, background: 'transparent', border: 'none',
-              borderBottom: '1px solid var(--border)',
-              cursor: 'pointer', color: 'var(--fg-2)', flexShrink: 0,
-              width: '100%', position: 'sticky', top: 0, zIndex: 2,
-              backdropFilter: 'blur(8px)',
-            }}
-          >
-            {!poolSidebarCollapsed && (
-              <>
-                <span className="row" style={{ gap: 6, alignItems: 'center', minWidth: 0 }}>
-                  <NeuronGlyph size={15} />
-                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--fg)', textTransform: 'uppercase', letterSpacing: '0.09em', whiteSpace: 'nowrap' }}>
-                    Pool Neurons
-                  </span>
-                </span>
-                <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>
-                  {poolInfo?.active_count.toString() ?? '0'} active
-                </span>
-              </>
-            )}
-            <Icon name={poolSidebarCollapsed ? 'chevRight' : 'chevDown'} size={14} stroke="var(--fg-3)" />
-          </button>
-
-          {/* Sidebar body */}
-          {!poolSidebarCollapsed && (
-            <div className="col" style={{ flex: 1, padding: 12, gap: 10 }}>
-              {/* Explainer: always the first item in the list */}
-              <Btn variant="secondary" sm style={{ width: '100%' }} onClick={() => setPoolDetailsOpen(true)}>
-                <Icon name="info" size={12} /> More details
-              </Btn>
-              {/* Primary CTA */}
-              {!myPoolNeuron && (
-                <Btn
-                  variant="primary"
-                  sm
-                  style={{ width: '100%' }}
-                  onClick={() => { openPoolWizard(); setPoolMobileOpen(false); }}
-                  disabled={!principal || principal.isAnonymous()}
-                >
-                  <Icon name="spark" size={13} stroke="var(--char-950)" />
-                  {!principal || principal.isAnonymous() ? 'Sign in to join' : 'Join Pool'}
-                </Btn>
-              )}
-
-              {/* My entry */}
-              {myPoolNeuron && (
-                <div className="col" style={{
-                  gap: 7, padding: '9px 10px', borderRadius: 7,
-                  border: '1px solid var(--border)', background: 'transparent',
-                }}>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 6 }}>
-                    <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Your neuron</span>
-                    {poolIs(myPoolNeuron.status, 'Active')
-                      ? (myPoolRank != null && myPoolRank <= 25
-                          ? <Chip tone="ok" style={{ height: 18, fontSize: 10 }}><Icon name="check" size={10} /> Active - Paid</Chip>
-                          : <Chip tone="muted" style={{ height: 18, fontSize: 10 }}>Active</Chip>)
-                      : poolIs(myPoolNeuron.status, 'Draft')
-                      ? <Chip tone="pending" style={{ height: 18, fontSize: 10 }}>Draft</Chip>
-                      : <Chip tone="muted" style={{ height: 18, fontSize: 10 }}>Inactive</Chip>}
-                  </div>
-                  <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg)', overflowWrap: 'anywhere' }}>
-                    #{myPoolNeuron.neuron_id.toString()}
-                  </span>
-                  {poolIs(myPoolNeuron.status, 'Active') && (
-                    <span className="mono" style={{ fontSize: 12, color: 'var(--sprout)' }}>
-                      {fmtVP(myPoolNeuron.voting_power)} VP
-                    </span>
-                  )}
-                  {(poolIs(myPoolNeuron.status, 'Draft') || poolIs(myPoolNeuron.status, 'Inactive')) && (
-                    <Btn variant="primary" sm style={{ width: '100%', marginTop: 2 }} onClick={() => openPoolWizard()}>
-                      <Icon name="arrowUp" size={12} stroke="var(--char-950)" />
-                      {poolIs(myPoolNeuron.status, 'Draft') ? ' Resume setup' : ' Finish activation'}
-                    </Btn>
-                  )}
-                  {poolIs(myPoolNeuron.status, 'Inactive') && (
-                    <button
-                      onClick={handleCancelPoolDraft} disabled={isCancellingDraft}
-                      style={{ background: 'none', border: 'none', cursor: isCancellingDraft ? 'default' : 'pointer', color: 'var(--ember)', fontSize: 11.5, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4, opacity: isCancellingDraft ? 0.5 : 1 }}
-                    >
-                      <Icon name="x" size={11} stroke="var(--ember)" /> {isCancellingDraft ? 'Clearing…' : 'Clear neuron'}
-                    </button>
-                  )}
-                  {poolIs(myPoolNeuron.status, 'Active') && (
-                    <button
-                      onClick={() => setConfirmLeaveId(myPoolNeuron.neuron_id)}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--ember)', fontSize: 11.5, padding: '2px 0', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 4 }}
-                    >
-                      <Icon name="x" size={11} stroke="var(--ember)" /> Leave pool
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Other active neurons */}
-              {(poolInfo?.active_neurons ?? [])
-                .filter(n => !myPoolNeuron || n.neuron_id !== myPoolNeuron.neuron_id)
-                .map(n => (
-                  <div key={n.neuron_id.toString()} className="col" style={{
-                    gap: 4, padding: '8px 10px', borderRadius: 6,
-                    border: '1px solid var(--border)', background: 'transparent',
-                  }}>
-                    <div className="row" style={{ justifyContent: 'space-between', gap: 6 }}>
-                      {isLocal ? (
-                        <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          #{n.neuron_id.toString()}
-                        </span>
-                      ) : (
-                        <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${n.neuron_id.toString()}`}
-                          target="_blank" rel="noreferrer"
-                          style={{ fontSize: 11, color: 'var(--sprout)', display: 'inline-flex', alignItems: 'center', gap: 3, overflow: 'hidden', whiteSpace: 'nowrap' }}
-                          title="View on the NNS dashboard">
-                          #{n.neuron_id.toString()} <Icon name="external" size={9} stroke="var(--sprout)" />
-                        </a>
-                      )}
-                      {n.rank <= 25
-                        ? <Chip tone="ok" style={{ height: 17, fontSize: 10 }}><Icon name="check" size={9} /> Active - Paid</Chip>
-                        : <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>Active</Chip>}
-                    </div>
-                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--sprout)' }}>{fmtVP(n.voting_power)} VP</span>
-                  </div>
-                ))
-              }
-
-              {(poolInfo?.active_count ?? 0n) === 0n && !myPoolNeuron && (
-                <span style={{ fontSize: 12, color: 'var(--fg-3)', textAlign: 'center', padding: '12px 0', lineHeight: 1.5 }}>
-                  No pool neurons yet. Join to amplify the syndicate's voting power.
-                </span>
-              )}
-            </div>
-          )}
-        </aside>
-        )}
 
         {/* Right Column: Tweak panel & Progression Ladder — local dev only */}
         {page === 'voting' && isLocal && dashControlsOpen && <aside style={{
@@ -3434,7 +3439,7 @@ export default function App() {
             </div>
 
             <p style={{ fontSize: 12, color: 'var(--fg-3)', margin: 0, lineHeight: 1.5 }}>
-              Accumulates the 0.005 ICP protocol fee per commit plus the treasury share of every settled proposal's proceeds. Without pool neurons: 50% treasury / 25% backend cycles / 25% frontend cycles. With active pool neurons: 25% treasury / 25% backend / 25% frontend / 25% pool. Withdraw to any principal.
+              Accumulates the treasury share of every settled proposal's proceeds, and fronts the ledger fees that make commits and refunds fee-free for users. Without pool neurons: 50% treasury / 25% backend cycles / 25% frontend cycles. With active pool neurons: 25% each. Withdraw to any principal.
             </p>
 
             {treasurySuccess && (
@@ -4025,14 +4030,14 @@ export default function App() {
                             : weight <= 0n ? 'Stake ICP to unlock free voting power' : undefined}
                         >
                           <Icon name="zap" size={13} stroke={voteMode === 'stake' ? 'var(--burn)' : 'currentColor'} />
-                          Staked vote · free
+                          Staked Vote
                         </button>
                         <button
                           style={segBtn(voteMode === 'burn')}
                           onClick={() => setVoteMode('burn')}
                         >
                           <Icon name="flame" size={13} stroke={voteMode === 'burn' ? 'var(--burn)' : 'currentColor'} />
-                          Burn ICP
+                          Burn
                         </button>
                       </div>
                       {stakeLocked && (
@@ -4091,19 +4096,47 @@ export default function App() {
                   </>
                 ) : (
                 <>
-                {/* Amount input */}
+                {/* Amount input — any supported token; non-ICP converts at commit */}
                 <div className="col" style={{ gap: 8 }}>
+                  <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                    {WALLET_TOKENS.map(t => (
+                      <Btn key={t} variant={voteToken === t ? 'primary' : 'ghost'} sm
+                        onClick={() => { setVoteToken(t); setTxError(null); }}>
+                        {t}
+                      </Btn>
+                    ))}
+                  </div>
                   <label style={{ fontSize: 12, color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-                    How much ICP to burn?
+                    How much {voteToken} to burn?
                   </label>
+                  {/* USD presets — the token amount is computed for you */}
+                  <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                    {[1, 2, 5, 10, 20, 100].map(usd => {
+                      const meta = WALLET_TOKEN_META[voteToken];
+                      const rate = usdRates[meta.variant] ?? 0n;
+                      return (
+                        <Btn key={usd} variant="ghost" sm disabled={rate <= 0n}
+                          onClick={() => {
+                            const smallest = BigInt(usd) * 100_000_000n * BigInt(10) ** BigInt(meta.decimals) / rate;
+                            const d = BigInt(10) ** BigInt(meta.decimals);
+                            const whole = smallest / d;
+                            const frac = (smallest % d).toString().padStart(meta.decimals, '0').replace(/0+$/, '');
+                            setConfirmAmount(frac ? `${whole}.${frac}` : whole.toString());
+                            setTxError(null);
+                          }}>
+                          ${usd}
+                        </Btn>
+                      );
+                    })}
+                  </div>
                   <div style={{ position: 'relative' }}>
                     <input
                       type="number"
-                      min="1"
+                      min="0"
                       step="0.1"
                       placeholder="0.0"
                       className="burn-input"
-                      style={{ fontSize: 22, padding: '10px 52px 10px 14px', fontFamily: 'var(--font-mono)' }}
+                      style={{ fontSize: 22, padding: '10px 78px 10px 14px', fontFamily: 'var(--font-mono)' }}
                       value={confirmAmount}
                       onChange={(e) => { setConfirmAmount(e.target.value); setTxError(null); }}
                       autoFocus
@@ -4111,8 +4144,23 @@ export default function App() {
                     <span className="mono" style={{
                       position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
                       fontSize: 14, color: 'var(--fg-3)', pointerEvents: 'none'
-                    }}>ICP</span>
+                    }}>{voteToken}</span>
                   </div>
+                  {(() => {
+                    const meta = WALLET_TOKEN_META[voteToken];
+                    const smallest = parseTokenUnits(confirmAmount || '0', meta.decimals) ?? 0n;
+                    const rate = usdRates[meta.variant] ?? 0n;
+                    const icpRate = usdRates[ExplorerToken.ICP] ?? 0n;
+                    if (smallest <= 0n || rate <= 0n) return null;
+                    const usd = smallest * rate / BigInt(10) ** BigInt(meta.decimals);
+                    const estIcp = icpRate > 0n ? usd * 100_000_000n / icpRate : 0n;
+                    return (
+                      <span className="row" style={{ gap: 8, fontSize: 11.5, color: 'var(--fg-3)' }}>
+                        <Icon name="info" size={11} stroke="var(--fg-3)" />
+                        ≈ {fmtUsd(usd)}{voteToken !== 'ICP' ? <> · stays escrowed as {voteToken}; converts to ~{fmtICP(estIcp)} ICP only if the vote passes — refunded in {voteToken} if it doesn't</> : null}
+                      </span>
+                    );
+                  })()}
                   {/* Inline limits */}
                   <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', width: '100%', flexWrap: 'wrap', gap: 8 }}>
                     <div className="row" style={{ gap: 12, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
@@ -4140,31 +4188,21 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Live fee breakdown */}
+                {/* Zero-fee commits: what you commit is what counts — no fee table */}
                 <div className="col" style={{ gap: 8, fontSize: 13, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
-                  <div className="row" style={{ justifyContent: 'space-between' }}>
-                    <span style={{ color: 'var(--fg-2)' }}>Committed weight</span>
-                    <span className="mono">{confirmAmount ? parseFloat(confirmAmount).toFixed(4) : "—"} ICP</span>
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between' }}>
-                    <span style={{ color: 'var(--fg-2)' }}>Protocol fee</span>
-                    <span className="mono">0.0050 ICP</span>
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between' }}>
-                    <span style={{ color: 'var(--fg-2)' }}>Ledger fees</span>
-                    <span className="mono">0.0005 ICP</span>
-                  </div>
-                  <hr />
                   <div className="row" style={{ justifyContent: 'space-between', fontWeight: 600 }}>
-                    <span style={{ color: 'var(--fg)' }}>Total debit</span>
+                    <span style={{ color: 'var(--fg)' }}>Committed weight</span>
                     <span className="mono" style={{ color: confirmAmount ? 'var(--burn)' : 'var(--fg-3)' }}>
-                      {confirmAmount ? (parseFloat(confirmAmount) + 0.0055).toFixed(4) : "—"} ICP
+                      {confirmAmount ? parseFloat(confirmAmount).toFixed(4) : "—"} {voteToken}
                     </span>
                   </div>
+                  <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                    No fees — if the vote misses its threshold you get back exactly what you committed.
+                  </span>
                 </div>
 
                 <div style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
-                  ⚠️ <b>Commitment is final.</b> By confirming, you authorize a transfer from your wallet into a deterministic per-proposal escrow. The 0.005 ICP protocol fee is consumed immediately. If the proposal reaches threshold and the neuron votes, your committed ICP is spent — 50% to the treasury, 25% to backend-canister cycles, 25% to frontend-canister cycles. If threshold is not met, your ICP is returned (minus the 0.0001 ICP ledger fee).
+                  ⚠️ <b>Commitment is final.</b> Your funds move into escrow for this proposal. If it reaches threshold and the neuron votes, your commitment is spent; if not, it is returned in full.
                 </div>
 
                 {isTransacting ? (
@@ -4185,10 +4223,10 @@ export default function App() {
                       </Btn>
                       <Btn
                         variant="primary"
-                        style={{ flex: 1, opacity: tier >= 2 && confirmAmount && parseFloat(confirmAmount) >= 1 ? 1 : 0.45 }}
+                        style={{ flex: 1, opacity: tier >= 2 && confirmAmount && parseFloat(confirmAmount) >= (voteToken === 'ICP' ? 1 : 0) && parseFloat(confirmAmount) > 0 ? 1 : 0.45 }}
                         onClick={() => { if (tier >= 2) executeTransaction(); }}
                       >
-                        <Icon name="flame" size={14} stroke="var(--char-950)" /> Burn {confirmAmount ? `${parseFloat(confirmAmount).toFixed(1)} ICP` : "ICP"}
+                        <Icon name="flame" size={14} stroke="var(--char-950)" /> Submit
                       </Btn>
                     </div>
                   </div>
@@ -4310,31 +4348,21 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Fee breakdown — simpler than initial commit */}
+                {/* Zero-fee top-up summary */}
                 <div className="col" style={{ gap: 8, fontSize: 13, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
-                  <div className="row" style={{ justifyContent: 'space-between' }}>
-                    <span style={{ color: 'var(--fg-2)' }}>Additional weight</span>
-                    <span className="mono">{addMoreAmount ? parseFloat(addMoreAmount).toFixed(4) : "—"} ICP</span>
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between' }}>
-                    <span style={{ color: 'var(--fg-2)' }}>Ledger fee</span>
-                    <span className="mono">0.0001 ICP</span>
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between', fontSize: 11.5, color: 'var(--fg-3)' }}>
-                    <span>Protocol fee</span>
-                    <span className="mono" style={{ textDecoration: 'line-through' }}>waived (already paid)</span>
-                  </div>
-                  <hr />
                   <div className="row" style={{ justifyContent: 'space-between', fontWeight: 600 }}>
-                    <span style={{ color: 'var(--fg)' }}>Total debit</span>
+                    <span style={{ color: 'var(--fg)' }}>Additional weight</span>
                     <span className="mono" style={{ color: addMoreAmount ? 'var(--burn)' : 'var(--fg-3)' }}>
-                      {addMoreAmount ? (parseFloat(addMoreAmount) + 0.0001).toFixed(4) : "—"} ICP
+                      {addMoreAmount ? parseFloat(addMoreAmount).toFixed(4) : "—"} ICP
                     </span>
                   </div>
+                  <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                    No fees — refunds return exactly what you committed.
+                  </span>
                 </div>
 
                 <div style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.45 }}>
-                  ⚠️ <b>Top-up is final.</b> Your additional ICP will be deposited into the same escrow. No protocol fee is charged — only the 0.0001 ICP ledger transfer fee. Your stance ({existingCommitment?.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}) cannot be changed.
+                  ⚠️ <b>Top-up is final.</b> Your additional ICP joins the same escrow. Your stance ({existingCommitment?.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}) cannot be changed.
                 </div>
 
                 {isAddMoreTransacting ? (
@@ -4405,7 +4433,7 @@ export default function App() {
                     <b>Settlement:</b>
                     <ul style={{ margin: '4px 0 0 0', paddingLeft: 16, listStyleType: 'disc' }}>
                       <li>If the vote fires, your committed ICP is spent — <b>50% to the protocol treasury, 25% to backend-canister cycles, 25% to frontend-canister cycles</b> (the cycle portions are burned from ICP supply via the CMC).</li>
-                      <li>If the threshold isn't met, your ICP is returned to your wallet (minus the 0.0001 ICP ledger fee).</li>
+                      <li>If the threshold isn't met, your commitment is returned to your wallet in full — exactly what you put in.</li>
                     </ul>
                   </li>
                 </ol>
@@ -4497,26 +4525,9 @@ export default function App() {
               <hr />
 
               <div className="col" style={{ gap: 4 }}>
-                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Protocol Fee (0.005 ICP)</span>
+                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Fees</span>
                 <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
-                  A flat fee charged by the Caldera protocol on each
-                  commit transaction. This fee is immediately consumed and is
-                  non-refundable, supporting canister compute costs and system
-                  operations.
-                </p>
-              </div>
-
-              <div className="col" style={{ gap: 4 }}>
-                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Ledger Fees (0.0003 ICP)</span>
-                <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
-                  Standard ICP ledger transfer fees. The client pre-allocates 0.0003 ICP to ensure safe coverage of all transaction steps (e.g. transfer to escrow, and subsequent burn or refund). Only actual ledger costs (0.0001 ICP per transfer) will be consumed.
-                </p>
-              </div>
-
-              <div className="col" style={{ gap: 4 }}>
-                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Total Debit</span>
-                <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
-                  The total maximum ICP that will be temporarily debited from your connected wallet. If the proposal fails to meet its threshold, the committed amount is returned to you (minus the 0.0001 ICP refund transfer ledger fee).
+                  None. Caldera charges no protocol fee and the treasury covers every ledger fee on your behalf. If the proposal fails to meet its threshold, the committed amount is returned to you in full — exactly what you put in.
                 </p>
               </div>
 

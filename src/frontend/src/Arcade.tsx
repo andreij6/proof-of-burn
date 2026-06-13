@@ -6,6 +6,16 @@ import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, formatPrincipal } from "./ui";
 import { fmtTokenAmount } from "./IdeaBoard";
 import MiniGolf from "./arcade/MiniGolf";
+import FieldGoal from "./arcade/FieldGoal";
+import TurboRush from "./arcade/TurboRush";
+import {
+  ROUNDS_PER_GAME as FG_ROUNDS, MIN_DISTANCE_YDS, MAX_DISTANCE_YDS,
+  DEFAULT_KICKER, HELMET_COLORS, JERSEY_COLORS, type KickerLook,
+} from "./arcade/fieldgoalEngine";
+import {
+  STAGES as TR_STAGES, RUN_MS as TR_RUN_MS,
+  DEFAULT_CAR, BODY_COLORS, STRIPE_COLORS, WHEEL_COLORS, WHEEL_NAMES, type CarLook,
+} from "./arcade/racerEngine";
 import {
   COURSE, HOLES_PER_ROUND, fmtMillis, mergeCourse,
   HAIR_COLORS, HAIR_NAMES, SKIN_COLORS, SKIN_NAMES, OUTFIT_COLORS, OUTFIT_NAMES,
@@ -14,11 +24,20 @@ import {
 
 // ==========================================
 // Arcade — participation-gated skill games.
-// One game today (Mini Golf Gold); the lobby + per-game leaderboard are
-// keyed by game id so future titles (and a combined board) slot in.
+// Three games (Mini Golf, Field Goal, Turbo Rush), each with its own
+// sub-page, leaderboard, $1 persona AND feature flag (the parent `arcade`
+// flag is the master switch; per-game flags pull one title at a time).
 // ==========================================
 
 const GAME_MINIGOLF = 'minigolf';
+const GAME_FIELDGOAL = 'fieldgoal';
+const GAME_TURBORUSH = 'turborush';
+
+// The outfit palette doubles as helmet/jersey/body colors — team-ish names.
+const HELMET_NAMES = OUTFIT_NAMES;
+const JERSEY_NAMES = OUTFIT_NAMES;
+const BODY_NAMES = OUTFIT_NAMES;
+const STRIPE_NAMES = OUTFIT_NAMES;
 
 const LABEL_STYLE: React.CSSProperties = {
   fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)',
@@ -82,6 +101,61 @@ function GolferPreview({ look, size = 96 }: { look: CharacterLook; size?: number
   );
 }
 
+/** SVG twin of the in-game pixel car (matches TurboRush's drawCar). */
+function CarPreview({ look, size = 96 }: { look: CarLook; size?: number }) {
+  const body = BODY_COLORS[look.body] ?? BODY_COLORS[0];
+  const stripe = STRIPE_COLORS[look.stripe] ?? STRIPE_COLORS[0];
+  const wheels = WHEEL_COLORS[look.wheels] ?? WHEEL_COLORS[0];
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" aria-label="Your car" shapeRendering="crispEdges">
+      <rect x="6" y="40" width="36" height="4" fill="rgba(0,0,0,0.32)" />
+      {/* wheels */}
+      <rect x="6" y="28" width="7" height="12" fill={wheels} />
+      <rect x="35" y="28" width="7" height="12" fill={wheels} />
+      {/* body block + racing stripe */}
+      <rect x="8" y="16" width="32" height="22" fill={body} />
+      <rect x="21" y="16" width="6" height="22" fill={stripe} />
+      {/* cabin + rear window */}
+      <rect x="13" y="8" width="22" height="11" fill={body} />
+      <rect x="15" y="10" width="18" height="7" fill="#1f2230" />
+      {/* tail lights */}
+      <rect x="9" y="33" width="5" height="3" fill="#ff4a3a" />
+      <rect x="34" y="33" width="5" height="3" fill="#ff4a3a" />
+    </svg>
+  );
+}
+
+/** SVG twin of the in-game kicker mini-figure (matches FieldGoal's drawKicker). */
+function KickerPreview({ look, size = 96 }: { look: KickerLook; size?: number }) {
+  const skin = SKIN_COLORS[look.skin] ?? SKIN_COLORS[0];
+  const helmet = HELMET_COLORS[look.helmet] ?? HELMET_COLORS[0];
+  const jersey = JERSEY_COLORS[look.jersey] ?? JERSEY_COLORS[0];
+  return (
+    <svg width={size} height={size} viewBox="0 0 48 48" aria-label="Your kicker" shapeRendering="crispEdges">
+      <ellipse cx="24" cy="44.5" rx="11" ry="3.4" fill="rgba(0,0,0,0.32)" />
+      {/* legs (kicking foot forward) + cleats */}
+      <rect x="17" y="30" width="5" height="13" fill="#d8d8d8" />
+      <rect x="25" y="29" width="5" height="12" fill="#d8d8d8" />
+      <rect x="16" y="41" width="6.5" height="3" fill="#26211c" />
+      <rect x="25" y="39" width="7.5" height="3" fill="#26211c" />
+      {/* jersey torso + sleeve stripe */}
+      <rect x="14" y="14" width="19" height="17" fill={jersey} />
+      <rect x="14" y="16" width="19" height="2" fill="rgba(255,255,255,0.55)" />
+      {/* arms */}
+      <line x1="16" y1="18" x2="9" y2="28" stroke={skin} strokeWidth="3" />
+      <line x1="31" y1="18" x2="38" y2="27" stroke={skin} strokeWidth="3" />
+      {/* head + helmet + facemask */}
+      <rect x="18" y="4" width="12" height="11" fill={skin} />
+      <rect x="16" y="1" width="16" height="9" fill={helmet} />
+      <rect x="16" y="8" width="4" height="5" fill={helmet} />
+      <line x1="24" y1="12" x2="32" y2="12" stroke="#cfcfcf" strokeWidth="2" />
+      {/* football at his feet */}
+      <ellipse cx="38" cy="42" rx="5" ry="3.2" fill="#8a4a22" />
+      <line x1="36" y1="42" x2="40" y2="42" stroke="#f5efe0" strokeWidth="1" />
+    </svg>
+  );
+}
+
 // Supported payment tokens for the $1 customization fee. fallbackFee MUST
 // match the per-token ledger fee (a flat fallback under-funded ckETH
 // deposits by the whole transfer fee — review 2026-06-11).
@@ -121,13 +195,18 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
   const [info, setInfo] = useState<ArcadeInfo | null>(null);
   const [expInfo, setExpInfo] = useState<ExplorerInfo | null>(null);
   const [board, setBoard] = useState<ArcadeLeaderboardRow[]>([]);
+  const [boardFG, setBoardFG] = useState<ArcadeLeaderboardRow[]>([]);
+  const [boardTR, setBoardTR] = useState<ArcadeLeaderboardRow[]>([]);
   const [course, setCourse] = useState<HoleDef[]>(COURSE);
   const [isLoading, setIsLoading] = useState(true);
-  const [view, setView] = useState<'lobby' | 'game'>('lobby');
+  const [view, setView] = useState<'lobby' | 'golf' | 'fieldgoal' | 'turborush'>('lobby');
+  // Lobby sub-page — one per game (its card, persona and leaderboard).
+  const [tab, setTab] = useState<'minigolf' | 'fieldgoal' | 'turborush'>('minigolf');
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
 
-  // Character editor
+  // Persona editor — one modal, three targets (golfer / kicker / car).
   const [isEditorOpen, setIsEditorOpen] = useState(false);
+  const [editorTarget, setEditorTarget] = useState<'golfer' | 'kicker' | 'car'>('golfer');
   const [draft, setDraft] = useState<CharacterLook>(DEFAULT_CHARACTER);
   const [payToken, setPayToken] = useState<ExplorerToken>(ExplorerToken.ICP);
   const [payQuote, setPayQuote] = useState<ExplorerQuote | null>(null);
@@ -156,15 +235,19 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
   const refreshAll = async (currentActor = actor) => {
     if (!currentActor) return;
     try {
-      const [arcadeInfo, rows, overrides, explorerInfo] = await Promise.all([
+      const [arcadeInfo, rows, rowsFG, rowsTR, overrides, explorerInfo] = await Promise.all([
         currentActor.get_arcade_info(),
         currentActor.get_arcade_leaderboard(GAME_MINIGOLF),
+        currentActor.get_arcade_leaderboard(GAME_FIELDGOAL),
+        currentActor.get_arcade_leaderboard(GAME_TURBORUSH),
         currentActor.get_arcade_course(),
         currentActor.get_explorer_info(),
       ]);
       setInfo(arcadeInfo);
       setExpInfo(explorerInfo);
       setBoard(rows);
+      setBoardFG(rowsFG);
+      setBoardTR(rowsTR);
       // Admin-edited hole layouts (on-chain) override the built-in course.
       setCourse(mergeCourse(overrides));
     } catch (err) {
@@ -182,30 +265,66 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
   const myLook: CharacterLook = info?.my_character
     ? { hair: info.my_character.hair, skin: info.my_character.skin, outfit: info.my_character.outfit }
     : DEFAULT_CHARACTER;
+  // The kicker reuses ArcadeCharacter with hair→helmet, outfit→jersey.
+  const myKicker: KickerLook = info?.my_kicker
+    ? { helmet: info.my_kicker.hair, skin: info.my_kicker.skin, jersey: info.my_kicker.outfit }
+    : DEFAULT_KICKER;
+  // The car reuses ArcadeCharacter with hair→body, skin→wheels, outfit→stripe.
+  const myCar: CarLook = info?.my_car
+    ? { body: info.my_car.hair, wheels: info.my_car.skin, stripe: info.my_car.outfit }
+    : DEFAULT_CAR;
   const fullAccess = info?.full_access ?? false;
   const myRow = signedIn ? board.find(r => r.player.toString() === principal!.toString()) : undefined;
+  const myRowFG = signedIn ? boardFG.find(r => r.player.toString() === principal!.toString()) : undefined;
+  const myRowTR = signedIn ? boardTR.find(r => r.player.toString() === principal!.toString()) : undefined;
 
-  const handleRoundComplete = async (perHole: number[], millis: number) => {
+  // Per-game kill switches: hide a disabled game's tab entirely; if the
+  // active tab's game got pulled, fall back to the first enabled one.
+  const golfOn = info?.minigolf_enabled ?? true;
+  const fgOn = info?.fieldgoal_enabled ?? true;
+  const trOn = info?.turborush_enabled ?? true;
+  const enabledTabs = ([
+    golfOn ? 'minigolf' : null,
+    fgOn ? 'fieldgoal' : null,
+    trOn ? 'turborush' : null,
+  ].filter(Boolean)) as ('minigolf' | 'fieldgoal' | 'turborush')[];
+  const activeTab = enabledTabs.includes(tab) ? tab : (enabledTabs[0] ?? 'minigolf');
+
+  const submitScore = async (game: string, perHole: number[], millis: number, noun: string) => {
     if (!signedIn || !actor) {
-      setSubmitNote("Sign in to put your round on the leaderboard.");
+      setSubmitNote(`Sign in to put your ${noun} on the leaderboard.`);
       return;
     }
-    if (!fullAccess) return; // gate screen already blocked holes 2–9
+    if (!fullAccess) return; // gate screen already blocked the full game
     try {
-      setSubmitNote("Submitting your round…");
-      const res = await actor.submit_arcade_score(GAME_MINIGOLF, BigInt(millis), Uint8Array.from(perHole));
+      setSubmitNote(`Submitting your ${noun}…`);
+      const res = await actor.submit_arcade_score(game, BigInt(millis), Uint8Array.from(perHole));
       if (res.__kind__ === "Err") throw new Error(res.Err);
-      setSubmitNote(`On the board — rank #${res.Ok} (best round counts).`);
+      setSubmitNote(`On the board — rank #${res.Ok} (best ${noun} counts).`);
       refreshAll();
     } catch (err: any) {
       console.error("Score submit failed:", err);
       setSubmitNote(`Score submit failed: ${err.message || err}`);
     }
   };
+  const handleRoundComplete = (perHole: number[], millis: number) =>
+    submitScore(GAME_MINIGOLF, perHole, millis, 'round');
+  const handleKicksComplete = (perKick: number[], millis: number) =>
+    submitScore(GAME_FIELDGOAL, perKick, millis, 'game');
+  const handleRushComplete = (perStage: number[], millis: number) =>
+    submitScore(GAME_TURBORUSH, perStage, millis, 'run');
 
-  const openEditor = () => {
+  // Draft reuses CharacterLook fields for every target (hair→helmet/body,
+  // skin→skin/wheels, outfit→jersey/stripe).
+  const draftOf = (target: 'golfer' | 'kicker' | 'car'): CharacterLook =>
+    target === 'golfer' ? myLook
+      : target === 'kicker' ? { hair: myKicker.helmet, skin: myKicker.skin, outfit: myKicker.jersey }
+      : { hair: myCar.body, skin: myCar.wheels, outfit: myCar.stripe };
+
+  const openEditor = (target: 'golfer' | 'kicker' | 'car') => {
     if (!signedIn) { onSignIn(); return; }
-    setDraft(myLook);
+    setEditorTarget(target);
+    setDraft(draftOf(target));
     setEditorError(null);
     setEditorStep('');
     setIsEditorOpen(true);
@@ -213,7 +332,8 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
 
   const executeCustomize = async () => {
     if (!actor || !identity || !info || editorBusy) return;
-    if (draft.hair === myLook.hair && draft.skin === myLook.skin && draft.outfit === myLook.outfit) {
+    const current = draftOf(editorTarget);
+    if (draft.hair === current.hair && draft.skin === current.skin && draft.outfit === current.outfit) {
       setEditorError("That's already your current look.");
       return;
     }
@@ -248,7 +368,11 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
         throw new Error(`Payment failed: ${detail}`);
       }
       setEditorStep("Step 2/2: Saving your look on-chain...");
-      const res = await actor.customize_character(draft.hair, draft.skin, draft.outfit, payToken);
+      const res = editorTarget === 'golfer'
+        ? await actor.customize_character(draft.hair, draft.skin, draft.outfit, payToken)
+        : editorTarget === 'kicker'
+        ? await actor.customize_kicker(draft.hair, draft.skin, draft.outfit, payToken)
+        : await actor.customize_car(draft.hair, draft.skin, draft.outfit, payToken);
       if (res.__kind__ === "Err") throw new Error(res.Err);
       setIsEditorOpen(false);
       await refreshAll();
@@ -260,7 +384,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
     }
   };
 
-  if (view === 'game') {
+  if (view === 'golf') {
     return (
       <div className="idea-board-container">
         <MiniGolf
@@ -268,7 +392,37 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
           character={myLook}
           fullAccess={fullAccess}
           onRoundComplete={handleRoundComplete}
-          onExit={() => { setView('lobby'); setSubmitNote(undefined); refreshAll(); }}
+          onExit={() => { setTab('minigolf'); setView('lobby'); setSubmitNote(undefined); refreshAll(); }}
+          onGoParticipate={onGoParticipate}
+          submitNote={submitNote}
+        />
+      </div>
+    );
+  }
+
+  if (view === 'fieldgoal') {
+    return (
+      <div className="idea-board-container">
+        <FieldGoal
+          kicker={myKicker}
+          fullAccess={fullAccess}
+          onRoundComplete={handleKicksComplete}
+          onExit={() => { setTab('fieldgoal'); setView('lobby'); setSubmitNote(undefined); refreshAll(); }}
+          onGoParticipate={onGoParticipate}
+          submitNote={submitNote}
+        />
+      </div>
+    );
+  }
+
+  if (view === 'turborush') {
+    return (
+      <div className="idea-board-container">
+        <TurboRush
+          car={myCar}
+          fullAccess={fullAccess}
+          onRoundComplete={handleRushComplete}
+          onExit={() => { setTab('turborush'); setView('lobby'); setSubmitNote(undefined); refreshAll(); }}
           onGoParticipate={onGoParticipate}
           submitNote={submitNote}
         />
@@ -287,13 +441,35 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
             <h4 style={{ margin: 0 }}>Arcade</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
-            Skill games for protocol participants. Everyone can preview hole 1 — stake ICP
-            or vote on a proposal (within the last 30 days) to unlock full rounds and the
-            leaderboard. Fewest strokes wins; ties go to the fastest time.
+            Skill games for protocol participants. Everyone gets a free preview — stake ICP
+            or vote on a proposal (within the last 30 days) to unlock full games and the
+            leaderboards.
           </p>
         </div>
         {signedIn && !fullAccess && (
-          <Chip tone="pending"><Icon name="lock" size={11} /> Hole 1 preview only — stake or vote to unlock</Chip>
+          <Chip tone="pending"><Icon name="lock" size={11} /> Free preview only — stake or vote to unlock</Chip>
+        )}
+      </div>
+
+      {/* ── Game sub-pages (per-game flags hide pulled titles) ── */}
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        {golfOn && (
+          <Btn variant={activeTab === 'minigolf' ? 'primary' : 'ghost'} sm onClick={() => setTab('minigolf')}>
+            <Icon name="flame" size={13} stroke={activeTab === 'minigolf' ? 'var(--char-950)' : 'currentColor'} />
+            Mini Golf
+          </Btn>
+        )}
+        {fgOn && (
+          <Btn variant={activeTab === 'fieldgoal' ? 'primary' : 'ghost'} sm onClick={() => setTab('fieldgoal')}>
+            <Icon name="zap" size={13} stroke={activeTab === 'fieldgoal' ? 'var(--char-950)' : 'currentColor'} />
+            Field Goal
+          </Btn>
+        )}
+        {trOn && (
+          <Btn variant={activeTab === 'turborush' ? 'primary' : 'ghost'} sm onClick={() => setTab('turborush')}>
+            <Icon name="gamepad" size={13} stroke={activeTab === 'turborush' ? 'var(--char-950)' : 'currentColor'} />
+            Turbo Rush
+          </Btn>
         )}
       </div>
 
@@ -302,11 +478,11 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
           <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
           Loading arcade...
         </div>
-      ) : (
+      ) : activeTab === 'minigolf' ? (
         <>
-          {/* ── Game + character cards ── */}
+          {/* ── Mini Golf: game + golfer cards ── */}
           <div className="idea-grid">
-            {/* Mini Golf Gold */}
+            {/* Mini Golf */}
             <div className="card col" style={{ gap: 10 }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                 <Chip tone="burn" style={{ height: 19, fontSize: 10 }}>
@@ -314,7 +490,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
                 </Chip>
                 <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>{HOLES_PER_ROUND} holes · Par {course.reduce((s, h) => s + h.par, 0)}</span>
               </div>
-              <h6 style={{ margin: 0, fontSize: 16 }}>Mini Golf Gold</h6>
+              <h6 style={{ margin: 0, fontSize: 16 }}>Mini Golf</h6>
               <p style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0, flex: 1 }}>
                 Classic table-top mini golf: drag back from the ball, release to putt. Banks,
                 bunkers, water, slopes and a windmill stand between you and the cup. One
@@ -332,14 +508,14 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
                 <Btn variant="primary" sm onClick={() => {
                   if (!signedIn) { onSignIn(); return; }
                   setSubmitNote(undefined);
-                  setView('game');
+                  setView('golf');
                 }}>
                   <Icon name="flame" size={11} stroke="var(--char-950)" /> {signedIn ? 'Play' : 'Sign in to play'}
                 </Btn>
               </div>
             </div>
 
-            {/* Character card */}
+            {/* Golfer persona card */}
             <div className="card col" style={{ gap: 10, alignItems: 'center' }}>
               <span style={LABEL_STYLE}>Your golfer</span>
               <GolferPreview look={myLook} size={104} />
@@ -348,61 +524,144 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
                 <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{SKIN_NAMES[myLook.skin]}</Chip>
                 <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{OUTFIT_NAMES[myLook.outfit]}</Chip>
               </span>
-              <Btn variant="secondary" sm onClick={openEditor}>
+              <Btn variant="secondary" sm onClick={() => openEditor('golfer')}>
                 <Icon name="edit" size={12} /> Customize · $1 in any token
               </Btn>
             </div>
           </div>
 
-          {/* ── Leaderboard ── */}
-          <div className="col" style={{ gap: 10 }}>
-            <span className="row" style={{ gap: 8 }}>
-              <Icon name="target" size={14} stroke="var(--burn)" />
-              <b style={{ fontSize: 14, color: 'var(--fg)' }}>Mini Golf Gold — leaderboard</b>
-              <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· best round per player · top 100</span>
-            </span>
-            {board.length === 0 ? (
-              <div className="col" style={{ alignItems: 'center', gap: 10, padding: '32px 0', color: 'var(--fg-3)' }}>
-                <Icon name="target" size={26} stroke="var(--fg-dim)" />
-                <span style={{ fontSize: 13 }}>No rounds on the board yet. Set the first time.</span>
+          <LeaderboardSection
+            title="Mini Golf — leaderboard"
+            sub="· best round per player · top 100"
+            scoreHeader="Strokes"
+            rows={board}
+            empty="No rounds on the board yet. Set the first time."
+            principal={signedIn ? principal : null}
+          />
+        </>
+      ) : activeTab === 'fieldgoal' ? (
+        <>
+          {/* ── Field Goal: game + kicker cards ── */}
+          <div className="idea-grid">
+            <div className="card col" style={{ gap: 10 }}>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                <Chip tone="burn" style={{ height: 19, fontSize: 10 }}>
+                  <LiveDot color="var(--burn)" size={5} /> Game 2
+                </Chip>
+                <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
+                  {FG_ROUNDS} kicks · {MIN_DISTANCE_YDS}–{MAX_DISTANCE_YDS} yds
+                </span>
               </div>
-            ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12.5 }}>
-                  <thead>
-                    <tr className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                      <th style={LB_TH}>#</th>
-                      <th style={{ ...LB_TH, textAlign: 'left' }}>Player</th>
-                      <th style={LB_TH}>Strokes</th>
-                      <th style={LB_TH}>Time</th>
-                      <th style={LB_TH}>When</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {board.map(r => {
-                      const mine = signedIn && r.player.toString() === principal!.toString();
-                      return (
-                        <tr key={r.rank} style={{
-                          borderTop: '1px solid var(--border)',
-                          background: mine ? 'var(--burn-950)' : 'transparent',
-                        }}>
-                          <td style={{ ...LB_TD, color: r.rank <= 3 ? 'var(--burn)' : 'var(--fg-3)', fontWeight: r.rank <= 3 ? 700 : 400 }}>{r.rank}</td>
-                          <td style={{ ...LB_TD, textAlign: 'left' }} className="mono">
-                            {formatPrincipal(r.player)}{mine ? ' · you' : ''}
-                          </td>
-                          <td style={LB_TD} className="mono">{r.strokes.toString()}</td>
-                          <td style={LB_TD} className="mono">{fmtMillis(Number(r.millis))}</td>
-                          <td style={{ ...LB_TD, color: 'var(--fg-3)' }} className="mono">
-                            {new Date(Number(r.submitted_at / 1_000_000n)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              <h6 style={{ margin: 0, fontSize: 16 }}>Field Goal</h6>
+              <p style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0, flex: 1 }}>
+                Five kicks, each from a random distance and hash. From the snap you get
+                <b> 3 seconds</b> to aim and let it fly — hesitate and the rushed kick sails
+                wide or dies short. A make scores its distance in yards; most points wins.
+              </p>
+              {myRowFG && (
+                <Chip tone="ok" style={{ alignSelf: 'flex-start' }}>
+                  <Icon name="target" size={11} /> Your best: {myRowFG.strokes} pts · {fmtMillis(Number(myRowFG.millis))} · rank #{myRowFG.rank}
+                </Chip>
+              )}
+              <div className="row" style={{ justifyContent: 'space-between', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
+                <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
+                  {fullAccess ? 'Full game unlocked' : 'Kick 1 free preview'}
+                </span>
+                <Btn variant="primary" sm onClick={() => {
+                  if (!signedIn) { onSignIn(); return; }
+                  setSubmitNote(undefined);
+                  setView('fieldgoal');
+                }}>
+                  <Icon name="zap" size={11} stroke="var(--char-950)" /> {signedIn ? 'Play' : 'Sign in to play'}
+                </Btn>
               </div>
-            )}
+            </div>
+
+            {/* Kicker persona card */}
+            <div className="card col" style={{ gap: 10, alignItems: 'center' }}>
+              <span style={LABEL_STYLE}>Your kicker</span>
+              <KickerPreview look={myKicker} size={104} />
+              <span className="row" style={{ gap: 6, flexWrap: 'wrap', justifyContent: 'center' }}>
+                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{HELMET_NAMES[myKicker.helmet]} helmet</Chip>
+                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{SKIN_NAMES[myKicker.skin]}</Chip>
+                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{JERSEY_NAMES[myKicker.jersey]} jersey</Chip>
+              </span>
+              <Btn variant="secondary" sm onClick={() => openEditor('kicker')}>
+                <Icon name="edit" size={12} /> Customize · $1 in any token
+              </Btn>
+            </div>
           </div>
+
+          <LeaderboardSection
+            title="Field Goal — leaderboard"
+            sub="· best game per player · top 100"
+            scoreHeader="Points"
+            rows={boardFG}
+            empty="No games on the board yet. Drill the first kick."
+            principal={signedIn ? principal : null}
+          />
+        </>
+      ) : (
+        <>
+          {/* ── Turbo Rush: game + car cards ── */}
+          <div className="idea-grid">
+            <div className="card col" style={{ gap: 10 }}>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                <Chip tone="burn" style={{ height: 19, fontSize: 10 }}>
+                  <LiveDot color="var(--burn)" size={5} /> Game 3
+                </Chip>
+                <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
+                  {TR_STAGES} stages · {TR_RUN_MS / 1000} s run
+                </span>
+              </div>
+              <h6 style={{ margin: 0, fontSize: 16 }}>Turbo Rush</h6>
+              <p style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0, flex: 1 }}>
+                A love letter to console racers of the cartridge era: 60 seconds of full
+                throttle on a 3-lane sunset highway. Thread through slower traffic —
+                every clean pass is a point, every clip is a 1.5-second spin-out.
+              </p>
+              {myRowTR && (
+                <Chip tone="ok" style={{ alignSelf: 'flex-start' }}>
+                  <Icon name="target" size={11} /> Your best: {myRowTR.strokes} passed · {fmtMillis(Number(myRowTR.millis))} · rank #{myRowTR.rank}
+                </Chip>
+              )}
+              <div className="row" style={{ justifyContent: 'space-between', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
+                <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
+                  {fullAccess ? 'Full run unlocked' : 'Stage 1 free preview'}
+                </span>
+                <Btn variant="primary" sm onClick={() => {
+                  if (!signedIn) { onSignIn(); return; }
+                  setSubmitNote(undefined);
+                  setView('turborush');
+                }}>
+                  <Icon name="gamepad" size={11} stroke="var(--char-950)" /> {signedIn ? 'Play' : 'Sign in to play'}
+                </Btn>
+              </div>
+            </div>
+
+            {/* Car persona card */}
+            <div className="card col" style={{ gap: 10, alignItems: 'center' }}>
+              <span style={LABEL_STYLE}>Your car</span>
+              <CarPreview look={myCar} size={104} />
+              <span className="row" style={{ gap: 6, flexWrap: 'wrap', justifyContent: 'center' }}>
+                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{BODY_NAMES[myCar.body]} body</Chip>
+                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{STRIPE_NAMES[myCar.stripe]} stripe</Chip>
+                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{WHEEL_NAMES[myCar.wheels]} wheels</Chip>
+              </span>
+              <Btn variant="secondary" sm onClick={() => openEditor('car')}>
+                <Icon name="edit" size={12} /> Customize · $1 in any token
+              </Btn>
+            </div>
+          </div>
+
+          <LeaderboardSection
+            title="Turbo Rush — leaderboard"
+            sub="· best run per player · top 100"
+            scoreHeader="Passed"
+            rows={boardTR}
+            empty="No runs on the board yet. Burn the first lap."
+            principal={signedIn ? principal : null}
+          />
         </>
       )}
 
@@ -416,17 +675,29 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
                 <Icon name="edit" size={15} stroke="var(--burn)" />
-                <b>Customize your golfer</b>
+                <b>Customize your {editorTarget}</b>
               </span>
               <Btn variant="ghost" sm onClick={() => !editorBusy && setIsEditorOpen(false)}><Icon name="x" size={14} /></Btn>
             </div>
             <div className="row" style={{ justifyContent: 'center' }}>
-              <GolferPreview look={draft} size={120} />
+              {editorTarget === 'golfer'
+                ? <GolferPreview look={draft} size={120} />
+                : editorTarget === 'kicker'
+                ? <KickerPreview look={{ helmet: draft.hair, skin: draft.skin, jersey: draft.outfit }} size={120} />
+                : <CarPreview look={{ body: draft.hair, wheels: draft.skin, stripe: draft.outfit }} size={120} />}
             </div>
-            {([
+            {(editorTarget === 'golfer' ? [
               ['Hair', HAIR_COLORS, HAIR_NAMES, draft.hair, (i: number) => setDraft(d => ({ ...d, hair: i }))],
               ['Skin', SKIN_COLORS, SKIN_NAMES, draft.skin, (i: number) => setDraft(d => ({ ...d, skin: i }))],
               ['Outfit', OUTFIT_COLORS, OUTFIT_NAMES, draft.outfit, (i: number) => setDraft(d => ({ ...d, outfit: i }))],
+            ] as const : editorTarget === 'kicker' ? [
+              ['Helmet', HELMET_COLORS, HELMET_NAMES, draft.hair, (i: number) => setDraft(d => ({ ...d, hair: i }))],
+              ['Skin', SKIN_COLORS, SKIN_NAMES, draft.skin, (i: number) => setDraft(d => ({ ...d, skin: i }))],
+              ['Jersey', JERSEY_COLORS, JERSEY_NAMES, draft.outfit, (i: number) => setDraft(d => ({ ...d, outfit: i }))],
+            ] as const : [
+              ['Body', BODY_COLORS, BODY_NAMES, draft.hair, (i: number) => setDraft(d => ({ ...d, hair: i }))],
+              ['Wheels', WHEEL_COLORS, WHEEL_NAMES, draft.skin, (i: number) => setDraft(d => ({ ...d, skin: i }))],
+              ['Stripe', STRIPE_COLORS, STRIPE_NAMES, draft.outfit, (i: number) => setDraft(d => ({ ...d, outfit: i }))],
             ] as const).map(([label, colors, names, sel, set]) => (
               <div key={label} className="col" style={{ gap: 6 }}>
                 <label style={LABEL_STYLE}>{label} · {names[sel]}</label>
@@ -479,3 +750,63 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
 
 const LB_TH: React.CSSProperties = { padding: '6px 10px', textAlign: 'center', fontWeight: 500 };
 const LB_TD: React.CSSProperties = { padding: '7px 10px', textAlign: 'center' };
+
+function LeaderboardSection({ title, sub, scoreHeader, rows, empty, principal }: {
+  title: string;
+  sub: string;
+  scoreHeader: string;
+  rows: ArcadeLeaderboardRow[];
+  empty: string;
+  principal: Principal | null;
+}) {
+  return (
+    <div className="col" style={{ gap: 10 }}>
+      <span className="row" style={{ gap: 8 }}>
+        <Icon name="target" size={14} stroke="var(--burn)" />
+        <b style={{ fontSize: 14, color: 'var(--fg)' }}>{title}</b>
+        <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>{sub}</span>
+      </span>
+      {rows.length === 0 ? (
+        <div className="col" style={{ alignItems: 'center', gap: 10, padding: '32px 0', color: 'var(--fg-3)' }}>
+          <Icon name="target" size={26} stroke="var(--fg-dim)" />
+          <span style={{ fontSize: 13 }}>{empty}</span>
+        </div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12.5 }}>
+            <thead>
+              <tr className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                <th style={LB_TH}>#</th>
+                <th style={{ ...LB_TH, textAlign: 'left' }}>Player</th>
+                <th style={LB_TH}>{scoreHeader}</th>
+                <th style={LB_TH}>Time</th>
+                <th style={LB_TH}>When</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => {
+                const mine = principal !== null && r.player.toString() === principal.toString();
+                return (
+                  <tr key={r.rank} style={{
+                    borderTop: '1px solid var(--border)',
+                    background: mine ? 'var(--burn-950)' : 'transparent',
+                  }}>
+                    <td style={{ ...LB_TD, color: r.rank <= 3 ? 'var(--burn)' : 'var(--fg-3)', fontWeight: r.rank <= 3 ? 700 : 400 }}>{r.rank}</td>
+                    <td style={{ ...LB_TD, textAlign: 'left' }} className="mono">
+                      {formatPrincipal(r.player)}{mine ? ' · you' : ''}
+                    </td>
+                    <td style={LB_TD} className="mono">{r.strokes.toString()}</td>
+                    <td style={LB_TD} className="mono">{fmtMillis(Number(r.millis))}</td>
+                    <td style={{ ...LB_TD, color: 'var(--fg-3)' }} className="mono">
+                      {new Date(Number(r.submitted_at / 1_000_000n)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -8,7 +8,7 @@ description: Edit the React frontend (src/frontend). Use when changing UI pages,
 React 19 + TypeScript + Vite SPA in `src/frontend`. Pages are flat files in
 `src/frontend/src/`: `App.tsx` (shell/routing/auth), `Landing.tsx`,
 `Staking.tsx`, `Lottery.tsx`, `Payouts.tsx`, `IdeaBoard.tsx`, `Explorer.tsx`,
-`Arcade.tsx` (+ `arcade/` for Mini Golf Gold), `EarlyAdopters.tsx`, `Admin.tsx`,
+`Arcade.tsx` (+ `arcade/` for Mini Golf), `EarlyAdopters.tsx`, `Admin.tsx`,
 shared widgets in `ui.tsx`.
 
 ```bash

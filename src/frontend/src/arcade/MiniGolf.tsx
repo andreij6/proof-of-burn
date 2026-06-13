@@ -9,7 +9,7 @@ import {
 import { arcadeMusic } from './music';
 
 // ==========================================
-// Mini Golf Gold — fixed isometric voxel renderer.
+// Mini Golf — fixed isometric voxel renderer.
 // The course grid renders as flat-shaded voxel cubes (solid saturated
 // colors, three-tone directional lighting from the NW, sharp SE shadows) on
 // a strict 2:1-style isometric projection. The golfer vanishes the instant

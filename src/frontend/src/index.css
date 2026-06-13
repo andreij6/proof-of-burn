@@ -564,6 +564,10 @@ a:hover {
   padding: var(--sp-5) var(--sp-4);
   transform: translateX(-100%);
   transition: transform var(--dur-slow) var(--ease-out);
+  /* The nav list has outgrown short screens — scroll inside the drawer so
+     the Account section at the bottom is always reachable. */
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .mobile-drawer.open {
   transform: translateX(0);

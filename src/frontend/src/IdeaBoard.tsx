@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
-import { IdeaToken } from "./bindings/backend";
+import {} from "./bindings/backend";
+import { IdeaToken } from "./tokens";
 import type { Idea, IdeaBoardInfo, Project } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, formatPrincipal } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal } from "./ui";
 
 // ==========================================
 // Community R&D — ideas + admin-curated projects
@@ -26,6 +27,10 @@ const TOKEN_BASE: Record<IdeaToken, { label: string; decimals: number; fee: bigi
   [IdeaToken.ICP]:   { label: 'ICP',   decimals: 8,  fee: 10_000n,             fallbackMin: 20_000_000n },
   [IdeaToken.CkBTC]: { label: 'ckBTC', decimals: 8,  fee: 10n,                 fallbackMin: 1_000n },
   [IdeaToken.CkETH]: { label: 'ckETH', decimals: 18, fee: 2_000_000_000_000n,  fallbackMin: 330_000_000_000_000n },
+  // Stables exist in the token type for vote-refund records only — the idea
+  // board never offers them (TOKEN_ORDER is the UI list).
+  [IdeaToken.CkUSDC]: { label: 'ckUSDC', decimals: 6, fee: 10_000n, fallbackMin: 1_000_000n },
+  [IdeaToken.CkUSDT]: { label: 'ckUSDT', decimals: 6, fee: 10_000n, fallbackMin: 1_000_000n },
 };
 
 export interface TokenMeta {
@@ -627,10 +632,18 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             <h4 style={{ margin: 0 }}>Community R&amp;D</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
-            Pitch ways to burn more ICP and grow the token's value, back the best ideas with
-            ICP, ckBTC, or ckETH, and fund official projects. <b>75%</b> of every idea upvote goes
-            to the protocol treasury and <b>25%</b> pays the poster; project funding goes 100% to
-            the treasury. Ideas with no upvotes for 30 days are deleted.
+            Pitch ways to burn more ICP, back the best ideas, and fund official projects.{' '}
+            <MoreInfo title="How Community R&D works">
+              <p style={{ margin: 0 }}>
+                Pitch ways to burn more ICP and grow the token's value, back the best ideas with
+                ICP, ckBTC, or ckETH, and fund official projects.
+              </p>
+              <p style={{ margin: 0 }}>
+                <b>75%</b> of every idea upvote goes to the protocol treasury and <b>25%</b> pays
+                the poster; project funding goes 100% to the treasury. Ideas with no upvotes for
+                30 days are deleted.
+              </p>
+            </MoreInfo>
           </p>
         </div>
         <span className="col" style={{ gap: 6, alignItems: 'flex-end' }}>

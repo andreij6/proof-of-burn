@@ -3,7 +3,7 @@ import { Principal } from "@icp-sdk/core/principal";
 import { StakeTier, StakingBootstrap, UnstakeStatus, YieldStatus } from "./bindings/backend";
 import type { StakingPoolInfo, TierPoolInfo, UserStakeInfo, PendingUnstake, YieldDistribution } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP } from "./ui";
 
 // ==========================================
 // Lossless Voting — pooled staking across three fixed-term NNS neurons
@@ -258,12 +258,28 @@ export default function Staking({
         </span>
         <b style={{ fontSize: 17 }}>Stake ICP. Keep it. Vote for free. Win the lottery.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 680 }}>
-          Pick a term — 6 months, 1 year or 2 years. Your ICP joins that term's pooled NNS neuron,
-          your voting power is the ICP you stake ÷ 10 (10 staked ICP = 1 burned ICP of weight),
-          longer terms earn more lottery tickets (5 / 10 / 20 a day), and staking qualifies you for
-          the lossless lottery (5 / 10 / 20 free tickets a day). The neurons' yield funds the
-          protocol — 80% lottery prize pool, 20% treasury — and you can unstake any time: your ICP
-          returns to your wallet after the term's dissolve.
+          Your ICP stays yours — staking earns free voting power and daily lottery tickets.{' '}
+          <MoreInfo title="How lossless staking works">
+            <p style={{ margin: 0 }}>
+              Pick a term — 6 months, 1 year or 2 years. Your ICP joins that term's pooled NNS
+              neuron, and your voting power is the ICP you stake ÷ 10 (10 staked ICP = 1 burned
+              ICP of weight).
+            </p>
+            <p style={{ margin: 0 }}>
+              <b>Loyalty compounds:</b> every 6 months a stake stays put, the voting power it
+              grants <b>doubles</b> — ×2 at 6 months, ×4 at a year, up to ×16 after 2 years.
+              Topping up blends the clock (new ICP starts its own 6 months); unstaking part of
+              a position keeps the rest's tenure.
+            </p>
+            <p style={{ margin: 0 }}>
+              Staking qualifies you for the lossless lottery — longer terms earn more tickets
+              (5 / 10 / 20 free tickets a day for 6-month / 1-year / 2-year terms).
+            </p>
+            <p style={{ margin: 0 }}>
+              The neurons' yield funds the protocol — 80% lottery prize pool, 20% treasury — and
+              you can unstake any time: your ICP returns to your wallet after the term's dissolve.
+            </p>
+          </MoreInfo>
         </span>
       </div>
 
@@ -310,6 +326,24 @@ export default function Staking({
                   ICP in {termLabel} · weight {fmtICP(selMine?.weight_e8s ?? 0n)}
                 </span>
               </div>
+
+              {/* VP tenure: doubles every 6 months staked, capped at 16× */}
+              {selMine && selMine.amount_e8s > 0n && (
+                <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
+                  <Chip tone={selMine.tenure_multiplier > 1n ? 'ok' : 'muted'} style={{ height: 18, fontSize: 10.5 }}>
+                    Tenure ×{selMine.tenure_multiplier.toString()}
+                  </Chip>
+                  {selMine.next_double_at > 0n ? (
+                    <span>
+                      voting power doubles {new Date(Number(selMine.next_double_at / 1_000_000n))
+                        .toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                      {' '}— the longer you stay staked, the louder your vote
+                    </span>
+                  ) : (
+                    <span>max tenure reached — your stake votes at 16×</span>
+                  )}
+                </span>
+              )}
 
               <div className="col" style={{ gap: 8 }}>
                 <div className="row" style={{ gap: 8 }}>
@@ -531,19 +565,24 @@ export default function Staking({
               </div>
             ))}
           </div>
-          <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.5 }}>
-            <Icon name="info" size={12} stroke="var(--fg-3)" style={{ flexShrink: 0, marginTop: 2 }} />
-            <span>
-              Each unstake splits its own neuron that dissolves for the tier's full term — follow it
-              live with the neuron link. When the dissolve completes, the protocol automatically
-              disburses the ICP to your wallet (it appears under Profile as an "Unstake disbursement"
-              payout) and the treasury reimburses every ledger fee, so you receive exactly what you
-              unstaked. Changed your mind? Restake the dissolving neuron into any term pool and it
-              starts earning voting power and tickets again immediately. After a restake the
-              emptied neuron still exists on the NNS (merges never delete the source), and
-              NNS explorers can show stale balances for a few hours while their indexers
-              catch up — the live stake is already in the pool neuron.
-            </span>
+          <span className="row" style={{ gap: 8, fontSize: 11.5, color: 'var(--fg-3)', alignItems: 'center', flexWrap: 'wrap' }}>
+            <span>Your ICP lands in your wallet automatically when the dissolve completes — exactly what you unstaked.</span>
+            <MoreInfo label="What happens while a neuron dissolves" title="What happens while a neuron dissolves">
+              <p style={{ margin: 0 }}>
+                Each unstake splits its own neuron that dissolves for the tier's full term — follow
+                it live with the neuron link. When the dissolve completes, the protocol
+                automatically disburses the ICP to your wallet (it appears under Profile as an
+                "Unstake disbursement" payout) and the treasury reimburses every ledger fee, so you
+                receive exactly what you unstaked.
+              </p>
+              <p style={{ margin: 0 }}>
+                Changed your mind? Restake the dissolving neuron into any term pool and it starts
+                earning voting power and tickets again immediately. After a restake the emptied
+                neuron still exists on the NNS (merges never delete the source), and NNS explorers
+                can show stale balances for a few hours while their indexers catch up — the live
+                stake is already in the pool neuron.
+              </p>
+            </MoreInfo>
           </span>
         </div>
       )}

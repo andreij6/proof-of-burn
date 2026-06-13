@@ -6,7 +6,7 @@ import {
 } from './engine';
 
 // ==========================================
-// Admin course editor — paint the voxel layout of any Mini Golf Gold hole
+// Admin course editor — paint the voxel layout of any Mini Golf hole
 // cell by cell, place the tee/cup/windmill, and save it on-chain
 // (admin_set_arcade_hole). Saved holes override the built-in layout for
 // every player; Reset reverts to the built-in.

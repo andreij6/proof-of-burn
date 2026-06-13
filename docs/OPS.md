@@ -275,3 +275,28 @@ icp canister start backend -e production
 ```
 
 Stopping the canister preserves all stable-memory state. The timer will restart automatically on `start`.
+
+---
+
+## Multi-Token Voting & USD Thresholds (June 2026)
+
+Users can fund a burn commitment in **any supported token** (`commit_token`):
+the token converts to ICP **at commit time**, then the standard ICP rules run
+unchanged (pots, burns, refunds — refunds pay ICP). Conversion paths:
+
+- **Local**: an internal desk pays ICP from `SWAP_LIQUIDITY_SUBACCOUNT`
+  (`[8u8;32]`, seeded 100 ICP by deploy-local.sh) at the cached oracle rates.
+- **Mainnet**: ICPSwap (approve → depositFrom → swap → withdraw) with a 2%
+  slippage rail vs the XRC rates. **Each token's pool must be wired first**:
+  `admin_set_swap_pool(token, pool_principal, token_is_token0)` — discover
+  pools via the SwapFactory (`4mmnk-kiaaa-aaaag-qbllq-cai` getPool, fee 3000).
+  ⚠ The mainnet swap path has NOT had a live canary yet — wire one pool and
+  run a small commit_token before announcing.
+
+Thresholds can be **dollar-denominated**: `admin_set_default_threshold_usd(usd_e8s)`
+($1 = 100_000_000) re-thresholds open proposals; pots are valued at the cached
+ICP/USD rate (XRC, 10-min TTL; static $5 locally). `admin_set_default_threshold`
+(ICP) switches back to legacy mode. `get_usd_rates` exposes the cached rates.
+
+The Profile → Wallet tab adds native BTC/ETH/USDC/USDT on/off-ramps via the
+DFINITY minters (ckBTC `mqygn-…`, ckETH/ckERC20 `sv3dd-…`) — mainnet only.
