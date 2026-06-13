@@ -48,6 +48,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   const [autopilot, setAutopilot] = useState<AutopilotState | null>(null);
   const [wager, setWager] = useState('5');
   const [targetX, setTargetX] = useState('2.00');
+  const [autoCash, setAutoCash] = useState(true);
   const [chatText, setChatText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -189,9 +190,9 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
 
   const placeBet = () => run('bet', async () => {
     const chips = BigInt(Math.floor(Number(wager) * 1000)); // VP → chips
-    // Blank / invalid target = 0 = no auto cash-out (cash out manually with SPACE).
+    // Auto cash-out off (or blank/invalid) = target 0 = manual only.
     const tNum = Number(targetX);
-    const t = !targetX.trim() || !isFinite(tNum) || tNum <= 0 ? 0n : BigInt(Math.round(tNum * 100));
+    const t = !autoCash || !targetX.trim() || !isFinite(tNum) || tNum <= 0 ? 0n : BigInt(Math.round(tNum * 100));
     const res = await actor.crash_bet(chips, t);
     if (res.__kind__ === 'Err') throw new Error(res.Err);
   });
@@ -250,7 +251,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   const capNote = (() => {
     const wagerChips = Math.floor(Number(wager || 0) * 1000);
     const target = Math.round(Number(targetX || 0) * 100);
-    if (!targetX.trim()) return 'No auto cash-out — hit SPACE to cash out live. Max payout 10,000 VP/round.';
+    if (!autoCash || !targetX.trim()) return 'Manual cash-out — hit SPACE or click CASH OUT during the round. Max payout 10,000 VP/round.';
     if (wagerChips <= 0 || target < 101) return 'Max payout 10,000 VP/round.';
     const eff = effectiveTargetX100(wagerChips, target);
     return eff < target
@@ -335,11 +336,21 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                     <input value={wager} onChange={(e) => setWager(e.target.value)} inputMode="decimal"
                       style={{ width: 120, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
                   </label>
-                  <label className="col" style={{ gap: 4, fontSize: 11, color: 'var(--fg-3)' }}>
-                    Auto cash-out (× · optional)
-                    <input value={targetX} onChange={(e) => setTargetX(e.target.value)} inputMode="decimal" placeholder="none"
-                      style={{ width: 120, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
-                  </label>
+                  <div className="col" style={{ gap: 4, fontSize: 11, color: 'var(--fg-3)' }}>
+                    <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+                      Auto cash-out (×)
+                      <button onClick={() => setAutoCash((v) => !v)}
+                        style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 99, cursor: 'pointer',
+                          color: autoCash ? 'var(--char-950)' : 'var(--fg-3)',
+                          background: autoCash ? 'var(--sprout)' : 'var(--char-900)',
+                          border: '1px solid ' + (autoCash ? 'var(--sprout)' : 'var(--border)') }}>
+                        {autoCash ? 'ON' : 'OFF'}
+                      </button>
+                    </span>
+                    <input value={targetX} onChange={(e) => setTargetX(e.target.value)} inputMode="decimal" disabled={!autoCash}
+                      placeholder={autoCash ? '2.00' : 'manual'}
+                      style={{ width: 120, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)', opacity: autoCash ? 1 : 0.45 }} />
+                  </div>
                 </div>
                 <p style={{ color: 'var(--fg-3)', fontSize: 11, marginTop: 6 }}>{capNote}</p>
 

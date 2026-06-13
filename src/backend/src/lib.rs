@@ -12332,6 +12332,16 @@ async fn crash_tick() {
     }
     let mut r = crash_state();
     let now = current_time();
+    // Defuse stale/early timers: a round only advances once its current phase is
+    // actually due. Without this, an armed one-shot timer left over from an
+    // earlier round (settled via the watchdog) could fire late and settle the
+    // CURRENT running round before its real crash time — making the multiplier
+    // appear to jump (e.g. 1.4× → instantly "crashed @ 10.1×"). The legitimate
+    // armed timer (set at phase entry) and the watchdog drive the transition at
+    // the right moment. 50 ms grace absorbs scheduling jitter.
+    if r.phase_deadline > now.saturating_add(50_000_000) {
+        return;
+    }
     match r.phase {
         // Idle (initial), or the gap after a crash → open the next round, unless
         // the loop has been stopped (flag off / paused).
