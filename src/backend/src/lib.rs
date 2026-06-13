@@ -811,6 +811,9 @@ fn post_upgrade() {
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
     recompute_pool_info();
     setup_timers();
+    // Re-arm the crash round loop from the persisted phase (timers don't survive
+    // upgrades; a mid-flight round resumes from its remaining time, plans/crash/01).
+    crash_resume();
 }
 
 // ==========================================
@@ -1198,6 +1201,7 @@ async fn admin_trigger_sweep() -> Result<(), String> {
     cycle_topup_check().await;
     staking_sweep().await;
     early_adopter_settlement_check().await;
+    casino_weekly_burn();
     Ok(())
 }
 
@@ -4236,6 +4240,12 @@ fn setup_timers() {
         staking_sweep().await;
         lottery_draw_check().await;
         early_adopter_settlement_check().await;
+        casino_weekly_burn();
+    });
+    // Short watchdog so the crash loop self-heals if a one-shot timer is ever
+    // dropped (e.g. across an upgrade). Cheap: a couple of reads when idle.
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(15), || async {
+        crash_watchdog().await;
     });
 }
 
@@ -4409,10 +4419,15 @@ pub const FLAG_EARLY_ADOPTERS: &str = "early_adopters";
 pub const FLAG_ARCADE_MINIGOLF: &str = "arcade_minigolf";
 pub const FLAG_ARCADE_FIELDGOAL: &str = "arcade_fieldgoal";
 pub const FLAG_ARCADE_TURBORUSH: &str = "arcade_turborush";
-const KNOWN_FEATURE_FLAGS: [&str; 9] = [
+/// The Casino: Crash (bustabit-style multiplier game) + the shared casino VP
+/// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
+/// until the owner enables it after a playtest.
+pub const FLAG_CRASH: &str = "crash";
+const KNOWN_FEATURE_FLAGS: [&str; 10] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_TURBORUSH,
+    FLAG_CRASH,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -4500,10 +4515,23 @@ pub struct IdeaUpvote {
     pub poster_block: Option<u64>,
 }
 
+/// A feature's three states. `Off` = nobody; `On` = everybody; `AdminOn` =
+/// admins only (preview/playtest a feature live without exposing it).
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlagState {
+    Off,
+    On,
+    AdminOn,
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct FeatureFlag {
     pub key: String,
+    /// Effective for the CALLER (On for everyone, or AdminOn and the caller is an
+    /// admin). UI gating reads this.
     pub enabled: bool,
+    /// The raw three-state setting (for the admin panel to display/cycle).
+    pub state: FlagState,
 }
 
 /// Admin-curated, fundable project (Community R&D "Projects" tab). Funding
@@ -4641,15 +4669,57 @@ fn feature_default(key: &str) -> bool {
     }
 }
 
+/// Stored value → state. Legacy values 0/1 map to Off/On; 2 = AdminOn. Unset
+/// falls back to the per-flag default.
+fn feature_state(key: &str) -> FlagState {
+    match FEATURE_FLAGS.with(|m| m.borrow().get(&key.to_string())) {
+        Some(0) => FlagState::Off,
+        Some(2) => FlagState::AdminOn,
+        Some(_) => FlagState::On, // 1 (and any legacy non-zero)
+        None => {
+            if feature_default(key) {
+                FlagState::On
+            } else {
+                FlagState::Off
+            }
+        }
+    }
+}
+
+fn flag_state_code(s: FlagState) -> u8 {
+    match s {
+        FlagState::Off => 0,
+        FlagState::On => 1,
+        FlagState::AdminOn => 2,
+    }
+}
+
+/// "On for everyone." Caller-agnostic — SAFE to call from timers (no `caller`).
+/// Treats `AdminOn` as off so global background processes don't run for an
+/// admin-only feature.
 fn feature_enabled(key: &str) -> bool {
-    FEATURE_FLAGS
-        .with(|m| m.borrow().get(&key.to_string()))
-        .map(|v| v == 1)
-        .unwrap_or_else(|| feature_default(key))
+    matches!(feature_state(key), FlagState::On)
+}
+
+/// "Not off" — the feature is live in some capacity (On or AdminOn). Used by
+/// background loops (e.g. the crash round loop) that must run so admins can use
+/// the feature under `AdminOn`. Caller-agnostic.
+fn feature_active(key: &str) -> bool {
+    !matches!(feature_state(key), FlagState::Off)
+}
+
+/// Effective for a specific caller: On for anyone, AdminOn only for admins.
+/// Only call from a message context (it needs the caller).
+fn feature_visible(key: &str, caller: Principal) -> bool {
+    match feature_state(key) {
+        FlagState::On => true,
+        FlagState::AdminOn => is_admin_principal(caller),
+        FlagState::Off => false,
+    }
 }
 
 fn require_idea_board_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_IDEA_BOARD) {
+    if !feature_visible(FLAG_IDEA_BOARD, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -4665,16 +4735,17 @@ fn valid_flag_key(key: &str) -> bool {
 /// admin-created keys). Public so anonymous viewers can hide gated UI.
 #[ic_cdk::query]
 fn list_feature_flags() -> Vec<FeatureFlag> {
-    let mut flags: Vec<FeatureFlag> = KNOWN_FEATURE_FLAGS
-        .iter()
-        .map(|k| FeatureFlag { key: k.to_string(), enabled: feature_enabled(k) })
-        .collect();
+    let caller = get_caller();
+    let mk = |key: String| {
+        let state = feature_state(&key);
+        FeatureFlag { enabled: feature_visible(&key, caller), state, key }
+    };
+    let mut flags: Vec<FeatureFlag> = KNOWN_FEATURE_FLAGS.iter().map(|k| mk(k.to_string())).collect();
     FEATURE_FLAGS.with(|m| {
         for entry in m.borrow().iter() {
             let key = entry.key().clone();
             if !KNOWN_FEATURE_FLAGS.contains(&key.as_str()) {
-                let enabled = entry.value() == 1;
-                flags.push(FeatureFlag { key, enabled });
+                flags.push(mk(key));
             }
         }
     });
@@ -4696,6 +4767,24 @@ fn admin_set_feature_flag(key: String, enabled: bool) -> Result<(), String> {
             return Err("TOO_MANY_FLAGS".to_string());
         }
         m.insert(key, if enabled { 1 } else { 0 });
+        Ok(())
+    })
+}
+
+/// Admin: set a feature's three-state flag — Off (nobody), On (everybody), or
+/// AdminOn (admins only, for a live preview/playtest).
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_feature_flag_state(key: String, state: FlagState) -> Result<(), String> {
+    let key = key.trim().to_string();
+    if !valid_flag_key(&key) {
+        return Err("INVALID_FLAG_KEY".to_string());
+    }
+    FEATURE_FLAGS.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.get(&key).is_none() && m.len() >= MAX_FEATURE_FLAGS {
+            return Err("TOO_MANY_FLAGS".to_string());
+        }
+        m.insert(key, flag_state_code(state));
         Ok(())
     })
 }
@@ -4862,7 +4951,7 @@ fn validate_idea_text(title: &str, description: &str, detail: &str) -> Result<()
 fn get_idea_board_info() -> IdeaBoardInfo {
     let config = CONFIG.with(|c| c.borrow().get().clone());
     IdeaBoardInfo {
-        enabled: feature_enabled(FLAG_IDEA_BOARD),
+        enabled: feature_visible(FLAG_IDEA_BOARD, get_caller()),
         icp_ledger: token_ledger(IdeaToken::ICP, &config),
         ckbtc_ledger: token_ledger(IdeaToken::CkBTC, &config),
         cketh_ledger: token_ledger(IdeaToken::CkETH, &config),
@@ -6156,7 +6245,7 @@ impl Drop for StakingLock {
 }
 
 fn require_lossless_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_LOSSLESS_VOTING) {
+    if !feature_visible(FLAG_LOSSLESS_VOTING, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -7947,7 +8036,7 @@ fn set_lottery_state(state: LotteryState) {
 }
 
 fn require_lottery_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_LOSSLESS_LOTTERY) {
+    if !feature_visible(FLAG_LOSSLESS_LOTTERY, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -8316,7 +8405,7 @@ fn claim_daily_tickets() -> Result<u64, String> {
 async fn get_lottery_info() -> LotteryInfo {
     let caller = get_caller();
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
-    let enabled = feature_enabled(FLAG_LOSSLESS_LOTTERY);
+    let enabled = feature_visible(FLAG_LOSSLESS_LOTTERY, get_caller());
     let state = lottery_state();
     let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
 
@@ -8790,7 +8879,7 @@ thread_local! {
 }
 
 fn require_explorer_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_EXPLORER) {
+    if !feature_visible(FLAG_EXPLORER, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -9491,7 +9580,7 @@ fn seed_default_dapps() {
 fn get_explorer_info() -> ExplorerInfo {
     let config = CONFIG.with(|c| c.borrow().get().clone());
     ExplorerInfo {
-        enabled: feature_enabled(FLAG_EXPLORER),
+        enabled: feature_visible(FLAG_EXPLORER, get_caller()),
         icp_ledger: explorer_token_ledger(ExplorerToken::ICP, &config),
         ckbtc_ledger: explorer_token_ledger(ExplorerToken::CkBTC, &config),
         cketh_ledger: explorer_token_ledger(ExplorerToken::CkETH, &config),
@@ -10050,7 +10139,7 @@ thread_local! {
 }
 
 fn require_arcade_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_ARCADE) {
+    if !feature_visible(FLAG_ARCADE, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -10067,7 +10156,7 @@ fn arcade_game_flag(game: &str) -> &'static str {
 
 fn require_arcade_game_enabled(game: &str) -> Result<(), String> {
     require_arcade_enabled()?;
-    if !feature_enabled(arcade_game_flag(game)) {
+    if !feature_visible(arcade_game_flag(game), get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -10142,10 +10231,10 @@ fn get_arcade_info() -> ArcadeInfo {
         arcade_access(caller)
     };
     ArcadeInfo {
-        enabled: feature_enabled(FLAG_ARCADE),
-        minigolf_enabled: feature_enabled(FLAG_ARCADE_MINIGOLF),
-        fieldgoal_enabled: feature_enabled(FLAG_ARCADE_FIELDGOAL),
-        turborush_enabled: feature_enabled(FLAG_ARCADE_TURBORUSH),
+        enabled: feature_visible(FLAG_ARCADE, get_caller()),
+        minigolf_enabled: feature_visible(FLAG_ARCADE_MINIGOLF, get_caller()),
+        fieldgoal_enabled: feature_visible(FLAG_ARCADE_FIELDGOAL, get_caller()),
+        turborush_enabled: feature_visible(FLAG_ARCADE_TURBORUSH, get_caller()),
         full_access: has_stake || voted_recently,
         has_stake,
         voted_recently,
@@ -10857,7 +10946,7 @@ thread_local! {
 }
 
 fn require_early_adopters_enabled() -> Result<(), String> {
-    if !feature_enabled(FLAG_EARLY_ADOPTERS) {
+    if !feature_visible(FLAG_EARLY_ADOPTERS, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     Ok(())
@@ -10925,7 +11014,7 @@ fn get_early_adopter_info() -> EarlyAdopterInfo {
     });
     let config = CONFIG.with(|c| c.borrow().get().clone());
     EarlyAdopterInfo {
-        enabled: feature_enabled(FLAG_EARLY_ADOPTERS),
+        enabled: feature_visible(FLAG_EARLY_ADOPTERS, get_caller()),
         membership_closed: state.membership_closed,
         close_threshold_e8s: EARLY_ADOPTER_CLOSE_YIELD_E8S,
         restake_threshold_e8s: EARLY_ADOPTER_RESTAKE_BELOW_E8S,
@@ -11606,6 +11695,1926 @@ fn set_twitter_handle(handle: String) -> Result<(), String> {
 #[ic_cdk::query]
 fn get_my_twitter_handle() -> Option<String> {
     TWITTER_HANDLES.with(|m| m.borrow().get(&get_caller()))
+}
+
+// ==========================================
+// 20. Crash / Casino (Epic J)
+// ==========================================
+//
+// A bustabit-style multiplier game wrapped in a Casino section. One global
+// round every ~20 s; a multiplier climbs from 1.00x until it crashes at a
+// provably-fair point fixed at genesis (commit-reveal hash chain). Wagers are
+// "chips" drawn from a shared casino VP ledger derived from each user's
+// staking weight — STAKED ICP IS NEVER TOUCHED. The house banks every round
+// (1% edge) and BURNS its winnings weekly (a VP furnace), so the edge can only
+// re-enter the system through staking. See plans/crash/ (decisions C1–C18).
+
+// ── Units (plans/crash/02) ────────────────────────────────────────────────
+/// 1 VP = 1e8 weight-e8s (the staking-weight unit `user_voting_weight` returns).
+const VP_E8S: u64 = 100_000_000;
+/// 1 chip = 0.001 VP = 1e5 weight-e8s. chips = effective_vp_e8s / CHIP_E8S.
+const CHIP_E8S: u64 = 100_000;
+const CRASH_MIN_BET_CHIPS: u64 = 10; // 0.01 VP
+const CRASH_MAX_BET_CHIPS: u64 = 10_000_000; // 10,000 VP (1 VP = 1,000 chips)
+/// Hard cap on a single player's payout in a single round: 10,000 VP. A bet
+/// whose `wager × target` would exceed this is auto-cashed at the capped
+/// multiplier instead (e.g. a 5,000 VP bet auto-cashes at 2.00×).
+const CASINO_PAYOUT_CAP_VP: u64 = 10_000;
+const CRASH_MIN_TARGET_X100: u64 = 101; // 1.01x
+const CRASH_MAX_TARGET_X100: u64 = 5_000; // 50.00x
+const CRASH_CAP_X100: u64 = 5_000; // 50.00x cap on the curve (max multiplier 5000)
+const CRASH_DOMAIN: &[u8] = b"caldera-crash-v1";
+/// Round phase durations.
+const CRASH_INTERMISSION_NANOS: u64 = 5 * 1_000_000_000;
+const CRASH_BETTING_NANOS: u64 = 10 * 1_000_000_000;
+/// Default per-round potential-payout cap (VP). Admin-tunable in [100, 100_000].
+const CRASH_DEFAULT_EXPOSURE_CAP_VP: u64 = 100_000;
+const CRASH_EXPOSURE_CAP_MIN_VP: u64 = 100;
+const CRASH_EXPOSURE_CAP_MAX_VP: u64 = 1_000_000;
+/// How many finished rounds to keep in the archive.
+const CRASH_ARCHIVE_KEEP: u64 = 500;
+/// Genesis hash chain: N rounds (~7 months at 20 s/round), checkpoint stride.
+const CRASH_CHAIN_N: u64 = 1_000_000;
+const CRASH_CHAIN_STRIDE: u64 = 10_000;
+/// Casino-wide stop-loss floor (effective VP, e8s) a bet may not breach.
+/// Default 0 = "you can play down to zero chips but never into principal".
+const CASINO_STOP_LOSS_FLOOR_E8S: u64 = 0;
+/// Auto-pilots serviced per betting window (FIFO fairness).
+const CRASH_AUTOPILOT_CAP: usize = 500;
+/// Casino chat (plans/crash/03).
+const CASINO_CHAT_RING: u64 = 500;
+const CASINO_CHAT_MAX_LEN: usize = 200;
+const CASINO_CHAT_COOLDOWN_NANOS: u64 = 5 * 1_000_000_000;
+const WEEK_NANOS: u64 = 7 * DAY_NANOS;
+/// $5 to author a crash strategy (USD e8s); marketplace sale split 80/20.
+const CRASH_STRATEGY_FEE_USD_E8S: u64 = 500_000_000;
+const MAX_STRATEGIES_PER_AUTHOR: usize = 20;
+const MAX_STRATEGY_JSON_BYTES: usize = 4096;
+const MARKET_PRICE_MIN_USD_E8S: u64 = 100_000_000; // $1
+const MARKET_PRICE_MAX_USD_E8S: u64 = 50_000_000_000; // $500
+const MARKET_SELLER_BPS: u64 = 8_000; // 80% to seller, 20% treasury
+
+// ── Domain types (plans/crash/01) ──────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CrashPhase {
+    #[default]
+    Intermission,
+    Betting,
+    Running,
+    Crashed,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BetOutcome {
+    #[default]
+    Pending,
+    Won,
+    Lost,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CrashBet {
+    pub user: Principal,
+    pub wager_chips: u64,
+    pub target_x100: u64,
+    /// Set when the player smashed manual CASH OUT before the crash (the
+    /// recorded multiplier, never above their own auto target).
+    pub manual_x100: Option<u64>,
+    pub outcome: BetOutcome,
+    /// Multiplier the bet settled at (0 = lost). x100 fixed point.
+    pub payout_x100: u64,
+    /// Signed VP delta written at settlement (weight-e8s).
+    pub delta_e8s: i128,
+    /// True for bets placed by the round loop on a user's behalf (auto-pilot).
+    pub auto_pilot: bool,
+    /// Strategy id that placed the bet (auto-pilot), for the VP leaderboard.
+    pub strategy_id: Option<u64>,
+}
+
+/// The single live/archived round record. The live copy lives in CRASH_STATE;
+/// finished copies are archived into CRASH_ROUNDS. `crash_x100`/`seed_reveal`
+/// are sealed at betting close but only EXPOSED to callers after the crash.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CrashRound {
+    pub id: u64,
+    pub phase: CrashPhase,
+    pub chain_index: u64,
+    /// 0 until the round seals at betting close.
+    pub crash_x100: u64,
+    pub seed_reveal: Option<[u8; 32]>,
+    pub phase_deadline: u64, // ns; intermission/betting end, or the crash time
+    pub run_started_at: u64,
+    pub crashed_at: u64,
+    /// Σ(wager_e8s × target) reserved this round, for the exposure cap.
+    pub potential_payout_e8s: u128,
+    pub bets: Vec<CrashBet>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CasinoBook {
+    /// The house's signed VP balance (weight-e8s). May go negative (players up).
+    pub house_e8s: i128,
+    /// Lifetime VP destroyed by the weekly house burn (weight-e8s).
+    pub burned_e8s: u128,
+    /// Lifetime VP forgiven by the tenure jubilee (weight-e8s).
+    pub jubilee_e8s: u128,
+    /// Week index of the last burn (now / WEEK_NANOS).
+    pub last_burn_week: u64,
+    /// Round loop paused by admin (current round still settles).
+    pub paused: bool,
+    /// Per-round potential-payout cap (VP).
+    pub exposure_cap_vp: u64,
+}
+
+/// Per-user casino ledger entry: a signed modifier on staking weight plus the
+/// tenure-jubilee bookmark.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct UserCasino {
+    pub delta_e8s: i128,
+    pub last_jubilee_period: u64,
+}
+
+/// Monotonic id counters (one cell beats many).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CrashCounters {
+    pub next_round_id: u64,
+    pub next_chain_index: u64,
+    pub next_chat_id: u64,
+    pub next_strategy_id: u64,
+    pub next_listing_id: u64,
+    pub next_license_id: u64,
+}
+impl Default for CrashCounters {
+    fn default() -> Self {
+        CrashCounters {
+            next_round_id: 1,
+            next_chain_index: 1,
+            next_chat_id: 1,
+            next_strategy_id: 1,
+            next_listing_id: 1,
+            next_license_id: 1,
+        }
+    }
+}
+
+/// Genesis hash chain (plans/crash/01 C5). `chain_seed` is h_N; hashing it down
+/// yields h_{N-1}…h_0; `terminal` = h_0 is the public commitment. We store one
+/// checkpoint every `stride` so any round seed costs ≤ stride hashes to recover.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct CrashChain {
+    pub initialized: bool,
+    pub chain_seed: [u8; 32],
+    pub terminal: [u8; 32],
+    pub n: u64,
+    pub stride: u64,
+    /// checkpoints[k] = h_{k*stride}; checkpoints[0] = terminal (h_0).
+    pub checkpoints: Vec<[u8; 32]>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChatMsg {
+    pub id: u64,
+    pub author: Principal,
+    pub text: String,
+    pub at: u64,
+}
+
+/// One progression rule (on_loss / on_win): how to size the next bet.
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BetAction {
+    #[default]
+    Reset,
+    /// Multiply the current bet by factor_x100 (1.00x–10.00x).
+    Multiply,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, Default)]
+pub struct ProgressionRule {
+    pub action: BetAction,
+    pub factor_x100: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct StrategyStop {
+    /// +profit in VP-x1000 that ends the session (0 = none).
+    pub take_profit_vp_x1000: u64,
+    /// -loss in VP-x1000 that ends the session (0 = none).
+    pub stop_loss_vp_x1000: u64,
+    /// max rounds before stopping (0 = none).
+    pub max_rounds: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CrashStrategy {
+    pub id: u64,
+    pub author: Principal,
+    pub name: String,
+    pub description: String,
+    pub base_bet_chips: u64,
+    pub auto_target_x100: u64,
+    pub on_loss: ProgressionRule,
+    pub on_win: ProgressionRule,
+    pub max_bet_chips: u64,
+    pub max_consecutive_losses: u64, // 0 = unlimited
+    pub skip_rounds_after_loss: u64, // 0..10
+    pub stop: StrategyStop,
+    pub version: u64,
+    pub builtin: bool,
+    /// Lifetime VP (weight-e8s) won/lost by all pilots running this strategy.
+    pub lifetime_vp_e8s: i128,
+    pub created_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct AutopilotState {
+    pub strategy_id: u64,
+    pub active: bool,
+    pub current_bet_chips: u64,
+    pub consecutive_losses: u64,
+    pub skip_counter: u64,
+    pub rounds_played: u64,
+    pub session_pnl_e8s: i128,
+    pub started_at: u64,
+    /// Set when a stop fired; surfaced to the UI ("take-profit +50 VP reached").
+    pub stop_reason: Option<String>,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MarketKind {
+    #[default]
+    Crash,
+    Poker,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Listing {
+    pub id: u64,
+    pub kind: MarketKind,
+    pub seller: Principal,
+    /// For Crash: the strategy id whose body unlocks on license.
+    pub item_id: u64,
+    pub title: String,
+    /// Public shape teaser ("martingale ×2.0 @ 2.00×"). Body stays hidden.
+    pub teaser: String,
+    pub price_usd_e8s: u64,
+    pub sales: u64,
+    pub created_at: u64,
+    pub active: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct License {
+    pub id: u64,
+    pub listing_id: u64,
+    pub buyer: Principal,
+    pub at: u64,
+}
+
+impl_storable!(CrashRound);
+impl_storable!(CasinoBook);
+impl_storable!(UserCasino);
+impl_storable!(CrashCounters);
+impl_storable!(CrashChain);
+impl_storable!(ChatMsg);
+impl_storable!(CrashStrategy);
+impl_storable!(AutopilotState);
+impl_storable!(Listing);
+impl_storable!(License);
+
+thread_local! {
+    /// Per-user casino VP ledger (delta on staking weight). MemoryId 60.
+    static CASINO_VP_DELTA: RefCell<StableBTreeMap<Principal, UserCasino, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(60)))));
+    /// House / burn / jubilee bookkeeping + loop config. MemoryId 61.
+    static CASINO_BOOK: RefCell<StableCell<CasinoBook, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(61)), CasinoBook {
+            exposure_cap_vp: CRASH_DEFAULT_EXPOSURE_CAP_VP, ..Default::default()
+        })));
+    /// The live round. MemoryId 62.
+    static CRASH_STATE: RefCell<StableCell<CrashRound, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(62)), CrashRound::default())));
+    /// Finished-round archive. MemoryId 63.
+    static CRASH_ROUNDS: RefCell<StableBTreeMap<u64, CrashRound, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(63)))));
+    /// Id counters. MemoryId 64.
+    static CRASH_COUNTERS: RefCell<StableCell<CrashCounters, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(64)), CrashCounters::default())));
+    /// Casino chat ring. MemoryId 65.
+    static CASINO_CHAT: RefCell<StableBTreeMap<u64, ChatMsg, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(65)))));
+    /// Crash strategies (incl. builtins). MemoryId 66.
+    static CRASH_STRATEGIES: RefCell<StableBTreeMap<u64, CrashStrategy, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(66)))));
+    /// Per-user auto-pilot state. MemoryId 67.
+    static CRASH_AUTOPILOT: RefCell<StableBTreeMap<Principal, AutopilotState, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(67)))));
+    /// Genesis hash chain. MemoryId 68.
+    static CRASH_CHAIN: RefCell<StableCell<CrashChain, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(68)), CrashChain::default())));
+    /// Chat mutes (principal -> muted-until ns). MemoryId 69.
+    static CASINO_MUTES: RefCell<StableBTreeMap<Principal, u64, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(69)))));
+    /// Marketplace listings. MemoryId 70.
+    static MARKET_LISTINGS: RefCell<StableBTreeMap<u64, Listing, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(70)))));
+    /// Marketplace licenses (id -> license; scanned by buyer/listing). MemoryId 71.
+    static MARKET_LICENSES: RefCell<StableBTreeMap<u64, License, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(71)))));
+}
+
+fn crash_counters() -> CrashCounters {
+    CRASH_COUNTERS.with(|c| c.borrow().get().clone())
+}
+fn set_crash_counters(c: CrashCounters) {
+    CRASH_COUNTERS.with(|cell| { let _ = cell.borrow_mut().set(c); });
+}
+fn casino_book() -> CasinoBook {
+    CASINO_BOOK.with(|c| c.borrow().get().clone())
+}
+fn set_casino_book(b: CasinoBook) {
+    CASINO_BOOK.with(|cell| { let _ = cell.borrow_mut().set(b); });
+}
+fn crash_state() -> CrashRound {
+    CRASH_STATE.with(|c| c.borrow().get().clone())
+}
+fn set_crash_state(r: CrashRound) {
+    CRASH_STATE.with(|cell| { let _ = cell.borrow_mut().set(r); });
+}
+
+fn require_crash_enabled() -> Result<(), String> {
+    if !feature_visible(FLAG_CRASH, get_caller()) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+thread_local! {
+    /// Local-dev simulation bots (principal -> display handle). MemoryId 72.
+    /// Used only by `dev_seed_casino_play` to make the table feel alive locally.
+    static CASINO_BOTS: RefCell<StableBTreeMap<Principal, String, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(72)))));
+}
+
+/// Insert a chat line on a principal's behalf, bypassing the rate limit — only
+/// ever called for simulation bots (plus the ring eviction the public path uses).
+fn bot_say(author: Principal, text: &str) {
+    let now = current_time();
+    let mut counters = crash_counters();
+    let id = counters.next_chat_id;
+    counters.next_chat_id += 1;
+    set_crash_counters(counters);
+    CASINO_CHAT.with(|m| {
+        let mut map = m.borrow_mut();
+        map.insert(id, ChatMsg { id, author, text: text.to_string(), at: now });
+        while map.len() > CASINO_CHAT_RING {
+            if let Some(oldest) = map.iter().next().map(|e| *e.key()) {
+                map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    });
+}
+
+/// After a round settles, occasionally have a bot react — keeps the local chat
+/// lively. Entropy comes from the (already-public) round outcome; no-op when no
+/// bots are seeded (i.e. always on mainnet).
+fn crash_bot_chatter(r: &CrashRound) {
+    let bots: Vec<Principal> = CASINO_BOTS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    if bots.is_empty() {
+        return;
+    }
+    let e = r.crash_x100.wrapping_mul(2_654_435_761).wrapping_add(r.id);
+    if e % 10 == 0 {
+        return; // ~90% of rounds someone talks
+    }
+    let win = ["ez money 💰", "called it", "🚀🚀🚀", "cashed in time", "10x club", "to the moon 🌙"];
+    let bust = ["rip", "so close", "one more round", "the house burns it all 🔥", "set auto lower next time", "knew it would dump"];
+    let neutral = ["gl all", "who's in?", "2x and run", "let it ride", "feeling lucky", "send it"];
+    let pool: &[&str] = if r.crash_x100 >= 1000 { &win } else if r.crash_x100 <= 130 { &bust } else { &neutral };
+    bot_say(bots[(e as usize) % bots.len()], pool[(e as usize / 7) % pool.len()]);
+    // ~40% of the time a second bot chimes in with a different line.
+    if e % 5 < 2 && bots.len() > 1 {
+        let other = bots[(e as usize / 3 + 1) % bots.len()];
+        bot_say(other, pool[(e as usize / 11 + 1) % pool.len()]);
+    }
+}
+
+// ── Provably-fair engine (plans/crash/01 C4/C5, PB-232) ─────────────────────
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
+/// Build the genesis chain from `chain_seed` (= h_N). Returns (terminal h_0,
+/// checkpoints) where checkpoints[k] = h_{k*stride}. Pure + testable.
+fn build_crash_chain(chain_seed: [u8; 32], n: u64, stride: u64) -> ([u8; 32], Vec<[u8; 32]>) {
+    let count = (n / stride) as usize + 1;
+    let mut checkpoints = vec![[0u8; 32]; count];
+    let mut h = chain_seed; // h_n
+    let mut i = n;
+    if i % stride == 0 {
+        checkpoints[(i / stride) as usize] = h;
+    }
+    while i > 0 {
+        h = sha256(&h);
+        i -= 1; // now h == h_i
+        if i % stride == 0 {
+            checkpoints[(i / stride) as usize] = h;
+        }
+    }
+    (h, checkpoints) // h == h_0 == terminal
+}
+
+/// Recover seed h_index from the nearest checkpoint at/above it (≤ stride hashes).
+fn crash_seed_at(chain: &CrashChain, index: u64) -> [u8; 32] {
+    let stride = chain.stride.max(1);
+    // smallest multiple of stride that is >= index (clamped to n)
+    let mut c = index.div_ceil(stride) * stride;
+    if c > chain.n {
+        c = chain.n;
+    }
+    let ck = chain.checkpoints.get((c / stride) as usize).copied().unwrap_or(chain.terminal);
+    let mut h = ck; // h_c
+    let mut steps = c.saturating_sub(index);
+    while steps > 0 {
+        h = sha256(&h);
+        steps -= 1;
+    }
+    h // h_index
+}
+
+/// Normative crash-point formula (bustabit-classic, 1% edge): 1/101 instant
+/// bust at 1.00×; otherwise floor((100·2^52 − h)/(2^52 − h)) in ×100 fixed
+/// point, capped at 100.00×. Closed form: P[crash ≥ x] ≈ 99/(100·x).
+fn crash_point_x100(seed: &[u8; 32]) -> u64 {
+    let mut data = seed.to_vec();
+    data.extend_from_slice(CRASH_DOMAIN);
+    let h = sha256(&data);
+    let u = u64::from_be_bytes(h[0..8].try_into().unwrap());
+    if u % 101 == 0 {
+        return 100; // 1.00× instant bust
+    }
+    let e: u128 = 1u128 << 52;
+    let hb = (u as u128) & (e - 1);
+    let x = (100 * e - hb) / (e - hb); // ≥ 100, increasing in hb
+    (x as u64).clamp(100, CRASH_CAP_X100)
+}
+
+/// Multiplier at `elapsed_ms` into the run: m(t) = e^(0.06·t), ×100 fixed point,
+/// floored, never below 1.00×. f64 exp is deterministic on wasm.
+fn crash_multiplier_x100(elapsed_ms: u64) -> u64 {
+    let t = elapsed_ms as f64 / 1000.0;
+    let m = (0.06 * t).exp();
+    ((m * 100.0).floor() as u64).max(100)
+}
+
+/// Time (ns from run start) at which the curve reaches `crash_x100`.
+fn crash_time_offset_nanos(crash_x100: u64) -> u64 {
+    let m = (crash_x100 as f64 / 100.0).max(1.0);
+    let t = m.ln() / 0.06; // seconds
+    (t * 1_000_000_000.0).round() as u64
+}
+
+/// The auto-cashout target a bet is actually settled at: the lesser of the
+/// player's chosen target and the multiplier at which `wager × multiplier` hits
+/// the per-round payout cap (10,000 VP). So a 5,000 VP bet is auto-cashed at
+/// 2.00× no matter how high the player set their target. `target_x100 == 0`
+/// means "no auto cash-out" (manual only) — the payout cap is the sole ceiling,
+/// which for small bets is far above the 50× curve cap (i.e. effectively none).
+fn effective_target_x100(wager_chips: u64, target_x100: u64) -> u64 {
+    let cap_chips = CASINO_PAYOUT_CAP_VP.saturating_mul(1_000); // VP → chips
+    let cap_target = (cap_chips.saturating_mul(100) / wager_chips.max(1)).max(100);
+    if target_x100 == 0 {
+        cap_target
+    } else {
+        target_x100.min(cap_target)
+    }
+}
+
+/// Pure settlement of one bet against a sealed crash point. Returns the signed
+/// VP delta (weight-e8s) and the multiplier it paid at (0 = lost). The auto
+/// target — capped by the payout ceiling — pays iff `effective ≤ crash`; a
+/// recorded manual cashout pays at its (≤ effective, < crash) multiplier. The
+/// wager principal never moves — only profit (win) or the wager (loss) is
+/// written, since chips are reserved, not debited (plans/crash/02).
+fn settle_crash_bet(wager_chips: u64, target_x100: u64, manual_x100: Option<u64>, crash_x100: u64) -> (i128, u64) {
+    let wager_e8s = (wager_chips as i128) * (CHIP_E8S as i128);
+    let eff = effective_target_x100(wager_chips, target_x100);
+    let pay_x100 = match manual_x100 {
+        Some(m) => m.min(eff), // recorded only when cashed before the crash → a win
+        None if eff <= crash_x100 => eff,
+        None => 0,
+    };
+    if pay_x100 >= 100 && (manual_x100.is_some() || eff <= crash_x100) {
+        let profit = wager_e8s * (pay_x100 as i128 - 100) / 100;
+        (profit, pay_x100)
+    } else {
+        (-wager_e8s, 0)
+    }
+}
+
+// ── Casino VP ledger (plans/crash/02, PB-230) ───────────────────────────────
+
+/// Each user's casino VP base = their live staking weight (e8s). Staked ICP is
+/// never wagered; the ledger only ever modifies a *derived* number.
+fn casino_staking_weight_e8s(user: Principal) -> u64 {
+    user_voting_weight(user)
+}
+
+/// Tenure-jubilee period: completed 6-month spans since the user first staked
+/// (the earliest `staked_at` across their tiers).
+fn casino_tenure_period(user: Principal) -> u64 {
+    let now = current_time();
+    let staked_at = StakeTier::all()
+        .iter()
+        .filter_map(|&tier| STAKES.with(|m| m.borrow().get(&stake_key(tier, user)).map(|s| s.staked_at)))
+        .min()
+        .unwrap_or(0);
+    if staked_at == 0 || now <= staked_at {
+        return 0;
+    }
+    (now - staked_at) / (182 * DAY_NANOS + DAY_NANOS / 2)
+}
+
+/// Lazily forgive a negative delta when the user crosses a 6-month tenure tick
+/// (writer #7). Forgiven VP accrues to `jubilee_e8s` (separate from the burn).
+fn casino_apply_jubilee(user: Principal) {
+    let period = casino_tenure_period(user);
+    let mut entry = CASINO_VP_DELTA.with(|m| m.borrow().get(&user)).unwrap_or_default();
+    if period > entry.last_jubilee_period {
+        if entry.delta_e8s < 0 {
+            let forgiven = (-entry.delta_e8s) as u128;
+            let mut book = casino_book();
+            book.jubilee_e8s = book.jubilee_e8s.saturating_add(forgiven);
+            set_casino_book(book);
+            entry.delta_e8s = 0;
+        }
+        entry.last_jubilee_period = period;
+        CASINO_VP_DELTA.with(|m| m.borrow_mut().insert(user, entry));
+    }
+}
+
+fn casino_delta_e8s(user: Principal) -> i128 {
+    casino_apply_jubilee(user);
+    CASINO_VP_DELTA.with(|m| m.borrow().get(&user)).map(|e| e.delta_e8s).unwrap_or(0)
+}
+
+/// Effective casino VP (weight-e8s), never negative (invariant I-2).
+fn casino_effective_vp_e8s(user: Principal) -> u64 {
+    let base = casino_staking_weight_e8s(user) as i128;
+    (base + casino_delta_e8s(user)).max(0) as u64
+}
+
+fn casino_chips(user: Principal) -> u64 {
+    casino_effective_vp_e8s(user) / CHIP_E8S
+}
+
+/// Chips reserved by a live (pending) crash bet — invisible to a second crash
+/// bet or a poker sit-down, so they can't be double-spent (plans/crash/02).
+fn reserved_chips(user: Principal) -> u64 {
+    let r = crash_state();
+    if matches!(r.phase, CrashPhase::Betting | CrashPhase::Running) {
+        r.bets.iter().filter(|b| b.user == user && b.outcome == BetOutcome::Pending).map(|b| b.wager_chips).sum()
+    } else {
+        0
+    }
+}
+
+fn casino_available_chips(user: Principal) -> u64 {
+    casino_chips(user).saturating_sub(reserved_chips(user))
+}
+
+fn casino_add_delta(user: Principal, d: i128) {
+    casino_apply_jubilee(user);
+    let mut entry = CASINO_VP_DELTA.with(|m| m.borrow().get(&user)).unwrap_or_default();
+    entry.delta_e8s += d;
+    if entry.last_jubilee_period == 0 {
+        entry.last_jubilee_period = casino_tenure_period(user);
+    }
+    CASINO_VP_DELTA.with(|m| m.borrow_mut().insert(user, entry));
+}
+
+/// Σ user deltas + house + burned − jubilee == 0, forever (invariants I-1c/I-6).
+fn casino_reconciliation_e8s() -> i128 {
+    let users: i128 = CASINO_VP_DELTA.with(|m| m.borrow().iter().map(|e| e.value().delta_e8s).sum());
+    let book = casino_book();
+    users + book.house_e8s + book.burned_e8s as i128 - book.jubilee_e8s as i128
+}
+
+/// Weekly house burn (plans/crash/02 C3): once per ISO week, a positive house
+/// balance is destroyed (set to 0, lifetime-burned incremented, audit-logged);
+/// a negative house carries over (never minted away). Called from the sweep.
+fn casino_weekly_burn() {
+    let now = current_time();
+    let week = now / WEEK_NANOS;
+    let mut book = casino_book();
+    if week <= book.last_burn_week && book.last_burn_week != 0 {
+        return;
+    }
+    if book.last_burn_week == 0 {
+        // First tick just anchors the week; nothing to burn yet.
+        book.last_burn_week = week;
+        set_casino_book(book);
+        return;
+    }
+    if book.house_e8s > 0 {
+        let amount = book.house_e8s as u128;
+        book.burned_e8s = book.burned_e8s.saturating_add(amount);
+        book.house_e8s = 0;
+        AUDIT_LOG.with(|log| {
+            let _ = log.borrow_mut().append(&AuditLogEntry {
+                timestamp: now,
+                event_type: "crash_house_burn".to_string(),
+                proposal_id: 0,
+                user: get_canister_id(),
+                amount_e8s: u64::try_from(amount).unwrap_or(u64::MAX),
+            });
+        });
+    }
+    book.last_burn_week = week;
+    set_casino_book(book);
+}
+
+// ── Round loop (plans/crash/01, PB-233) ─────────────────────────────────────
+
+#[cfg(target_arch = "wasm32")]
+fn crash_arm_timer(after_nanos: u64) {
+    let dur = std::time::Duration::from_nanos(after_nanos);
+    ic_cdk_timers::set_timer(dur, async { crash_tick().await; });
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn crash_arm_timer(_after_nanos: u64) {}
+
+/// 32 random bytes for the genesis chain (raw_rand on wasm; fixed in tests).
+#[cfg(target_arch = "wasm32")]
+async fn crash_random_seed() -> Result<[u8; 32], String> {
+    let res: Result<(Vec<u8>,), _> = ic_cdk::call(Principal::management_canister(), "raw_rand", ()).await;
+    match res {
+        Ok((bytes,)) if bytes.len() >= 32 => Ok(bytes[..32].try_into().unwrap()),
+        Ok(_) => Err("RAW_RAND_TOO_SHORT".to_string()),
+        Err((code, msg)) => Err(format!("raw_rand failed ({:?}): {}", code, msg)),
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn crash_random_seed() -> Result<[u8; 32], String> {
+    Ok(sha256(b"caldera-crash-test-seed"))
+}
+
+/// Resume the loop after init/upgrade: if crash is live and a round is mid-flight,
+/// re-arm its timer from the remaining time; otherwise (idle) kick a fresh cycle.
+fn crash_resume() {
+    if !feature_active(FLAG_CRASH) || casino_book().paused || !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
+        return;
+    }
+    let r = crash_state();
+    let now = current_time();
+    match r.phase {
+        CrashPhase::Intermission | CrashPhase::Betting | CrashPhase::Running => {
+            let remaining = r.phase_deadline.saturating_sub(now);
+            crash_arm_timer(remaining);
+        }
+        CrashPhase::Crashed => crash_arm_timer(0),
+    }
+}
+
+/// Watchdog (runs on a short interval): if the current phase is overdue — a
+/// one-shot timer was dropped, e.g. across an upgrade — drive the transition so
+/// the loop self-heals instead of wedging. No-op when off/paused/uninitialised.
+async fn crash_watchdog() {
+    if !feature_active(FLAG_CRASH) || casino_book().paused {
+        return;
+    }
+    if !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
+        return;
+    }
+    let r = crash_state();
+    if current_time() > r.phase_deadline.saturating_add(1_000_000_000) {
+        crash_tick().await;
+    }
+}
+
+/// One phase transition. Idempotent w.r.t. the flag/pause (a stale timer that
+/// fires after a pause/flag-off simply settles the current round then stops).
+async fn crash_tick() {
+    if !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
+        return;
+    }
+    let mut r = crash_state();
+    let now = current_time();
+    // Defuse stale/early timers: a round only advances once its current phase is
+    // actually due. Without this, an armed one-shot timer left over from an
+    // earlier round (settled via the watchdog) could fire late and settle the
+    // CURRENT running round before its real crash time — making the multiplier
+    // appear to jump (e.g. 1.4× → instantly "crashed @ 10.1×"). The legitimate
+    // armed timer (set at phase entry) and the watchdog drive the transition at
+    // the right moment. 50 ms grace absorbs scheduling jitter.
+    if r.phase_deadline > now.saturating_add(50_000_000) {
+        return;
+    }
+    match r.phase {
+        // Idle (initial), or the gap after a crash → open the next round, unless
+        // the loop has been stopped (flag off / paused).
+        CrashPhase::Intermission | CrashPhase::Crashed => {
+            if !feature_active(FLAG_CRASH) || casino_book().paused {
+                return;
+            }
+            crash_open_round(now);
+        }
+        CrashPhase::Betting => {
+            crash_close_betting(&mut r, now);
+            set_crash_state(r.clone());
+            // Arm the crash timer for t_crash.
+            let dt = crash_time_offset_nanos(r.crash_x100);
+            crash_arm_timer(dt);
+        }
+        CrashPhase::Running => {
+            crash_settle_round(&mut r, now);
+            // Hold the crashed result for the intermission window; the watchdog
+            // and the armed timer both open the next round once it elapses.
+            r.phase_deadline = now + CRASH_INTERMISSION_NANOS;
+            set_crash_state(r.clone());
+            crash_archive(r);
+            if feature_active(FLAG_CRASH) && !casino_book().paused {
+                crash_arm_timer(CRASH_INTERMISSION_NANOS);
+            }
+        }
+    }
+}
+
+/// Public nudge: advance the loop if a phase is overdue. On a real subnet the
+/// autonomous timers do this; locally (and as a self-heal) the frontend calls
+/// this each poll so the round loop progresses whenever someone is watching.
+#[ic_cdk::update]
+async fn crash_poke() {
+    crash_watchdog().await;
+}
+
+fn crash_open_round(now: u64) {
+    let mut counters = crash_counters();
+    let id = counters.next_round_id;
+    let chain_index = counters.next_chain_index;
+    counters.next_round_id += 1;
+    counters.next_chain_index += 1;
+    set_crash_counters(counters);
+    let round = CrashRound {
+        id,
+        phase: CrashPhase::Betting,
+        chain_index,
+        crash_x100: 0,
+        seed_reveal: None,
+        phase_deadline: now + CRASH_BETTING_NANOS,
+        run_started_at: 0,
+        crashed_at: 0,
+        potential_payout_e8s: 0,
+        bets: Vec::new(),
+    };
+    set_crash_state(round);
+    // Place auto-pilot bets for this betting window.
+    crash_run_autopilots();
+    crash_arm_timer(CRASH_BETTING_NANOS);
+}
+
+fn crash_close_betting(r: &mut CrashRound, now: u64) {
+    let chain = CRASH_CHAIN.with(|c| c.borrow().get().clone());
+    let seed = crash_seed_at(&chain, r.chain_index);
+    r.crash_x100 = crash_point_x100(&seed); // sealed, not yet revealed
+    r.phase = CrashPhase::Running;
+    r.run_started_at = now;
+    r.phase_deadline = now + crash_time_offset_nanos(r.crash_x100);
+}
+
+/// Atomic settle pass (writer #5): per-bet deltas + the house's negation, so
+/// Σ(round) + house round-delta = 0 (invariant I-7). Reveals the seed.
+fn crash_settle_round(r: &mut CrashRound, now: u64) {
+    let chain = CRASH_CHAIN.with(|c| c.borrow().get().clone());
+    let seed = crash_seed_at(&chain, r.chain_index);
+    r.seed_reveal = Some(seed);
+    r.phase = CrashPhase::Crashed;
+    r.crashed_at = now;
+    let mut round_sum: i128 = 0;
+    for bet in r.bets.iter_mut() {
+        if bet.outcome != BetOutcome::Pending {
+            continue;
+        }
+        let (delta, pay) = settle_crash_bet(bet.wager_chips, bet.target_x100, bet.manual_x100, r.crash_x100);
+        bet.delta_e8s = delta;
+        bet.payout_x100 = pay;
+        bet.outcome = if pay > 0 { BetOutcome::Won } else { BetOutcome::Lost };
+        casino_add_delta(bet.user, delta);
+        round_sum += delta;
+        // Strategy lifetime-VP leaderboard + auto-pilot session bookkeeping.
+        if let Some(sid) = bet.strategy_id {
+            let existing = CRASH_STRATEGIES.with(|m| m.borrow().get(&sid));
+            if let Some(mut s) = existing {
+                s.lifetime_vp_e8s += delta;
+                CRASH_STRATEGIES.with(|m| m.borrow_mut().insert(sid, s));
+            }
+        }
+        if bet.auto_pilot {
+            crash_autopilot_after_round(bet.user, delta, pay > 0);
+        }
+    }
+    // House absorbs the exact negation of the round's net.
+    let mut book = casino_book();
+    book.house_e8s -= round_sum;
+    set_casino_book(book);
+    // Local-dev colour: bots react to the result (no-op when none are seeded).
+    crash_bot_chatter(r);
+}
+
+fn crash_archive(r: CrashRound) {
+    CRASH_ROUNDS.with(|m| {
+        let mut map = m.borrow_mut();
+        map.insert(r.id, r);
+        // Trim oldest beyond the keep window.
+        let len = map.len();
+        if len > CRASH_ARCHIVE_KEEP {
+            let mut to_remove = len - CRASH_ARCHIVE_KEEP;
+            let oldest: Vec<u64> = map.iter().map(|e| *e.key()).take(to_remove as usize).collect();
+            for k in oldest {
+                map.remove(&k);
+                to_remove -= 1;
+                if to_remove == 0 {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Shared placement core for both human and auto-pilot bets. Enforces every
+/// guard (rails, one-bet-per-round, available chips, casino stop-loss floor,
+/// exposure cap). Returns the placed bet on success.
+fn crash_place_bet(
+    user: Principal,
+    wager_chips: u64,
+    target_x100: u64,
+    auto_pilot: bool,
+    strategy_id: Option<u64>,
+) -> Result<(), String> {
+    let mut r = crash_state();
+    if r.phase != CrashPhase::Betting {
+        return Err("NOT_BETTING".to_string());
+    }
+    if !(CRASH_MIN_BET_CHIPS..=CRASH_MAX_BET_CHIPS).contains(&wager_chips) {
+        return Err("WAGER_OUT_OF_RANGE".to_string());
+    }
+    // target_x100 == 0 means "no auto cash-out" (manual only); otherwise rails.
+    if target_x100 != 0 && !(CRASH_MIN_TARGET_X100..=CRASH_MAX_TARGET_X100).contains(&target_x100) {
+        return Err("TARGET_OUT_OF_RANGE".to_string());
+    }
+    if r.bets.iter().any(|b| b.user == user) {
+        return Err("ALREADY_BET".to_string());
+    }
+    // Available chips (effective VP minus existing reservations).
+    if casino_available_chips(user) < wager_chips {
+        return Err("INSUFFICIENT_CHIPS".to_string());
+    }
+    // Casino-wide stop-loss floor: losing this bet may not breach the floor.
+    let wager_e8s = wager_chips * CHIP_E8S;
+    let effective = casino_effective_vp_e8s(user);
+    if effective.saturating_sub(wager_e8s) < CASINO_STOP_LOSS_FLOOR_E8S {
+        return Err("STOP_LOSS_FLOOR".to_string());
+    }
+    // Exposure cap: Σ(wager × effective target) ≤ cap (VP). Closes betting when
+    // tripped. The effective target already reflects the per-player payout cap.
+    let cap_e8s = (casino_book().exposure_cap_vp as u128) * (VP_E8S as u128);
+    let bet_potential = (wager_e8s as u128) * (effective_target_x100(wager_chips, target_x100) as u128) / 100;
+    if r.potential_payout_e8s + bet_potential > cap_e8s {
+        return Err("ROUND_FULL".to_string());
+    }
+    r.potential_payout_e8s += bet_potential;
+    r.bets.push(CrashBet {
+        user,
+        wager_chips,
+        target_x100,
+        manual_x100: None,
+        outcome: BetOutcome::Pending,
+        payout_x100: 0,
+        delta_e8s: 0,
+        auto_pilot,
+        strategy_id,
+    });
+    set_crash_state(r);
+    Ok(())
+}
+
+// ── Bets API (plans/crash/01 C7/C9, PB-234) ─────────────────────────────────
+
+/// Place a crash bet. `wager_chips` 10..10_000_000; `target_x100` is the auto
+/// cash-out (101..5_000) or **0 for no auto cash-out** (manual only — cash out
+/// with `crash_cashout`). Humans and agent principals are identical here — no
+/// registry, no claim step (C9). The auto target is the latency-fair primary
+/// mechanism (C7); the payout cap is always enforced.
+#[ic_cdk::update]
+fn crash_bet(wager_chips: u64, target_x100: u64) -> Result<(), String> {
+    require_crash_enabled()?;
+    require_authenticated()?;
+    let caller = get_caller();
+    crash_place_bet(caller, wager_chips, target_x100, false, None)
+}
+
+/// Manual CASH OUT (the bonus action, C7). Executes at the multiplier of the
+/// block that processes it — never above your own auto target, and only while
+/// the round is still running (i.e. before the crash). First writer wins;
+/// duplicate/late calls return ALREADY_SETTLED / TOO_LATE without mutation.
+#[ic_cdk::update]
+fn crash_cashout() -> Result<u64, String> {
+    require_crash_enabled()?;
+    require_authenticated()?;
+    let caller = get_caller();
+    let mut r = crash_state();
+    if r.phase != CrashPhase::Running {
+        return Err("TOO_LATE".to_string());
+    }
+    let now = current_time();
+    let elapsed_ms = (now.saturating_sub(r.run_started_at)) / 1_000_000;
+    let live_x100 = crash_multiplier_x100(elapsed_ms);
+    let bet = r.bets.iter_mut().find(|b| b.user == caller);
+    let bet = match bet {
+        Some(b) => b,
+        None => return Err("NO_BET".to_string()),
+    };
+    if bet.manual_x100.is_some() {
+        return Err("ALREADY_SETTLED".to_string());
+    }
+    // Never beat the crash, never beat your own (payout-capped) auto target.
+    if live_x100 >= r.crash_x100 {
+        return Err("TOO_LATE".to_string());
+    }
+    let recorded = live_x100.min(effective_target_x100(bet.wager_chips, bet.target_x100));
+    bet.manual_x100 = Some(recorded);
+    set_crash_state(r);
+    Ok(recorded)
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CrashBetView {
+    pub user: Principal,
+    pub wager_chips: u64,
+    pub target_x100: u64,
+    pub manual_x100: Option<u64>,
+    pub outcome: String,
+    pub payout_x100: u64,
+    pub auto_pilot: bool,
+}
+
+impl From<&CrashBet> for CrashBetView {
+    fn from(b: &CrashBet) -> Self {
+        CrashBetView {
+            user: b.user,
+            wager_chips: b.wager_chips,
+            target_x100: b.target_x100,
+            manual_x100: b.manual_x100,
+            outcome: match b.outcome {
+                BetOutcome::Pending => "pending",
+                BetOutcome::Won => "won",
+                BetOutcome::Lost => "lost",
+            }
+            .to_string(),
+            payout_x100: b.payout_x100,
+            auto_pilot: b.auto_pilot,
+        }
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CrashRoundView {
+    pub id: u64,
+    pub phase: String,
+    pub run_started_at: u64,
+    pub phase_deadline: u64,
+    /// Only revealed once the round has crashed (0 while running).
+    pub crash_x100: u64,
+    pub players: Vec<CrashBetView>,
+    pub my_bet: Option<CrashBetView>,
+    pub exposure_cap_vp: u64,
+    pub paused: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CrashHistoryItem {
+    pub id: u64,
+    pub crash_x100: u64,
+    pub chain_index: u64,
+    pub seed_hex: String,
+    pub crashed_at: u64,
+}
+
+fn hex32(b: &[u8; 32]) -> String {
+    b.iter().map(|x| format!("{:02x}", x)).collect()
+}
+
+/// The live round (curve drawn client-side from `run_started_at`). The crash
+/// point and seed are redacted until the round crashes — no result-aware betting.
+#[ic_cdk::query]
+fn get_crash_round() -> CrashRoundView {
+    let r = crash_state();
+    let caller = get_caller();
+    let crashed = matches!(r.phase, CrashPhase::Crashed);
+    CrashRoundView {
+        id: r.id,
+        phase: match r.phase {
+            CrashPhase::Intermission => "intermission",
+            CrashPhase::Betting => "betting",
+            CrashPhase::Running => "running",
+            CrashPhase::Crashed => "crashed",
+        }
+        .to_string(),
+        run_started_at: r.run_started_at,
+        phase_deadline: r.phase_deadline,
+        crash_x100: if crashed { r.crash_x100 } else { 0 },
+        players: r.bets.iter().map(CrashBetView::from).collect(),
+        my_bet: r.bets.iter().find(|b| b.user == caller).map(CrashBetView::from),
+        exposure_cap_vp: casino_book().exposure_cap_vp,
+        paused: casino_book().paused,
+    }
+}
+
+/// Last `n` finished rounds (newest first), each with its revealed seed for the
+/// client-side verify dialog (C14).
+#[ic_cdk::query]
+fn get_crash_history(n: u64) -> Vec<CrashHistoryItem> {
+    let take = n.clamp(1, 100) as usize;
+    CRASH_ROUNDS.with(|m| {
+        m.borrow()
+            .iter()
+            .rev()
+            .take(take)
+            .map(|e| {
+                let r = e.value();
+                CrashHistoryItem {
+                    id: r.id,
+                    crash_x100: r.crash_x100,
+                    chain_index: r.chain_index,
+                    seed_hex: r.seed_reveal.map(|s| hex32(&s)).unwrap_or_default(),
+                    crashed_at: r.crashed_at,
+                }
+            })
+            .collect()
+    })
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CrashVerifyView {
+    pub round_id: u64,
+    pub chain_index: u64,
+    pub seed_hex: String,
+    pub recomputed_x100: u64,
+    pub terminal_hex: String,
+    /// seed hashed forward `chain_index` times must equal the terminal h_0.
+    pub chain_verified: bool,
+}
+
+/// Provably-fair verification for a finished round (C14): returns the seed, the
+/// recomputed crash point, and the chain-link proof back to the genesis terminal.
+#[ic_cdk::query]
+fn verify_crash_round(round_id: u64) -> Result<CrashVerifyView, String> {
+    let r = CRASH_ROUNDS.with(|m| m.borrow().get(&round_id)).ok_or("ROUND_NOT_FOUND")?;
+    let seed = r.seed_reveal.ok_or("NOT_REVEALED")?;
+    let chain = CRASH_CHAIN.with(|c| c.borrow().get().clone());
+    // Hash the seed forward chain_index times → must land on the terminal h_0.
+    let mut h = seed;
+    for _ in 0..r.chain_index {
+        h = sha256(&h);
+    }
+    Ok(CrashVerifyView {
+        round_id,
+        chain_index: r.chain_index,
+        seed_hex: hex32(&seed),
+        recomputed_x100: crash_point_x100(&seed),
+        terminal_hex: hex32(&chain.terminal),
+        chain_verified: h == chain.terminal,
+    })
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CasinoStatsView {
+    pub house_vp_e8s: i64,
+    pub lifetime_burned_vp_e8s: u64,
+    pub jubilee_minted_vp_e8s: u64,
+    pub reconciliation_e8s: i64,
+    pub exposure_cap_vp: u64,
+    pub paused: bool,
+    pub crash_enabled: bool,
+    pub chain_initialized: bool,
+    pub terminal_hex: String,
+}
+
+#[ic_cdk::query]
+fn get_casino_stats() -> CasinoStatsView {
+    let book = casino_book();
+    let chain = CRASH_CHAIN.with(|c| c.borrow().get().clone());
+    CasinoStatsView {
+        house_vp_e8s: i64::try_from(book.house_e8s).unwrap_or(i64::MAX),
+        lifetime_burned_vp_e8s: u64::try_from(book.burned_e8s).unwrap_or(u64::MAX),
+        jubilee_minted_vp_e8s: u64::try_from(book.jubilee_e8s).unwrap_or(u64::MAX),
+        reconciliation_e8s: i64::try_from(casino_reconciliation_e8s()).unwrap_or(i64::MAX),
+        exposure_cap_vp: book.exposure_cap_vp,
+        paused: book.paused,
+        crash_enabled: feature_visible(FLAG_CRASH, get_caller()),
+        chain_initialized: chain.initialized,
+        terminal_hex: hex32(&chain.terminal),
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct MyCasinoView {
+    pub staking_weight_e8s: u64,
+    pub delta_e8s: i64,
+    pub effective_vp_e8s: u64,
+    pub chips: u64,
+    pub available_chips: u64,
+    pub reserved_chips: u64,
+}
+
+#[ic_cdk::query]
+fn get_my_casino() -> MyCasinoView {
+    let caller = get_caller();
+    MyCasinoView {
+        staking_weight_e8s: casino_staking_weight_e8s(caller),
+        delta_e8s: i64::try_from(casino_delta_e8s(caller)).unwrap_or(i64::MIN),
+        effective_vp_e8s: casino_effective_vp_e8s(caller),
+        chips: casino_chips(caller),
+        available_chips: casino_available_chips(caller),
+        reserved_chips: reserved_chips(caller),
+    }
+}
+
+// ── Casino chat (plans/crash/03 C13, PB-235) ────────────────────────────────
+
+fn valid_chat_text(t: &str) -> bool {
+    !t.is_empty() && t.chars().count() <= CASINO_CHAT_MAX_LEN && t.chars().all(|c| !c.is_control() || c == ' ')
+}
+
+/// Post to the global casino chat (signed-in only, 200 chars, 1 msg/5 s).
+/// Rendered as plain text by the UI — no markup, no links: zero injection
+/// surface. Muted users' posts are silently accepted but only echoed to them.
+#[ic_cdk::update]
+fn post_casino_chat(text: String) -> Result<u64, String> {
+    require_crash_enabled()?;
+    require_authenticated()?;
+    let caller = get_caller();
+    let text = text.trim().to_string();
+    if !valid_chat_text(&text) {
+        return Err("INVALID_TEXT".to_string());
+    }
+    let now = current_time();
+    // Mute check: muted users see only their own messages (handled client-side
+    // via the returned id); we still rate-limit and persist nothing for them.
+    let muted_until = CASINO_MUTES.with(|m| m.borrow().get(&caller)).unwrap_or(0);
+    if now < muted_until {
+        return Err("MUTED".to_string());
+    }
+    // Rate limit: last message by this author within the cooldown.
+    let too_soon = CASINO_CHAT.with(|m| {
+        m.borrow().iter().rev().take(50).any(|e| {
+            let msg = e.value();
+            msg.author == caller && now.saturating_sub(msg.at) < CASINO_CHAT_COOLDOWN_NANOS
+        })
+    });
+    if too_soon {
+        return Err("RATE_LIMITED".to_string());
+    }
+    let mut counters = crash_counters();
+    let id = counters.next_chat_id;
+    counters.next_chat_id += 1;
+    set_crash_counters(counters);
+    CASINO_CHAT.with(|m| {
+        let mut map = m.borrow_mut();
+        map.insert(id, ChatMsg { id, author: caller, text, at: now });
+        // Ring eviction: keep the newest CASINO_CHAT_RING messages.
+        while map.len() > CASINO_CHAT_RING {
+            if let Some(oldest) = map.iter().next().map(|e| *e.key()) {
+                map.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    });
+    Ok(id)
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ChatMsgView {
+    pub id: u64,
+    pub author: Principal,
+    pub text: String,
+    pub at: u64,
+}
+
+/// Chat messages with id > `since_id` (0 = the whole ring), oldest→newest.
+#[ic_cdk::query]
+fn get_casino_chat(since_id: u64) -> Vec<ChatMsgView> {
+    CASINO_CHAT.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| *e.key() > since_id)
+            .map(|e| {
+                let v = e.value();
+                ChatMsgView { id: v.id, author: v.author, text: v.text, at: v.at }
+            })
+            .collect()
+    })
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_mute_chat(user: Principal, until: u64) -> Result<(), String> {
+    CASINO_MUTES.with(|m| m.borrow_mut().insert(user, until));
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&AuditLogEntry {
+            timestamp: current_time(),
+            event_type: "crash_chat_mute".to_string(),
+            proposal_id: 0,
+            user,
+            amount_e8s: until,
+        });
+    });
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_delete_chat(id: u64) -> Result<(), String> {
+    let removed = CASINO_CHAT.with(|m| m.borrow_mut().remove(&id));
+    if removed.is_some() {
+        AUDIT_LOG.with(|log| {
+            let _ = log.borrow_mut().append(&AuditLogEntry {
+                timestamp: current_time(),
+                event_type: "crash_chat_delete".to_string(),
+                proposal_id: id,
+                user: get_caller(),
+                amount_e8s: 0,
+            });
+        });
+    }
+    Ok(())
+}
+
+// ── Paid-flow helpers: ICRC-2 transfer_from (approve-based, PB-236/237) ─────
+//
+// The $5 strategy fee and marketplace sales pull tokens FROM the buyer via
+// icrc2_transfer_from — the buyer pre-approves the canister as spender (the
+// frontend calls icrc2_approve first). This is the simplest one-call payment
+// path; host tests mock it out (no ledgers) so the surrounding logic is unit-
+// testable. USD prices are converted to the chosen token at the cached rate.
+
+#[derive(CandidType, Serialize)]
+struct Icrc2TransferFromArgs {
+    spender_subaccount: Option<[u8; 32]>,
+    from: LedgerAccount,
+    to: LedgerAccount,
+    amount: candid::Nat,
+    fee: Option<candid::Nat>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+enum TransferFromError {
+    BadFee { expected_fee: candid::Nat },
+    BadBurn { min_burn_amount: candid::Nat },
+    InsufficientFunds { balance: candid::Nat },
+    InsufficientAllowance { allowance: candid::Nat },
+    TooOld,
+    CreatedInFuture { ledger_time: u64 },
+    Duplicate { duplicate_of: candid::Nat },
+    TemporarilyUnavailable,
+    GenericError { error_code: candid::Nat, message: String },
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+enum Icrc2TransferFromResult {
+    Ok(candid::Nat),
+    Err(TransferFromError),
+}
+
+/// Token smallest-units worth `usd_e8s` USD at the cached oracle rate.
+fn usd_to_token_amount(token: ExplorerToken, usd_e8s: u64) -> u64 {
+    let rate = cached_usd_rate_e8s(token).max(1) as u128;
+    let scale = 10u128.pow(explorer_token_decimals(token));
+    u64::try_from((usd_e8s as u128) * scale / rate).unwrap_or(u64::MAX)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn call_icrc2_transfer_from(
+    ledger: Principal,
+    from: Principal,
+    to: LedgerAccount,
+    amount: u64,
+    fee: u64,
+) -> Result<(), String> {
+    let args = Icrc2TransferFromArgs {
+        spender_subaccount: None,
+        from: LedgerAccount { owner: from, subaccount: None },
+        to,
+        amount: candid::Nat::from(amount),
+        fee: Some(candid::Nat::from(fee)),
+        memo: None,
+        created_at_time: None,
+    };
+    let res: Result<(Icrc2TransferFromResult,), _> = ic_cdk::call(ledger, "icrc2_transfer_from", (args,)).await;
+    match res {
+        Ok((Icrc2TransferFromResult::Ok(_),)) => Ok(()),
+        Ok((Icrc2TransferFromResult::Err(e),)) => Err(format!("PAYMENT_FAILED: {:?}", e)),
+        Err((code, msg)) => Err(format!("PAYMENT_REJECTED ({:?}): {}", code, msg)),
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn call_icrc2_transfer_from(
+    _ledger: Principal,
+    _from: Principal,
+    _to: LedgerAccount,
+    _amount: u64,
+    _fee: u64,
+) -> Result<(), String> {
+    Ok(())
+}
+
+/// Charge `usd_e8s` (in `token`) from `payer` to the treasury (100% treasury).
+async fn charge_usd_fee_to_treasury(payer: Principal, token: ExplorerToken, usd_e8s: u64) -> Result<(), String> {
+    let config = get_config();
+    let amount = usd_to_token_amount(token, usd_e8s);
+    let ledger = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    let treasury = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
+    call_icrc2_transfer_from(ledger, payer, treasury, amount.saturating_sub(fee), fee).await
+}
+
+/// Charge `usd_e8s` from `payer`, paying `seller_bps`/10_000 to `seller` and the
+/// rest to the treasury (the 80/20 marketplace split).
+async fn charge_usd_split_to_seller(
+    payer: Principal,
+    seller: Principal,
+    token: ExplorerToken,
+    usd_e8s: u64,
+    seller_bps: u64,
+) -> Result<(), String> {
+    let config = get_config();
+    let amount = usd_to_token_amount(token, usd_e8s);
+    let ledger = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    let seller_amt = amount * seller_bps / 10_000;
+    let treasury_amt = amount.saturating_sub(seller_amt);
+    let seller_acct = LedgerAccount { owner: seller, subaccount: None };
+    let treasury = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
+    call_icrc2_transfer_from(ledger, payer, seller_acct, seller_amt.saturating_sub(fee), fee).await?;
+    call_icrc2_transfer_from(ledger, payer, treasury, treasury_amt.saturating_sub(fee), fee).await?;
+    Ok(())
+}
+
+// ── Strategy DSL + auto-pilot (plans/crash/04, PB-236) ──────────────────────
+
+/// Validate the DSL rails (plans/crash/04 C11). A finite stop trigger is
+/// REQUIRED — no immortal martingales.
+fn validate_strategy(s: &CrashStrategy) -> Result<(), String> {
+    if s.name.is_empty() || s.name.len() > 64 {
+        return Err("BAD_NAME".to_string());
+    }
+    if s.description.len() > 280 {
+        return Err("BAD_DESCRIPTION".to_string());
+    }
+    if !(CRASH_MIN_BET_CHIPS..=CRASH_MAX_BET_CHIPS).contains(&s.base_bet_chips) {
+        return Err("BAD_BASE_BET".to_string());
+    }
+    if !(CRASH_MIN_BET_CHIPS..=CRASH_MAX_BET_CHIPS).contains(&s.max_bet_chips) || s.max_bet_chips < s.base_bet_chips {
+        return Err("BAD_MAX_BET".to_string());
+    }
+    if !(CRASH_MIN_TARGET_X100..=CRASH_MAX_TARGET_X100).contains(&s.auto_target_x100) {
+        return Err("BAD_TARGET".to_string());
+    }
+    for rule in [&s.on_loss, &s.on_win] {
+        if rule.action == BetAction::Multiply && !(100..=1000).contains(&rule.factor_x100) {
+            return Err("BAD_FACTOR".to_string());
+        }
+    }
+    if s.skip_rounds_after_loss > 10 {
+        return Err("BAD_SKIP".to_string());
+    }
+    if s.stop.max_rounds > 5000 {
+        return Err("BAD_MAX_ROUNDS".to_string());
+    }
+    let has_stop = s.stop.take_profit_vp_x1000 > 0 || s.stop.stop_loss_vp_x1000 > 0 || s.stop.max_rounds > 0;
+    if !has_stop {
+        return Err("STOP_REQUIRED".to_string());
+    }
+    Ok(())
+}
+
+/// Seed the four free builtin strategies (idempotent; called from init/enable).
+fn seed_builtin_strategies() {
+    let exists = CRASH_STRATEGIES.with(|m| m.borrow().iter().any(|e| e.value().builtin));
+    if exists {
+        return;
+    }
+    let house = get_canister_id();
+    let now = current_time();
+    let mut mk = |id: u64, name: &str, desc: &str, base: u64, target: u64, on_loss: ProgressionRule, on_win: ProgressionRule, max_bet: u64, skip: u64| CrashStrategy {
+        id,
+        author: house,
+        name: name.to_string(),
+        description: desc.to_string(),
+        base_bet_chips: base,
+        auto_target_x100: target,
+        on_loss,
+        on_win,
+        max_bet_chips: max_bet,
+        max_consecutive_losses: 0,
+        skip_rounds_after_loss: skip,
+        stop: StrategyStop { take_profit_vp_x1000: 0, stop_loss_vp_x1000: 0, max_rounds: 1000 },
+        version: 1,
+        builtin: true,
+        lifetime_vp_e8s: 0,
+        created_at: now,
+    };
+    let reset = ProgressionRule { action: BetAction::Reset, factor_x100: 0 };
+    let dbl = ProgressionRule { action: BetAction::Multiply, factor_x100: 200 };
+    let builtins = vec![
+        mk(1, "Flat", "Same bet every round, 2.00× target.", 100, 200, reset, reset, 100, 0),
+        mk(2, "Classic Martingale", "Double on loss, reset on win, 2.00× target.", 100, 200, dbl, reset, 5000, 0),
+        mk(3, "Paroli", "Double on win, reset on loss (reverse martingale), 2.00× target.", 100, 200, reset, dbl, 5000, 0),
+        mk(4, "Target Sniper", "Flat bets at 10× target, cool down 2 rounds after a loss.", 100, 1000, reset, reset, 100, 2),
+    ];
+    CRASH_STRATEGIES.with(|m| {
+        for b in builtins {
+            m.borrow_mut().insert(b.id, b);
+        }
+    });
+    let mut counters = crash_counters();
+    if counters.next_strategy_id < 5 {
+        counters.next_strategy_id = 5;
+        set_crash_counters(counters);
+    }
+}
+
+/// Author a crash strategy. Costs $5 (charged in `token` via the shared quote
+/// flow — same machinery as the explorer/idea-board fees: the caller must have
+/// pre-approved the canister via icrc2_approve). ≤ 20 per author, ≤ 4 KB.
+#[ic_cdk::update]
+async fn create_crash_strategy(strategy: CrashStrategyInput, token: ExplorerToken) -> Result<u64, String> {
+    require_crash_enabled()?;
+    require_authenticated()?;
+    let caller = get_caller();
+    let owned = CRASH_STRATEGIES.with(|m| m.borrow().iter().filter(|e| e.value().author == caller && !e.value().builtin).count());
+    if owned >= MAX_STRATEGIES_PER_AUTHOR {
+        return Err("TOO_MANY_STRATEGIES".to_string());
+    }
+    // Size guard via the JSON the frontend would store.
+    if serde_json::to_vec(&strategy).map(|v| v.len()).unwrap_or(usize::MAX) > MAX_STRATEGY_JSON_BYTES {
+        return Err("STRATEGY_TOO_LARGE".to_string());
+    }
+    let mut counters = crash_counters();
+    let id = counters.next_strategy_id;
+    let s = CrashStrategy {
+        id,
+        author: caller,
+        name: strategy.name,
+        description: strategy.description,
+        base_bet_chips: strategy.base_bet_chips,
+        auto_target_x100: strategy.auto_target_x100,
+        on_loss: ProgressionRule { action: if strategy.on_loss_multiply { BetAction::Multiply } else { BetAction::Reset }, factor_x100: strategy.on_loss_factor_x100 },
+        on_win: ProgressionRule { action: if strategy.on_win_multiply { BetAction::Multiply } else { BetAction::Reset }, factor_x100: strategy.on_win_factor_x100 },
+        max_bet_chips: strategy.max_bet_chips,
+        max_consecutive_losses: strategy.max_consecutive_losses,
+        skip_rounds_after_loss: strategy.skip_rounds_after_loss,
+        stop: StrategyStop {
+            take_profit_vp_x1000: strategy.take_profit_vp_x1000,
+            stop_loss_vp_x1000: strategy.stop_loss_vp_x1000,
+            max_rounds: strategy.max_rounds,
+        },
+        version: 1,
+        builtin: false,
+        lifetime_vp_e8s: 0,
+        created_at: current_time(),
+    };
+    validate_strategy(&s)?;
+    // Charge the $5 fee to the treasury (skipped on local where rates are mock-
+    // pinned but the transfer still runs against the local ledger).
+    charge_usd_fee_to_treasury(caller, token, CRASH_STRATEGY_FEE_USD_E8S).await?;
+    counters.next_strategy_id += 1;
+    set_crash_counters(counters);
+    CRASH_STRATEGIES.with(|m| m.borrow_mut().insert(id, s));
+    Ok(id)
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CrashStrategyInput {
+    pub name: String,
+    pub description: String,
+    pub base_bet_chips: u64,
+    pub auto_target_x100: u64,
+    pub on_loss_multiply: bool,
+    pub on_loss_factor_x100: u64,
+    pub on_win_multiply: bool,
+    pub on_win_factor_x100: u64,
+    pub max_bet_chips: u64,
+    pub max_consecutive_losses: u64,
+    pub skip_rounds_after_loss: u64,
+    pub take_profit_vp_x1000: u64,
+    pub stop_loss_vp_x1000: u64,
+    pub max_rounds: u64,
+}
+
+#[ic_cdk::query]
+fn list_crash_strategies() -> Vec<CrashStrategy> {
+    let caller = get_caller();
+    CRASH_STRATEGIES.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            // Builtins + the caller's own + anything they hold a license to.
+            .filter(|s| s.builtin || s.author == caller || user_has_license_for_strategy(caller, s.id))
+            .collect()
+    })
+}
+
+/// Start auto-pilot with a strategy the caller may use (builtin / owned / licensed).
+#[ic_cdk::update]
+fn start_autopilot(strategy_id: u64) -> Result<(), String> {
+    require_crash_enabled()?;
+    require_authenticated()?;
+    let caller = get_caller();
+    let s = CRASH_STRATEGIES.with(|m| m.borrow().get(&strategy_id)).ok_or("STRATEGY_NOT_FOUND")?;
+    if !(s.builtin || s.author == caller || user_has_license_for_strategy(caller, strategy_id)) {
+        return Err("NO_LICENSE".to_string());
+    }
+    CRASH_AUTOPILOT.with(|m| {
+        m.borrow_mut().insert(caller, AutopilotState {
+            strategy_id,
+            active: true,
+            current_bet_chips: s.base_bet_chips,
+            consecutive_losses: 0,
+            skip_counter: 0,
+            rounds_played: 0,
+            session_pnl_e8s: 0,
+            started_at: current_time(),
+            stop_reason: None,
+        })
+    });
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn stop_autopilot() -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let existing = CRASH_AUTOPILOT.with(|m| m.borrow().get(&caller));
+    if let Some(mut st) = existing {
+        st.active = false;
+        st.stop_reason = Some("stopped by user".to_string());
+        CRASH_AUTOPILOT.with(|m| m.borrow_mut().insert(caller, st));
+    }
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_my_autopilot() -> Option<AutopilotState> {
+    CRASH_AUTOPILOT.with(|m| m.borrow().get(&get_caller()))
+}
+
+/// Place a bet for every active auto-pilot at the betting window (FIFO, capped).
+fn crash_run_autopilots() {
+    let pilots: Vec<(Principal, AutopilotState)> = CRASH_AUTOPILOT.with(|m| {
+        m.borrow().iter().filter(|e| e.value().active).map(|e| (*e.key(), e.value())).take(CRASH_AUTOPILOT_CAP).collect()
+    });
+    for (user, mut st) in pilots {
+        if st.skip_counter > 0 {
+            st.skip_counter -= 1;
+            CRASH_AUTOPILOT.with(|m| m.borrow_mut().insert(user, st));
+            continue;
+        }
+        let s = match CRASH_STRATEGIES.with(|m| m.borrow().get(&st.strategy_id)) {
+            Some(s) => s,
+            None => continue,
+        };
+        let wager = st.current_bet_chips.clamp(CRASH_MIN_BET_CHIPS, s.max_bet_chips.min(CRASH_MAX_BET_CHIPS));
+        // Every guard still applies (rails, floor, exposure). A rejected bet
+        // simply skips this round; the strategy state is untouched.
+        let _ = crash_place_bet(user, wager, s.auto_target_x100, true, Some(s.id));
+    }
+}
+
+/// Advance an auto-pilot's state after its bet settled, then check stops.
+fn crash_autopilot_after_round(user: Principal, delta_e8s: i128, won: bool) {
+    let mut st = match CRASH_AUTOPILOT.with(|m| m.borrow().get(&user)) {
+        Some(s) if s.active => s,
+        _ => return,
+    };
+    let s = match CRASH_STRATEGIES.with(|m| m.borrow().get(&st.strategy_id)) {
+        Some(s) => s,
+        None => return,
+    };
+    st.rounds_played += 1;
+    st.session_pnl_e8s += delta_e8s;
+    // Bet sizing for next round.
+    let next_rule = if won { s.on_win } else { s.on_loss };
+    let base = st.current_bet_chips;
+    st.current_bet_chips = match next_rule.action {
+        BetAction::Reset => s.base_bet_chips,
+        BetAction::Multiply => (base * next_rule.factor_x100 / 100).clamp(CRASH_MIN_BET_CHIPS, s.max_bet_chips),
+    };
+    if won {
+        st.consecutive_losses = 0;
+    } else {
+        st.consecutive_losses += 1;
+        st.skip_counter = s.skip_rounds_after_loss;
+    }
+    // Stop conditions (any one ends the session).
+    let pnl_vp_x1000 = st.session_pnl_e8s / (CHIP_E8S as i128); // VP×1000 == chips
+    let mut stop_reason: Option<String> = None;
+    if s.max_consecutive_losses > 0 && st.consecutive_losses >= s.max_consecutive_losses {
+        stop_reason = Some(format!("max {} consecutive losses", s.max_consecutive_losses));
+    } else if s.stop.max_rounds > 0 && st.rounds_played >= s.stop.max_rounds {
+        stop_reason = Some(format!("max-rounds {} reached", s.stop.max_rounds));
+    } else if s.stop.take_profit_vp_x1000 > 0 && pnl_vp_x1000 >= s.stop.take_profit_vp_x1000 as i128 {
+        stop_reason = Some("take-profit reached".to_string());
+    } else if s.stop.stop_loss_vp_x1000 > 0 && pnl_vp_x1000 <= -(s.stop.stop_loss_vp_x1000 as i128) {
+        stop_reason = Some("stop-loss reached".to_string());
+    }
+    if let Some(reason) = stop_reason {
+        st.active = false;
+        st.stop_reason = Some(reason);
+    }
+    CRASH_AUTOPILOT.with(|m| m.borrow_mut().insert(user, st));
+}
+
+// ── Shared marketplace (plans/crash/04 C12, PB-237) ─────────────────────────
+
+fn user_has_license_for_strategy(user: Principal, strategy_id: u64) -> bool {
+    MARKET_LISTINGS.with(|lm| {
+        lm.borrow().iter().any(|e| {
+            let l = e.value();
+            l.kind == MarketKind::Crash
+                && l.item_id == strategy_id
+                && MARKET_LICENSES.with(|cm| cm.borrow().iter().any(|c| {
+                    let lic = c.value();
+                    lic.listing_id == l.id && lic.buyer == user
+                }))
+        })
+    })
+}
+
+/// List a crash strategy (you authored) on the shared marketplace. $1–$500.
+#[ic_cdk::update]
+fn list_strategy(strategy_id: u64, price_usd_e8s: u64, teaser: String) -> Result<u64, String> {
+    require_crash_enabled()?;
+    require_authenticated()?;
+    let caller = get_caller();
+    if !(MARKET_PRICE_MIN_USD_E8S..=MARKET_PRICE_MAX_USD_E8S).contains(&price_usd_e8s) {
+        return Err("BAD_PRICE".to_string());
+    }
+    let s = CRASH_STRATEGIES.with(|m| m.borrow().get(&strategy_id)).ok_or("STRATEGY_NOT_FOUND")?;
+    if s.author != caller || s.builtin {
+        return Err("NOT_OWNER".to_string());
+    }
+    let mut counters = crash_counters();
+    let id = counters.next_listing_id;
+    counters.next_listing_id += 1;
+    set_crash_counters(counters);
+    MARKET_LISTINGS.with(|m| m.borrow_mut().insert(id, Listing {
+        id,
+        kind: MarketKind::Crash,
+        seller: caller,
+        item_id: strategy_id,
+        title: s.name.clone(),
+        teaser: teaser.chars().take(120).collect(),
+        price_usd_e8s,
+        sales: 0,
+        created_at: current_time(),
+        active: true,
+    }));
+    Ok(id)
+}
+
+#[ic_cdk::query]
+fn list_marketplace(kind_filter: Option<MarketKind>) -> Vec<Listing> {
+    MARKET_LISTINGS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|l| l.active && kind_filter.map(|k| k == l.kind).unwrap_or(true))
+            .collect()
+    })
+}
+
+/// Buy a license: 80% to the seller, 20% to the treasury (one payment path for
+/// both kinds). The buyer must have pre-approved the canister via icrc2_approve.
+#[ic_cdk::update]
+async fn buy_license(listing_id: u64, token: ExplorerToken) -> Result<u64, String> {
+    require_crash_enabled()?;
+    require_authenticated()?;
+    let caller = get_caller();
+    let listing = MARKET_LISTINGS.with(|m| m.borrow().get(&listing_id)).ok_or("LISTING_NOT_FOUND")?;
+    if !listing.active {
+        return Err("LISTING_INACTIVE".to_string());
+    }
+    if listing.seller == caller {
+        return Err("CANNOT_BUY_OWN".to_string());
+    }
+    if user_has_license_for_strategy(caller, listing.item_id) {
+        return Err("ALREADY_LICENSED".to_string());
+    }
+    // Charge buyer; split 80/20.
+    charge_usd_split_to_seller(caller, listing.seller, token, listing.price_usd_e8s, MARKET_SELLER_BPS).await?;
+    let mut counters = crash_counters();
+    let id = counters.next_license_id;
+    counters.next_license_id += 1;
+    set_crash_counters(counters);
+    MARKET_LICENSES.with(|m| m.borrow_mut().insert(id, License { id, listing_id, buyer: caller, at: current_time() }));
+    let listing_now = MARKET_LISTINGS.with(|m| m.borrow().get(&listing_id));
+    if let Some(mut l) = listing_now {
+        l.sales += 1;
+        MARKET_LISTINGS.with(|m| m.borrow_mut().insert(listing_id, l));
+    }
+    Ok(id)
+}
+
+#[ic_cdk::query]
+fn get_my_licenses() -> Vec<License> {
+    let caller = get_caller();
+    MARKET_LICENSES.with(|m| m.borrow().iter().filter(|e| e.value().buyer == caller).map(|e| e.value()).collect())
+}
+
+// ── Admin: genesis, pause, void, exposure cap (plans/crash/01 + 02) ─────────
+
+/// Owner one-time bootstrap: draw the genesis seed, build the hash chain,
+/// publish the terminal commitment, seed builtin strategies, and start the
+/// round loop. Idempotent (re-running with an initialized chain is a no-op
+/// except for re-arming the loop). The `crash` flag must already be ON.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_init_crash() -> Result<String, String> {
+    if !feature_active(FLAG_CRASH) {
+        return Err("ENABLE_FLAG_FIRST".to_string());
+    }
+    let already = CRASH_CHAIN.with(|c| c.borrow().get().initialized);
+    if !already {
+        let seed = crash_random_seed().await?;
+        let (terminal, checkpoints) = build_crash_chain(seed, CRASH_CHAIN_N, CRASH_CHAIN_STRIDE);
+        CRASH_CHAIN.with(|c| {
+            let _ = c.borrow_mut().set(CrashChain {
+                initialized: true,
+                chain_seed: seed,
+                terminal,
+                n: CRASH_CHAIN_N,
+                stride: CRASH_CHAIN_STRIDE,
+                checkpoints,
+            });
+        });
+    }
+    seed_builtin_strategies();
+    let mut book = casino_book();
+    book.paused = false;
+    book.exposure_cap_vp = CRASH_DEFAULT_EXPOSURE_CAP_VP;
+    set_casino_book(book);
+    // Start a fresh cycle.
+    crash_arm_timer(0);
+    let terminal = CRASH_CHAIN.with(|c| hex32(&c.borrow().get().terminal));
+    Ok(terminal)
+}
+
+/// Pause/unpause the round loop. The current round still settles; no new
+/// betting window opens while paused.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_pause_crash(paused: bool) -> Result<(), String> {
+    let mut book = casino_book();
+    book.paused = paused;
+    set_casino_book(book);
+    if !paused {
+        crash_resume();
+    }
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_exposure_cap(cap_vp: u64) -> Result<(), String> {
+    if !(CRASH_EXPOSURE_CAP_MIN_VP..=CRASH_EXPOSURE_CAP_MAX_VP).contains(&cap_vp) {
+        return Err("CAP_OUT_OF_RANGE".to_string());
+    }
+    let mut book = casino_book();
+    book.exposure_cap_vp = cap_vp;
+    set_casino_book(book);
+    Ok(())
+}
+
+/// Catastrophic-wedge escape hatch (writer #4): refund every wager in the
+/// current round (delta 0 for all, house delta 0) and archive it void.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_void_crash_round() -> Result<(), String> {
+    let mut r = crash_state();
+    if matches!(r.phase, CrashPhase::Crashed | CrashPhase::Intermission) {
+        return Err("NOTHING_TO_VOID".to_string());
+    }
+    for bet in r.bets.iter_mut() {
+        bet.outcome = BetOutcome::Lost; // marked settled with zero delta
+        bet.payout_x100 = 0;
+        bet.delta_e8s = 0;
+    }
+    r.phase = CrashPhase::Crashed;
+    r.crashed_at = current_time();
+    set_crash_state(r.clone());
+    crash_archive(r);
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&AuditLogEntry {
+            timestamp: current_time(),
+            event_type: "crash_void_round".to_string(),
+            proposal_id: 0,
+            user: get_caller(),
+            amount_e8s: 0,
+        });
+    });
+    if feature_active(FLAG_CRASH) && !casino_book().paused {
+        crash_arm_timer(CRASH_INTERMISSION_NANOS);
+    }
+    Ok(())
+}
+
+/// Local-dev only (admin): make the table playable + lively. Grants the CALLER a
+/// dev stake (so they have chips to play), then seeds six auto-pilot bots with
+/// dev stakes and varied builtin strategies so every round has company, plus a
+/// little opening chatter. Bots react to outcomes via `crash_bot_chatter`.
+#[ic_cdk::update(guard = "require_admin")]
+fn dev_seed_casino_play() -> Result<String, String> {
+    require_local_dev()?;
+    let now = current_time();
+    // 100,000 ICP of dev stake ≈ 10,000 VP of chips — enough to test the
+    // 10,000-VP payout cap (e.g. a 5,000-VP bet auto-cashing at 2×).
+    dev_grant_stake(get_caller(), 100_000 * ONE_ICP_E8S, now);
+    let house = get_canister_id();
+    // (handle, bet in VP, target ×100). Big bettors set a high target so the
+    // 10,000-VP payout cap is what stops them (auto-cash at 2.00× / 1.67× / 1.25×).
+    let bots: [(&str, u64, u64); 6] = [
+        ("rocketRandy", 500, 200),
+        ("2xTina", 1_500, 200),
+        ("moonGoblin", 3_000, 200),
+        ("serStaker", 5_000, 1_000),
+        ("autoAnnie", 6_000, 1_000),
+        ("diamondDan", 8_000, 1_000),
+    ];
+    let mut counters = crash_counters();
+    for (i, (h, bet_vp, target)) in bots.iter().enumerate() {
+        let p = Principal::from_slice(&[0xB0, i as u8, 0xCA, 0x51, 0x00]);
+        let bet_chips = bet_vp * 1_000;
+        // A deep bankroll (≈ 500× the bet) so bots don't bust mid-review and the
+        // table stays full. Local-dev only.
+        dev_grant_stake(p, bet_vp * 5_000 * ONE_ICP_E8S, now);
+        CASINO_BOTS.with(|m| m.borrow_mut().insert(p, h.to_string()));
+        // A per-bot flat strategy so the bet stays fixed each round.
+        let sid = counters.next_strategy_id;
+        counters.next_strategy_id += 1;
+        let reset = ProgressionRule { action: BetAction::Reset, factor_x100: 0 };
+        CRASH_STRATEGIES.with(|m| {
+            m.borrow_mut().insert(sid, CrashStrategy {
+                id: sid,
+                author: house,
+                name: format!("{} flat {}VP", h, bet_vp),
+                description: String::new(),
+                base_bet_chips: bet_chips,
+                auto_target_x100: *target,
+                on_loss: reset,
+                on_win: reset,
+                max_bet_chips: bet_chips,
+                max_consecutive_losses: 0,
+                skip_rounds_after_loss: 0,
+                stop: StrategyStop { take_profit_vp_x1000: 0, stop_loss_vp_x1000: 0, max_rounds: 1_000_000 },
+                version: 1,
+                builtin: false,
+                lifetime_vp_e8s: 0,
+                created_at: now,
+            })
+        });
+        CRASH_AUTOPILOT.with(|m| {
+            m.borrow_mut().insert(p, AutopilotState {
+                strategy_id: sid,
+                active: true,
+                current_bet_chips: bet_chips,
+                consecutive_losses: 0,
+                skip_counter: 0,
+                rounds_played: 0,
+                session_pnl_e8s: 0,
+                started_at: now,
+                stop_reason: None,
+            })
+        });
+    }
+    set_crash_counters(counters);
+    bot_say(Principal::from_slice(&[0xB0, 0, 0xCA, 0x51, 0x00]), "gm degens — who's hitting 10x today");
+    bot_say(Principal::from_slice(&[0xB0, 3, 0xCA, 0x51, 0x00]), "betting 5k VP, capped at 2x but it's free money");
+    Ok("seeded 6 auto-pilot bots (500–8,000 VP) + granted you 100,000 ICP of dev stake to play".to_string())
+}
+
+/// Dev helper: park a stake directly in tier 0 so a principal has casino chips
+/// without running the real staking flow. Overwrites any existing dev stake.
+fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
+    STAKES.with(|m| {
+        m.borrow_mut().insert(
+            stake_key(StakeTier::all()[0], user),
+            UserStake { amount_e8s, staked_at: now, last_action_at: now },
+        );
+    });
 }
 
 ic_cdk::export_candid!();
@@ -13143,6 +15152,39 @@ mod tests {
             m.borrow_mut().remove(&FLAG_IDEA_BOARD.to_string());
             m.borrow_mut().remove(&"future_thing".to_string());
         });
+    }
+
+    #[test]
+    fn tri_state_feature_flags() {
+        let admin = p("2vxsx-fae");
+        let stranger = Principal::from_slice(&[7, 7, 7, 7]);
+        let mut cfg = test_config(true);
+        cfg.admins = vec![admin];
+        CONFIG.with(|c| {
+            let _ = c.borrow_mut().set(cfg);
+        });
+        let key = "tri_state_test".to_string();
+        let set = |code: u8| FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(key.clone(), code); });
+
+        // AdminOn: live for admins only.
+        set(2);
+        assert_eq!(feature_state(&key), FlagState::AdminOn);
+        assert!(!feature_enabled(&key), "AdminOn is not on-for-everyone (timers stay off)");
+        assert!(feature_active(&key), "AdminOn is active so the loop/admin can use it");
+        assert!(feature_visible(&key, admin), "admin sees an AdminOn feature");
+        assert!(!feature_visible(&key, stranger), "non-admin does not");
+
+        // On: everyone.
+        set(1);
+        assert!(feature_enabled(&key));
+        assert!(feature_visible(&key, stranger));
+
+        // Off: nobody.
+        set(0);
+        assert!(!feature_active(&key));
+        assert!(!feature_visible(&key, admin));
+
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&key); });
     }
 
     #[test]
@@ -17078,6 +19120,346 @@ mod tests {
 
     fn prop_burned(pid: u64) -> u64 {
         PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().total_burned_e8s.unwrap_or(0)
+    }
+
+    // ===== Crash / Casino (Epic J) =====
+
+    /// Independent closed-form oracle (plans/crash/05 Layer 0): P[crash ≥ x],
+    /// x in ×100. Combines the 1/101 instant bust with the curve's tail.
+    fn crash_cdf_oracle(x_x100: u64) -> f64 {
+        if x_x100 <= 100 {
+            return 1.0;
+        }
+        let x = x_x100 as f64 / 100.0;
+        (100.0 / 101.0) * (99.0 / (100.0 * x - 1.0))
+    }
+
+    fn casino_test_reset() {
+        CASINO_VP_DELTA.with(|m| {
+            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
+        set_casino_book(CasinoBook { exposure_cap_vp: CRASH_DEFAULT_EXPOSURE_CAP_VP, ..Default::default() });
+    }
+
+    fn seed_for(n: u64) -> [u8; 32] {
+        sha256(&n.to_le_bytes())
+    }
+
+    fn stake_for_test(user: Principal, amount_e8s: u64, staked_at: u64) {
+        STAKES.with(|m| {
+            m.borrow_mut().insert(
+                stake_key(StakeTier::all()[0], user),
+                UserStake { amount_e8s, staked_at, last_action_at: staked_at },
+            );
+        });
+    }
+
+    #[test]
+    fn crash_point_bounds_and_determinism() {
+        for n in 0..5000u64 {
+            let s = seed_for(n);
+            let x = crash_point_x100(&s);
+            assert!((100..=CRASH_CAP_X100).contains(&x), "x {} out of range", x);
+            assert_eq!(x, crash_point_x100(&s), "deterministic");
+        }
+    }
+
+    #[test]
+    fn crash_instant_bust_maps_to_one() {
+        let mut found = false;
+        for n in 0..2000u64 {
+            let s = seed_for(n);
+            let mut data = s.to_vec();
+            data.extend_from_slice(CRASH_DOMAIN);
+            let h = sha256(&data);
+            let u = u64::from_be_bytes(h[0..8].try_into().unwrap());
+            if u % 101 == 0 {
+                assert_eq!(crash_point_x100(&s), 100);
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected at least one instant-bust seed in 2000 samples");
+    }
+
+    #[test]
+    fn crash_distribution_matches_oracle() {
+        let n = 200_000u64;
+        let buckets = [150u64, 200, 300, 500, 1000];
+        let mut counts = [0u64; 5];
+        let mut instant = 0u64;
+        for i in 0..n {
+            let x = crash_point_x100(&seed_for(i));
+            if x == 100 {
+                instant += 1;
+            }
+            for (b, &thr) in buckets.iter().enumerate() {
+                if x >= thr {
+                    counts[b] += 1;
+                }
+            }
+        }
+        // P[crash == 1.00×] = the 1/101 instant bust PLUS the curve mass that
+        // floors into [1.00,1.01) = P[crash < 1.01×] ≈ 2/101.
+        let p_one = instant as f64 / n as f64;
+        let theo_one = 1.0 - crash_cdf_oracle(101);
+        assert!((p_one - theo_one).abs() < 0.003, "p(1.00×)={} theo={}", p_one, theo_one);
+        for (b, &thr) in buckets.iter().enumerate() {
+            let emp = counts[b] as f64 / n as f64;
+            let theo = crash_cdf_oracle(thr);
+            assert!((emp - theo).abs() < 0.01, "bucket {}×100: emp {} theo {}", thr, emp, theo);
+        }
+    }
+
+    #[test]
+    fn crash_house_edge_converges() {
+        let n = 300_000u64;
+        let target = 200u64;
+        let mut paid = 0u64;
+        for i in 0..n {
+            let crash = crash_point_x100(&seed_for(i ^ 0x5151_5151));
+            if target <= crash {
+                paid += 2;
+            }
+        }
+        let ev = paid as f64 / n as f64;
+        assert!((0.96..=1.0).contains(&ev), "house edge EV {}", ev);
+    }
+
+    #[test]
+    fn multiplier_clock_and_inverse() {
+        assert_eq!(crash_multiplier_x100(0), 100);
+        let mut prev = 0;
+        for ms in (0..40_000).step_by(250) {
+            let m = crash_multiplier_x100(ms);
+            assert!(m >= prev);
+            prev = m;
+        }
+        for &x in &[150u64, 200, 500, 1000, 5000, 10000] {
+            let dt_ns = crash_time_offset_nanos(x);
+            let at = crash_multiplier_x100(dt_ns / 1_000_000);
+            assert!(at + 2 >= x && at <= x + 2, "x {} -> reached {}", x, at);
+        }
+    }
+
+    #[test]
+    fn hash_chain_recovers_and_verifies() {
+        let seed = sha256(b"genesis-test");
+        let (terminal, checkpoints) = build_crash_chain(seed, 1000, 100);
+        let chain = CrashChain { initialized: true, chain_seed: seed, terminal, n: 1000, stride: 100, checkpoints };
+        for &i in &[1u64, 50, 99, 100, 101, 250, 999, 1000] {
+            let s = crash_seed_at(&chain, i);
+            let mut h = s;
+            for _ in 0..i {
+                h = sha256(&h);
+            }
+            assert_eq!(h, terminal, "chain link broken at index {}", i);
+        }
+        let naive_h500 = {
+            let mut h = seed;
+            for _ in 0..(1000 - 500) {
+                h = sha256(&h);
+            }
+            h
+        };
+        assert_eq!(crash_seed_at(&chain, 500), naive_h500);
+    }
+
+    #[test]
+    fn settle_bet_cases() {
+        let (d, p) = settle_crash_bet(100, 200, None, 300);
+        assert_eq!(p, 200);
+        assert_eq!(d, 100 * CHIP_E8S as i128);
+        let (d, p) = settle_crash_bet(100, 300, None, 300);
+        assert_eq!(p, 300);
+        assert_eq!(d, 100 * CHIP_E8S as i128 * 2);
+        let (d, p) = settle_crash_bet(100, 500, None, 300);
+        assert_eq!(p, 0);
+        assert_eq!(d, -(100 * CHIP_E8S as i128));
+        let (d, p) = settle_crash_bet(100, 1000, Some(150), 300);
+        assert_eq!(p, 150);
+        assert_eq!(d, 100 * CHIP_E8S as i128 / 2);
+    }
+
+    #[test]
+    fn payout_cap_auto_cashes_big_bets() {
+        // 5,000 VP (5,000,000 chips) with a 10× target is auto-cashed at 2.00×
+        // (5,000 × 2 = the 10,000-VP payout cap).
+        assert_eq!(effective_target_x100(5_000_000, 1000), 200);
+        let (d, p) = settle_crash_bet(5_000_000, 1000, None, 2500); // crashes at 25×
+        assert_eq!(p, 200, "settled at the payout-capped 2.00×");
+        assert_eq!(d, 5_000_000i128 * CHIP_E8S as i128, "profit = +5,000 VP");
+        // Larger bets cap lower; small bets are unaffected.
+        assert_eq!(effective_target_x100(6_000_000, 5000), 166);
+        assert_eq!(effective_target_x100(8_000_000, 5000), 125);
+        assert_eq!(effective_target_x100(100, 200), 200);
+        // A capped bet still loses if the crash is below the capped target.
+        let (d, p) = settle_crash_bet(5_000_000, 1000, None, 150); // crash 1.5× < 2×
+        assert_eq!(p, 0);
+        assert_eq!(d, -(5_000_000i128 * CHIP_E8S as i128));
+    }
+
+    #[test]
+    fn no_auto_target_is_manual_only() {
+        // target 0 = no auto cash-out: rides to the crash → loss unless the
+        // player manually cashed out.
+        let (_, p) = settle_crash_bet(100, 0, None, 300);
+        assert_eq!(p, 0, "no auto target never auto-cashes");
+        let (_, p2) = settle_crash_bet(100, 0, Some(250), 300);
+        assert_eq!(p2, 250, "manual cashout still wins");
+        // The payout cap still bounds a no-auto big bet.
+        assert_eq!(effective_target_x100(5_000_000, 0), 200);
+    }
+
+    #[test]
+    fn ledger_reconciliation_zero_sum() {
+        casino_test_reset();
+        let now = current_time();
+        let a = Principal::from_slice(&[1; 29]);
+        let b = Principal::from_slice(&[2; 29]);
+        stake_for_test(a, 1_000 * ONE_ICP_E8S, now);
+        stake_for_test(b, 1_000 * ONE_ICP_E8S, now);
+        let deltas = [(a, 200_000_000i128), (b, -200_000_000i128)];
+        let mut round_sum = 0i128;
+        for (u, d) in deltas {
+            casino_add_delta(u, d);
+            round_sum += d;
+        }
+        let mut book = casino_book();
+        book.house_e8s -= round_sum;
+        set_casino_book(book);
+        assert_eq!(casino_reconciliation_e8s(), 0, "Σ users + house must be 0");
+    }
+
+    #[test]
+    fn weekly_burn_zeroes_positive_house() {
+        casino_test_reset();
+        let mut book = casino_book();
+        book.house_e8s = 500_000_000;
+        book.last_burn_week = 1;
+        set_casino_book(book);
+        let before = casino_reconciliation_e8s();
+        casino_weekly_burn();
+        let after = casino_book();
+        assert_eq!(after.house_e8s, 0);
+        assert_eq!(after.burned_e8s, 500_000_000);
+        assert_eq!(casino_reconciliation_e8s(), before, "burn preserves reconciliation");
+        let burned = after.burned_e8s;
+        casino_weekly_burn();
+        assert_eq!(casino_book().burned_e8s, burned);
+    }
+
+    #[test]
+    fn validate_strategy_corpus() {
+        let base = CrashStrategy {
+            id: 0,
+            author: Principal::anonymous(),
+            name: "ok".into(),
+            description: String::new(),
+            base_bet_chips: 100,
+            auto_target_x100: 200,
+            on_loss: ProgressionRule { action: BetAction::Multiply, factor_x100: 200 },
+            on_win: ProgressionRule { action: BetAction::Reset, factor_x100: 0 },
+            max_bet_chips: 5000,
+            max_consecutive_losses: 7,
+            skip_rounds_after_loss: 0,
+            stop: StrategyStop { take_profit_vp_x1000: 0, stop_loss_vp_x1000: 0, max_rounds: 500 },
+            version: 1,
+            builtin: false,
+            lifetime_vp_e8s: 0,
+            created_at: 0,
+        };
+        assert!(validate_strategy(&base).is_ok());
+        let mut s = base.clone();
+        s.stop = StrategyStop::default();
+        assert_eq!(validate_strategy(&s), Err("STOP_REQUIRED".into()));
+        let mut s = base.clone();
+        s.on_loss.factor_x100 = 1100;
+        assert_eq!(validate_strategy(&s), Err("BAD_FACTOR".into()));
+        let mut s = base.clone();
+        s.max_bet_chips = 50;
+        assert_eq!(validate_strategy(&s), Err("BAD_MAX_BET".into()));
+        let mut s = base.clone();
+        s.auto_target_x100 = 100;
+        assert_eq!(validate_strategy(&s), Err("BAD_TARGET".into()));
+    }
+
+    #[test]
+    fn place_bet_guards() {
+        casino_test_reset();
+        let now = current_time();
+        let u = Principal::from_slice(&[7; 29]);
+        stake_for_test(u, 5_000 * ONE_ICP_E8S, now);
+        set_crash_state(CrashRound {
+            id: 1,
+            phase: CrashPhase::Betting,
+            phase_deadline: now + CRASH_BETTING_NANOS,
+            ..Default::default()
+        });
+        let chips = casino_chips(u);
+        assert!(chips >= 100, "test stake should yield ≥100 chips, got {}", chips);
+        assert_eq!(crash_place_bet(u, 5, 200, false, None), Err("WAGER_OUT_OF_RANGE".into()));
+        assert_eq!(crash_place_bet(u, 100, 100, false, None), Err("TARGET_OUT_OF_RANGE".into()));
+        assert!(crash_place_bet(u, 100, 200, false, None).is_ok());
+        assert_eq!(crash_place_bet(u, 100, 200, false, None), Err("ALREADY_BET".into()));
+        assert_eq!(casino_available_chips(u), chips - 100);
+        let mut r = crash_state();
+        r.phase = CrashPhase::Running;
+        set_crash_state(r);
+        let u2 = Principal::from_slice(&[8; 29]);
+        stake_for_test(u2, 5_000 * ONE_ICP_E8S, now);
+        assert_eq!(crash_place_bet(u2, 100, 200, false, None), Err("NOT_BETTING".into()));
+    }
+
+    #[test]
+    fn settle_with_strategy_bet_does_not_panic() {
+        // Regression: settling an auto-pilot bet (strategy_id set) must not hit a
+        // RefCell double-borrow when updating the strategy's lifetime-VP total.
+        casino_test_reset();
+        let seed = sha256(b"settle-strat");
+        let (terminal, cps) = build_crash_chain(seed, 100, 10);
+        CRASH_CHAIN.with(|c| {
+            let _ = c.borrow_mut().set(CrashChain { initialized: true, chain_seed: seed, terminal, n: 100, stride: 10, checkpoints: cps });
+        });
+        seed_builtin_strategies();
+        let bot = Principal::from_slice(&[0xB0, 9, 9]);
+        stake_for_test(bot, 1_000 * ONE_ICP_E8S, current_time());
+        let mut r = CrashRound {
+            id: 1,
+            phase: CrashPhase::Running,
+            chain_index: 1,
+            crash_x100: 300,
+            run_started_at: current_time(),
+            ..Default::default()
+        };
+        r.bets.push(CrashBet {
+            user: bot,
+            wager_chips: 100,
+            target_x100: 200,
+            manual_x100: None,
+            outcome: BetOutcome::Pending,
+            payout_x100: 0,
+            delta_e8s: 0,
+            auto_pilot: true,
+            strategy_id: Some(2),
+        });
+        crash_settle_round(&mut r, current_time()); // must not panic
+        assert_eq!(r.bets[0].outcome, BetOutcome::Won, "target 2x ≤ crash 3x pays");
+        let s = CRASH_STRATEGIES.with(|m| m.borrow().get(&2)).unwrap();
+        assert!(s.lifetime_vp_e8s > 0, "strategy leaderboard accrues the win");
+    }
+
+    #[test]
+    fn chat_text_validation() {
+        assert!(valid_chat_text("gl all"));
+        assert!(!valid_chat_text(""));
+        assert!(!valid_chat_text(&"x".repeat(CASINO_CHAT_MAX_LEN + 1)));
+        assert!(!valid_chat_text("bad\u{0007}bell"));
+        assert!(valid_chat_text("spaces are fine"));
     }
 
 }

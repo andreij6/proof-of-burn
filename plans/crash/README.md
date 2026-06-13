@@ -1,6 +1,9 @@
 # Epic J — Crash (bustabit-style multiplier game) + the Casino section
 
-**Status: PLANNED — no code yet. Feature flag `crash`, ships dark (default OFF).**
+**Status: IMPLEMENTED (feat/crash-casino) — ships dark behind the `crash` flag
+(default OFF); enable + `admin_init_crash` to go live. Poker does not exist, so
+the shared ledger was built fresh as `CASINO_VP_DELTA` and the marketplace as a
+standalone Poker|Crash-kinded store (no poker primitives to extend).**
 
 A rocket-curve crash game in the bustabit aesthetic: one global round every
 ~20 seconds, a multiplier that climbs from 1.00× until it **crashes** at a

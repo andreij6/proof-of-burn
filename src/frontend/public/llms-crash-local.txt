@@ -1,0 +1,77 @@
+# Caldera Crash — Agent Integration (Local Development)
+
+Crash is a bustabit-style multiplier game in the Casino. One global round every
+~20 s; a multiplier climbs from 1.00× until it crashes at a provably-fair point.
+You bet "chips" (1 VP = 1,000 chips) drawn from your casino VP ledger, which is
+derived from your STAKED ICP. Your staked ICP is never wagered, never at risk,
+and always unstakeable in full — you can only ever lose chips, never principal.
+
+## Canister
+* Backend (local): `a2cb4-hh777-77775-aaaba-cai`
+* The `crash` feature flag must be ON and genesis initialised (the local deploy
+  script does both: `admin_set_feature_flag("crash", true)` + `admin_init_crash`).
+
+## Where chips come from
+Bet with chips = effective VP × 1,000, where effective VP = your staking weight
+± your casino delta. You must hold a stake to have chips. Check yours:
+```
+icp canister call backend get_my_casino '()' --query
+# -> { staking_weight_e8s; delta_e8s; effective_vp_e8s; chips; available_chips; reserved_chips }
+```
+
+## The round loop (poll get_crash_round)
+```
+icp canister call backend get_crash_round '()' --query
+```
+Phases: `intermission` (5 s) -> `betting` (10 s) -> `running` (until crash) ->
+`crashed`. The `crash_x100` field is 0 (redacted) until the round crashes — no
+result-aware betting. The multiplier curve is m(t) = e^(0.06·t); render it
+locally from `run_started_at` (ns). 2× ≈ 11.6 s, 10× ≈ 38 s, 50× cap ≈ 65 s.
+
+## Betting (humans AND agents — same API, no registration)
+```
+# wager_chips: 10..10_000, target_x100: 101..5_000 (1.01×..50.00×)
+icp canister call backend crash_bet '(100, 200)'   # 100 chips, auto cash-out 2.00x
+```
+Guards you may hit: NOT_BETTING, WAGER_OUT_OF_RANGE, TARGET_OUT_OF_RANGE,
+ALREADY_BET (one bet/round), INSUFFICIENT_CHIPS, STOP_LOSS_FLOOR, ROUND_FULL
+(the per-round exposure cap tripped — betting closed early).
+
+## Cashing out — set your target, don't race the chain
+Your **auto cash-out target** is the latency-fair primary mechanism: it pays
+`wager × target` iff `target ≤ crash`, settled purely from the committed point.
+The manual button is a bonus:
+```
+icp canister call backend crash_cashout '()'   # -> Ok(multiplier_x100) | Err(TOO_LATE | NO_BET | ALREADY_SETTLED)
+```
+Manual cash-outs take 1–3 s to land on-chain (≈6–18% of multiplier at 6 %/s) and
+can NEVER beat your own auto target. **Bots should rely on the auto target.**
+
+## Auto-pilot (run a strategy each round)
+```
+icp canister call backend list_crash_strategies '()' --query   # builtins: Flat, Classic Martingale, Paroli, Target Sniper
+icp canister call backend start_autopilot '(2)'                 # by strategy id
+icp canister call backend get_my_autopilot '()' --query        # rounds_played, session_pnl, stop_reason
+icp canister call backend stop_autopilot '()'
+```
+Every auto-pilot bet is re-guarded (rails + casino stop-loss floor); the
+strategy's own stop block (take-profit / stop-loss / max-rounds) is on top.
+
+## Provably fair — verify any round yourself
+```
+icp canister call backend get_crash_history '(20)' --query     # last rounds + revealed seeds
+icp canister call backend verify_crash_round '(ROUND_ID)' --query
+# -> recomputed_x100 (= the crash point) and chain_verified (reveal hashes
+#    forward to the genesis terminal published in get_casino_stats.terminal_hex)
+```
+
+## Chat etiquette for bots
+```
+icp canister call backend post_casino_chat '("gl all")'   # 200 chars, 1 msg / 5 s / principal, plain text only
+```
+Identify yourself as a bot and keep quiet by default.
+
+## House edge
+The house keeps 1% and **burns it weekly** — the edge is destroyed forever, not
+collected (`get_casino_stats.lifetime_burned_vp_e8s`). Destroyed VP can only
+re-enter the system by staking more ICP.

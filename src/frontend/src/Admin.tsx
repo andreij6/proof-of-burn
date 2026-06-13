@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { ExplorerToken } from "./bindings/backend";
 import { UnstakeStatus } from "./bindings/backend";
+import { FlagState } from "./bindings/backend";
 import type { Config, FeatureFlag, GlobalStats, LotteryInfo, EarlyAdopterInfo, StakingPoolInfo, PoolInfo, NeuronFollowStatus, AuditLogEntry, StakeTier, PendingUnstake } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Btn, Chip, LiveDot, fmtICP, formatPrincipal } from "./ui";
@@ -294,10 +295,15 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     return `Threshold set to $${usd.toFixed(2)} — all open proposals re-thresholded by dollar value.`;
   });
 
-  const toggleFlag = (key: string, enabled: boolean) => run(`flag-${key}`, async () => {
-    const res = await actor.admin_set_feature_flag(key, !enabled);
+  // Cycle a flag Off → On → AdminOn → Off. AdminOn enables the feature for
+  // admins only (live preview/playtest without exposing it to everyone).
+  const cycleFlag = (key: string, state: FlagState) => run(`flag-${key}`, async () => {
+    const next = state === FlagState.Off ? FlagState.On
+      : state === FlagState.On ? FlagState.AdminOn
+        : FlagState.Off;
+    const res = await actor.admin_set_feature_flag_state(key, next);
     if (res.__kind__ === "Err") { setError(res.Err); return null; }
-    return `${key} ${!enabled ? 'enabled' : 'disabled'}.`;
+    return `${key} → ${next}.`;
   });
 
   const setTickets = () => run('tickets', async () => {
@@ -348,6 +354,12 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     if (res.__kind__ === "Err") { setError(res.Err); return null; }
     await refreshHealth();
     return 'Sweep triggered — settlements, retries and timers all ran.';
+  });
+
+  const seedCasino = () => run('seedcasino', async () => {
+    const res = await actor.dev_seed_casino_play();
+    if (res.__kind__ === "Err") { setError(res.Err); return null; }
+    return (res.Ok as string) + ' — open Play → Casino.';
   });
 
   const refreshSplitNeurons = async () => {
@@ -776,27 +788,31 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               <Eyebrow>Feature kill switches</Eyebrow>
             </span>
             <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-              {featureFlags.map(f => (
-                <div key={f.key} className="row" style={{
-                  gap: 10, padding: '8px 12px', border: '1px solid var(--border)',
-                  borderRadius: 8, background: 'var(--surface)',
-                }}>
-                  <span className="mono" style={{ fontSize: 12.5 }}>{f.key}</span>
-                  <Btn
-                    variant={f.enabled ? 'primary' : 'secondary'} sm
-                    onClick={() => toggleFlag(f.key, f.enabled)}
-                    disabled={busy === `flag-${f.key}`}
-                  >
-                    {busy === `flag-${f.key}`
-                      ? <LiveDot size={7} color={f.enabled ? 'var(--char-950)' : 'var(--fg)'} />
-                      : <Icon name={f.enabled ? 'check' : 'x'} size={12} stroke={f.enabled ? 'var(--char-950)' : 'currentColor'} />}
-                    {f.enabled ? ' On' : ' Off'}
-                  </Btn>
-                </div>
-              ))}
+              {featureFlags.map(f => {
+                const label = f.state === FlagState.On ? 'On' : f.state === FlagState.AdminOn ? 'Admin' : 'Off';
+                const variant = f.state === FlagState.On ? 'primary' : f.state === FlagState.AdminOn ? 'secondary' : 'ghost';
+                return (
+                  <div key={f.key} className="row" style={{
+                    gap: 10, padding: '8px 12px', border: '1px solid var(--border)',
+                    borderRadius: 8, background: 'var(--surface)',
+                  }}>
+                    <span className="mono" style={{ fontSize: 12.5 }}>{f.key}</span>
+                    <Btn
+                      variant={variant} sm
+                      onClick={() => cycleFlag(f.key, f.state)}
+                      disabled={busy === `flag-${f.key}`}
+                    >
+                      {busy === `flag-${f.key}`
+                        ? <LiveDot size={7} color="var(--fg)" />
+                        : <Icon name={f.state === FlagState.On ? 'check' : f.state === FlagState.AdminOn ? 'key' : 'x'} size={12} stroke={f.state === FlagState.On ? 'var(--char-950)' : 'currentColor'} />}
+                      {' '}{label}
+                    </Btn>
+                  </div>
+                );
+              })}
             </div>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Off = the page disappears for everyone and the canister rejects the feature's methods. Instant, reversible.
+              Click to cycle <b>Off</b> → <b>On</b> (everyone) → <b>Admin</b> (admins only — live preview/playtest). Instant, reversible.
             </span>
           </div>
 
@@ -811,6 +827,22 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             </span>
             <CourseEditor actor={actor} />
           </div>
+
+          {config?.is_local && (
+            <div className="col" style={{ ...card, gap: 10 }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="zap" size={13} stroke="var(--burn)" />
+                <Eyebrow>Casino — local playtest</Eyebrow>
+              </span>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                Grants you 5,000 ICP of dev stake (so you have chips) and seeds 6 auto-pilot
+                bots that bet &amp; chat every round. Local only — needs the <span className="mono">crash</span> flag on.
+              </span>
+              <Btn variant="secondary" sm onClick={seedCasino} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                <Icon name="gamepad" size={12} /> Seed bots &amp; grant me chips
+              </Btn>
+            </div>
+          )}
         </>
       )}
 
