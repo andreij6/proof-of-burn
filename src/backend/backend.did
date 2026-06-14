@@ -1292,6 +1292,8 @@ service : (InitPayload) -> {
   get_faucet_stats : () -> (FaucetStats) query;
   get_faucet_status : (opt principal) -> (FaucetStatus) query;
   list_faucet_grants : (nat32) -> (vec FaucetGrant) query;
+  dev_fund_treasury : (nat64) -> (Result);
+  dev_seed_faucet_grants : (nat32) -> (Result);
   // App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
   // cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
   // the count of distinct NNS proposals this app has cast a vote on.

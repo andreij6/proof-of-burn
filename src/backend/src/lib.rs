@@ -16604,6 +16604,54 @@ fn list_faucet_grants(limit: u32) -> Vec<FaucetGrant> {
     FAUCET_GRANTS.with(|m| m.borrow().iter().rev().take(n).map(|e| e.value()).collect())
 }
 
+/// Local-dev: move ICP from the canister's own default account (same source as
+/// `dev_faucet_token`) into the treasury subaccount, so the faucet floor gate
+/// passes and grants have ICP to draw from.
+#[ic_cdk::update]
+async fn dev_fund_treasury(amount_e8s: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let ledger = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+    let dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
+    call_ledger_transfer(ledger, None, dest, amount_e8s, Some(10_000))
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("DEV_FUND_TREASURY: {}", e))
+}
+
+/// Local-dev: insert mock faucet grants so the "Recent grants" list renders.
+#[ic_cdk::update]
+fn dev_seed_faucet_grants(count: u32) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let caller = get_caller();
+    let n = count.min(25);
+    let now = current_time();
+    let base = FAUCET_STATS.with(|c| c.borrow().get().total_claims);
+    let mock_amount: u64 = 25_000_000; // 0.25 ICP each
+    for i in 0..n {
+        let id = base + (i as u64) + 1;
+        FAUCET_GRANTS.with(|m| {
+            m.borrow_mut().insert(id, FaucetGrant {
+                id,
+                dev: caller,
+                canister_id: mock_principal((i % 7) as u8),
+                amount_icp_e8s: mock_amount,
+                block_index: 1_000_000 + id,
+                at: now.saturating_sub((i as u64) * 86_400_000_000_000), // staggered days back
+            });
+        });
+    }
+    FAUCET_STATS.with(|c| {
+        let mut s = c.borrow().get().clone();
+        s.total_claims = s.total_claims.saturating_add(n as u64);
+        s.total_granted_icp_e8s = s.total_granted_icp_e8s.saturating_add(mock_amount.saturating_mul(n as u64));
+        s.last_grant_at = now;
+        let _ = c.borrow_mut().set(s);
+    });
+    Ok(())
+}
+
 // ── Admin param setters (all admin-settable, sanity-railed) ──
 
 #[ic_cdk::update(guard = "require_admin")]

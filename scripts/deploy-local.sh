@@ -182,6 +182,20 @@ else
   ok "Swap desk already funded ($SWAP_BAL e8s)"
 fi
 
+# ── 7b. Backend default account (dev faucet + faucet treasury preload source) ──
+# On a fresh network the ledger-init pre-funded principal collides with the
+# permuted ICP-ledger id, so the backend's own account starts empty — which
+# breaks dev_faucet_token AND the cycles-faucet treasury-preload button (both
+# dispense from the backend's default account). Seed it from the admin once.
+BE_BAL=$(icp canister call ledger icrc1_balance_of "(record { owner = principal \"$BACKEND_ID\"; subaccount = null })" --query -e "$ENV" | grep -oE '[0-9_]+' | head -1 | tr -d '_')
+if [[ "${BE_BAL:-0}" -lt 10000000000 ]]; then
+  note "Funding backend default account (500 ICP) for dev faucet + treasury preload…"
+  icp canister call ledger icrc1_transfer "(record { to = record { owner = principal \"$BACKEND_ID\"; subaccount = null }; amount = 50_000_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+  ok "Backend account funded (dev_faucet_token + faucet treasury-preload now work)"
+else
+  ok "Backend account already funded ($BE_BAL e8s)"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo
 echo "──────────────────────────────────────────────────────────"

@@ -75,7 +75,7 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
   const [stats, setStats] = useState<{ total_claims: bigint; total_granted_icp_e8s: bigint } | null>(null);
   const [grants, setGrants] = useState<Array<{ id: bigint; canister_id: Principal; amount_icp_e8s: bigint; block_index: bigint; at: bigint }>>([]);
   const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState<'' | 'claim' | 'register'>('');
+  const [busy, setBusy] = useState<'' | 'claim' | 'register' | 'devfund' | 'devgrants'>('');
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -131,6 +131,26 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
   // On-chain link for a grant's ICP-ledger block (mainnet only; local has no explorer).
   const txUrl = (block: bigint): string | null =>
     isLocal ? null : `https://dashboard.internetcomputer.org/transaction/${block}`;
+
+  // ── Local-dev helpers (visualization only) ──
+  const devFund = async () => {
+    setError(null); setNotice(null); setBusy('devfund');
+    try {
+      const res = await actor.dev_fund_treasury(10_000_000_000n); // 100 ICP
+      if (res?.__kind__ === 'Err') throw new Error(res.Err);
+      setNotice('Treasury preloaded with 100 ICP.');
+      await refresh();
+    } catch (e: any) { setError(String(e?.message ?? e)); } finally { setBusy(''); }
+  };
+  const devSeedGrants = async () => {
+    setError(null); setNotice(null); setBusy('devgrants');
+    try {
+      const res = await actor.dev_seed_faucet_grants(8);
+      if (res?.__kind__ === 'Err') throw new Error(res.Err);
+      setNotice('Seeded 8 mock grants.');
+      await refresh();
+    } catch (e: any) { setError(String(e?.message ?? e)); } finally { setBusy(''); }
+  };
 
   const claim = async () => {
     setError(null); setNotice(null);
@@ -316,6 +336,23 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
             </p>
           )}
         </>
+      )}
+
+      {isLocal && signedIn && (
+        <div style={{ ...card, borderColor: 'var(--border-hi)' }}>
+          <Eyebrow>Local dev</Eyebrow>
+          <p style={{ color: 'var(--fg-3)', fontSize: 12, margin: '4px 0 10px' }}>
+            Local-only helpers to visualize this page.
+          </p>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <Btn variant="secondary" disabled={busy === 'devfund'} onClick={devFund}>
+              {busy === 'devfund' ? 'Funding…' : 'Preload treasury (+100 ICP)'}
+            </Btn>
+            <Btn variant="secondary" disabled={busy === 'devgrants'} onClick={devSeedGrants}>
+              {busy === 'devgrants' ? 'Seeding…' : 'Seed 8 mock grants'}
+            </Btn>
+          </div>
+        </div>
       )}
 
       <p style={{ color: 'var(--fg-3)', fontSize: 12 }}>
