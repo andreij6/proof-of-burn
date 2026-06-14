@@ -467,6 +467,24 @@ pub struct IdeaViewKey {
     pub user: Principal,
 }
 
+/// One free upvote per user per idea. Mirrors `IdeaViewKey`.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IdeaUpvoteKey {
+    pub idea_id: u64,
+    pub user: Principal,
+}
+
+/// Cumulative pool-reward already paid (gross e8s, i.e. including the ledger fee
+/// consumed by each transfer) to one recipient for one settled proposal. Lets
+/// `distribute_pool_rewards` (a) top up incrementally as retried burns raise the
+/// proposal's burn total and (b) retry a failed payout — both without ever
+/// double-paying a recipient. Mirrors `IdeaUpvoteKey`.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PoolRewardKey {
+    pub proposal_id: u64,
+    pub recipient: Principal,
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum Vote {
     Yes,
@@ -558,6 +576,8 @@ impl_storable!(Proposal);
 impl_storable!(Commitment);
 impl_storable!(CommitmentKey);
 impl_storable!(IdeaViewKey);
+impl_storable!(IdeaUpvoteKey);
+impl_storable!(PoolRewardKey);
 impl_storable!(VoteRecord);
 impl_storable!(UserAggregates);
 impl_storable!(AuditLogEntry);
@@ -814,7 +834,13 @@ fn post_upgrade() {
     // Re-arm the crash round loop from the persisted phase (timers don't survive
     // upgrades; a mid-flight round resumes from its remaining time, plans/crash/01).
     crash_resume();
-    poker_ensure_tables();
+    // One-time purge of feature flags for removed features (poker, the Turbo
+    // Rush arcade game, the global ticker). Their flag values persisted in
+    // stable memory from earlier deploys; no code reads them anymore, but
+    // list_feature_flags would still surface them as dead admin toggles.
+    for retired in ["poker", "arcade_turborush", "ticker"] {
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&retired.to_string()); });
+    }
 }
 
 // ==========================================
@@ -845,8 +871,12 @@ fn get_pool_info() -> PoolInfo {
         }
     });
 
-    // Sort by voting power descending
-    active_neurons.sort_by(|a, b| b.voting_power.cmp(&a.voting_power));
+    // Rank by voting power descending; equal VP falls back to neuron id so
+    // ranks (and the top-100 paid cutoff) are deterministic.
+    active_neurons.sort_by(|a, b| {
+        b.voting_power.cmp(&a.voting_power)
+            .then_with(|| a.neuron_id.cmp(&b.neuron_id))
+    });
 
     let mut ranked = Vec::new();
     for (i, n) in active_neurons.into_iter().enumerate() {
@@ -892,28 +922,50 @@ fn get_my_pool_neuron() -> Option<PoolNeuron> {
 
 #[ic_cdk::update]
 async fn distribute_pool_rewards(proposal_id: u64) -> Result<(), String> {
-    let mut proposal = PROPOSALS.with(|map| map.borrow().get(&proposal_id))
+    let proposal = PROPOSALS.with(|map| map.borrow().get(&proposal_id))
         .ok_or_else(|| "PROPOSAL_NOT_FOUND".to_string())?;
 
     if proposal.status != "settled" {
         return Err("PROPOSAL_NOT_SETTLED".to_string());
     }
 
+    // Fast path: already fully distributed for the current burn total. A retried
+    // burn that raises the total re-opens this by setting `pool_distributed`
+    // back to false (see `retry_failed_settlements`).
     if proposal.pool_distributed {
         return Ok(());
     }
 
-    // Mark distributed first (bias against double-spend)
-    proposal.pool_distributed = true;
-    PROPOSALS.with(|map| {
-        map.borrow_mut().insert(proposal_id, proposal.clone());
-    });
+    // Re-entrancy guard: if another distribution for this proposal is already in
+    // flight (e.g. the public endpoint racing the sweep), let it finish. Kept
+    // separate from ProposalLock so it is safe even while the cutoff lock is
+    // held (the first distribution runs inside `settle_proposal_commitments`).
+    let _dist_lock = match PoolDistLock::new(proposal_id) {
+        Some(l) => l,
+        None => return Ok(()),
+    };
 
-    let total_burned = proposal.total_burned_e8s.unwrap_or(0);
-    if total_burned == 0 {
+    // The burn total we distribute against. We only latch `pool_distributed` at
+    // the end if this is still the current total — a burn that completes
+    // mid-flight will have re-opened distribution against a larger total.
+    let distributed_against = proposal.total_burned_e8s.unwrap_or(0);
+
+    // Latch the proposal as fully distributed iff no failure occurred and no
+    // larger burn total has landed since we started.
+    let finalize = |against: u64| {
+        if let Some(mut p) = PROPOSALS.with(|map| map.borrow().get(&proposal_id)) {
+            if !p.pool_distributed && p.total_burned_e8s.unwrap_or(0) == against {
+                p.pool_distributed = true;
+                PROPOSALS.with(|map| { map.borrow_mut().insert(proposal_id, p); });
+            }
+        }
+    };
+
+    if distributed_against == 0 {
+        finalize(0);
         return Ok(());
     }
-    let pool_share = total_burned / 4;
+    let pool_share = distributed_against / 4;
 
     let mut active_neurons = Vec::new();
     POOL_NEURONS.with(|map| {
@@ -926,15 +978,19 @@ async fn distribute_pool_rewards(proposal_id: u64) -> Result<(), String> {
     });
 
     if active_neurons.is_empty() {
+        finalize(distributed_against);
         return Ok(());
     }
 
+    // Rank by voting power (highest first); a tie for the last paid slot is
+    // decided by voting power — equal VP falls back to neuron id for a
+    // deterministic, idempotent result. Top 100 neurons are paid.
     active_neurons.sort_by(|a, b| {
         b.voting_power.cmp(&a.voting_power)
             .then_with(|| a.neuron_id.cmp(&b.neuron_id))
     });
 
-    active_neurons.truncate(25);
+    active_neurons.truncate(100);
 
     let mut recipients = Vec::new();
     for n in active_neurons {
@@ -945,20 +1001,34 @@ async fn distribute_pool_rewards(proposal_id: u64) -> Result<(), String> {
 
     let n = recipients.len() as u64;
     if n == 0 {
+        finalize(distributed_against);
         return Ok(());
     }
 
-    let share_per_recipient = pool_share / n;
-    if share_per_recipient <= 10_000 {
-        return Ok(());
-    }
-    let payout_amt = share_per_recipient - 10_000;
+    // Each recipient's TARGET gross share (including the per-transfer fee) for
+    // the current burn total. We pay only the delta vs. what they've already
+    // received (`POOL_REWARDS_PAID`), so retried burns top up and a re-run
+    // never double-pays.
+    let target_gross = pool_share / n;
+    let fee: u64 = 10_000;
 
     let config = CONFIG.with(|c| c.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
     let now = current_time();
 
+    let mut all_succeeded = true;
+
     for recipient in recipients {
+        let key = PoolRewardKey { proposal_id, recipient };
+        let already = POOL_REWARDS_PAID.with(|m| m.borrow().get(&key)).unwrap_or(0);
+        let delta_gross = target_gross.saturating_sub(already);
+        // Nothing owed, or the remaining delta can't cover a transfer fee (dust):
+        // skip without marking a failure.
+        if delta_gross <= fee {
+            continue;
+        }
+        let payout_amt = delta_gross - fee;
+
         let dest = LedgerAccount {
             owner: recipient,
             subaccount: None,
@@ -969,12 +1039,15 @@ async fn distribute_pool_rewards(proposal_id: u64) -> Result<(), String> {
             Some(TREASURY_SUBACCOUNT),
             dest,
             payout_amt,
-            Some(10_000),
+            Some(fee),
         )
         .await;
 
         match xfer_res {
             Ok(_) => {
+                // Record the gross amount (payout + fee) as paid so a later
+                // top-up pays only the new increment.
+                POOL_REWARDS_PAID.with(|m| { m.borrow_mut().insert(key, already + delta_gross); });
                 let log_entry = AuditLogEntry {
                     timestamp: now,
                     event_type: "pool_reward_payout".to_string(),
@@ -988,12 +1061,22 @@ async fn distribute_pool_rewards(proposal_id: u64) -> Result<(), String> {
                 record_payout(recipient, PayoutType::PoolReward, IdeaToken::ICP, payout_amt, proposal_id);
             }
             Err(e) => {
+                // Leave POOL_REWARDS_PAID unchanged so the next sweep retries
+                // this recipient's still-outstanding delta.
+                all_succeeded = false;
                 canister_print(&format!(
                     "Failed to transfer pool reward to {}: {}",
                     recipient, e
                 ));
             }
         }
+    }
+
+    // Latch only when every recipient reached target with no failed transfer and
+    // no larger burn total landed mid-flight; otherwise the sweep re-runs this
+    // and the per-recipient ledger above tops up / retries.
+    if all_succeeded {
+        finalize(distributed_against);
     }
 
     Ok(())
@@ -1551,6 +1634,11 @@ const TREASURY_SUBACCOUNT: [u8; 32] = [1u8; 32];
 thread_local! {
     static ACTIVE_CALLERS: RefCell<std::collections::HashSet<Principal>> = RefCell::new(std::collections::HashSet::new());
     static ACTIVE_PROPOSALS: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
+    // Re-entrancy guard for pool-reward distribution (in-memory, like
+    // ACTIVE_PROPOSALS). Independent of ProposalLock so it is safe whether or
+    // not the cutoff lock is held — prevents the public `distribute_pool_rewards`
+    // endpoint from racing the sweep and double-paying across an await point.
+    static POOL_DIST_ACTIVE: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
     // F-103: stores the most recent treasury→CMC topup transfer block index
     // so a retry of `cycle_topup_check` can skip the transfer and just notify
     // the CMC. Reset to None on a successful `notify_top_up`.
@@ -1594,6 +1682,30 @@ impl ProposalLock {
 impl Drop for ProposalLock {
     fn drop(&mut self) {
         ACTIVE_PROPOSALS.with(|set| set.borrow_mut().remove(&self.proposal_id));
+    }
+}
+
+/// Re-entrancy guard for pool-reward distribution. `new` returns `None` when a
+/// distribution for this proposal is already in flight (the caller should then
+/// no-op and let the in-progress run finish). Released on drop.
+struct PoolDistLock {
+    proposal_id: u64,
+}
+
+impl PoolDistLock {
+    fn new(proposal_id: u64) -> Option<Self> {
+        let inserted = POOL_DIST_ACTIVE.with(|set| set.borrow_mut().insert(proposal_id));
+        if inserted {
+            Some(Self { proposal_id })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for PoolDistLock {
+    fn drop(&mut self) {
+        POOL_DIST_ACTIVE.with(|set| set.borrow_mut().remove(&self.proposal_id));
     }
 }
 
@@ -3684,10 +3796,6 @@ async fn cast_nns_vote(leader_id: u64, proposal_id: u64, vote_choice: i32) -> Re
     }
 }
 
-/// Threshold satisfaction: EITHER burned conviction or staked conviction can
-/// carry a proposal — it is "met" when burn commitments reach the threshold
-/// OR when the combined staked voting weight (both sides) equals/exceeds the
-/// same ICP threshold.
 /// Cached USD price of one whole token (e8s of USD). Never async: uses the
 /// admin-set/XRC-cached explorer rate or the static default. Mainnet async
 /// paths refresh the cache via `refresh_icp_rate` before sync valuations.
@@ -3728,14 +3836,15 @@ async fn refresh_icp_rate(config: &Config) {
     }
 }
 
+/// Threshold satisfaction: burn-only. A proposal is "met" when burn commitments
+/// reach the threshold. Staking no longer grants voting power, so the staked
+/// `lossless_*` pots (retained for upgrade-safety) never count here.
 fn proposal_threshold_met(p: &Proposal) -> bool {
-    let staked = p.lossless_adopt_e8s.saturating_add(p.lossless_reject_e8s);
     if let Some(threshold_usd) = p.threshold_usd_e8s {
-        // Dollar-denominated threshold: value the ICP pots at the cached rate.
-        return icp_amount_usd_e8s(p.total_committed_e8s) >= threshold_usd
-            || icp_amount_usd_e8s(staked) >= threshold_usd;
+        // Dollar-denominated threshold: value the burned ICP pot at the cached rate.
+        return icp_amount_usd_e8s(p.total_committed_e8s) >= threshold_usd;
     }
-    p.total_committed_e8s >= p.threshold_e8s || staked >= p.threshold_e8s
+    p.total_committed_e8s >= p.threshold_e8s
 }
 
 /// NNS vote choice (1 = Yes/adopt, 2 = No/reject) from the committed pots.
@@ -3763,12 +3872,12 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
 
     let met = proposal_threshold_met(&proposal);
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
-    // PB-123: majority of committed ICP wins; an exact tie is broken by the
-    // first stance committed on this proposal (first vote wins). Lossless
-    // staking weight joins the balance of power here — never the threshold.
+    // PB-123: majority of committed (burned) ICP wins; an exact tie is broken by
+    // the first stance committed on this proposal (first vote wins). Voting is
+    // burn-only — the staked `lossless_*` pots no longer join the tally.
     let vote_choice = decide_vote_choice(
-        proposal.adopt_pot_e8s.saturating_add(proposal.lossless_adopt_e8s),
-        proposal.reject_pot_e8s.saturating_add(proposal.lossless_reject_e8s),
+        proposal.adopt_pot_e8s,
+        proposal.reject_pot_e8s,
         proposal.first_stance.clone(),
     );
 
@@ -4094,6 +4203,10 @@ async fn retry_failed_settlements() {
                                     .unwrap_or(0)
                                     .saturating_add(commitment.amount_e8s),
                             );
+                            // Re-open pool distribution so the next sweep tops up
+                            // the top-100's 25% share of this newly-completed
+                            // burn (idempotent via POOL_REWARDS_PAID).
+                            p.pool_distributed = false;
                             map.borrow_mut().insert(proposal_id, p);
                         }
                     });
@@ -4247,15 +4360,6 @@ fn setup_timers() {
     // dropped (e.g. across an upgrade). Cheap: a couple of reads when idle.
     ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(15), || async {
         crash_watchdog().await;
-    });
-    // Poker tables advance on this tick too (paced hand loop, house-agent play).
-    // Idle tables are nearly free (a few reads). The spectator UI also pokes.
-    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(2), || async {
-        if feature_active(FLAG_POKER) {
-            for id in 1..=POKER_NUM_TABLES {
-                poker_advance(id).await;
-            }
-        }
     });
 }
 
@@ -4416,7 +4520,8 @@ fn get_audit_log(offset: u64, limit: u64) -> Vec<AuditLogEntry> {
 /// Feature-flag key for the Idea Board. Flags default via `feature_default`;
 /// an admin override in FEATURE_FLAGS (1 = on, 0 = off) wins over the default.
 pub const FLAG_IDEA_BOARD: &str = "idea_board";
-/// Kill switch for lossless staking + voting (stake/unstake/cast_lossless_vote).
+/// Kill switch for lossless staking (stake/unstake). Staking earns lottery
+/// tickets only; it no longer grants voting power (voting is burn-only).
 pub const FLAG_LOSSLESS_VOTING: &str = "lossless_voting";
 /// Lossless lottery (Powerball-style draws over the staking-yield lottery
 /// pot). Ships dark — default OFF until an admin flips it on.
@@ -4428,23 +4533,15 @@ pub const FLAG_EARLY_ADOPTERS: &str = "early_adopters";
 // `arcade` flag and its own flag are on.
 pub const FLAG_ARCADE_MINIGOLF: &str = "arcade_minigolf";
 pub const FLAG_ARCADE_FIELDGOAL: &str = "arcade_fieldgoal";
-pub const FLAG_ARCADE_TURBORUSH: &str = "arcade_turborush";
 /// The Casino: Crash (bustabit-style multiplier game) + the shared casino VP
 /// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
 /// until the owner enables it after a playtest.
 pub const FLAG_CRASH: &str = "crash";
-/// Agent Poker (No-Limit Hold'em, agents-only) under the Casino hub. Wagers are
-/// casino VP chips; humans spectate while their claimed agent plays. Ships dark
-/// (default OFF) until the owner enables it after a playtest.
-pub const FLAG_POKER: &str = "poker";
-/// Global scrolling ticker (open votes · feature promo · crypto prices) below
-/// the top bar. Ships dark (default OFF) — a work-in-progress UI element.
-pub const FLAG_TICKER: &str = "ticker";
-const KNOWN_FEATURE_FLAGS: [&str; 12] = [
+const KNOWN_FEATURE_FLAGS: [&str; 9] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
-    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_TURBORUSH,
-    FLAG_CRASH, FLAG_POKER, FLAG_TICKER,
+    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL,
+    FLAG_CRASH,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -4505,6 +4602,11 @@ pub struct Idea {
     /// Detail-view opens by signed-in users (drives "most viewed" sorting).
     #[serde(default)]
     pub views: u64,
+    /// Filled per-caller at query time: whether the caller has upvoted. Not stored.
+    #[serde(default)]
+    pub has_upvoted: bool,
+    // Legacy per-token contribution totals from the old paid-upvote model —
+    // retained for upgrade-safety. Upvotes are now free; these stay at 0.
     pub total_icp_e8s: u64,
     pub total_ckbtc_e8s: u64,
     pub total_cketh_wei: u64,
@@ -4557,7 +4659,9 @@ fn default_true() -> bool {
 }
 
 /// goes 100% to the protocol treasury, which pays for the project's
-/// execution. Per-token goals of 0 mean "not seeking that token".
+/// execution. Each project has ONE USD-denominated goal and accepts any
+/// supported crypto; contributions (tracked per-token) are valued at the
+/// cached USD rate and summed into `raised_usd_e8s` for progress.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct Project {
     pub id: u64,
@@ -4565,6 +4669,14 @@ pub struct Project {
     pub description: String,
     pub detail: String,
     pub created_at: u64,
+    /// The single funding goal, in USD e8s ($1 = 100_000_000).
+    #[serde(default)]
+    pub goal_usd_e8s: u64,
+    /// Filled at query time: per-token raised pots valued in USD e8s. Not stored.
+    #[serde(default)]
+    pub raised_usd_e8s: u64,
+    // Legacy per-token goals — retained for upgrade-safety, no longer used
+    // (all projects now use the single USD goal above).
     pub goal_icp_e8s: u64,
     pub goal_ckbtc_e8s: u64,
     pub goal_cketh_wei: u64,
@@ -4572,12 +4684,21 @@ pub struct Project {
     pub raised_ckbtc_e8s: u64,
     pub raised_cketh_wei: u64,
     pub funding_count: u64,
+    // Every project accepts every supported crypto; kept for upgrade-safety.
     #[serde(default = "default_true")]
     pub accept_icp: bool,
     #[serde(default = "default_true")]
     pub accept_ckbtc: bool,
     #[serde(default = "default_true")]
     pub accept_cketh: bool,
+}
+
+/// A project's total raised across all tokens, valued in USD e8s at the
+/// cached rate. Used for the single-goal progress display.
+fn project_raised_usd_e8s(p: &Project) -> u64 {
+    icp_amount_usd_e8s(p.raised_icp_e8s)
+        .saturating_add(token_amount_usd_e8s(ExplorerToken::CkBTC, p.raised_ckbtc_e8s))
+        .saturating_add(token_amount_usd_e8s(ExplorerToken::CkETH, p.raised_cketh_wei))
 }
 
 /// Saga journal for one project funding (single transfer → treasury), same
@@ -4661,28 +4782,27 @@ thread_local! {
     static IDEA_VIEWS: RefCell<StableBTreeMap<IdeaViewKey, (), Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(18))))
     });
+
+    // One free upvote per user per idea (dedupe set). MemoryId 74.
+    static IDEA_UPVOTERS: RefCell<StableBTreeMap<IdeaUpvoteKey, (), Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(74))))
+    });
+
+    // Cumulative pool-reward paid (gross e8s) per (settled proposal, recipient).
+    // Drives idempotent, incremental top-ups + failed-payout retries so retried
+    // burns still pay the top-100 their 25% and a failed transfer is re-tried
+    // without double-paying. MemoryId 75.
+    static POOL_REWARDS_PAID: RefCell<StableBTreeMap<PoolRewardKey, u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(75))))
+    });
 }
 
 fn feature_default(key: &str) -> bool {
     match key {
-        FLAG_IDEA_BOARD => true,
-        FLAG_LOSSLESS_VOTING => true,
-        // Money-moving and unproven on mainnet — ships dark until an admin
-        // enables it (see docs/OPS.md § "Lossless Lottery").
-        FLAG_LOSSLESS_LOTTERY => false,
-        FLAG_EXPLORER => true,
-        // Ships dark like the lottery — flips on locally via deploy-local.sh,
-        // on mainnet via the admin flag panel after a playtest.
-        FLAG_ARCADE => false,
-        // Per-game flags default ON — the parent `arcade` flag is the master
-        // kill switch; these let an admin pull ONE game without closing the
-        // whole arcade.
-        FLAG_ARCADE_MINIGOLF => true,
-        FLAG_ARCADE_FIELDGOAL => true,
-        FLAG_ARCADE_TURBORUSH => true,
-        // Irreversible money-moving — ships dark until the owner enables it.
-        FLAG_EARLY_ADOPTERS => false,
-        _ => false,
+        // Default OFF: Crash (casino, pending the points redesign).
+        FLAG_CRASH => false,
+        // Every other SHIPPED feature defaults ON; unknown keys stay OFF.
+        k => KNOWN_FEATURE_FLAGS.contains(&k),
     }
 }
 
@@ -4988,6 +5108,7 @@ fn get_idea_board_info() -> IdeaBoardInfo {
 #[ic_cdk::query]
 fn list_ideas() -> Vec<Idea> {
     let now = current_time();
+    let caller = get_caller();
     let mut ideas: Vec<Idea> = IDEAS.with(|m| {
         m.borrow()
             .iter()
@@ -4995,6 +5116,11 @@ fn list_ideas() -> Vec<Idea> {
             .filter(|idea| !idea_is_expired(idea.last_upvote_at, now))
             .collect()
     });
+    // Per-caller flag so the UI can show "Upvoted" and one upvote per idea.
+    for idea in ideas.iter_mut() {
+        idea.has_upvoted = IDEA_UPVOTERS
+            .with(|m| m.borrow().contains_key(&IdeaUpvoteKey { idea_id: idea.id, user: caller }));
+    }
     ideas.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     ideas
 }
@@ -5116,6 +5242,7 @@ async fn post_idea(title: String, description: String, detail: String) -> Result
         last_upvote_at: now,
         upvote_count: 0,
         views: 0,
+        has_upvoted: false,
         total_icp_e8s: 0,
         total_ckbtc_e8s: 0,
         total_cketh_wei: 0,
@@ -5215,25 +5342,14 @@ fn apply_upvote_to_idea(uv: &IdeaUpvote, now: u64) {
     });
 }
 
-/// Upvote an idea with deposited funds. 75% of the amount goes to the
-/// protocol treasury, 25% to the idea poster's wallet. The caller must first
-/// transfer `amount + 2×fee` to their `get_idea_deposit_address` subaccount
-/// on the chosen token's ledger.
+/// Upvote an idea — FREE. No crypto is collected; one upvote per user per idea
+/// (mirrors `record_idea_view`). Bumps the idea's count and resets its 30-day
+/// expiry clock.
 #[ic_cdk::update]
-async fn upvote_idea(idea_id: u64, token: IdeaToken, amount: u64) -> Result<(), String> {
+fn upvote_idea(idea_id: u64) -> Result<(), String> {
     require_authenticated()?;
     require_idea_board_enabled()?;
     let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let fee = token_fee(token, &config);
-    if amount < token_min_upvote(token, &config) {
-        return Err("BELOW_MINIMUM".to_string());
-    }
-    if amount > MAX_UPVOTE_UNITS {
-        return Err("EXCEEDS_GLOBAL_CAP".to_string());
-    }
 
     let idea = IDEAS
         .with(|m| m.borrow().get(&idea_id))
@@ -5243,56 +5359,27 @@ async fn upvote_idea(idea_id: u64, token: IdeaToken, amount: u64) -> Result<(), 
         return Err("IDEA_EXPIRED".to_string());
     }
 
-    let ledger_id = token_ledger(token, &config);
-    let sub = derive_idea_subaccount(&caller, idea_id);
-    let escrow = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(sub),
-    };
-    let balance = call_ledger_balance(ledger_id, escrow).await?;
-    let required = amount
-        .checked_add(fee.checked_mul(2).ok_or("OVERFLOW")?)
-        .ok_or("OVERFLOW")?;
-    if balance < required {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    let key = IdeaUpvoteKey { idea_id, user: caller };
+    if IDEA_UPVOTERS.with(|m| m.borrow().contains_key(&key)) {
+        return Err("ALREADY_UPVOTED".to_string());
     }
+    IDEA_UPVOTERS.with(|m| m.borrow_mut().insert(key, ()));
 
-    // Journal the upvote BEFORE moving funds so a mid-saga failure is
-    // visible and retryable from the sweep timer.
-    let upvote_id = NEXT_UPVOTE_ID.with(|c| {
-        let id = *c.borrow().get();
-        c.borrow_mut().set(id + 1);
-        id
+    IDEAS.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(mut idea) = m.get(&idea_id) {
+            idea.upvote_count = idea.upvote_count.saturating_add(1);
+            idea.last_upvote_at = now;
+            m.insert(idea_id, idea);
+        }
     });
-    let mut uv = IdeaUpvote {
-        id: upvote_id,
-        idea_id,
-        voter: caller,
-        token,
-        amount,
-        status: UpvoteStatus::FailedPayout,
-        created_at: now,
-        treasury_block: None,
-        poster_block: None,
-    };
-    IDEA_UPVOTES.with(|m| {
-        m.borrow_mut().insert(upvote_id, uv.clone());
-    });
-
-    run_upvote_payout(ledger_id, sub, idea.poster, fee, &mut uv).await?;
-
-    uv.status = UpvoteStatus::Settled;
-    IDEA_UPVOTES.with(|m| {
-        m.borrow_mut().insert(upvote_id, uv.clone());
-    });
-    apply_upvote_to_idea(&uv, now);
 
     let log_entry = AuditLogEntry {
         timestamp: now,
         event_type: "idea_upvote".to_string(),
         proposal_id: idea_id,
         user: caller,
-        amount_e8s: amount,
+        amount_e8s: 0,
     };
     AUDIT_LOG.with(|log| {
         let _ = log.borrow_mut().append(&log_entry);
@@ -5393,28 +5480,24 @@ fn derive_project_subaccount(user: &Principal, project_id: u64) -> [u8; 32] {
     sub
 }
 
-/// Admin: add a fundable project. At least one per-token goal must be set.
+/// Minimum project funding goal: $1 (USD e8s).
+const MIN_PROJECT_GOAL_USD_E8S: u64 = 100_000_000;
+
+/// Admin: add a fundable project with a single USD goal. Every project accepts
+/// any supported crypto; contributions are valued in USD toward the goal.
 #[ic_cdk::update(guard = "require_admin")]
 fn admin_add_project(
     title: String,
     description: String,
     detail: String,
-    goal_icp_e8s: u64,
-    goal_ckbtc_e8s: u64,
-    goal_cketh_wei: u64,
-    accept_icp: bool,
-    accept_ckbtc: bool,
-    accept_cketh: bool,
+    goal_usd_e8s: u64,
 ) -> Result<u64, String> {
     let title = title.trim().to_string();
     let description = description.trim().to_string();
     let detail = detail.trim().to_string();
     validate_idea_text(&title, &description, &detail)?;
-    if goal_icp_e8s == 0 && goal_ckbtc_e8s == 0 && goal_cketh_wei == 0 {
-        return Err("NO_GOAL_SET".to_string());
-    }
-    if !accept_icp && !accept_ckbtc && !accept_cketh {
-        return Err("NO_CRYPTO_ACCEPTED".to_string());
+    if goal_usd_e8s < MIN_PROJECT_GOAL_USD_E8S {
+        return Err("GOAL_BELOW_MIN".to_string());
     }
     if PROJECTS.with(|m| m.borrow().len()) >= MAX_PROJECTS {
         return Err("PROJECT_QUOTA_REACHED".to_string());
@@ -5433,44 +5516,38 @@ fn admin_add_project(
             description,
             detail,
             created_at: now,
-            goal_icp_e8s,
-            goal_ckbtc_e8s,
-            goal_cketh_wei,
+            goal_usd_e8s,
+            raised_usd_e8s: 0,
+            goal_icp_e8s: 0,
+            goal_ckbtc_e8s: 0,
+            goal_cketh_wei: 0,
             raised_icp_e8s: 0,
             raised_ckbtc_e8s: 0,
             raised_cketh_wei: 0,
             funding_count: 0,
-            accept_icp,
-            accept_ckbtc,
-            accept_cketh,
+            accept_icp: true,
+            accept_ckbtc: true,
+            accept_cketh: true,
         });
     });
     Ok(id)
 }
 
-/// Admin: update a project's details, funding goals, and cryptocurrency toggles.
+/// Admin: update a project's details and its single USD funding goal.
 #[ic_cdk::update(guard = "require_admin")]
 fn admin_update_project(
     id: u64,
     title: String,
     description: String,
     detail: String,
-    goal_icp_e8s: u64,
-    goal_ckbtc_e8s: u64,
-    goal_cketh_wei: u64,
-    accept_icp: bool,
-    accept_ckbtc: bool,
-    accept_cketh: bool,
+    goal_usd_e8s: u64,
 ) -> Result<(), String> {
     let title = title.trim().to_string();
     let description = description.trim().to_string();
     let detail = detail.trim().to_string();
     validate_idea_text(&title, &description, &detail)?;
-    if goal_icp_e8s == 0 && goal_ckbtc_e8s == 0 && goal_cketh_wei == 0 {
-        return Err("NO_GOAL_SET".to_string());
-    }
-    if !accept_icp && !accept_ckbtc && !accept_cketh {
-        return Err("NO_CRYPTO_ACCEPTED".to_string());
+    if goal_usd_e8s < MIN_PROJECT_GOAL_USD_E8S {
+        return Err("GOAL_BELOW_MIN".to_string());
     }
     PROJECTS.with(|m| {
         let mut m = m.borrow_mut();
@@ -5478,12 +5555,11 @@ fn admin_update_project(
             project.title = title;
             project.description = description;
             project.detail = detail;
-            project.goal_icp_e8s = goal_icp_e8s;
-            project.goal_ckbtc_e8s = goal_ckbtc_e8s;
-            project.goal_cketh_wei = goal_cketh_wei;
-            project.accept_icp = accept_icp;
-            project.accept_ckbtc = accept_ckbtc;
-            project.accept_cketh = accept_cketh;
+            project.goal_usd_e8s = goal_usd_e8s;
+            // Every project accepts every supported crypto.
+            project.accept_icp = true;
+            project.accept_ckbtc = true;
+            project.accept_cketh = true;
             m.insert(id, project);
             Ok(())
         } else {
@@ -5504,12 +5580,16 @@ fn admin_remove_project(project_id: u64) -> Result<(), String> {
     })
 }
 
-/// All projects, newest first.
+/// All projects, newest first. `raised_usd_e8s` is computed per call from the
+/// per-token raised pots at the cached USD rate.
 #[ic_cdk::query]
 fn list_projects() -> Vec<Project> {
     let mut projects: Vec<Project> = PROJECTS.with(|m| {
         m.borrow().iter().map(|entry| entry.value()).collect()
     });
+    for p in projects.iter_mut() {
+        p.raised_usd_e8s = project_raised_usd_e8s(p);
+    }
     projects.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     projects
 }
@@ -5828,6 +5908,7 @@ fn seed_mock_ideas() {
                 last_upvote_at: now,
                 upvote_count: 0,
                 views: 0,
+                has_upvoted: false,
                 total_icp_e8s: 0,
                 total_ckbtc_e8s: 0,
                 total_cketh_wei: 0,
@@ -7217,84 +7298,9 @@ async fn merge_unstake(unstake_id: u64, target_tier: StakeTier) -> Result<(), St
 
 // ── Lossless voting ──
 
-/// Cast a free vote with the caller's staked weight. NO ICP moves and nothing
-/// is escrowed — this only bumps the proposal's staked-weight tallies. It
-/// therefore has nothing to refund at settlement: the cutoff path only
-/// settles burned COMMITMENTS, never LOSSLESS_VOTES. The weight joins the
-/// adopt/reject balance of power AND can carry the proposal to its threshold;
-/// one immutable vote per user per proposal, snapshotted at cast time.
-#[ic_cdk::update]
-fn cast_lossless_vote(proposal_id: u64, stance: Stance) -> Result<(), String> {
-    require_authenticated()?;
-    require_lossless_enabled()?;
-    let caller = get_caller();
-
-    // Weight = total staked ICP ÷ 10 (see staked_voting_power).
-    let weight = user_voting_weight(caller);
-    if weight == 0 {
-        return Err("NO_STAKE".to_string());
-    }
-
-    let key = CommitmentKey {
-        proposal_id,
-        principal: caller,
-    };
-    if LOSSLESS_VOTES.with(|m| m.borrow().get(&key).is_some()) {
-        return Err("ALREADY_VOTED".to_string());
-    }
-
-    let proposal = PROPOSALS.with(|map| map.borrow().get(&proposal_id));
-    let mut proposal = match proposal {
-        Some(p) => p,
-        None => return Err("PROPOSAL_NOT_FOUND".to_string()),
-    };
-    if proposal.status != "open" && proposal.status != "met" {
-        return Err("VOTING_CLOSED".to_string());
-    }
-    let now = current_time();
-    if now >= proposal.deadline.saturating_sub(3_600_000_000_000) {
-        return Err("VOTING_CLOSED".to_string());
-    }
-
-    if proposal.first_stance.is_none() {
-        proposal.first_stance = Some(stance.clone());
-    }
-    if stance == Stance::Adopt {
-        proposal.lossless_adopt_e8s = proposal
-            .lossless_adopt_e8s
-            .checked_add(weight)
-            .ok_or("POT_OVERFLOW")?;
-    } else {
-        proposal.lossless_reject_e8s = proposal
-            .lossless_reject_e8s
-            .checked_add(weight)
-            .ok_or("POT_OVERFLOW")?;
-    }
-
-    // Staked conviction counts toward the threshold too: when the combined
-    // staked weight reaches the burn-ICP threshold the proposal is met.
-    if proposal.status == "open" && proposal_threshold_met(&proposal) {
-        proposal.status = "met".to_string();
-    }
-
-    LOSSLESS_VOTES.with(|m| {
-        m.borrow_mut().insert(
-            key,
-            LosslessVote {
-                proposal_id,
-                principal: caller,
-                stance,
-                weight_e8s: weight,
-                cast_at: now,
-            },
-        );
-    });
-    PROPOSALS.with(|map| {
-        map.borrow_mut().insert(proposal_id, proposal);
-    });
-    staking_audit("lossless_vote", caller, weight, proposal_id);
-    Ok(())
-}
+// Free staked voting was removed (2026-06-13): voting is burn-only. Staking now
+// only earns lottery tickets. The `LOSSLESS_VOTES` map and the proposal
+// `lossless_*` pots are retained for upgrade-safety but are no longer written.
 
 // ── Sweep: bootstrap repair, unstakes, maturity, yield ──
 
@@ -7492,9 +7498,9 @@ async fn distribute_yield_inbox() {
     }
 
     let spendable = balance - 2 * ICP_FEE_E8S;
-    // 80% lottery / 20% treasury (was 50/50, June 2026): the lottery EV is
-    // what pays stakers their advertised return — see GROWTH_TARGETS.md §5.
-    let lottery_amt = spendable * 4 / 5;
+    // 50% lottery / 50% treasury — every staking neuron (including the
+    // permanent Booster neuron) splits its yield evenly.
+    let lottery_amt = spendable / 2;
     let treasury_amt = spendable - lottery_amt;
 
     let id = NEXT_YIELD_ID.with(|c| {
@@ -7694,17 +7700,6 @@ fn list_my_pending_unstakes() -> Vec<PendingUnstake> {
     })
 }
 
-#[ic_cdk::query]
-fn get_my_lossless_votes() -> Vec<LosslessVote> {
-    let caller = get_caller();
-    LOSSLESS_VOTES.with(|m| {
-        m.borrow()
-            .iter()
-            .map(|e| e.value())
-            .filter(|v| v.principal == caller)
-            .collect()
-    })
-}
 
 #[ic_cdk::query]
 fn list_yield_distributions() -> Vec<YieldDistribution> {
@@ -8357,7 +8352,7 @@ fn user_daily_tickets(user: Principal) -> u64 {
     // Stake-weighted: base × term multiplier × whole ICP staked in the tier
     // (1 ICP for 6 months = base/day; 500 ICP for 2 years = base × 4 × 500).
     // Sub-1-ICP stakes still earn one base unit so small stakers participate.
-    StakeTier::all().iter().fold(0u64, |acc, &tier| {
+    let tier_tickets = StakeTier::all().iter().fold(0u64, |acc, &tier| {
         let staked_e8s = STAKES
             .with(|m| m.borrow().get(&stake_key(tier, user)))
             .map(|s| s.amount_e8s)
@@ -8370,7 +8365,19 @@ fn user_daily_tickets(user: Principal) -> u64 {
         } else {
             acc
         }
-    })
+    });
+    // Boosters (permanent stake): a flat 100 tickets/day per whole ICP, on top
+    // of any tier stake. Sub-1-ICP still earns one unit.
+    let booster_e8s = EARLY_ADOPTERS
+        .with(|m| m.borrow().get(&user))
+        .map(|e| e.staked_e8s)
+        .unwrap_or(0);
+    let booster_tickets = if booster_e8s > 0 {
+        BOOSTER_TICKETS_PER_ICP_PER_DAY.saturating_mul((booster_e8s / ONE_ICP_E8S).max(1))
+    } else {
+        0
+    };
+    tier_tickets.saturating_add(booster_tickets)
 }
 
 /// Credit today's tickets (once per UTC day). Requires an active stake —
@@ -8663,6 +8670,32 @@ async fn dev_run_lottery_draw(force_win: bool) -> Result<(), String> {
     }
     run_lottery_draw(if force_win { Some(0) } else { None }).await;
     Ok(())
+}
+
+/// Local-dev: grant the caller `count` lottery tickets in the current round so
+/// the UI can be demoed with a non-empty holding without staking. Local only.
+#[ic_cdk::update]
+fn dev_grant_lottery_tickets(count: u64) -> Result<u64, String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    require_lottery_enabled()?;
+    let caller = get_caller();
+    let now = current_time();
+    let mut state = lottery_state();
+    let mut entry = LOTTERY_TICKETS
+        .with(|m| m.borrow().get(&caller))
+        .unwrap_or(TicketEntry { round: state.round, count: 0, last_claim_day: 0 });
+    if entry.round != state.round {
+        entry = TicketEntry { round: state.round, count: 0, last_claim_day: entry.last_claim_day };
+    }
+    entry.count = entry.count.saturating_add(count);
+    state.total_tickets = state.total_tickets.saturating_add(count);
+    if state.next_draw_at == 0 {
+        state.next_draw_at = next_draw_after(now);
+    }
+    LOTTERY_TICKETS.with(|m| { m.borrow_mut().insert(caller, entry.clone()); });
+    set_lottery_state(state);
+    Ok(entry.count)
 }
 
 /// Local-dev: seed a varied set of mock payout records for the caller so the
@@ -10040,15 +10073,6 @@ const FIELDGOAL_ROUNDS: usize = 5;
 const FIELDGOAL_MAX_POINTS_PER_KICK: u8 = 70;
 const FIELDGOAL_MIN_MILLIS: u64 = 5_000; // 5 snaps can't finish in <5 s
 const FIELDGOAL_MAX_MILLIS: u64 = 30 * 60 * 1000; // 30 min
-// Game 3: "Turbo Rush" — an original Atari-era pseudo-3D lane racer. One
-// 60-second run split into 5 stages; per_hole carries CARS PASSED per stage,
-// MOST total wins (arcade_rank_key inverts like Field Goal).
-const ARCADE_GAME_TURBORUSH: &str = "turborush";
-const TURBORUSH_STAGES: usize = 5;
-/// Physically ~1 pass/sec tops; 60/stage leaves headroom.
-const TURBORUSH_MAX_POINTS_PER_STAGE: u8 = 60;
-const TURBORUSH_MIN_MILLIS: u64 = 50_000; // the run itself is 60 s
-const TURBORUSH_MAX_MILLIS: u64 = 30 * 60 * 1000;
 const ARCADE_LEADERBOARD_LIMIT: usize = 100;
 // Palette sizes — the frontend mirrors these (index = palette entry).
 const CHARACTER_HAIR_OPTIONS: u8 = 6;
@@ -10058,11 +10082,6 @@ const CHARACTER_OUTFIT_OPTIONS: u8 = 8;
 // outfit palette, skin shares the 6-tone skin palette.
 const KICKER_HELMET_OPTIONS: u8 = 8;
 const KICKER_JERSEY_OPTIONS: u8 = 8;
-// Car palettes (Turbo Rush): body/stripe share the 8-color outfit palette,
-// wheels have their own 6-entry palette in the frontend.
-const CAR_BODY_OPTIONS: u8 = 8;
-const CAR_STRIPE_OPTIONS: u8 = 8;
-const CAR_WHEEL_OPTIONS: u8 = 6;
 
 /// Palette indices for the low-poly golfer (defaults are all 0).
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -10106,7 +10125,6 @@ pub struct ArcadeInfo {
     /// Per-game kill switches (only meaningful when `enabled` is true).
     pub minigolf_enabled: bool,
     pub fieldgoal_enabled: bool,
-    pub turborush_enabled: bool,
     /// Caller may finish full rounds + submit scores (stake or recent vote).
     pub full_access: bool,
     pub has_stake: bool,
@@ -10116,8 +10134,6 @@ pub struct ArcadeInfo {
     pub my_character: Option<ArcadeCharacter>,
     /// Field Goal kicker persona — fields map hair→helmet, outfit→jersey.
     pub my_kicker: Option<ArcadeCharacter>,
-    /// Turbo Rush car — fields map hair→body, skin→wheels, outfit→stripe.
-    pub my_car: Option<ArcadeCharacter>,
     pub hair_options: u8,
     pub skin_options: u8,
     pub outfit_options: u8,
@@ -10147,12 +10163,7 @@ thread_local! {
     static ARCADE_KICKERS: RefCell<StableBTreeMap<Principal, ArcadeCharacter, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(52))))
     });
-
-    // Turbo Rush cars — reuses ArcadeCharacter with the mapping hair→body,
-    // skin→wheels, outfit→stripe.
-    static ARCADE_CARS: RefCell<StableBTreeMap<Principal, ArcadeCharacter, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(53))))
-    });
+    // MemoryId 53 was ARCADE_CARS (Turbo Rush personas) — game removed; id retired.
 }
 
 fn require_arcade_enabled() -> Result<(), String> {
@@ -10166,7 +10177,6 @@ fn require_arcade_enabled() -> Result<(), String> {
 fn arcade_game_flag(game: &str) -> &'static str {
     match game {
         ARCADE_GAME_FIELDGOAL => FLAG_ARCADE_FIELDGOAL,
-        ARCADE_GAME_TURBORUSH => FLAG_ARCADE_TURBORUSH,
         _ => FLAG_ARCADE_MINIGOLF,
     }
 }
@@ -10214,8 +10224,8 @@ fn arcade_access(user: Principal) -> (bool, bool) {
 /// slot and ranks by most, so its key inverts the score. Ties break by
 /// faster time, then earlier submission.
 fn arcade_rank_key(game: &str, score: u32, millis: u64, at: u64) -> (u32, u64, u64) {
-    // Field Goal + Turbo Rush rank by MOST points; mini golf by fewest strokes.
-    if game == ARCADE_GAME_FIELDGOAL || game == ARCADE_GAME_TURBORUSH {
+    // Field Goal ranks by MOST points; mini golf by fewest strokes.
+    if game == ARCADE_GAME_FIELDGOAL {
         (u32::MAX - score, millis, at)
     } else {
         (score, millis, at)
@@ -10251,14 +10261,12 @@ fn get_arcade_info() -> ArcadeInfo {
         enabled: feature_visible(FLAG_ARCADE, get_caller()),
         minigolf_enabled: feature_visible(FLAG_ARCADE_MINIGOLF, get_caller()),
         fieldgoal_enabled: feature_visible(FLAG_ARCADE_FIELDGOAL, get_caller()),
-        turborush_enabled: feature_visible(FLAG_ARCADE_TURBORUSH, get_caller()),
         full_access: has_stake || voted_recently,
         has_stake,
         voted_recently,
         customize_fee_usd_e8s: ARCADE_CUSTOMIZE_FEE_USD_E8S,
         my_character: ARCADE_CHARACTERS.with(|m| m.borrow().get(&caller)),
         my_kicker: ARCADE_KICKERS.with(|m| m.borrow().get(&caller)),
-        my_car: ARCADE_CARS.with(|m| m.borrow().get(&caller)),
         hair_options: CHARACTER_HAIR_OPTIONS,
         skin_options: CHARACTER_SKIN_OPTIONS,
         outfit_options: CHARACTER_OUTFIT_OPTIONS,
@@ -10430,70 +10438,6 @@ async fn customize_kicker(helmet: u8, skin: u8, jersey: u8, token: ExplorerToken
     Ok(())
 }
 
-/// Change the Turbo Rush car's look (body/wheels/stripe palette indices)
-/// for $1, paid in any supported token — same quote + deposit flow as the
-/// golfer and kicker.
-#[ic_cdk::update]
-async fn customize_car(body: u8, wheels: u8, stripe: u8, token: ExplorerToken) -> Result<(), String> {
-    require_authenticated()?;
-    require_arcade_game_enabled(ARCADE_GAME_TURBORUSH)?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    if body >= CAR_BODY_OPTIONS || wheels >= CAR_WHEEL_OPTIONS || stripe >= CAR_STRIPE_OPTIONS {
-        return Err("INVALID_CHARACTER_OPTION".to_string());
-    }
-    let now = current_time();
-    let quote = ARCADE_QUOTES
-        .with(|m| m.borrow().get(&caller))
-        .ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.token != token {
-        return Err("QUOTE_MISMATCH".to_string());
-    }
-    if now > quote.expires_at {
-        return Err("QUOTE_EXPIRED".to_string());
-    }
-
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let ledger_id = explorer_token_ledger(token, &config);
-    let fee = explorer_token_fee(token, &config);
-    let sub = derive_arcade_subaccount(&caller);
-    let escrow = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(sub),
-    };
-    let balance = call_ledger_balance(ledger_id, escrow).await?;
-    if balance < quote.amount.saturating_add(fee) {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
-    }
-    let treasury_dest = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(TREASURY_SUBACCOUNT),
-    };
-    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
-        .await
-        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
-
-    ARCADE_CARS.with(|m| {
-        m.borrow_mut().insert(caller, ArcadeCharacter { hair: body, skin: wheels, outfit: stripe });
-    });
-    ARCADE_QUOTES.with(|m| {
-        m.borrow_mut().remove(&caller);
-    });
-
-    let entry = AuditLogEntry {
-        timestamp: now,
-        event_type: "arcade_customize_car".to_string(),
-        proposal_id: 0,
-        user: caller,
-        amount_e8s: quote.amount,
-    };
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&entry);
-    });
-    Ok(())
-}
-
 /// Submit a finished round. Requires full access (the hole-1 preview can't
 /// produce a 9-hole score). Insert-if-better per (game, player); returns the
 /// caller's resulting 1-based rank on that game's board.
@@ -10529,18 +10473,6 @@ fn submit_arcade_score(game: String, millis: u64, per_hole: Vec<u8>) -> Result<u
                 return Err("INVALID_STROKES".to_string());
             }
             if !(FIELDGOAL_MIN_MILLIS..=FIELDGOAL_MAX_MILLIS).contains(&millis) {
-                return Err("INVALID_TIME".to_string());
-            }
-        }
-        ARCADE_GAME_TURBORUSH => {
-            // per_hole = cars passed per 12-second stage (0 is valid).
-            if per_hole.len() != TURBORUSH_STAGES {
-                return Err("INVALID_HOLE_COUNT".to_string());
-            }
-            if per_hole.iter().any(|&p| p > TURBORUSH_MAX_POINTS_PER_STAGE) {
-                return Err("INVALID_STROKES".to_string());
-            }
-            if !(TURBORUSH_MIN_MILLIS..=TURBORUSH_MAX_MILLIS).contains(&millis) {
                 return Err("INVALID_TIME".to_string());
             }
         }
@@ -10797,6 +10729,8 @@ const EARLY_ADOPTER_DISSOLVE_SECS: u32 = 63_115_200;
 const EARLY_ADOPTER_MIN_DISTRIBUTION_E8S: u64 = 10_000_000_000;
 /// 1 ICP minimum buy-in.
 const MIN_EARLY_ADOPTER_STAKE_E8S: u64 = 100_000_000;
+/// Boosters earn a flat 100 lottery tickets/day per whole ICP staked.
+const BOOSTER_TICKETS_PER_ICP_PER_DAY: u64 = 100;
 /// Settlement period: 30-day months indexed from the Unix epoch.
 const EARLY_ADOPTER_PERIOD_NANOS: u64 = 30 * DAY_NANOS;
 const MAX_EARLY_ADOPTERS: u64 = 10_000;
@@ -10991,34 +10925,14 @@ fn derive_early_adopter_subaccount(user: &Principal) -> [u8; 32] {
 /// • Otherwise the first 1,000 ICP is the treasury's and the excess (net of
 ///   the one ledger fee burned moving it into the share pool — found by
 ///   local e2e) feeds the distribution pot.
+/// Booster yield routing: 50% treasury / 50% lottery pot — never to users, and
+/// no restake to the neuron. Returns `(restake=0, treasury_cut, lottery_net)`;
+/// the lottery half is fee-adjusted for its onward transfer.
 fn early_adopter_route_yield(yield_e8s: u64, fee: u64) -> (u64, u64, u64) {
-    if yield_e8s < EARLY_ADOPTER_RESTAKE_BELOW_E8S {
-        return (yield_e8s, 0, 0);
-    }
-    let treasury_cut = yield_e8s.min(EARLY_ADOPTER_TREASURY_CUT_E8S);
-    let excess = yield_e8s.saturating_sub(treasury_cut);
-    let excess_net = if excess > fee { excess - fee } else { 0 };
-    (0, treasury_cut, excess_net)
-}
-
-/// Pure pot allocation (unit-tested): split `pot` across early adopters in
-/// proportion to their staked ICP. Returns the per-founder shares and the
-/// integer-division dust left over. Pots under 100 ICP allocate nothing.
-fn early_adopter_allocate(pot: u64, stakes: &[(Principal, u64)]) -> (Vec<(Principal, u64)>, u64) {
-    let total: u128 = stakes.iter().map(|(_, s)| *s as u128).sum();
-    if total == 0 || pot < EARLY_ADOPTER_MIN_DISTRIBUTION_E8S {
-        return (Vec::new(), pot);
-    }
-    let mut shares = Vec::with_capacity(stakes.len());
-    let mut allocated: u64 = 0;
-    for (user, stake) in stakes {
-        let share = ((pot as u128) * (*stake as u128) / total) as u64;
-        if share > 0 {
-            shares.push((*user, share));
-            allocated = allocated.saturating_add(share);
-        }
-    }
-    (shares, pot - allocated)
+    let treasury_cut = yield_e8s / 2;
+    let lottery = yield_e8s.saturating_sub(treasury_cut);
+    let lottery_net = if lottery > fee { lottery - fee } else { 0 };
+    (0, treasury_cut, lottery_net)
 }
 
 #[ic_cdk::query]
@@ -11123,19 +11037,8 @@ async fn early_adopter_stake(amount_e8s: u64) -> Result<(), String> {
     if amount_e8s < MIN_EARLY_ADOPTER_STAKE_E8S {
         return Err("BELOW_MIN_STAKE".to_string());
     }
-    let is_member = EARLY_ADOPTERS.with(|m| m.borrow().get(&caller).is_some());
-    // Once a month's yield has hit 2,000 ICP, the founders' table is full —
-    // forever. Existing early adopters may still top up at any time.
-    if !is_member {
-        let closed = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().membership_closed);
-        if closed {
-            return Err("MEMBERSHIP_CLOSED".to_string());
-        }
-        let at_quota = EARLY_ADOPTERS.with(|m| m.borrow().len() >= MAX_EARLY_ADOPTERS);
-        if at_quota {
-            return Err("EARLY_ADOPTER_QUOTA_REACHED".to_string());
-        }
-    }
+    // Boosters are open forever — no member quota, no membership-close gate.
+    // Anyone can stake any time to earn lottery tickets.
 
     let config = CONFIG.with(|c| c.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
@@ -11271,64 +11174,12 @@ async fn advance_early_adopter_bootstrap() -> Result<(), String> {
     Ok(())
 }
 
-/// Claim the caller's current monthly share. Shares not claimed before the
-/// next settlement are forfeited to the treasury.
+/// Boosters never pay ICP to users — yield funds the lottery + treasury (50/50).
+/// Retained as a hard guard against any legacy `claimable_e8s`: it always
+/// refuses. Legacy shares are drained to the treasury at the next settlement.
 #[ic_cdk::update]
 async fn claim_early_adopter_yield() -> Result<u64, String> {
-    require_authenticated()?;
-    require_early_adopters_enabled()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    let claimable = EARLY_ADOPTERS
-        .with(|m| m.borrow().get(&caller))
-        .map(|c| c.claimable_e8s)
-        .unwrap_or(0);
-    if claimable <= 10_000 {
-        return Err("NOTHING_TO_CLAIM".to_string());
-    }
-    // Zero the share BEFORE the transfer (no double-claim across await); on
-    // transfer failure it is restored.
-    EARLY_ADOPTERS.with(|m| {
-        let mut m = m.borrow_mut();
-        if let Some(mut c) = m.get(&caller) {
-            c.claimable_e8s = 0;
-            m.insert(caller, c);
-        }
-    });
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let net = claimable - 10_000;
-    let dest = LedgerAccount { owner: caller, subaccount: None };
-    let transfer = call_ledger_transfer(
-        config.ledger_canister_id,
-        Some(EARLY_ADOPTER_SHARE_POOL_SUBACCOUNT),
-        dest,
-        net,
-        Some(10_000),
-    )
-    .await;
-    if let Err(e) = transfer {
-        EARLY_ADOPTERS.with(|m| {
-            let mut m = m.borrow_mut();
-            if let Some(mut c) = m.get(&caller) {
-                c.claimable_e8s = claimable;
-                m.insert(caller, c);
-            }
-        });
-        return Err(format!("CLAIM_TRANSFER_FAILED: {}", e));
-    }
-    record_payout(caller, PayoutType::EarlyAdopterYield, IdeaToken::ICP, net, 0);
-    let entry = AuditLogEntry {
-        timestamp: current_time(),
-        event_type: "early_adopter_claim".to_string(),
-        proposal_id: 0,
-        user: caller,
-        amount_e8s: net,
-    };
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&entry);
-    });
-    Ok(net)
+    Err("BOOSTERS_NO_YIELD".to_string())
 }
 
 /// Run (or resume) one monthly settlement: expire unclaimed shares →
@@ -11434,86 +11285,49 @@ async fn early_adopter_run_settlement(now: u64) -> Result<(), String> {
         job.cut_done = true;
         persist_job(&job);
     }
+    // The "pool" leg now sends the user-half to the LOTTERY POT (not a per-user
+    // share pool). Boosters never pay ICP to users — yield is 50% treasury (the
+    // cut leg above) / 50% lottery (here).
     if !job.pool_done {
         if job.excess_net_e8s > 0 {
-            let pool = LedgerAccount { owner: canister, subaccount: Some(EARLY_ADOPTER_SHARE_POOL_SUBACCOUNT) };
-            call_ledger_transfer(ledger_id, Some(EARLY_ADOPTER_YIELD_SUBACCOUNT), pool, job.excess_net_e8s, Some(fee))
+            let lottery = LedgerAccount { owner: canister, subaccount: Some(LOTTERY_SUBACCOUNT) };
+            call_ledger_transfer(ledger_id, Some(EARLY_ADOPTER_YIELD_SUBACCOUNT), lottery, job.excess_net_e8s, Some(fee))
                 .await
-                .map_err(|e| format!("POOL_TRANSFER_FAILED: {}", e))?;
+                .map_err(|e| format!("LOTTERY_TRANSFER_FAILED: {}", e))?;
         }
         job.pool_done = true;
         persist_job(&job);
     }
 
-    // 3. Finalize (runs exactly once — the job is cleared at the end):
-    // allocate shares in proportion to each early adopter's staked ICP.
+    // 3. Persist the round + state and close the job. No per-user allocation —
+    // the lottery half already moved above.
     let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
     let n = EARLY_ADOPTERS.with(|m| m.borrow().len());
-    let pot = job.excess_net_e8s.saturating_add(state.rollover_e8s);
-    let stakes: Vec<(Principal, u64)> = EARLY_ADOPTERS.with(|m| {
-        m.borrow().iter().map(|e| (*e.key(), e.value().staked_e8s)).collect()
-    });
-    let (shares, new_rollover) = early_adopter_allocate(pot, &stakes);
-    let allocated: u64 = shares.iter().map(|(_, s)| *s).sum();
-    EARLY_ADOPTERS.with(|m| {
-        let mut m = m.borrow_mut();
-        for (user, share) in &shares {
-            if let Some(mut c) = m.get(user) {
-                c.claimable_e8s = *share;
-                m.insert(*user, c);
-            }
-        }
-    });
-
-    // 4. Persist the round + state and close the job.
     let month = job.month;
     let yield_e8s = job.yield_e8s;
-    let unclaimed_now: u64 = EARLY_ADOPTERS.with(|m| m.borrow().iter().map(|e| e.value().claimable_e8s).sum());
     EARLY_ADOPTER_ROUNDS.with(|m| {
         m.borrow_mut().insert(month, EarlyAdopterRound {
             month,
             settled_at: now,
             yield_e8s,
             treasury_e8s: job.treasury_cut_e8s,
-            distributed_e8s: allocated,
-            restaked_e8s: job.restake_e8s,
+            distributed_e8s: 0, // never distributed to users
+            restaked_e8s: 0,
             early_adopter_count: n,
             expired_e8s: job.expired_e8s,
-            rollover_after_e8s: new_rollover,
-            share_pool_after_e8s: new_rollover.saturating_add(unclaimed_now),
+            rollover_after_e8s: 0,
+            share_pool_after_e8s: 0,
         });
     });
-    let newly_closed = !state.membership_closed && yield_e8s >= EARLY_ADOPTER_CLOSE_YIELD_E8S;
     EARLY_ADOPTER_STATE.with(|c| {
         let mut s = c.borrow().get().clone();
-        s.rollover_e8s = new_rollover;
+        s.rollover_e8s = 0;
         s.last_processed_month = month.max(s.last_processed_month);
         s.total_yield_e8s = s.total_yield_e8s.saturating_add(yield_e8s);
-        s.total_distributed_e8s = s.total_distributed_e8s.saturating_add(allocated);
         s.total_expired_e8s = s.total_expired_e8s.saturating_add(job.expired_e8s);
-        if job.restake_e8s > 0 {
-            s.total_restaked_e8s = s.total_restaked_e8s.saturating_add(job.restake_e8s);
-            // Restaked yield must be claim/refreshed into the neuron too.
-            s.pending_refresh_e8s = s.pending_refresh_e8s.saturating_add(job.restake_e8s.saturating_sub(fee));
-        }
-        if newly_closed {
-            s.membership_closed = true;
-        }
         s.pending_job = None;
         c.borrow_mut().set(s);
     });
-    if newly_closed {
-        let entry = AuditLogEntry {
-            timestamp: now,
-            event_type: "early_adopter_membership_closed".to_string(),
-            proposal_id: month,
-            user: get_canister_id(),
-            amount_e8s: yield_e8s,
-        };
-        AUDIT_LOG.with(|log| {
-            let _ = log.borrow_mut().append(&entry);
-        });
-    }
     let entry = AuditLogEntry {
         timestamp: now,
         event_type: "early_adopter_settlement".to_string(),
@@ -11730,6 +11544,9 @@ fn get_my_twitter_handle() -> Option<String> {
 /// 1 VP = 1e8 weight-e8s (the staking-weight unit `user_voting_weight` returns).
 const VP_E8S: u64 = 100_000_000;
 /// 1 chip = 0.001 VP = 1e5 weight-e8s. chips = effective_vp_e8s / CHIP_E8S.
+/// The chip is what the UI calls **SVPP** (Staked Voting Power Points): because
+/// the casino base credits stake at full value (see `casino_staking_weight_e8s`,
+/// no 10× voting discount), 1 staked ICP = 1,000 SVPP at base tenure.
 const CHIP_E8S: u64 = 100_000;
 const CRASH_MIN_BET_CHIPS: u64 = 10; // 0.01 VP
 const CRASH_MAX_BET_CHIPS: u64 = 10_000_000; // 10,000 VP (1 VP = 1,000 chips)
@@ -11961,7 +11778,6 @@ pub struct AutopilotState {
 pub enum MarketKind {
     #[default]
     Crash,
-    Poker,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -12237,10 +12053,18 @@ fn settle_crash_bet(wager_chips: u64, target_x100: u64, manual_x100: Option<u64>
 
 // ── Casino VP ledger (plans/crash/02, PB-230) ───────────────────────────────
 
-/// Each user's casino VP base = their live staking weight (e8s). Staked ICP is
-/// never wagered; the ledger only ever modifies a *derived* number.
+/// Each user's casino SVPP base, in weight-e8s. Staked ICP is never wagered;
+/// the ledger only ever modifies a *derived* number.
+///
+/// SVPP (Staked Voting Power Points) deliberately does NOT apply the 10×
+/// staked-voting discount (`STAKED_VP_DIVISOR`): voting weight (SVP) discounts
+/// stake 10:1 vs. an irreversible burn, but the casino credits stake at full
+/// value so that **1 staked ICP = 1,000 SVPP** at base tenure (and scales with
+/// the same tenure multiplier — up to 16,000 after 2 years). We reuse
+/// `user_voting_weight` (which carries the tenure multiplier) and multiply the
+/// discount back out, keeping the single tenure code path.
 fn casino_staking_weight_e8s(user: Principal) -> u64 {
-    user_voting_weight(user)
+    user_voting_weight(user).saturating_mul(STAKED_VP_DIVISOR)
 }
 
 /// Tenure-jubilee period: completed 6-month spans since the user first staked
@@ -12292,17 +12116,14 @@ fn casino_chips(user: Principal) -> u64 {
 }
 
 /// Chips reserved by a live (pending) crash bet — invisible to a second crash
-/// bet or a poker sit-down, so they can't be double-spent (plans/crash/02).
+/// bet, so they can't be double-spent (plans/crash/02).
 fn reserved_chips(user: Principal) -> u64 {
     let r = crash_state();
-    let crash = if matches!(r.phase, CrashPhase::Betting | CrashPhase::Running) {
+    if matches!(r.phase, CrashPhase::Betting | CrashPhase::Running) {
         r.bets.iter().filter(|b| b.user == user && b.outcome == BetOutcome::Pending).map(|b| b.wager_chips).sum()
     } else {
         0
-    };
-    // A live poker seat reserves its stack too, so the same VP can't be spent
-    // in both games at once (casino-wide reservation, plans/crash C2).
-    crash + poker_reserved_chips(user)
+    }
 }
 
 fn casino_available_chips(user: Principal) -> u64 {
@@ -13635,1839 +13456,6 @@ fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
             UserStake { amount_e8s, staked_at: now, last_action_at: now },
         );
     });
-}
-
-/// Local-dev only (admin): grant the caller chips and seat six house agents at
-/// Caldera 1 so a hand is always in progress to watch. Idempotent-ish.
-#[ic_cdk::update(guard = "require_admin")]
-fn dev_seed_poker_play() -> Result<String, String> {
-    require_local_dev()?;
-    let now = current_time();
-    dev_grant_stake(get_caller(), 100_000 * ONE_ICP_E8S, now);
-    poker_ensure_tables();
-    let bots: [(&str, PokerStyle); 6] = [
-        ("aceHunter", PokerStyle::Tag),
-        ("riverRat", PokerStyle::Lag),
-        ("nitMaster", PokerStyle::Nit),
-        ("callBot9000", PokerStyle::Station),
-        ("bluffy", PokerStyle::Lag),
-        ("gripStack", PokerStyle::Tag),
-    ];
-    let mut t = get_poker_table(1).ok_or("NO_TABLE")?;
-    for (i, (h, style)) in bots.iter().enumerate() {
-        let p = Principal::from_slice(&[0xC0, i as u8, 0x90, 0x4E, 0x00]);
-        dev_grant_stake(p, (2_000 + (i as u64) * 500) * ONE_ICP_E8S, now);
-        let agent = PokerAgent {
-            agent_principal: p, // house mode: agent principal == owner
-            mode: AgentMode::House,
-            model: format!("caldera-house · {}", h),
-            style: *style,
-            avatar_url: None,
-            stop_loss_e8s: 0,
-            claimed_at: now,
-            last_seen: now,
-            table_id: None,
-            seat: None,
-            state: AgentState::Idle,
-        };
-        POKER_AGENT_INDEX.with(|m| { m.borrow_mut().insert(p, p); });
-        set_poker_agent(p, agent);
-        poker_place_in_seat(&mut t, p);
-    }
-    t.resume_at = now; // start a hand on the next tick
-    set_poker_table(t);
-    Ok("seeded 6 house agents at Caldera 1 + granted you 100,000 ICP of dev stake".to_string())
-}
-
-// ==========================================
-// 21. Agent Poker (Epic I) — pure NLHE engine
-// ==========================================
-//
-// A deterministic, ic_cdk-free state machine (plans/poker/02). The canister
-// layer (below) feeds it RNG + actions and persists snapshots. Wagers are
-// casino VP chips (shared CASINO_VP_DELTA ledger); hands are zero-sum between
-// players — 0% rake. Humans never act; agents (external or the house) do.
-
-mod poker_engine {
-    use super::sha256;
-
-    pub const NUM_SEATS: usize = 9;
-    pub const SMALL_BLIND: u64 = 25;
-    pub const BIG_BLIND: u64 = 50;
-
-    #[inline]
-    pub fn rank_of(card: u8) -> u8 {
-        card / 4
-    } // 0=2 … 12=A
-    #[inline]
-    pub fn suit_of(card: u8) -> u8 {
-        card % 4
-    }
-
-    /// Fisher-Yates shuffle of a 52-card deck seeded by a 32-byte seed. The
-    /// stream is sha256(seed ‖ counter) so it's deterministic and verifiable.
-    pub fn shuffled_deck(seed: &[u8; 32]) -> Vec<u8> {
-        let mut deck: Vec<u8> = (0..52u8).collect();
-        let mut ctr: u64 = 0;
-        let mut buf: Vec<u8> = Vec::new();
-        let mut next = |ctr: &mut u64| -> u64 {
-            let mut data = seed.to_vec();
-            data.extend_from_slice(&ctr.to_le_bytes());
-            *ctr += 1;
-            let h = sha256(&data);
-            u64::from_le_bytes(h[0..8].try_into().unwrap())
-        };
-        let _ = &mut buf;
-        for i in (1..52usize).rev() {
-            let j = (next(&mut ctr) % (i as u64 + 1)) as usize;
-            deck.swap(i, j);
-        }
-        deck
-    }
-
-    fn pack(cat: u32, tie: &[u8]) -> u32 {
-        let mut v = cat << 20;
-        for (i, &r) in tie.iter().take(5).enumerate() {
-            v |= (r as u32) << (16 - 4 * i);
-        }
-        v
-    }
-
-    /// Strength of an exact 5-card hand as a totally ordered u32 (category in
-    /// the high bits, tiebreak ranks below). Higher = better.
-    pub fn eval5(cs: [u8; 5]) -> u32 {
-        let mut rc = [0u8; 13];
-        let suit0 = suit_of(cs[0]);
-        let mut flush = true;
-        for &c in &cs {
-            rc[rank_of(c) as usize] += 1;
-            if suit_of(c) != suit0 {
-                flush = false;
-            }
-        }
-        // (count, rank) pairs, sorted by count desc then rank desc — this is
-        // exactly the tiebreak order for a 5-card hand.
-        let mut pairs: Vec<(u8, u8)> =
-            (0..13u8).filter(|&r| rc[r as usize] > 0).map(|r| (rc[r as usize], r)).collect();
-        pairs.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-        let counts: Vec<u8> = pairs.iter().map(|p| p.0).collect();
-        let order: Vec<u8> = pairs.iter().map(|p| p.1).collect();
-        let straight_high = if counts.len() == 5 {
-            if order[0] - order[4] == 4 {
-                Some(order[0])
-            } else if order == [12, 3, 2, 1, 0] {
-                Some(3) // wheel A-5 (high card is the 5)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if flush {
-            if let Some(h) = straight_high {
-                return pack(8, &[h]);
-            }
-        }
-        if counts == [4, 1] {
-            return pack(7, &order);
-        }
-        if counts == [3, 2] {
-            return pack(6, &order);
-        }
-        if flush {
-            return pack(5, &order);
-        }
-        if let Some(h) = straight_high {
-            return pack(4, &[h]);
-        }
-        if counts == [3, 1, 1] {
-            return pack(3, &order);
-        }
-        if counts == [2, 2, 1] {
-            return pack(2, &order);
-        }
-        if counts == [2, 1, 1, 1] {
-            return pack(1, &order);
-        }
-        pack(0, &order)
-    }
-
-    /// Best 5-card strength from 5–7 cards (max over all 5-card subsets).
-    pub fn eval_best(cards: &[u8]) -> u32 {
-        let n = cards.len();
-        let mut best = 0u32;
-        // iterate all C(n,5) combinations
-        let idx: Vec<usize> = (0..n).collect();
-        for a in 0..n {
-            for b in (a + 1)..n {
-                for c in (b + 1)..n {
-                    for d in (c + 1)..n {
-                        for e in (d + 1)..n {
-                            let hand = [cards[idx[a]], cards[idx[b]], cards[idx[c]], cards[idx[d]], cards[idx[e]]];
-                            let s = eval5(hand);
-                            if s > best {
-                                best = s;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        best
-    }
-
-    /// Human-readable category for a strength value (for the UI hand banner).
-    pub fn hand_category_name(strength: u32) -> &'static str {
-        match strength >> 20 {
-            8 => "straight flush",
-            7 => "four of a kind",
-            6 => "full house",
-            5 => "flush",
-            4 => "straight",
-            3 => "three of a kind",
-            2 => "two pair",
-            1 => "one pair",
-            _ => "high card",
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub enum SeatStatus {
-        Empty,
-        Active,
-        Folded,
-        AllIn,
-        SittingOut,
-        WaitingForBb,
-    }
-
-    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-    pub struct Seat {
-        pub occupied: bool,
-        pub stack: u64,                 // chips
-        pub committed_street: u64,      // chips put in this street
-        pub committed_total: u64,       // chips put in this hand
-        pub hole: [u8; 2],
-        pub status: SeatStatus,
-        pub has_acted_street: bool,     // acted since last raise this street
-    }
-
-    impl Default for Seat {
-        fn default() -> Self {
-            Seat {
-                occupied: false,
-                stack: 0,
-                committed_street: 0,
-                committed_total: 0,
-                hole: [255, 255],
-                status: SeatStatus::Empty,
-                has_acted_street: false,
-            }
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub enum Phase {
-        Preflop,
-        Flop,
-        Turn,
-        River,
-        Showdown,
-        Done,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Action {
-        Fold,
-        Check,
-        Call,
-        /// total committed this street the player is moving to
-        BetTo(u64),
-    }
-
-    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-    pub struct Engine {
-        pub seats: Vec<Seat>, // len NUM_SEATS
-        pub button: usize,
-        pub deck: Vec<u8>,    // remaining (drawn from the back)
-        pub board: Vec<u8>,
-        pub phase: Phase,
-        pub acting: usize,
-        pub current_bet: u64,  // highest committed_street
-        pub min_raise: u64,    // size of the last full raise
-        pub start_stacks: [u64; NUM_SEATS],
-        pub winners_msg: String,
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub enum EngineError {
-        NotYourTurn,
-        IllegalAction,
-        HandOver,
-    }
-
-    pub struct LegalActions {
-        pub can_check: bool,
-        pub call_amount: u64,  // chips to add to call
-        pub min_raise_to: u64, // total-this-street for a min raise (0 if can't raise)
-        pub max_raise_to: u64, // all-in cap (total-this-street)
-    }
-
-    fn next_occupied_in(seats: &[Seat], from: usize, pred: impl Fn(&Seat) -> bool) -> Option<usize> {
-        let n = seats.len();
-        for off in 1..=n {
-            let i = (from + off) % n;
-            if seats[i].occupied && pred(&seats[i]) {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    impl Engine {
-        /// Start a hand. `seats` carries occupancy + stacks + status (Active or
-        /// WaitingForBb). `deck` is a full 52-card shuffled deck. Posts blinds,
-        /// deals two cards to each in-hand seat, sets the first actor.
-        pub fn start_hand(mut seats: Vec<Seat>, button: usize, deck: Vec<u8>) -> Engine {
-            let mut start_stacks = [0u64; NUM_SEATS];
-            for (i, s) in seats.iter_mut().enumerate() {
-                s.committed_street = 0;
-                s.committed_total = 0;
-                s.has_acted_street = false;
-                s.hole = [255, 255];
-                if s.occupied {
-                    start_stacks[i] = s.stack;
-                    // Anyone with chips who isn't sitting out is in the hand.
-                    if s.status != SeatStatus::SittingOut && s.stack > 0 {
-                        s.status = SeatStatus::Active;
-                    }
-                }
-            }
-            let mut e = Engine {
-                seats,
-                button,
-                deck,
-                board: Vec::new(),
-                phase: Phase::Preflop,
-                acting: button,
-                current_bet: 0,
-                min_raise: BIG_BLIND,
-                start_stacks,
-                winners_msg: String::new(),
-            };
-            let in_hand: Vec<usize> = (0..e.seats.len()).filter(|&i| e.is_in_hand(i)).collect();
-            // Deal two cards each, starting left of button.
-            for _round in 0..2 {
-                let mut seat = e.button;
-                for _ in 0..e.seats.len() {
-                    seat = (seat + 1) % e.seats.len();
-                    if in_hand.contains(&seat) {
-                        let c = e.deck.pop().unwrap();
-                        if e.seats[seat].hole[0] == 255 {
-                            e.seats[seat].hole[0] = c;
-                        } else {
-                            e.seats[seat].hole[1] = c;
-                        }
-                    }
-                }
-            }
-            // Blinds. Heads-up: button is SB.
-            let (sb_seat, bb_seat) = if in_hand.len() == 2 {
-                (e.button, next_occupied_in(&e.seats, e.button, |s| s.status == SeatStatus::Active).unwrap())
-            } else {
-                let sb = next_occupied_in(&e.seats, e.button, |s| s.status == SeatStatus::Active).unwrap();
-                let bb = next_occupied_in(&e.seats, sb, |s| s.status == SeatStatus::Active).unwrap();
-                (sb, bb)
-            };
-            e.post_blind(sb_seat, SMALL_BLIND);
-            e.post_blind(bb_seat, BIG_BLIND);
-            e.current_bet = BIG_BLIND;
-            e.min_raise = BIG_BLIND;
-            // First to act preflop: left of BB (or button/SB in heads-up).
-            e.acting = next_occupied_in(&e.seats, bb_seat, |s| s.status == SeatStatus::Active)
-                .unwrap_or(bb_seat);
-            e
-        }
-
-        fn is_in_hand(&self, i: usize) -> bool {
-            self.seats[i].occupied
-                && self.seats[i].stack > 0
-                && self.seats[i].status != SeatStatus::SittingOut
-        }
-
-        fn post_blind(&mut self, seat: usize, amount: u64) {
-            let pay = amount.min(self.seats[seat].stack);
-            self.seats[seat].stack -= pay;
-            self.seats[seat].committed_street += pay;
-            self.seats[seat].committed_total += pay;
-            if self.seats[seat].stack == 0 {
-                self.seats[seat].status = SeatStatus::AllIn;
-            }
-        }
-
-        pub fn pot_total(&self) -> u64 {
-            self.seats.iter().map(|s| s.committed_total).sum()
-        }
-
-        fn active_can_act(&self) -> Vec<usize> {
-            (0..self.seats.len()).filter(|&i| self.seats[i].status == SeatStatus::Active).collect()
-        }
-
-        fn still_in(&self) -> Vec<usize> {
-            (0..self.seats.len())
-                .filter(|&i| matches!(self.seats[i].status, SeatStatus::Active | SeatStatus::AllIn))
-                .collect()
-        }
-
-        /// Seats that reached showdown (didn't fold). Used by the canister layer
-        /// to decide whether to reveal hole cards.
-        pub fn still_in_count(&self) -> usize {
-            self.still_in().len()
-        }
-
-        pub fn legal_actions(&self, seat: usize) -> LegalActions {
-            let s = &self.seats[seat];
-            let to_call = self.current_bet.saturating_sub(s.committed_street);
-            let call_amount = to_call.min(s.stack);
-            let can_check = to_call == 0;
-            let max_raise_to = s.committed_street + s.stack; // all-in total this street
-            // A legal raise must reach at least current_bet + min_raise (or all-in).
-            let min_raise_to = self.current_bet + self.min_raise;
-            let can_raise = s.stack > to_call; // has chips beyond a call
-            LegalActions {
-                can_check,
-                call_amount,
-                min_raise_to: if can_raise { min_raise_to.min(max_raise_to) } else { 0 },
-                max_raise_to: if can_raise { max_raise_to } else { 0 },
-            }
-        }
-
-        /// Apply an action for `seat`. Advances streets and runs to settlement
-        /// when betting closes. Returns the per-seat chip deltas once Done.
-        pub fn apply_action(&mut self, seat: usize, action: Action) -> Result<(), EngineError> {
-            if self.phase == Phase::Done || self.phase == Phase::Showdown {
-                return Err(EngineError::HandOver);
-            }
-            if seat != self.acting || self.seats[seat].status != SeatStatus::Active {
-                return Err(EngineError::NotYourTurn);
-            }
-            let la = self.legal_actions(seat);
-            match action {
-                Action::Fold => {
-                    self.seats[seat].status = SeatStatus::Folded;
-                }
-                Action::Check => {
-                    if !la.can_check {
-                        return Err(EngineError::IllegalAction);
-                    }
-                    self.seats[seat].has_acted_street = true;
-                }
-                Action::Call => {
-                    self.commit(seat, la.call_amount);
-                    self.seats[seat].has_acted_street = true;
-                }
-                Action::BetTo(total) => {
-                    let cur = self.seats[seat].committed_street;
-                    if total <= cur {
-                        return Err(EngineError::IllegalAction);
-                    }
-                    let add = total - cur;
-                    if add > self.seats[seat].stack {
-                        return Err(EngineError::IllegalAction);
-                    }
-                    let all_in = add == self.seats[seat].stack;
-                    // Must meet min-raise unless it's an all-in shove.
-                    if total < la.min_raise_to && !all_in {
-                        return Err(EngineError::IllegalAction);
-                    }
-                    let raise_size = total.saturating_sub(self.current_bet);
-                    self.commit(seat, add);
-                    // A full raise reopens action; an all-in short of a full
-                    // raise does not (classic incomplete-raise rule).
-                    if total > self.current_bet {
-                        if raise_size >= self.min_raise {
-                            self.min_raise = raise_size;
-                            // reopen: everyone else must act again
-                            for (i, s) in self.seats.iter_mut().enumerate() {
-                                if i != seat && s.status == SeatStatus::Active {
-                                    s.has_acted_street = false;
-                                }
-                            }
-                        }
-                        self.current_bet = total;
-                    }
-                    self.seats[seat].has_acted_street = true;
-                }
-            }
-            self.advance();
-            Ok(())
-        }
-
-        fn commit(&mut self, seat: usize, add: u64) {
-            let pay = add.min(self.seats[seat].stack);
-            self.seats[seat].stack -= pay;
-            self.seats[seat].committed_street += pay;
-            self.seats[seat].committed_total += pay;
-            if self.seats[seat].stack == 0 {
-                self.seats[seat].status = SeatStatus::AllIn;
-            }
-        }
-
-        /// Move to the next actor, or close the street / hand.
-        fn advance(&mut self) {
-            // Only one player left in the hand → award immediately.
-            if self.still_in().len() <= 1 {
-                self.goto_showdown();
-                return;
-            }
-            // Betting round closes when every Active seat has acted and matched.
-            let need_action: Vec<usize> = self
-                .active_can_act()
-                .into_iter()
-                .filter(|&i| !self.seats[i].has_acted_street || self.seats[i].committed_street < self.current_bet)
-                .collect();
-            if need_action.is_empty() || self.active_can_act().len() <= 1 && self.all_matched() {
-                self.close_street();
-                return;
-            }
-            // Next active seat to act.
-            if let Some(n) = next_occupied_in(&self.seats, self.acting, |s| s.status == SeatStatus::Active) {
-                self.acting = n;
-            } else {
-                self.close_street();
-            }
-        }
-
-        fn all_matched(&self) -> bool {
-            self.active_can_act()
-                .iter()
-                .all(|&i| self.seats[i].committed_street == self.current_bet && self.seats[i].has_acted_street)
-        }
-
-        fn close_street(&mut self) {
-            // If at most one player can still act and the rest are all-in, run
-            // out the board to showdown.
-            for s in self.seats.iter_mut() {
-                s.committed_street = 0;
-                s.has_acted_street = false;
-            }
-            self.current_bet = 0;
-            self.min_raise = BIG_BLIND;
-            match self.phase {
-                Phase::Preflop => {
-                    self.deal_board(3);
-                    self.phase = Phase::Flop;
-                }
-                Phase::Flop => {
-                    self.deal_board(1);
-                    self.phase = Phase::Turn;
-                }
-                Phase::Turn => {
-                    self.deal_board(1);
-                    self.phase = Phase::River;
-                }
-                Phase::River => {
-                    self.goto_showdown();
-                    return;
-                }
-                _ => {}
-            }
-            // If nobody can act anymore (all-in), keep running streets.
-            if self.active_can_act().len() < 2 {
-                // still may need more board cards
-                if self.phase != Phase::Showdown && self.phase != Phase::Done {
-                    self.close_street();
-                    return;
-                }
-            }
-            // First to act postflop: left of button.
-            self.acting = next_occupied_in(&self.seats, self.button, |s| s.status == SeatStatus::Active)
-                .unwrap_or(self.button);
-        }
-
-        fn deal_board(&mut self, n: usize) {
-            for _ in 0..n {
-                if let Some(c) = self.deck.pop() {
-                    self.board.push(c);
-                }
-            }
-        }
-
-        fn goto_showdown(&mut self) {
-            // Ensure 5 board cards if we're going to showdown with ≥2 in.
-            if self.still_in().len() > 1 {
-                while self.board.len() < 5 {
-                    if let Some(c) = self.deck.pop() {
-                        self.board.push(c);
-                    } else {
-                        break;
-                    }
-                }
-            }
-            self.phase = Phase::Showdown;
-            self.settle();
-            self.phase = Phase::Done;
-        }
-
-        /// Build side pots from total contributions and award each to the best
-        /// eligible hand. Mutates stacks; sets `winners_msg`.
-        fn settle(&mut self) {
-            let n = self.seats.len();
-            let mut contrib: Vec<u64> = (0..n).map(|i| self.seats[i].committed_total).collect();
-            let folded: Vec<bool> = (0..n).map(|i| self.seats[i].status == SeatStatus::Folded).collect();
-            let occupied: Vec<bool> = (0..n).map(|i| self.seats[i].occupied).collect();
-
-            // Sole survivor (everyone else folded): take the whole pot, no reveal.
-            let in_hand: Vec<usize> = (0..n)
-                .filter(|&i| matches!(self.seats[i].status, SeatStatus::Active | SeatStatus::AllIn))
-                .collect();
-            let total_pot: u64 = contrib.iter().sum();
-            if in_hand.len() == 1 {
-                self.seats[in_hand[0]].stack += total_pot;
-                self.winners_msg = "uncontested".to_string();
-                return;
-            }
-
-            // Strengths for non-folded, in-hand seats.
-            let strength = |i: usize, board: &[u8], seats: &[Seat]| -> u32 {
-                let mut cards = vec![seats[i].hole[0], seats[i].hole[1]];
-                cards.extend_from_slice(board);
-                eval_best(&cards)
-            };
-
-            let mut winners_desc = String::new();
-            // Side pots: peel layers at each distinct contribution level.
-            loop {
-                let min_pos = contrib
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, &c)| c > 0 && occupied[*i])
-                    .map(|(_, &c)| c)
-                    .min();
-                let layer = match min_pos {
-                    Some(l) if l > 0 => l,
-                    _ => break,
-                };
-                // Contributors to this layer.
-                let mut pot: u64 = 0;
-                let mut eligible: Vec<usize> = Vec::new();
-                for i in 0..n {
-                    if contrib[i] >= layer && occupied[i] {
-                        pot += layer;
-                        contrib[i] -= layer;
-                        if !folded[i] {
-                            eligible.push(i);
-                        }
-                    }
-                }
-                if eligible.is_empty() {
-                    continue;
-                }
-                // Best strength among eligible.
-                let best = eligible.iter().map(|&i| strength(i, &self.board, &self.seats)).max().unwrap();
-                let winners: Vec<usize> =
-                    eligible.iter().cloned().filter(|&i| strength(i, &self.board, &self.seats) == best).collect();
-                let share = pot / winners.len() as u64;
-                let mut odd = pot - share * winners.len() as u64;
-                // Odd chips: first winner left of the button.
-                let mut ordered = winners.clone();
-                ordered.sort_by_key(|&i| (i + n - self.button) % n);
-                for &w in &ordered {
-                    let mut amt = share;
-                    if odd > 0 {
-                        amt += 1;
-                        odd -= 1;
-                    }
-                    self.seats[w].stack += amt;
-                }
-                if winners_desc.is_empty() {
-                    winners_desc = hand_category_name(best).to_string();
-                }
-            }
-            self.winners_msg = winners_desc;
-        }
-
-        /// Per-seat chip delta vs. start of hand (Σ == 0). Call once Done.
-        pub fn deltas(&self) -> [i64; NUM_SEATS] {
-            let mut d = [0i64; NUM_SEATS];
-            for i in 0..self.seats.len().min(NUM_SEATS) {
-                if self.seats[i].occupied {
-                    d[i] = self.seats[i].stack as i64 - self.start_stacks[i] as i64;
-                }
-            }
-            d
-        }
-    }
-}
-
-// ==========================================
-// 21b. Agent Poker — canister layer (tables, agents, API, house play)
-// ==========================================
-
-use poker_engine::{Action as EngAction, Engine, Phase, Seat, SeatStatus};
-
-const POKER_NUM_TABLES: u8 = 2;
-const POKER_MIN_SIT_CHIPS: u64 = 500; // 10 BB
-const POKER_ACTION_DEADLINE_NANOS: u64 = 30 * 1_000_000_000;
-const POKER_PACE_NANOS: u64 = 3 * 1_000_000_000; // "thinking" delay between actions
-const POKER_INTER_HAND_NANOS: u64 = 5 * 1_000_000_000;
-const POKER_HANDS_KEEP: u64 = 2_000;
-const POKER_DEFAULT_STOPLOSS_PCT: u64 = 25;
-const POKER_MODEL_MAX: usize = 40;
-const POKER_RECLAIM_COOLDOWN_NANOS: u64 = 24 * 3_600 * 1_000_000_000;
-const POKER_HOUSE_MODEL: &str = "caldera-house";
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum PokerStyle {
-    #[default]
-    Tag, // tight-aggressive (default)
-    Lag, // loose-aggressive
-    Nit, // very tight
-    Station, // loose-passive
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum AgentMode {
-    #[default]
-    House,
-    External,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum AgentState {
-    #[default]
-    Idle,
-    Searching,
-    Waitlisted,
-    Seated,
-    StopLossHit,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PokerAgent {
-    pub agent_principal: Principal,
-    pub mode: AgentMode,
-    pub model: String,
-    pub style: PokerStyle,
-    pub avatar_url: Option<String>,
-    pub stop_loss_e8s: u64,
-    pub claimed_at: u64,
-    pub last_seen: u64,
-    pub table_id: Option<u8>,
-    pub seat: Option<u8>,
-    pub state: AgentState,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
-pub enum BufAction {
-    Fold,
-    Check,
-    Call,
-    BetTo(u64),
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PokerTable {
-    pub id: u8,
-    pub hand_no: u64,
-    pub button: u8,
-    pub seat_owners: Vec<Option<Principal>>, // len 9
-    pub engine: Option<Engine>,
-    pub next_event_at: u64,
-    pub action_deadline: u64,
-    pub buffered: Option<(u8, BufAction)>,
-    pub resume_at: u64,
-    pub last_result: Option<String>,
-    pub last_board: Vec<u8>,
-    pub paused: bool,
-    pub seed_hex: String,
-    pub timeouts: Vec<u8>, // consecutive auto-folds per seat
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PokerHandSeat {
-    pub owner: Principal,
-    pub model: String,
-    pub hole: Option<[u8; 2]>,
-    pub delta_chips: i64,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PokerHandRecord {
-    pub id: u64,
-    pub table_id: u8,
-    pub hand_no: u64,
-    pub board: Vec<u8>,
-    pub seed_hex: String,
-    pub winners_msg: String,
-    pub at: u64,
-    pub seats: Vec<PokerHandSeat>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct PokerCounters {
-    pub next_hand_id: u64,
-    pub next_waitlist_seq: u64,
-}
-
-impl_storable!(PokerTable);
-impl_storable!(PokerAgent);
-impl_storable!(PokerHandRecord);
-impl_storable!(PokerCounters);
-
-thread_local! {
-    static POKER_TABLES: RefCell<StableBTreeMap<u8, PokerTable, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(54)))));
-    static POKER_HANDS: RefCell<StableBTreeMap<u64, PokerHandRecord, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(55)))));
-    static POKER_AGENTS: RefCell<StableBTreeMap<Principal, PokerAgent, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(56)))));
-    static POKER_AGENT_INDEX: RefCell<StableBTreeMap<Principal, Principal, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(57)))));
-    static POKER_WAITLIST: RefCell<StableBTreeMap<u64, Principal, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(59)))));
-    static POKER_COUNTERS: RefCell<StableCell<PokerCounters, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(73)), PokerCounters::default())));
-}
-
-fn poker_counters() -> PokerCounters {
-    POKER_COUNTERS.with(|c| c.borrow().get().clone())
-}
-fn set_poker_counters(c: PokerCounters) {
-    POKER_COUNTERS.with(|cell| { let _ = cell.borrow_mut().set(c); });
-}
-fn get_poker_table(id: u8) -> Option<PokerTable> {
-    POKER_TABLES.with(|m| m.borrow().get(&id))
-}
-fn set_poker_table(t: PokerTable) {
-    POKER_TABLES.with(|m| { m.borrow_mut().insert(t.id, t); });
-}
-fn get_poker_agent(owner: Principal) -> Option<PokerAgent> {
-    POKER_AGENTS.with(|m| m.borrow().get(&owner))
-}
-fn set_poker_agent(owner: Principal, a: PokerAgent) {
-    POKER_AGENTS.with(|m| { m.borrow_mut().insert(owner, a); });
-}
-
-fn require_poker_visible() -> Result<(), String> {
-    if !feature_visible(FLAG_POKER, get_caller()) {
-        return Err("FEATURE_DISABLED".to_string());
-    }
-    Ok(())
-}
-
-/// Chips reserved by a live poker seat (so they can't be double-spent in crash).
-fn poker_reserved_chips(user: Principal) -> u64 {
-    let a = match get_poker_agent(user) {
-        Some(a) => a,
-        None => return 0,
-    };
-    let (tid, seat) = match (a.table_id, a.seat) {
-        (Some(t), Some(s)) => (t, s),
-        _ => return 0,
-    };
-    if let Some(t) = get_poker_table(tid) {
-        if let Some(eng) = &t.engine {
-            if let Some(s) = eng.seats.get(seat as usize) {
-                return s.stack + s.committed_total;
-            }
-        }
-    }
-    // Between hands: the whole bankroll is committed to the seat.
-    casino_chips(user)
-}
-
-/// Lazily create the 10 cash tables on first access.
-fn poker_ensure_tables() {
-    let count = POKER_TABLES.with(|m| m.borrow().len());
-    if count >= POKER_NUM_TABLES as u64 {
-        return;
-    }
-    for id in 1..=POKER_NUM_TABLES {
-        if get_poker_table(id).is_none() {
-            set_poker_table(PokerTable {
-                id,
-                hand_no: 0,
-                button: 0,
-                seat_owners: vec![None; poker_engine::NUM_SEATS],
-                engine: None,
-                next_event_at: 0,
-                action_deadline: 0,
-                buffered: None,
-                resume_at: 0,
-                last_result: None,
-                last_board: Vec::new(),
-                paused: false,
-                seed_hex: String::new(),
-                timeouts: vec![0; poker_engine::NUM_SEATS],
-            });
-        }
-    }
-}
-
-fn poker_open_seats(t: &PokerTable) -> usize {
-    t.seat_owners.iter().filter(|s| s.is_none()).count()
-}
-fn poker_occupants(t: &PokerTable) -> usize {
-    t.seat_owners.iter().filter(|s| s.is_some()).count()
-}
-
-// ── Settlement + hand lifecycle ─────────────────────────────────────────────
-
-fn poker_begin_hand(t: &mut PokerTable, seed: [u8; 32], now: u64) {
-    let mut seats = vec![Seat::default(); poker_engine::NUM_SEATS];
-    let mut ready = 0;
-    for i in 0..poker_engine::NUM_SEATS {
-        if let Some(owner) = t.seat_owners[i] {
-            let chips = casino_chips(owner);
-            let active = chips >= SMALL_BLIND_CHIPS;
-            seats[i] = Seat {
-                occupied: true,
-                stack: chips,
-                status: if active { SeatStatus::Active } else { SeatStatus::SittingOut },
-                ..Default::default()
-            };
-            if active {
-                ready += 1;
-            }
-        }
-    }
-    if ready < 2 {
-        t.engine = None;
-        t.resume_at = now + POKER_INTER_HAND_NANOS;
-        return;
-    }
-    t.hand_no += 1;
-    let deck = poker_engine::shuffled_deck(&seed);
-    t.seed_hex = hex32(&seed);
-    let eng = Engine::start_hand(seats, t.button as usize, deck);
-    t.engine = Some(eng);
-    t.action_deadline = now + POKER_ACTION_DEADLINE_NANOS;
-    t.next_event_at = now + POKER_PACE_NANOS;
-    t.buffered = None;
-    t.last_result = None;
-}
-
-const SMALL_BLIND_CHIPS: u64 = poker_engine::SMALL_BLIND;
-
-fn poker_settle_hand(t: &mut PokerTable, now: u64) {
-    let eng = match t.engine.take() {
-        Some(e) => e,
-        None => return,
-    };
-    let deltas = eng.deltas();
-    let mut counters = poker_counters();
-    let rec_id = counters.next_hand_id;
-    counters.next_hand_id += 1;
-    set_poker_counters(counters);
-    let mut rec_seats: Vec<PokerHandSeat> = Vec::new();
-    for i in 0..poker_engine::NUM_SEATS {
-        if let Some(owner) = t.seat_owners[i] {
-            let d = deltas[i];
-            if d != 0 {
-                casino_add_delta(owner, d as i128 * CHIP_E8S as i128);
-            }
-            let seat = &eng.seats[i];
-            // Reveal hole cards only for seats that reached showdown (not folded).
-            let revealed = !matches!(seat.status, SeatStatus::Folded) && eng.board.len() == 5 && eng.still_in_count() > 1;
-            let model = get_poker_agent(owner).map(|a| a.model).unwrap_or_default();
-            rec_seats.push(PokerHandSeat {
-                owner,
-                model,
-                hole: if revealed { Some(seat.hole) } else { None },
-                delta_chips: d,
-            });
-        }
-    }
-    let record = PokerHandRecord {
-        id: rec_id,
-        table_id: t.id,
-        hand_no: t.hand_no,
-        board: eng.board.clone(),
-        seed_hex: t.seed_hex.clone(),
-        winners_msg: eng.winners_msg.clone(),
-        at: now,
-        seats: rec_seats,
-    };
-    POKER_HANDS.with(|m| {
-        let mut map = m.borrow_mut();
-        map.insert(rec_id, record);
-        while map.len() > POKER_HANDS_KEEP {
-            if let Some(oldest) = map.iter().next().map(|e| *e.key()) {
-                map.remove(&oldest);
-            } else {
-                break;
-            }
-        }
-    });
-    t.last_result = Some(format!("hand #{} — {}", t.hand_no, eng.winners_msg));
-    t.last_board = eng.board.clone();
-
-    // Stand up busted / stop-loss seats; rotate button; seat the waitlist.
-    for i in 0..poker_engine::NUM_SEATS {
-        if let Some(owner) = t.seat_owners[i] {
-            let chips = casino_chips(owner);
-            let agent = get_poker_agent(owner);
-            let floor = agent.as_ref().map(|a| a.stop_loss_e8s).unwrap_or(0);
-            let stop_hit = floor > 0 && casino_effective_vp_e8s(owner) <= floor;
-            if chips < POKER_MIN_SIT_CHIPS || stop_hit {
-                t.seat_owners[i] = None;
-                t.timeouts[i] = 0;
-                if let Some(mut a) = agent {
-                    a.table_id = None;
-                    a.seat = None;
-                    a.state = if stop_hit { AgentState::StopLossHit } else { AgentState::Idle };
-                    set_poker_agent(owner, a);
-                }
-            }
-        }
-    }
-    if let Some(nb) = poker_next_occupied(t, t.button) {
-        t.button = nb;
-    }
-    t.resume_at = now + POKER_INTER_HAND_NANOS;
-    t.engine = None;
-    poker_seat_waitlist(t, now);
-}
-
-fn poker_next_occupied(t: &PokerTable, from: u8) -> Option<u8> {
-    let n = poker_engine::NUM_SEATS;
-    for off in 1..=n {
-        let i = ((from as usize + off) % n) as u8;
-        if t.seat_owners[i as usize].is_some() {
-            return Some(i);
-        }
-    }
-    None
-}
-
-fn poker_seat_waitlist(t: &mut PokerTable, _now: u64) {
-    loop {
-        if poker_open_seats(t) == 0 {
-            return;
-        }
-        let head = POKER_WAITLIST.with(|m| m.borrow().iter().next().map(|e| (*e.key(), e.value())));
-        let (seq, owner) = match head {
-            Some(x) => x,
-            None => return,
-        };
-        // Skip stale waitlist entries (agent gone / already seated).
-        let ok = get_poker_agent(owner).map(|a| a.state == AgentState::Waitlisted).unwrap_or(false);
-        POKER_WAITLIST.with(|m| { m.borrow_mut().remove(&seq); });
-        if !ok {
-            continue;
-        }
-        if casino_chips(owner) < POKER_MIN_SIT_CHIPS {
-            if let Some(mut a) = get_poker_agent(owner) {
-                a.state = AgentState::Idle;
-                set_poker_agent(owner, a);
-            }
-            continue;
-        }
-        poker_place_in_seat(t, owner);
-    }
-}
-
-fn poker_place_in_seat(t: &mut PokerTable, owner: Principal) -> bool {
-    // First open seat clockwise from the button.
-    let n = poker_engine::NUM_SEATS;
-    for off in 1..=n {
-        let i = (t.button as usize + off) % n;
-        if t.seat_owners[i].is_none() {
-            t.seat_owners[i] = Some(owner);
-            t.timeouts[i] = 0;
-            if let Some(mut a) = get_poker_agent(owner) {
-                a.table_id = Some(t.id);
-                a.seat = Some(i as u8);
-                a.state = AgentState::Seated;
-                set_poker_agent(owner, a);
-            }
-            return true;
-        }
-    }
-    false
-}
-
-// ── House-agent decision (heuristic play styles, PB-207/208) ────────────────
-
-fn poker_style_thresholds(style: PokerStyle) -> (u32, u32) {
-    // (call_threshold, raise_threshold) on a 0..100 strength scale.
-    match style {
-        PokerStyle::Nit => (58, 76),
-        PokerStyle::Tag => (46, 64),
-        PokerStyle::Lag => (32, 52),
-        PokerStyle::Station => (22, 90),
-    }
-}
-
-fn poker_preflop_score(hole: [u8; 2]) -> u32 {
-    let r0 = poker_engine::rank_of(hole[0]);
-    let r1 = poker_engine::rank_of(hole[1]);
-    let suited = poker_engine::suit_of(hole[0]) == poker_engine::suit_of(hole[1]);
-    let hi = r0.max(r1) as i32;
-    let lo = r0.min(r1) as i32;
-    let mut sc;
-    if r0 == r1 {
-        sc = 50 + hi * 4; // pairs strong; AA huge
-    } else {
-        sc = hi * 4 + lo;
-        if suited {
-            sc += 8;
-        }
-        let gap = hi - lo;
-        if gap == 1 {
-            sc += 6;
-        } else if gap == 2 {
-            sc += 2;
-        }
-        if hi >= 11 {
-            sc += 6; // A/K high
-        }
-    }
-    sc.clamp(0, 100) as u32
-}
-
-fn poker_postflop_score(hole: [u8; 2], board: &[u8]) -> u32 {
-    let mut cards = vec![hole[0], hole[1]];
-    cards.extend_from_slice(board);
-    let strength = poker_engine::eval_best(&cards);
-    let cat = strength >> 20;
-    // Map category to a coarse score; add the top tiebreak rank for nuance.
-    let top = ((strength >> 16) & 0xF) as u32;
-    let base = match cat {
-        8 => 99,
-        7 => 97,
-        6 => 94,
-        5 => 88,
-        4 => 84,
-        3 => 78,
-        2 => 64,
-        1 => 40 + top, // pair — kicker/rank matters
-        _ => 12 + top, // high card
-    };
-    base.min(100)
-}
-
-fn poker_rng_u64(t: &PokerTable, salt: u64) -> u64 {
-    let mut data = t.seed_hex.clone().into_bytes();
-    data.extend_from_slice(&t.hand_no.to_le_bytes());
-    data.extend_from_slice(&salt.to_le_bytes());
-    let h = sha256(&data);
-    u64::from_le_bytes(h[0..8].try_into().unwrap())
-}
-
-fn poker_house_decide(t: &PokerTable, eng: &Engine, seat: usize, style: PokerStyle) -> EngAction {
-    let la = eng.legal_actions(seat);
-    let hole = eng.seats[seat].hole;
-    let score = if eng.board.is_empty() {
-        poker_preflop_score(hole)
-    } else {
-        poker_postflop_score(hole, &eng.board)
-    };
-    let (call_thr, raise_thr) = poker_style_thresholds(style);
-    let roll = (poker_rng_u64(t, seat as u64 + eng.board.len() as u64 * 17) % 100) as u32;
-    let pot = eng.pot_total();
-
-    if la.can_check {
-        // No bet to call: bet for value/bluff or check.
-        let bluff = roll < 12; // occasional steal
-        if (score >= raise_thr || bluff) && la.min_raise_to > 0 {
-            let target = la.min_raise_to.max(eng.seats[seat].committed_street + (pot / 2).max(poker_engine::BIG_BLIND));
-            return EngAction::BetTo(target.min(la.max_raise_to));
-        }
-        return EngAction::Check;
-    }
-    // Facing a bet.
-    if score >= raise_thr && la.min_raise_to > 0 && roll < 70 {
-        let target = la.min_raise_to.max(eng.seats[seat].committed_street + pot.max(poker_engine::BIG_BLIND));
-        return EngAction::BetTo(target.min(la.max_raise_to));
-    }
-    if score >= call_thr {
-        return EngAction::Call;
-    }
-    // Pot-odds bluff-catch / float occasionally with weak holdings.
-    if roll < 8 && la.call_amount * 4 <= pot.max(1) {
-        return EngAction::Call;
-    }
-    EngAction::Fold
-}
-
-fn buf_to_eng(b: BufAction) -> EngAction {
-    match b {
-        BufAction::Fold => EngAction::Fold,
-        BufAction::Check => EngAction::Check,
-        BufAction::Call => EngAction::Call,
-        BufAction::BetTo(x) => EngAction::BetTo(x),
-    }
-}
-
-/// Advance one paced step on a table. Async because starting a hand draws RNG.
-async fn poker_advance(table_id: u8) {
-    if !feature_active(FLAG_POKER) {
-        return;
-    }
-    let mut t = match get_poker_table(table_id) {
-        Some(t) => t,
-        None => return,
-    };
-    if t.paused {
-        return;
-    }
-    let now = current_time();
-    match &t.engine {
-        None => {
-            // Between hands: start one when due and ≥2 funded seats are present.
-            if now < t.resume_at {
-                return;
-            }
-            let ready = t.seat_owners.iter().filter(|s| s.map(|o| casino_chips(o) >= SMALL_BLIND_CHIPS).unwrap_or(false)).count();
-            if ready < 2 {
-                return;
-            }
-            let seed = match crash_random_seed().await {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            // Re-read (could have changed during await) and start.
-            t = match get_poker_table(table_id) {
-                Some(t) => t,
-                None => return,
-            };
-            poker_begin_hand(&mut t, seed, current_time());
-            set_poker_table(t);
-        }
-        Some(eng) if eng.phase == Phase::Done => {
-            poker_settle_hand(&mut t, now);
-            set_poker_table(t);
-        }
-        Some(eng) => {
-            if now < t.next_event_at {
-                return;
-            }
-            let seat = eng.acting;
-            let owner = match t.seat_owners.get(seat).and_then(|o| *o) {
-                Some(o) => o,
-                None => return,
-            };
-            let agent = get_poker_agent(owner);
-            let is_house = agent.as_ref().map(|a| a.mode == AgentMode::House).unwrap_or(true);
-            let action: Option<EngAction> = if is_house {
-                let style = agent.as_ref().map(|a| a.style).unwrap_or_default();
-                Some(poker_house_decide(&t, eng, seat, style))
-            } else if let Some((bs, ba)) = t.buffered {
-                if bs as usize == seat {
-                    Some(buf_to_eng(ba))
-                } else {
-                    None
-                }
-            } else if now >= t.action_deadline {
-                // Timeout: check if legal, else fold; count it.
-                let la = eng.legal_actions(seat);
-                Some(if la.can_check { EngAction::Check } else { EngAction::Fold })
-            } else {
-                None
-            };
-            let Some(act) = action else {
-                return;
-            };
-            let mut eng2 = eng.clone();
-            let timed_out = !is_house && t.buffered.is_none() && now >= t.action_deadline;
-            if eng2.apply_action(seat, act).is_err() {
-                // Fall back to a guaranteed-legal action.
-                let la = eng2.legal_actions(seat);
-                let _ = eng2.apply_action(seat, if la.can_check { EngAction::Check } else { EngAction::Fold });
-            }
-            t.buffered = None;
-            // External timeout bookkeeping → lose the seat after repeated fails.
-            if timed_out {
-                t.timeouts[seat] = t.timeouts[seat].saturating_add(1);
-                if t.timeouts[seat] >= 3 {
-                    if let Some(mut a) = get_poker_agent(owner) {
-                        a.table_id = None;
-                        a.seat = None;
-                        a.state = AgentState::Idle;
-                        set_poker_agent(owner, a);
-                    }
-                    t.seat_owners[seat] = None;
-                    t.timeouts[seat] = 0;
-                }
-            } else if !is_house {
-                t.timeouts[seat] = 0;
-            }
-            t.engine = Some(eng2);
-            t.next_event_at = now + POKER_PACE_NANOS;
-            t.action_deadline = now + POKER_ACTION_DEADLINE_NANOS;
-            set_poker_table(t);
-        }
-    }
-}
-
-// ── Public API: agents, seating, action, views (PB-205/206/213/214/215) ─────
-
-fn poker_owner_of(caller: Principal) -> Option<Principal> {
-    if POKER_AGENTS.with(|m| m.borrow().contains_key(&caller)) {
-        Some(caller)
-    } else {
-        POKER_AGENT_INDEX.with(|m| m.borrow().get(&caller))
-    }
-}
-
-fn valid_model(m: &str) -> bool {
-    !m.is_empty()
-        && m.chars().count() <= POKER_MODEL_MAX
-        && m.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
-}
-
-/// Claim your one poker agent (Profile → Agent Space). Passing your own
-/// principal = a house-mode agent (the canister plays your style); a different
-/// principal registers an external bot. One agent per user; an agent principal
-/// serves one owner; re-claim allowed after a 24 h cooldown, never while seated.
-#[ic_cdk::update]
-fn claim_poker_agent(agent_principal: Principal, model: String) -> Result<(), String> {
-    require_poker_visible()?;
-    require_authenticated()?;
-    let owner = get_caller();
-    let now = current_time();
-    poker_ensure_tables();
-    if let Some(existing) = get_poker_agent(owner) {
-        if matches!(existing.state, AgentState::Seated | AgentState::Waitlisted | AgentState::Searching) {
-            return Err("AGENT_BUSY".to_string());
-        }
-        if now.saturating_sub(existing.claimed_at) < POKER_RECLAIM_COOLDOWN_NANOS && existing.agent_principal != agent_principal {
-            return Err("RECLAIM_COOLDOWN".to_string());
-        }
-        // Releasing the old agent-principal index.
-        POKER_AGENT_INDEX.with(|m| { m.borrow_mut().remove(&existing.agent_principal); });
-    }
-    let is_house = agent_principal == owner;
-    if !is_house {
-        // Agent principal must not already serve another owner.
-        if let Some(other) = POKER_AGENT_INDEX.with(|m| m.borrow().get(&agent_principal)) {
-            if other != owner {
-                return Err("AGENT_TAKEN".to_string());
-            }
-        }
-        if !valid_model(&model) {
-            return Err("INVALID_MODEL".to_string());
-        }
-    }
-    let model = if is_house { POKER_HOUSE_MODEL.to_string() } else { model.trim().to_string() };
-    let stop_loss = casino_staking_weight_e8s(owner) * POKER_DEFAULT_STOPLOSS_PCT / 100;
-    let agent = PokerAgent {
-        agent_principal,
-        mode: if is_house { AgentMode::House } else { AgentMode::External },
-        model,
-        style: PokerStyle::Tag,
-        avatar_url: None,
-        stop_loss_e8s: stop_loss,
-        claimed_at: now,
-        last_seen: now,
-        table_id: None,
-        seat: None,
-        state: AgentState::Idle,
-    };
-    POKER_AGENT_INDEX.with(|m| { m.borrow_mut().insert(agent_principal, owner); });
-    set_poker_agent(owner, agent);
-    Ok(())
-}
-
-#[ic_cdk::update]
-fn set_poker_style(style: PokerStyle) -> Result<(), String> {
-    require_authenticated()?;
-    let owner = get_caller();
-    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
-    a.style = style;
-    set_poker_agent(owner, a);
-    Ok(())
-}
-
-#[ic_cdk::update]
-fn set_poker_model(model: String) -> Result<(), String> {
-    require_authenticated()?;
-    let owner = get_caller();
-    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
-    if a.mode == AgentMode::House {
-        return Err("HOUSE_MODEL_FIXED".to_string());
-    }
-    if !valid_model(&model) {
-        return Err("INVALID_MODEL".to_string());
-    }
-    a.model = model.trim().to_string();
-    set_poker_agent(owner, a);
-    Ok(())
-}
-
-/// Set the stop-loss effective-VP floor (0 = off). Owner-only, between hands.
-#[ic_cdk::update]
-fn set_poker_stop_loss(stop_loss_e8s: u64) -> Result<(), String> {
-    require_authenticated()?;
-    let owner = get_caller();
-    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
-    a.stop_loss_e8s = stop_loss_e8s;
-    set_poker_agent(owner, a);
-    Ok(())
-}
-
-/// Enter matchmaking: the canister seats the agent at the table with the most
-/// open seats (tie → lowest id); all full ⇒ FIFO waitlist. Idempotent.
-#[ic_cdk::update]
-fn poker_find_seat() -> Result<(), String> {
-    require_poker_visible()?;
-    require_authenticated()?;
-    let caller = get_caller();
-    let owner = poker_owner_of(caller).ok_or("NO_AGENT")?;
-    poker_ensure_tables();
-    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
-    if matches!(a.state, AgentState::Seated | AgentState::Waitlisted) {
-        return Ok(()); // idempotent
-    }
-    if casino_chips(owner) < POKER_MIN_SIT_CHIPS {
-        return Err("MIN_SIT_500_CHIPS".to_string());
-    }
-    // Stop-loss: don't seat into a pointless one-hand session.
-    if a.stop_loss_e8s > 0 && casino_effective_vp_e8s(owner) <= a.stop_loss_e8s {
-        return Err("STOP_LOSS_FLOOR".to_string());
-    }
-    // Pick the table with the most open seats (tie → lowest id).
-    let mut best: Option<(u8, usize)> = None;
-    for id in 1..=POKER_NUM_TABLES {
-        if let Some(t) = get_poker_table(id) {
-            if t.paused {
-                continue;
-            }
-            let open = poker_open_seats(&t);
-            if open > 0 && best.map(|(_, o)| open > o).unwrap_or(true) {
-                best = Some((id, open));
-            }
-        }
-    }
-    if let Some((id, _)) = best {
-        let mut t = get_poker_table(id).unwrap();
-        poker_place_in_seat(&mut t, owner);
-        set_poker_table(t);
-    } else {
-        // All full → waitlist.
-        let mut counters = poker_counters();
-        let seq = counters.next_waitlist_seq;
-        counters.next_waitlist_seq += 1;
-        set_poker_counters(counters);
-        POKER_WAITLIST.with(|m| { m.borrow_mut().insert(seq, owner); });
-        a.state = AgentState::Waitlisted;
-        a.table_id = None;
-        a.seat = None;
-        set_poker_agent(owner, a);
-    }
-    Ok(())
-}
-
-/// Stand up (after the current hand) or leave the waitlist.
-#[ic_cdk::update]
-fn poker_leave() -> Result<(), String> {
-    require_authenticated()?;
-    let caller = get_caller();
-    let owner = poker_owner_of(caller).ok_or("NO_AGENT")?;
-    let mut a = get_poker_agent(owner).ok_or("NO_AGENT")?;
-    if let (Some(tid), Some(seat)) = (a.table_id, a.seat) {
-        if let Some(mut t) = get_poker_table(tid) {
-            // If a hand is live and this seat is in it, fold then vacate.
-            if let Some(eng) = &mut t.engine {
-                if eng.seats.get(seat as usize).map(|s| s.status == SeatStatus::Active).unwrap_or(false) {
-                    let _ = eng.apply_action(seat as usize, EngAction::Fold);
-                }
-            }
-            t.seat_owners[seat as usize] = None;
-            t.timeouts[seat as usize] = 0;
-            set_poker_table(t);
-        }
-    }
-    // Remove from waitlist if present.
-    let mine: Vec<u64> = POKER_WAITLIST.with(|m| m.borrow().iter().filter(|e| e.value() == owner).map(|e| *e.key()).collect());
-    POKER_WAITLIST.with(|m| {
-        let mut map = m.borrow_mut();
-        for k in mine {
-            map.remove(&k);
-        }
-    });
-    a.table_id = None;
-    a.seat = None;
-    a.state = AgentState::Idle;
-    set_poker_agent(owner, a);
-    Ok(())
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub enum PokerActionInput {
-    Fold,
-    Check,
-    Call,
-    BetTo(u64),
-}
-
-/// External agent acts. Buffered and revealed on the table's pacing timer
-/// (D18). `hand_no` guards against stale actions.
-#[ic_cdk::update]
-fn poker_act(table_id: u8, hand_no: u64, action: PokerActionInput) -> Result<(), String> {
-    require_poker_visible()?;
-    require_authenticated()?;
-    let caller = get_caller();
-    let owner = poker_owner_of(caller).ok_or("NO_AGENT")?;
-    let mut t = get_poker_table(table_id).ok_or("NO_TABLE")?;
-    if t.hand_no != hand_no {
-        return Err("STALE_HAND".to_string());
-    }
-    let agent = get_poker_agent(owner).ok_or("NO_AGENT")?;
-    let seat = match (agent.table_id, agent.seat) {
-        (Some(tid), Some(s)) if tid == table_id => s,
-        _ => return Err("NOT_SEATED".to_string()),
-    };
-    let eng = t.engine.as_ref().ok_or("NO_HAND")?;
-    if eng.acting != seat as usize || eng.seats[seat as usize].status != SeatStatus::Active {
-        return Err("NOT_YOUR_TURN".to_string());
-    }
-    let buf = match action {
-        PokerActionInput::Fold => BufAction::Fold,
-        PokerActionInput::Check => BufAction::Check,
-        PokerActionInput::Call => BufAction::Call,
-        PokerActionInput::BetTo(x) => BufAction::BetTo(x),
-    };
-    t.buffered = Some((seat, buf));
-    // Reveal on the pacing timer (no instant bot rushes the table).
-    t.next_event_at = current_time() + POKER_PACE_NANOS;
-    set_poker_table(t);
-    if let Some(mut a) = get_poker_agent(owner) {
-        a.last_seen = current_time();
-        set_poker_agent(owner, a);
-    }
-    Ok(())
-}
-
-/// Public nudge that advances every active table (timers don't fire on a quiet
-/// local replica; the spectator UI calls this each poll). Async (draws RNG).
-#[ic_cdk::update]
-async fn poker_poke() {
-    if !feature_active(FLAG_POKER) {
-        return;
-    }
-    for id in 1..=POKER_NUM_TABLES {
-        poker_advance(id).await;
-    }
-}
-
-// ── View DTOs ───────────────────────────────────────────────────────────────
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct PokerLegalView {
-    pub can_check: bool,
-    pub call_amount: u64,
-    pub min_raise_to: u64,
-    pub max_raise_to: u64,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct PokerSeatView {
-    pub seat: u8,
-    pub occupied: bool,
-    pub principal: Option<Principal>,
-    pub model: String,
-    pub stack_chips: u64,
-    pub committed_chips: u64,
-    pub status: String,
-    pub is_acting: bool,
-    pub hole: Option<Vec<u8>>,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct PokerTableView {
-    pub table_id: u8,
-    pub hand_no: u64,
-    pub phase: String,
-    pub board: Vec<u8>,
-    pub pot_chips: u64,
-    pub button: u8,
-    pub acting_seat: Option<u8>,
-    pub action_deadline: u64,
-    pub seats: Vec<PokerSeatView>,
-    pub my_seat: Option<u8>,
-    pub legal: Option<PokerLegalView>,
-    pub last_result: Option<String>,
-    pub paused: bool,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct PokerLobbyRow {
-    pub table_id: u8,
-    pub seats_taken: u8,
-    pub max_seats: u8,
-    pub hand_no: u64,
-    pub pot_chips: u64,
-    pub phase: String,
-    pub waitlist_len: u64,
-    pub paused: bool,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct MyPokerAgentView {
-    pub claimed: bool,
-    pub agent_principal: Option<Principal>,
-    pub mode: String,
-    pub model: String,
-    pub style: PokerStyle,
-    pub stop_loss_e8s: u64,
-    pub state: String,
-    pub table_id: Option<u8>,
-    pub seat: Option<u8>,
-    pub chips: u64,
-    pub effective_vp_e8s: u64,
-    pub waitlist_pos: Option<u64>,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct PokerHandSeatView {
-    pub principal: Principal,
-    pub model: String,
-    pub hole: Option<Vec<u8>>,
-    pub delta_chips: i64,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct PokerHandView {
-    pub id: u64,
-    pub table_id: u8,
-    pub hand_no: u64,
-    pub board: Vec<u8>,
-    pub seed_hex: String,
-    pub winners_msg: String,
-    pub at: u64,
-    pub seats: Vec<PokerHandSeatView>,
-}
-
-fn phase_name(p: Phase) -> &'static str {
-    match p {
-        Phase::Preflop => "preflop",
-        Phase::Flop => "flop",
-        Phase::Turn => "turn",
-        Phase::River => "river",
-        Phase::Showdown => "showdown",
-        Phase::Done => "done",
-    }
-}
-
-fn status_name(s: SeatStatus) -> &'static str {
-    match s {
-        SeatStatus::Empty => "empty",
-        SeatStatus::Active => "active",
-        SeatStatus::Folded => "folded",
-        SeatStatus::AllIn => "all-in",
-        SeatStatus::SittingOut => "sitting-out",
-        SeatStatus::WaitingForBb => "waiting",
-    }
-}
-
-/// Build a table view. When `viewer` owns a seat, that seat's hole cards and the
-/// legal-action helper are included; everyone else's hole cards stay hidden.
-fn build_table_view(t: &PokerTable, viewer: Option<Principal>) -> PokerTableView {
-    let viewer_owner = viewer.and_then(poker_owner_of);
-    let mut my_seat: Option<u8> = None;
-    let mut seats: Vec<PokerSeatView> = Vec::with_capacity(poker_engine::NUM_SEATS);
-    let acting = t.engine.as_ref().filter(|e| e.phase != Phase::Done).map(|e| e.acting);
-    for i in 0..poker_engine::NUM_SEATS {
-        let owner = t.seat_owners[i];
-        let model = owner.and_then(get_poker_agent).map(|a| a.model).unwrap_or_default();
-        let (stack, committed, status, hole) = if let Some(eng) = &t.engine {
-            let s = &eng.seats[i];
-            let is_mine = owner.is_some() && owner == viewer_owner;
-            if is_mine {
-                my_seat = Some(i as u8);
-            }
-            let reveal = is_mine && s.hole[0] != 255;
-            (s.stack, s.committed_total, status_name(s.status).to_string(), if reveal { Some(vec![s.hole[0], s.hole[1]]) } else { None })
-        } else {
-            let chips = owner.map(casino_chips).unwrap_or(0);
-            if owner.is_some() && owner == viewer_owner {
-                my_seat = Some(i as u8);
-            }
-            (chips, 0, if owner.is_some() { "seated".to_string() } else { "empty".to_string() }, None)
-        };
-        seats.push(PokerSeatView {
-            seat: i as u8,
-            occupied: owner.is_some(),
-            principal: owner,
-            model,
-            stack_chips: stack,
-            committed_chips: committed,
-            status,
-            is_acting: acting == Some(i),
-            hole,
-        });
-    }
-    let legal = match (&t.engine, my_seat) {
-        (Some(eng), Some(seat)) if eng.phase != Phase::Done && eng.acting == seat as usize => {
-            let la = eng.legal_actions(seat as usize);
-            Some(PokerLegalView {
-                can_check: la.can_check,
-                call_amount: la.call_amount,
-                min_raise_to: la.min_raise_to,
-                max_raise_to: la.max_raise_to,
-            })
-        }
-        _ => None,
-    };
-    PokerTableView {
-        table_id: t.id,
-        hand_no: t.hand_no,
-        phase: t.engine.as_ref().map(|e| phase_name(e.phase).to_string()).unwrap_or_else(|| "waiting".to_string()),
-        board: t.engine.as_ref().map(|e| e.board.clone()).unwrap_or_else(|| t.last_board.clone()),
-        pot_chips: t.engine.as_ref().map(|e| e.pot_total()).unwrap_or(0),
-        button: t.button,
-        acting_seat: acting.map(|a| a as u8),
-        action_deadline: t.action_deadline,
-        seats,
-        my_seat,
-        legal,
-        last_result: t.last_result.clone(),
-        paused: t.paused,
-    }
-}
-
-#[ic_cdk::query]
-fn get_poker_lobby() -> Vec<PokerLobbyRow> {
-    let waitlist_len = POKER_WAITLIST.with(|m| m.borrow().len());
-    (1..=POKER_NUM_TABLES)
-        .filter_map(get_poker_table)
-        .map(|t| PokerLobbyRow {
-            table_id: t.id,
-            seats_taken: poker_occupants(&t) as u8,
-            max_seats: poker_engine::NUM_SEATS as u8,
-            hand_no: t.hand_no,
-            pot_chips: t.engine.as_ref().map(|e| e.pot_total()).unwrap_or(0),
-            phase: t.engine.as_ref().map(|e| phase_name(e.phase).to_string()).unwrap_or_else(|| "idle".to_string()),
-            waitlist_len,
-            paused: t.paused,
-        })
-        .collect()
-}
-
-#[ic_cdk::query]
-fn get_table_public(table_id: u8) -> Option<PokerTableView> {
-    get_poker_table(table_id).map(|t| build_table_view(&t, None))
-}
-
-#[ic_cdk::query]
-fn get_my_table_view() -> Option<PokerTableView> {
-    let caller = get_caller();
-    let owner = poker_owner_of(caller)?;
-    let agent = get_poker_agent(owner)?;
-    let tid = agent.table_id?;
-    get_poker_table(tid).map(|t| build_table_view(&t, Some(caller)))
-}
-
-#[ic_cdk::query]
-fn get_my_poker_agent() -> MyPokerAgentView {
-    let caller = get_caller();
-    let owner = poker_owner_of(caller).unwrap_or(caller);
-    match get_poker_agent(owner) {
-        Some(a) => {
-            let waitlist_pos = if a.state == AgentState::Waitlisted {
-                POKER_WAITLIST.with(|m| m.borrow().iter().position(|e| e.value() == owner).map(|p| p as u64 + 1))
-            } else {
-                None
-            };
-            MyPokerAgentView {
-                claimed: true,
-                agent_principal: Some(a.agent_principal),
-                mode: if a.mode == AgentMode::House { "house".into() } else { "external".into() },
-                model: a.model,
-                style: a.style,
-                stop_loss_e8s: a.stop_loss_e8s,
-                state: format!("{:?}", a.state).to_lowercase(),
-                table_id: a.table_id,
-                seat: a.seat,
-                chips: casino_chips(owner),
-                effective_vp_e8s: casino_effective_vp_e8s(owner),
-                waitlist_pos,
-            }
-        }
-        None => MyPokerAgentView {
-            claimed: false,
-            agent_principal: None,
-            mode: String::new(),
-            model: String::new(),
-            style: PokerStyle::Tag,
-            stop_loss_e8s: 0,
-            state: "none".into(),
-            table_id: None,
-            seat: None,
-            chips: casino_chips(owner),
-            effective_vp_e8s: casino_effective_vp_e8s(owner),
-            waitlist_pos: None,
-        },
-    }
-}
-
-#[ic_cdk::query]
-fn get_poker_history(table_id: u8, n: u64) -> Vec<PokerHandView> {
-    let take = n.clamp(1, 50) as usize;
-    POKER_HANDS.with(|m| {
-        m.borrow()
-            .iter()
-            .rev()
-            .filter(|e| e.value().table_id == table_id)
-            .take(take)
-            .map(|e| {
-                let r = e.value();
-                PokerHandView {
-                    id: r.id,
-                    table_id: r.table_id,
-                    hand_no: r.hand_no,
-                    board: r.board.clone(),
-                    seed_hex: r.seed_hex.clone(),
-                    winners_msg: r.winners_msg.clone(),
-                    at: r.at,
-                    seats: r.seats.iter().map(|s| PokerHandSeatView {
-                        principal: s.owner,
-                        model: s.model.clone(),
-                        hole: s.hole.map(|h| vec![h[0], h[1]]),
-                        delta_chips: s.delta_chips,
-                    }).collect(),
-                }
-            })
-            .collect()
-    })
-}
-
-// ── Admin ───────────────────────────────────────────────────────────────────
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_pause_poker_table(table_id: u8, paused: bool) -> Result<(), String> {
-    let mut t = get_poker_table(table_id).ok_or("NO_TABLE")?;
-    t.paused = paused;
-    set_poker_table(t);
-    Ok(())
-}
-
-/// Void the current hand: refund every committed chip (delta 0), archive a void.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_void_poker_hand(table_id: u8) -> Result<(), String> {
-    let mut t = get_poker_table(table_id).ok_or("NO_TABLE")?;
-    if t.engine.is_none() {
-        return Err("NO_HAND".to_string());
-    }
-    // Drop the hand with no ledger writes; restore seats; next hand starts fresh.
-    t.engine = None;
-    t.buffered = None;
-    t.last_result = Some("hand voided by admin".to_string());
-    t.resume_at = current_time() + POKER_INTER_HAND_NANOS;
-    set_poker_table(t);
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&AuditLogEntry {
-            timestamp: current_time(),
-            event_type: "poker_void_hand".to_string(),
-            proposal_id: table_id as u64,
-            user: get_caller(),
-            amount_e8s: 0,
-        });
-    });
-    Ok(())
 }
 
 ic_cdk::export_candid!();
@@ -17072,6 +15060,7 @@ mod tests {
             last_upvote_at: 2,
             upvote_count: 3,
             views: 9,
+            has_upvoted: false,
             total_icp_e8s: 4,
             total_ckbtc_e8s: 5,
             total_cketh_wei: 6,
@@ -17457,52 +15446,6 @@ mod tests {
         clear_arcade();
     }
 
-    #[test]
-    fn test_submit_turborush_score_and_per_game_flags() {
-        clear_arcade();
-        enable_arcade_flag();
-        let now = current_time();
-        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
-        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
-        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
-        for u in [alice, bob] {
-            STAKES.with(|m| {
-                m.borrow_mut().insert(
-                    StakeKey { tier: 0, user: u },
-                    UserStake { amount_e8s: 100_000_000, staked_at: now, last_action_at: now },
-                );
-            });
-        }
-        set_mock_caller(alice);
-
-        // Validation: 5 stages, per-stage cap, time bounds.
-        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![10; 4]).unwrap_err(), "INVALID_HOLE_COUNT");
-        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![61; 5]).unwrap_err(), "INVALID_STROKES");
-        assert_eq!(submit_arcade_score("turborush".into(), 10_000, vec![10; 5]).unwrap_err(), "INVALID_TIME");
-
-        // MOST cars passed wins (same descending rule as Field Goal).
-        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![8, 9, 10, 11, 12]).unwrap(), 1);
-        set_mock_caller(bob);
-        assert_eq!(submit_arcade_score("turborush".into(), 61_000, vec![3; 5]).unwrap(), 2);
-        let board = get_arcade_leaderboard("turborush".into());
-        assert_eq!(board[0].player, alice);
-        assert_eq!(board[0].strokes, 50);
-
-        // Per-game kill switch: turning the game's own flag off blocks
-        // submissions while the rest of the arcade stays open.
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE_TURBORUSH.to_string(), 0u8); });
-        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![5; 5]).unwrap_err(), "FEATURE_DISABLED");
-        assert_eq!(submit_arcade_score("minigolf".into(), 120_000, vec![3; 9]).unwrap(), 1, "other games unaffected");
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE_TURBORUSH.to_string(), 1u8); });
-        assert_eq!(submit_arcade_score("turborush".into(), 62_000, vec![20; 5]).unwrap(), 1);
-
-        for u in [alice, bob] {
-            STAKES.with(|m| { m.borrow_mut().remove(&StakeKey { tier: 0, user: u }); });
-        }
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_ARCADE_TURBORUSH.to_string()); });
-        clear_arcade();
-    }
-
     // ── Early Adopters ────────────────────────────────────────────────────────
 
     fn clear_early_adopters() {
@@ -17529,43 +15472,31 @@ mod tests {
 
     #[test]
     fn test_early_adopter_route_yield_rules() {
-        // Under 50 ICP: the whole month restakes into the neuron.
-        assert_eq!(early_adopter_route_yield(49 * ICP, 0), (49 * ICP, 0, 0));
-        assert_eq!(early_adopter_route_yield(1, 0), (1, 0, 0));
-        // 50..150: all treasury, nothing to the pot.
-        assert_eq!(early_adopter_route_yield(50 * ICP, 0), (0, 50 * ICP, 0));
-        assert_eq!(early_adopter_route_yield(149 * ICP, 0), (0, 149 * ICP, 0));
-        assert_eq!(early_adopter_route_yield(150 * ICP, 0), (0, 150 * ICP, 0));
-        // Above 150: the treasury cut is CAPPED at 150, the excess feeds the pot.
-        assert_eq!(early_adopter_route_yield(300 * ICP, 0), (0, 150 * ICP, 150 * ICP));
-        // The pot is net of the ledger fee burned moving it into the pool —
-        // otherwise the final claim is one fee short (caught by local e2e).
-        assert_eq!(early_adopter_route_yield(350 * ICP, 10_000), (0, 150 * ICP, 200 * ICP - 10_000));
-        // Excess at or below one fee doesn't move.
-        assert_eq!(early_adopter_route_yield(150 * ICP + 9_000, 10_000), (0, 150 * ICP, 0));
+        // Booster yield splits 50% treasury / 50% lottery — no restake, no
+        // per-user shares. Returns (restake=0, treasury_cut, lottery_net).
+        assert_eq!(early_adopter_route_yield(0, 0), (0, 0, 0));
+        assert_eq!(early_adopter_route_yield(100 * ICP, 0), (0, 50 * ICP, 50 * ICP));
+        // The lottery half is net of one onward-transfer fee.
+        assert_eq!(early_adopter_route_yield(100 * ICP, 10_000), (0, 50 * ICP, 50 * ICP - 10_000));
+        // A half at/below one fee doesn't move.
+        assert_eq!(early_adopter_route_yield(2, 10_000), (0, 1, 0));
     }
 
     #[test]
-    fn test_early_adopter_allocate_is_proportional_to_stake() {
-        let a = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
-        let b = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
-        // 10 vs 30 staked → 25% / 75% of the pot.
-        let stakes = vec![(a, 10 * ICP), (b, 30 * ICP)];
-        let (shares, dust) = early_adopter_allocate(200 * ICP, &stakes);
-        assert_eq!(shares, vec![(a, 50 * ICP), (b, 150 * ICP)]);
-        assert_eq!(dust, 0);
-        // Pots under 100 ICP allocate nothing — everything rolls over.
-        let (none, roll) = early_adopter_allocate(99 * ICP, &stakes);
-        assert!(none.is_empty());
-        assert_eq!(roll, 99 * ICP);
-        // Integer dust stays in the pool.
-        let stakes3 = vec![(a, 1 * ICP), (b, 2 * ICP)];
-        let (shares3, dust3) = early_adopter_allocate(100 * ICP + 1, &stakes3);
-        let total: u64 = shares3.iter().map(|(_, s)| *s).sum();
-        assert_eq!(total + dust3, 100 * ICP + 1);
-        assert!(shares3[1].1 == shares3[0].1 * 2 || shares3[1].1 == shares3[0].1 * 2 + 1);
-        // No stake → nothing allocated.
-        assert_eq!(early_adopter_allocate(500 * ICP, &[]).0.len(), 0);
+    fn test_booster_daily_tickets_100_per_icp() {
+        clear_early_adopters();
+        let user = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let now = current_time();
+        // No booster stake → no booster tickets.
+        assert_eq!(user_daily_tickets(user), 0);
+        // 3 ICP booster stake → 300 tickets/day (100 × whole ICP).
+        EARLY_ADOPTERS.with(|m| {
+            m.borrow_mut().insert(user, EarlyAdopter {
+                user, staked_e8s: 3 * ICP, joined_at: now, last_stake_at: now, claimable_e8s: 0,
+            });
+        });
+        assert_eq!(user_daily_tickets(user), 300);
+        clear_early_adopters();
     }
 
     #[tokio::test]
@@ -17596,74 +15527,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_early_adopter_settlement_allocates_claims_and_expires() {
+    async fn test_early_adopter_settlement_routes_50_50_no_user_payout() {
         clear_early_adopters();
         enable_early_adopters_flag();
         let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
-        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
         CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
         set_mock_ledger_transfer(Ok(1));
-        // Alice stakes 10, Bob 30 → shares must be 25% / 75%.
         set_mock_caller(alice);
         set_mock_ledger_balance(10 * ICP + 10_000);
         early_adopter_stake(10 * ICP).await.unwrap();
-        set_mock_caller(bob);
-        set_mock_ledger_balance(30 * ICP + 10_000);
-        early_adopter_stake(30 * ICP).await.unwrap();
 
         // The neuron bootstraps and follows the primary voting neuron.
         let info = get_early_adopter_info();
         assert!(info.neuron_id.is_some(), "neuron claimed at first stake");
         assert!(info.follows_primary_neuron, "follows the leader on all topics");
 
-        // Month 1: 350 ICP yield in the inbox → 150 treasury cut; the 200
-        // excess (net of one pool-transfer fee) splits 25/75 by stake.
-        let pot = 200 * ICP - 10_000;
-        let alice_share = pot / 4;
-        let bob_share = (pot as u128 * 3 / 4) as u64;
-        set_mock_ledger_balance(350 * ICP); // inbox balance read
+        // 100 ICP yield → 50 treasury / 50 lottery. Users get NOTHING.
+        set_mock_ledger_balance(100 * ICP);
         early_adopter_run_settlement(current_time()).await.unwrap();
         set_mock_caller(alice);
-        assert_eq!(get_early_adopter_info().my_claimable_e8s, alice_share);
-        set_mock_caller(bob);
-        assert_eq!(get_early_adopter_info().my_claimable_e8s, bob_share);
+        assert_eq!(get_early_adopter_info().my_claimable_e8s, 0, "boosters never pay users");
+        assert_eq!(claim_early_adopter_yield().await.unwrap_err(), "BOOSTERS_NO_YIELD");
         let rounds = list_early_adopter_rounds();
         assert_eq!(rounds.len(), 1);
-        assert_eq!(rounds[0].yield_e8s, 350 * ICP);
-        assert_eq!(rounds[0].treasury_e8s, 150 * ICP);
-        assert_eq!(rounds[0].distributed_e8s, alice_share + bob_share);
+        assert_eq!(rounds[0].yield_e8s, 100 * ICP);
+        assert_eq!(rounds[0].treasury_e8s, 50 * ICP);
+        assert_eq!(rounds[0].distributed_e8s, 0, "no user distribution");
         assert_eq!(rounds[0].restaked_e8s, 0);
-        assert_eq!(rounds[0].early_adopter_count, 2);
-
-        // Alice claims; Bob doesn't.
-        set_mock_caller(alice);
-        let net = claim_early_adopter_yield().await.unwrap();
-        assert_eq!(net, alice_share - 10_000);
-        assert_eq!(claim_early_adopter_yield().await.unwrap_err(), "NOTHING_TO_CLAIM");
-
-        // Month 2 settles with low yield (49 ICP — under the 50 restake
-        // band, so the whole month RESTAKES into the neuron) and Bob's
-        // unclaimed share is forfeited to the treasury.
-        set_mock_ledger_balance(49 * ICP);
-        early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
-        set_mock_caller(bob);
-        assert_eq!(get_early_adopter_info().my_claimable_e8s, 0, "unclaimed share expired");
-        let rounds = list_early_adopter_rounds();
-        assert_eq!(rounds.len(), 2);
-        let r2 = rounds.iter().find(|r| r.expired_e8s > 0).expect("expiry recorded");
-        assert_eq!(r2.expired_e8s, bob_share);
-        assert_eq!(r2.treasury_e8s, 0, "sub-50 months pay the treasury nothing");
-        assert_eq!(r2.restaked_e8s, 49 * ICP, "sub-50 months compound into the neuron");
-        assert_eq!(r2.distributed_e8s, 0);
-        assert_eq!(get_early_adopter_info().total_restaked_e8s, 49 * ICP);
-
-        // Month 3: 100 ICP — between the thresholds (50..150) → all treasury.
-        set_mock_ledger_balance(100 * ICP);
-        early_adopter_run_settlement(current_time() + 2 * EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
-        let rounds = list_early_adopter_rounds();
-        let r3 = rounds.iter().find(|r| r.treasury_e8s == 100 * ICP).expect("mid-band month");
-        assert_eq!(r3.restaked_e8s, 0);
-        assert_eq!(r3.distributed_e8s, 0);
         clear_early_adopters();
     }
 
@@ -17688,13 +15578,12 @@ mod tests {
         assert!(early_adopter_run_settlement(current_time()).await.is_err());
         let job = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().pending_job.clone()).expect("journal persisted");
         assert_eq!(job.yield_e8s, 750 * ICP);
-        assert_eq!(job.treasury_cut_e8s, 150 * ICP);
-        assert_eq!(job.excess_net_e8s, 600 * ICP - 10_000);
-        assert!(job.expired_done && job.restake_done && !job.cut_done);
+        assert_eq!(job.treasury_cut_e8s, 375 * ICP, "50% treasury");
+        assert_eq!(job.excess_net_e8s, 375 * ICP - 10_000, "50% lottery, net of fee");
+        assert!(!job.cut_done);
 
-        // Resume with the inbox apparently drained (the pre-fix code re-read
-        // it and re-routed, double-dipping the treasury): the journal's
-        // amounts must be used instead.
+        // Resume with the inbox apparently drained: the journal's amounts must
+        // be used (the pre-fix bug re-read the inbox and re-routed).
         set_mock_ledger_balance(0);
         set_mock_ledger_transfer(Ok(2));
         early_adopter_run_settlement(current_time()).await.unwrap();
@@ -17702,24 +15591,8 @@ mod tests {
         let rounds = list_early_adopter_rounds();
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].yield_e8s, 750 * ICP, "original month, not the re-read remainder");
-        assert_eq!(rounds[0].treasury_e8s, 150 * ICP, "cut taken exactly once");
-        assert_eq!(rounds[0].restaked_e8s, 0, "remainder NOT mis-restaked");
-        let pot = 600 * ICP - 10_000;
-        assert_eq!(rounds[0].distributed_e8s, pot / 4 + (pot as u128 * 3 / 4) as u64);
-
-        // Once a settlement opens, prior claims are already expired: a claim
-        // racing the next month's settlement gets NOTHING_TO_CLAIM instead
-        // of double-spending the share pool.
-        set_mock_ledger_balance(50 * ICP);
-        set_mock_ledger_transfer(Err("ledger down".into()));
-        assert!(early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.is_err());
-        set_mock_caller(alice);
-        assert_eq!(claim_early_adopter_yield().await.unwrap_err(), "NOTHING_TO_CLAIM");
-        set_mock_ledger_transfer(Ok(3));
-        early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
-        let rounds = list_early_adopter_rounds();
-        let r2 = rounds.iter().find(|r| r.expired_e8s > 0).expect("expiry recorded");
-        assert_eq!(r2.expired_e8s, pot / 4 + (pot as u128 * 3 / 4) as u64);
+        assert_eq!(rounds[0].treasury_e8s, 375 * ICP, "cut taken exactly once");
+        assert_eq!(rounds[0].distributed_e8s, 0, "no user payout");
         clear_early_adopters();
     }
 
@@ -17740,44 +15613,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_early_adopter_membership_closes_at_600_yield_but_topups_continue() {
+    async fn test_boosters_open_forever_no_gates() {
         clear_early_adopters();
         enable_early_adopters_flag();
-        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
         let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
         CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
         set_mock_ledger_transfer(Ok(1));
-        set_mock_caller(alice);
+        // Even after a huge-yield month, anyone can still stake — no quota,
+        // no membership-close gate.
+        EARLY_ADOPTER_STATE.with(|c| {
+            let mut s = c.borrow().get().clone();
+            s.membership_closed = true; // legacy flag must NOT block staking now
+            c.borrow_mut().set(s);
+        });
+        set_mock_caller(bob);
         set_mock_ledger_balance(5 * ICP + 10_000);
         early_adopter_stake(5 * ICP).await.unwrap();
-
-        // A 1,999 ICP month keeps the doors open.
-        set_mock_ledger_balance(599 * ICP);
-        early_adopter_run_settlement(current_time()).await.unwrap();
-        assert!(!get_early_adopter_info().membership_closed);
-
-        // A 2,000 ICP month latches the table shut — permanently.
-        set_mock_ledger_balance(600 * ICP);
-        early_adopter_run_settlement(current_time() + EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
-        assert!(get_early_adopter_info().membership_closed);
-
-        // New members are turned away…
-        set_mock_caller(bob);
-        set_mock_ledger_balance(5 * ICP + 10_000);
-        assert_eq!(early_adopter_stake(5 * ICP).await.unwrap_err(), "MEMBERSHIP_CLOSED");
-        // …even after a later low-yield month (the latch never reopens).
-        set_mock_ledger_balance(10 * ICP);
-        early_adopter_run_settlement(current_time() + 2 * EARLY_ADOPTER_PERIOD_NANOS).await.unwrap();
-        set_mock_caller(bob);
-        set_mock_ledger_balance(5 * ICP + 10_000);
-        assert_eq!(early_adopter_stake(5 * ICP).await.unwrap_err(), "MEMBERSHIP_CLOSED");
-
-        // …but an existing early adopter can always add more.
-        set_mock_caller(alice);
-        set_mock_ledger_balance(3 * ICP + 10_000);
-        early_adopter_stake(3 * ICP).await.unwrap();
-        assert_eq!(get_early_adopter_info().my_staked_e8s, 8 * ICP);
-        assert_eq!(get_early_adopter_info().early_adopter_count, 1);
+        assert_eq!(get_early_adopter_info().my_staked_e8s, 5 * ICP);
         clear_early_adopters();
     }
 
@@ -18091,7 +15943,9 @@ mod tests {
                 description: "Build it".into(),
                 detail: "Detail".into(),
                 created_at: now,
-                goal_icp_e8s: 100_000_000_000,
+                goal_usd_e8s: 50_000_000_000_000,
+                raised_usd_e8s: 0,
+                goal_icp_e8s: 0,
                 goal_ckbtc_e8s: 0,
                 goal_cketh_wei: 0,
                 raised_icp_e8s: 0,
@@ -18155,7 +16009,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_admin_update_project_and_crypto_toggles() {
+    async fn test_admin_project_usd_goal_and_accepts_all_crypto() {
         let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
         CONFIG.with(|c| {
             let mut cfg = c.borrow().get().clone();
@@ -18164,60 +16018,46 @@ mod tests {
         });
         set_mock_caller(admin);
 
-        // 1. Add project with all tokens accepted
+        // Goal below $1 is rejected.
+        assert_eq!(
+            admin_add_project("P".into(), "D".into(), "X".into(), 0).unwrap_err(),
+            "GOAL_BELOW_MIN"
+        );
+
+        // 1. Add a project with a single USD goal ($50,000).
         let project_id = admin_add_project(
             "Project A".into(),
             "Desc A".into(),
             "Detail A".into(),
-            100_000,
-            200_000,
-            300_000,
-            true,
-            true,
-            true,
+            5_000_000_000_000,
         ).unwrap();
-
         let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
-        assert_eq!(pr.title, "Project A");
-        assert!(pr.accept_icp);
-        assert!(pr.accept_ckbtc);
-        assert!(pr.accept_cketh);
+        assert_eq!(pr.goal_usd_e8s, 5_000_000_000_000);
+        // Every supported crypto is accepted.
+        assert!(pr.accept_icp && pr.accept_ckbtc && pr.accept_cketh);
 
-        // 2. Update goals and disable CkBTC/CkETH
+        // 2. Update the goal; all crypto stays accepted.
         admin_update_project(
             project_id,
             "Project A Updated".into(),
             "Desc A".into(),
             "Detail A".into(),
-            500_000,
-            0,
-            0,
-            true,
-            false,
-            false,
+            2_500_000_000_000,
         ).unwrap();
-
         let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
         assert_eq!(pr.title, "Project A Updated");
-        assert_eq!(pr.goal_icp_e8s, 500_000);
-        assert!(pr.accept_icp);
-        assert!(!pr.accept_ckbtc);
-        assert!(!pr.accept_cketh);
+        assert_eq!(pr.goal_usd_e8s, 2_500_000_000_000);
+        assert!(pr.accept_icp && pr.accept_ckbtc && pr.accept_cketh);
 
-        // 3. Verify funding validation
+        // 3. Any supported crypto funds it; raised is valued in USD.
         let funder = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
         set_mock_caller(funder);
         set_mock_ledger_balance(10_000_000_000);
         set_mock_ledger_transfer(Ok(12));
-
-        // ICP is accepted
         assert!(fund_project(project_id, IdeaToken::ICP, 100_000_000).await.is_ok());
-
-        // CkBTC is disabled/rejected
-        assert_eq!(
-            fund_project(project_id, IdeaToken::CkBTC, 1_000_000).await.unwrap_err(),
-            "TOKEN_NOT_ACCEPTED"
-        );
+        assert!(fund_project(project_id, IdeaToken::CkBTC, 1_000_000).await.is_ok());
+        let listed = list_projects().into_iter().find(|x| x.id == project_id).unwrap();
+        assert!(listed.raised_usd_e8s > 0, "raised valued in USD across tokens");
     }
 
     #[tokio::test]
@@ -18230,49 +16070,30 @@ mod tests {
         set_mock_ledger_transfer(Ok(1));
         let idea_id = post_idea("Upvotable".into(), "Desc".into(), "".into()).await.unwrap();
 
+        // Unknown idea.
         set_mock_caller(voter);
-        set_mock_ledger_transfer(Ok(42));
+        assert_eq!(upvote_idea(999_999).unwrap_err(), "IDEA_NOT_FOUND");
 
-        // Insufficient deposit
-        set_mock_ledger_balance(100);
-        assert_eq!(
-            upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
-            "INSUFFICIENT_DEPOSIT"
-        );
-
-        // Below the value-aligned minimum (default 0.2 ICP)
-        assert_eq!(
-            upvote_idea(idea_id, IdeaToken::ICP, DEFAULT_MIN_UPVOTE_ICP_E8S - 1).await.unwrap_err(),
-            "BELOW_MINIMUM"
-        );
-
-        // Unknown idea
-        set_mock_ledger_balance(10_000_000_000);
-        assert_eq!(
-            upvote_idea(999_999, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
-            "IDEA_NOT_FOUND"
-        );
-
-        // Happy path
-        upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.unwrap();
+        // Free upvote: no ledger transfer happens (force every transfer to fail
+        // so a stray one would surface), count bumps, no crypto moves.
+        set_mock_ledger_transfer(Err("upvotes are free — must not move ICP".to_string()));
+        upvote_idea(idea_id).unwrap();
         let idea = IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap();
         assert_eq!(idea.upvote_count, 1);
-        assert_eq!(idea.total_icp_e8s, 100_000_000);
+        assert_eq!(idea.total_icp_e8s, 0, "no crypto collected");
 
-        let settled = IDEA_UPVOTES.with(|m| {
-            m.borrow().iter().map(|e| e.value())
-                .find(|u| u.idea_id == idea_id && u.voter == voter)
-        }).unwrap();
-        assert_eq!(settled.status, UpvoteStatus::Settled);
-        assert_eq!(settled.treasury_block, Some(42));
-        assert_eq!(settled.poster_block, Some(42));
+        // One upvote per user per idea.
+        assert_eq!(upvote_idea(idea_id).unwrap_err(), "ALREADY_UPVOTED");
+        assert_eq!(IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap().upvote_count, 1);
 
-        // ckBTC totals tracked separately (min is 1_000 sats)
-        upvote_idea(idea_id, IdeaToken::CkBTC, 1_000_000).await.unwrap();
-        let idea = IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap();
-        assert_eq!(idea.total_ckbtc_e8s, 1_000_000);
-        assert_eq!(idea.total_icp_e8s, 100_000_000);
-        assert_eq!(idea.upvote_count, 2);
+        // A different user can upvote, and list_ideas reports has_upvoted per caller.
+        let voter2 = p("rkp4c-7iaaa-aaaaa-aaaca-cai");
+        set_mock_caller(voter2);
+        upvote_idea(idea_id).unwrap();
+        assert_eq!(IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap().upvote_count, 2);
+        assert!(list_ideas().iter().find(|i| i.id == idea_id).unwrap().has_upvoted);
+        set_mock_caller(poster);
+        assert!(!list_ideas().iter().find(|i| i.id == idea_id).unwrap().has_upvoted);
     }
 
     #[tokio::test]
@@ -18311,21 +16132,19 @@ mod tests {
         set_mock_ledger_transfer(Ok(1));
         let idea_id = post_idea("Retry me".into(), "Desc".into(), "".into()).await.unwrap();
 
+        // Upvotes are now free, but the paid-upvote retry machinery is retained
+        // for any legacy journal entries. Simulate one that failed mid-payout.
         set_mock_caller(voter);
         set_mock_ledger_balance(10_000_000_000);
-        set_mock_ledger_transfer(Err("ledger down".to_string()));
-
-        assert!(upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.is_err());
-
-        // Journaled as FailedPayout, idea untouched.
-        let uv = IDEA_UPVOTES.with(|m| {
-            m.borrow().iter().map(|e| e.value())
-                .find(|u| u.idea_id == idea_id)
-        }).unwrap();
+        let uv_id = NEXT_UPVOTE_ID.with(|c| { let id = *c.borrow().get(); c.borrow_mut().set(id + 1); id });
+        IDEA_UPVOTES.with(|m| { m.borrow_mut().insert(uv_id, IdeaUpvote {
+            id: uv_id, idea_id, voter, token: IdeaToken::ICP, amount: 100_000_000,
+            status: UpvoteStatus::FailedPayout, created_at: current_time(),
+            treasury_block: None, poster_block: None,
+        }); });
+        let uv = IDEA_UPVOTES.with(|m| m.borrow().get(&uv_id)).unwrap();
         assert_eq!(uv.status, UpvoteStatus::FailedPayout);
-        assert!(uv.treasury_block.is_none());
-        let idea = IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap();
-        assert_eq!(idea.upvote_count, 0);
+        assert_eq!(IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap().upvote_count, 0);
 
         // Sweep retry settles it once the ledger recovers.
         set_mock_ledger_transfer(Ok(77));
@@ -18349,11 +16168,15 @@ mod tests {
         set_mock_ledger_transfer(Ok(1));
         let idea_id = post_idea("Doomed idea".into(), "Desc".into(), "".into()).await.unwrap();
 
-        // Upvote fails mid-saga, journaled as FailedPayout.
+        // A legacy paid upvote that failed mid-saga, journaled as FailedPayout.
         set_mock_caller(voter);
         set_mock_ledger_balance(10_000_000_000);
-        set_mock_ledger_transfer(Err("ledger down".to_string()));
-        assert!(upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.is_err());
+        let uv_id = NEXT_UPVOTE_ID.with(|c| { let id = *c.borrow().get(); c.borrow_mut().set(id + 1); id });
+        IDEA_UPVOTES.with(|m| { m.borrow_mut().insert(uv_id, IdeaUpvote {
+            id: uv_id, idea_id, voter, token: IdeaToken::ICP, amount: 100_000_000,
+            status: UpvoteStatus::FailedPayout, created_at: current_time(),
+            treasury_block: None, poster_block: None,
+        }); });
 
         // The idea expires and is deleted before the retry succeeds.
         IDEAS.with(|m| { m.borrow_mut().remove(&idea_id); });
@@ -18388,12 +16211,7 @@ mod tests {
             m.borrow_mut().insert(idea_id, idea);
         });
 
-        set_mock_ledger_balance(10_000_000_000);
-        set_mock_ledger_transfer(Ok(1));
-        assert_eq!(
-            upvote_idea(idea_id, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
-            "IDEA_EXPIRED"
-        );
+        assert_eq!(upvote_idea(idea_id).unwrap_err(), "IDEA_EXPIRED");
 
         // list_ideas omits it even before the sweep...
         assert!(list_ideas().into_iter().all(|i| i.id != idea_id));
@@ -18546,6 +16364,43 @@ mod tests {
         STAKES.with(|m| {
             m.borrow_mut().remove(&StakeKey { tier: 0, user: alice });
             m.borrow_mut().remove(&StakeKey { tier: 2, user: alice });
+        });
+    }
+
+    #[test]
+    fn test_casino_svpp_mapping() {
+        // SVPP credits stake at FULL value (no 10× voting discount), so
+        // 1 staked ICP = 1,000 SVPP at base tenure, doubling with tenure.
+        let bob = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        let now = current_time();
+        // 1 ICP, just staked → base tenure (1×).
+        STAKES.with(|m| {
+            m.borrow_mut().insert(
+                StakeKey { tier: 0, user: bob },
+                UserStake { amount_e8s: ONE_ICP_E8S, staked_at: now, last_action_at: now },
+            );
+        });
+        // Voting weight (SVP) is discounted 10:1 → 0.1 VP for 1 ICP…
+        assert_eq!(user_voting_weight(bob), ONE_ICP_E8S / STAKED_VP_DIVISOR);
+        // …but SVPP credits full stake → 1 ICP = 1,000 SVPP.
+        assert_eq!(casino_chips(bob), 1_000);
+        // Tenure doubles SVPP every 6 months (same multiplier as VP).
+        STAKES.with(|m| {
+            m.borrow_mut().insert(
+                StakeKey { tier: 0, user: bob },
+                UserStake {
+                    amount_e8s: ONE_ICP_E8S,
+                    staked_at: now.saturating_sub(VP_TENURE_PERIOD_NANOS),
+                    last_action_at: now,
+                },
+            );
+        });
+        assert_eq!(casino_chips(bob), 2_000, "6 months staked → 2,000 SVPP");
+        STAKES.with(|m| {
+            m.borrow_mut().remove(&StakeKey { tier: 0, user: bob });
+        });
+        CASINO_VP_DELTA.with(|m| {
+            m.borrow_mut().remove(&bob);
         });
     }
 
@@ -18847,112 +16702,17 @@ mod tests {
         assert!(unstake(200_000_000, StakeTier::SixMonths).await.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_lossless_vote_weight_and_immutability() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-        let pid = 555_001u64;
-        PROPOSALS.with(|m| {
-            m.borrow_mut()
-                .insert(pid, sample_proposal(pid, "open", 200_000_000, 0));
-        });
-        // sample_proposal pre-sets first_stance — clear it to test the
-        // first-lossless-vote tie-break path.
-        PROPOSALS.with(|m| {
-            let mut prop = m.borrow().get(&pid).unwrap();
-            prop.first_stance = None;
-            m.borrow_mut().insert(pid, prop);
-        });
-
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(1));
-
-        // No stake → no vote.
-        set_mock_caller(bob);
-        assert_eq!(
-            cast_lossless_vote(pid, Stance::Adopt).unwrap_err(),
-            "NO_STAKE"
-        );
-
-        // Alice: 3 ICP in the 6-month tier → weight 3 ICP (1× multiplier).
-        set_mock_caller(alice);
-        stake(300_000_000, StakeTier::SixMonths).await.unwrap();
-        cast_lossless_vote(pid, Stance::Reject).unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.lossless_reject_e8s, 30_000_000, "3 ICP staked ÷ 10");
-        assert_eq!(prop.lossless_adopt_e8s, 0);
-        assert_eq!(prop.first_stance, Some(Stance::Reject));
-        // Burn pots untouched. Staked weight = 3 ICP ÷ 10 = 0.3 ICP, below
-        // the 2 ICP threshold, so it stays open here.
-        assert_eq!(prop.total_committed_e8s, 0);
-        assert_eq!(prop.status, "open");
-
-        // One immutable vote per user per proposal.
-        assert_eq!(
-            cast_lossless_vote(pid, Stance::Adopt).unwrap_err(),
-            "ALREADY_VOTED"
-        );
-
-        // Weight was snapshotted: staking more does not retro-apply.
-        stake(100_000_000, StakeTier::SixMonths).await.unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.lossless_reject_e8s, 30_000_000);
-
-        // Bob: 1 ICP in the 2-year tier → weight 0.1 ICP (1 ICP ÷ 10; the
-        // term only scales lottery tickets, not voting power).
-        set_mock_caller(bob);
-        stake(100_000_000, StakeTier::TwoYears).await.unwrap();
-        assert_eq!(user_voting_weight(bob), 10_000_000);
-        cast_lossless_vote(pid, Stance::Adopt).unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.lossless_adopt_e8s, 10_000_000);
-
-        // Combined-pot decision: lossless weight can flip the direction even
-        // though the burn pots alone would say otherwise.
-        let vote = decide_vote_choice(
-            prop.adopt_pot_e8s.saturating_add(prop.lossless_adopt_e8s),
-            prop.reject_pot_e8s.saturating_add(prop.lossless_reject_e8s),
-            prop.first_stance.clone(),
-        );
-        assert_eq!(vote, 2, "30M reject (alice) vs 10M adopt (bob) → reject");
-    }
-
-    #[tokio::test]
-    async fn test_lossless_vote_closed_proposals() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(alice);
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(1));
-        stake(200_000_000, StakeTier::SixMonths).await.unwrap();
-
-        assert_eq!(
-            cast_lossless_vote(404_404, Stance::Adopt).unwrap_err(),
-            "PROPOSAL_NOT_FOUND"
-        );
-
-        let pid = 555_002u64;
-        PROPOSALS.with(|m| {
-            m.borrow_mut()
-                .insert(pid, sample_proposal(pid, "voted", 1, 1));
-        });
-        assert_eq!(
-            cast_lossless_vote(pid, Stance::Adopt).unwrap_err(),
-            "VOTING_CLOSED"
-        );
-
-        // Within the 1-hour cutoff window → closed.
-        let pid2 = 555_003u64;
-        let mut near = sample_proposal(pid2, "open", 1, 0);
-        near.deadline = current_time() + 1_000_000_000; // 1s from "now"
-        PROPOSALS.with(|m| {
-            m.borrow_mut().insert(pid2, near);
-        });
-        assert_eq!(
-            cast_lossless_vote(pid2, Stance::Adopt).unwrap_err(),
-            "VOTING_CLOSED"
-        );
+    #[test]
+    fn test_staked_weight_does_not_affect_threshold() {
+        // Voting is burn-only: the staked lossless_* pots must never meet a
+        // proposal's threshold, regardless of size.
+        let mut p = sample_proposal(556_001, "open", 200_000_000, 0);
+        p.lossless_adopt_e8s = 10_000_000_000; // 100 ICP of staked weight
+        p.lossless_reject_e8s = 10_000_000_000;
+        assert!(!proposal_threshold_met(&p), "staked weight cannot meet threshold");
+        // Only burned commitments count.
+        p.total_committed_e8s = 200_000_000;
+        assert!(proposal_threshold_met(&p), "burned ICP at threshold → met");
     }
 
     #[tokio::test]
@@ -18983,15 +16743,15 @@ mod tests {
         assert_eq!(pool_2y.pending_maturity.len(), 1);
         assert_eq!(pool_2y.total_yield_e8s, 110_000_000);
 
-        // Distribute: 80% lottery pot / 20% treasury, single shared pot.
+        // Distribute: 50% lottery pot / 50% treasury, single shared pot.
         set_mock_ledger_balance(220_000_000);
         distribute_yield_inbox().await;
         let dists = list_yield_distributions();
         assert_eq!(dists.len(), 1);
         let d = &dists[0];
         let spendable = 220_000_000 - 2 * ICP_FEE_E8S;
-        assert_eq!(d.lottery_amount_e8s, spendable * 4 / 5);
-        assert_eq!(d.treasury_amount_e8s, spendable - spendable * 4 / 5);
+        assert_eq!(d.lottery_amount_e8s, spendable / 2);
+        assert_eq!(d.treasury_amount_e8s, spendable - spendable / 2);
         assert_eq!(d.lottery_amount_e8s + d.treasury_amount_e8s, spendable);
         assert_eq!(d.status, YieldStatus::Done);
 
@@ -19106,7 +16866,8 @@ mod tests {
         let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         set_mock_caller(alice);
 
-        // Flag is OFF by default — the lottery ships dark.
+        // Lottery now defaults ON — turn it OFF to exercise the dark path.
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 0u8); });
         assert_eq!(claim_daily_tickets().unwrap_err(), "FEATURE_DISABLED");
         enable_lottery();
 
@@ -19841,6 +17602,117 @@ mod tests {
         assert_eq!(count, 2, "never double-pays");
     }
 
+    // Audit #1: a burn that completes via `retry_failed_settlements` after the
+    // first settlement must still pay the top-100 their 25% of the EXTRA burn —
+    // distribution tops up incrementally instead of latching shut.
+    #[tokio::test]
+    async fn test_pool_rewards_top_up_on_retried_burn() {
+        install_staking_test_config();
+        let m1 = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let m2 = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+        let pid = 700_081u64;
+        let mut prop = sample_proposal(pid, "settled", 1, 0);
+        prop.total_burned_e8s = Some(400_000_000); // pool share 100M → 50M each
+        prop.pool_distributed = false;
+        PROPOSALS.with(|m| { m.borrow_mut().insert(pid, prop); });
+
+        for (i, owner) in [(1u64, m1), (2u64, m2)] {
+            POOL_NEURONS.with(|m| {
+                m.borrow_mut().insert(i, PoolNeuron {
+                    neuron_id: i,
+                    registered_by: owner,
+                    voting_power: 1_000 * i,
+                    status: PoolStatus::Active,
+                    created_at: 1,
+                    activated_at: Some(1),
+                    treasury_block: None,
+                    backend_cmc_block: None,
+                    frontend_cmc_block: None,
+                });
+            });
+        }
+        set_mock_ledger_transfer(Ok(1));
+
+        // First distribution against 400M burned.
+        distribute_pool_rewards(pid).await.unwrap();
+        assert!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().pool_distributed);
+
+        // A retried burn lands: total → 800M (pool share 200M → 100M each) and
+        // distribution re-opens, exactly as `retry_failed_settlements` does.
+        PROPOSALS.with(|m| {
+            let mut pr = m.borrow().get(&pid).unwrap();
+            pr.total_burned_e8s = Some(800_000_000);
+            pr.pool_distributed = false;
+            m.borrow_mut().insert(pid, pr);
+        });
+
+        distribute_pool_rewards(pid).await.unwrap();
+        assert!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().pool_distributed);
+
+        // Each member: a 50M-fee initial payout plus a 50M-fee top-up.
+        let rewards: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter()
+            .map(|e| e.value())
+            .filter(|po| po.payout_type == PayoutType::PoolReward && po.ref_id == pid)
+            .collect());
+        assert_eq!(rewards.len(), 4, "two members × (initial + top-up)");
+        let m1_total: u64 = rewards.iter().filter(|po| po.user == m1).map(|po| po.amount).sum();
+        assert_eq!(m1_total, 2 * (50_000_000 - 10_000), "m1 paid both halves, once each");
+
+        // Re-running with no new burn is a no-op.
+        distribute_pool_rewards(pid).await.unwrap();
+        let count = PAYOUTS.with(|m| m.borrow().iter()
+            .filter(|e| e.value().payout_type == PayoutType::PoolReward && e.value().ref_id == pid).count());
+        assert_eq!(count, 4, "no double-pay after top-up");
+    }
+
+    // Audit #1/#9: a failed recipient transfer must not latch the proposal shut —
+    // distribution stays open and the next sweep retries the outstanding share
+    // without double-paying anyone who already received theirs.
+    #[tokio::test]
+    async fn test_pool_rewards_retry_after_failed_transfer() {
+        install_staking_test_config();
+        let m1 = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let pid = 700_082u64;
+        let mut prop = sample_proposal(pid, "settled", 1, 0);
+        prop.total_burned_e8s = Some(400_000_000); // 1 member → full 100M share
+        prop.pool_distributed = false;
+        PROPOSALS.with(|m| { m.borrow_mut().insert(pid, prop); });
+
+        POOL_NEURONS.with(|m| {
+            m.borrow_mut().insert(1u64, PoolNeuron {
+                neuron_id: 1,
+                registered_by: m1,
+                voting_power: 1_000,
+                status: PoolStatus::Active,
+                created_at: 1,
+                activated_at: Some(1),
+                treasury_block: None,
+                backend_cmc_block: None,
+                frontend_cmc_block: None,
+            });
+        });
+
+        // Transfer fails → not marked distributed, nothing recorded as paid.
+        set_mock_ledger_transfer(Err("ledger down".to_string()));
+        distribute_pool_rewards(pid).await.unwrap();
+        assert!(!PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().pool_distributed,
+            "stays open after a failed payout");
+        let count0 = PAYOUTS.with(|m| m.borrow().iter()
+            .filter(|e| e.value().payout_type == PayoutType::PoolReward && e.value().ref_id == pid).count());
+        assert_eq!(count0, 0, "no payout recorded on failure");
+
+        // Ledger recovers → the next sweep retries and pays the full share once.
+        set_mock_ledger_transfer(Ok(1));
+        distribute_pool_rewards(pid).await.unwrap();
+        assert!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().pool_distributed);
+        let rewards: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter()
+            .map(|e| e.value())
+            .filter(|po| po.payout_type == PayoutType::PoolReward && po.ref_id == pid)
+            .collect());
+        assert_eq!(rewards.len(), 1);
+        assert_eq!(rewards[0].amount, 100_000_000 - 10_000, "1 member → full 25% share");
+    }
+
     #[tokio::test]
     async fn test_pool_draft_finalize_cancel_refund() {
         install_staking_test_config();
@@ -19987,6 +17859,8 @@ mod tests {
         set_mock_caller(alice);
         set_mock_ledger_balance(500_000_000);
 
+        // Lottery now defaults ON — turn it OFF to exercise the dark state.
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 0u8); });
         // Flag off: dark — no pot reads, nothing enabled.
         let info = get_lottery_info().await;
         assert!(!info.enabled);
@@ -20389,16 +18263,13 @@ mod tests {
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].amount_e8s, 200_000_000);
 
-        // Stake + pending unstakes + lossless votes queries.
+        // Stake + pending unstakes queries.
         stake(300_000_000, StakeTier::OneYear).await.unwrap();
         let my = get_my_stake();
         assert_eq!(my.total_staked_e8s, 300_000_000);
-        assert_eq!(my.total_weight_e8s, 30_000_000, "voting power = stake ÷ 10");
         assert_eq!(my.tiers.len(), 1);
         let _uid = unstake(100_000_000, StakeTier::OneYear).await.unwrap();
         assert_eq!(list_my_pending_unstakes().len(), 1);
-        cast_lossless_vote(pid, Stance::Adopt).unwrap();
-        assert_eq!(get_my_lossless_votes().len(), 1);
 
         // Vote history.
         VOTES.with(|m| {
@@ -20708,16 +18579,12 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
 
-        // Out legs: a commitment, an idea post, an upvote (token-typed) and
-        // a stake lockup.
+        // Out legs: a commitment, an idea post and a stake lockup. (Upvotes are
+        // free now and move no money, so they never appear in tx history.)
         let pid = 730_001u64;
         open_proposal(pid, 10_000_000_000);
         commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
-        let idea = post_idea("Tx history".into(), "d".into(), "".into()).await.unwrap();
-        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-        set_mock_caller(bob);
-        upvote_idea(idea, IdeaToken::CkBTC, 5_000).await.unwrap();
-        set_mock_caller(alice);
+        let _idea = post_idea("Tx history".into(), "d".into(), "".into()).await.unwrap();
         stake(200_000_000, StakeTier::SixMonths).await.unwrap();
 
         // In leg: the commitment refunds when the proposal misses.
@@ -20741,239 +18608,14 @@ mod tests {
             assert!(w[0].timestamp >= w[1].timestamp);
         }
 
-        // Bob's view: only his token-typed upvote spend.
-        set_mock_caller(bob);
-        let bobs = get_my_transactions();
-        let uv = bobs.iter().find(|t| t.kind == "idea_upvote").expect("upvote spend");
-        assert_eq!(uv.direction, TxDirection::Out);
-        assert_eq!(uv.token, IdeaToken::CkBTC);
-        assert_eq!(uv.amount, 5_000);
-        assert!(bobs.iter().all(|t| t.kind != "deposit"), "caller-scoped");
-    }
-
-
-    #[tokio::test]
-    async fn test_staked_weight_meets_threshold_and_settles() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(alice);
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(1));
-
-        // Voting power = stake ÷ 10: 30 ICP staked = 3 ICP of weight.
-        stake(3_000_000_000, StakeTier::TwoYears).await.unwrap();
-
-        // Threshold 5 ICP: 3 ICP of staked weight is NOT enough on its own.
-        let pid = 740_001u64;
-        open_proposal(pid, 500_000_000);
-        cast_lossless_vote(pid, Stance::Adopt).unwrap();
-        assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "open");
-
-        // A second staker (20 ICP → 2 ICP weight) pushes COMBINED weight
-        // (3 + 2 = 5 ICP) to the 5 ICP threshold → met, no burn.
+        // Caller-scoped: a principal who moved no money has no transactions
+        // (and never sees alice's).
         let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
         set_mock_caller(bob);
-        stake(2_000_000_000, StakeTier::OneYear).await.unwrap();
-        cast_lossless_vote(pid, Stance::Reject).unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.status, "met", "combined staked weight ≥ threshold");
-        assert_eq!(prop.total_committed_e8s, 0, "no burn needed");
-
-        // Cutoff: the vote fires on staked conviction alone. Adopt (3 ICP)
-        // beats reject (2 ICP); nothing burns because nothing was committed.
-        process_proposal_cutoff(pid).await.unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.status, "settled");
-        assert_eq!(prop.total_burned_e8s, Some(0));
-        let vote = VOTES.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(vote.vote, Vote::Yes, "staked adopt majority carried it");
+        assert!(get_my_transactions().is_empty(), "caller-scoped — alice's txs don't leak");
     }
 
 
-    #[tokio::test]
-    async fn test_staked_vote_moves_no_icp_and_has_nothing_to_refund() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(alice);
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(1));
-        stake(300_000_000, StakeTier::SixMonths).await.unwrap(); // 0.3 VP
-
-        let pid = 760_001u64;
-        open_proposal(pid, 10_000_000_000); // unreachable threshold → will miss
-
-        // From here ANY ledger transfer would be a bug for a staked voter:
-        // make every transfer fail so a stray one surfaces loudly.
-        set_mock_ledger_transfer(Err("staked votes must not move ICP".to_string()));
-        cast_lossless_vote(pid, Stance::Adopt).unwrap();
-
-        // No escrow / commitment exists for the staked voter.
-        let key = CommitmentKey { proposal_id: pid, principal: alice };
-        assert!(COMMITMENTS.with(|m| m.borrow().get(&key)).is_none());
-
-        // Settlement of a missed proposal: nothing to refund, no transfer
-        // attempted (the Err mock is never hit), no payout recorded.
-        process_proposal_cutoff(pid).await.unwrap();
-        assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "abstained");
-        assert!(PAYOUTS.with(|m| m.borrow().is_empty()), "staked voters get nothing back");
-        // The immutable vote record persists though it moved zero ICP.
-        assert_eq!(get_my_lossless_votes().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_staked_vote_then_burn_commit_same_proposal() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(alice);
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(1));
-        follow_as(alice);
-        stake(1_000_000_000, StakeTier::SixMonths).await.unwrap(); // 10 ICP → 1 VP
-
-        let pid = 760_002u64;
-        open_proposal(pid, 500_000_000); // 5 ICP threshold
-
-        // 1) Free staked ADOPT first (1 ICP of weight; below threshold).
-        cast_lossless_vote(pid, Stance::Adopt).unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.lossless_adopt_e8s, 100_000_000);
-        assert_eq!(prop.total_committed_e8s, 0);
-        assert_eq!(prop.status, "open");
-
-        // 2) Then burn-commit ADOPT with wallet ICP — a separate escrow,
-        //    independent of the staked tally.
-        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.adopt_pot_e8s, 200_000_000, "burn pot independent of staked tally");
-        assert_eq!(prop.lossless_adopt_e8s, 100_000_000, "staked tally unchanged by the burn");
-        assert_eq!(prop.total_committed_e8s, 200_000_000);
-
-        // 3) Add more burn after the initial commitment → crosses threshold.
-        add_to_commitment(pid, 300_000_000).await.unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.total_committed_e8s, 500_000_000);
-        assert_eq!(prop.lossless_adopt_e8s, 100_000_000, "top-up doesn't touch staked tally");
-        assert_eq!(prop.status, "met");
-
-        // Settle: the burn is spent; the staked vote moved nothing and is
-        // NOT refunded — the user keeps both records, only the burn settles.
-        process_proposal_cutoff(pid).await.unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.status, "settled");
-        assert_eq!(prop.total_burned_e8s, Some(500_000_000));
-        let key = CommitmentKey { proposal_id: pid, principal: alice };
-        assert_eq!(
-            COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap().status,
-            CommitmentStatus::Burned
-        );
-        assert_eq!(get_my_lossless_votes().len(), 1, "staked vote record retained");
-        let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
-        assert!(
-            payouts.iter().all(|po| po.payout_type != PayoutType::CommitmentRefund),
-            "a settled burn is not refunded, and the staked side never had escrow"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_burn_then_staked_vote_opposite_stances_both_tally() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(alice);
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(1));
-        follow_as(alice);
-        stake(2_000_000_000, StakeTier::SixMonths).await.unwrap(); // 20 ICP → 2 VP
-
-        let pid = 760_005u64;
-        open_proposal(pid, 1_000_000_000); // 10 ICP threshold
-
-        // Burn ADOPT then cast a staked REJECT — a user is free to hedge.
-        // The two land on opposite sides of the balance of power.
-        commit(pid, Stance::Adopt, 300_000_000).await.unwrap();
-        cast_lossless_vote(pid, Stance::Reject).unwrap();
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.adopt_pot_e8s, 300_000_000);
-        assert_eq!(prop.lossless_reject_e8s, 200_000_000);
-        // first_stance is the burn ADOPT (it came first).
-        assert_eq!(prop.first_stance, Some(Stance::Adopt));
-        // Threshold not met (burn 3 ICP, staked 2 ICP — neither path reaches 10).
-        assert_eq!(prop.status, "open");
-    }
-
-    #[tokio::test]
-    async fn test_unmet_refunds_burners_not_staked_voters() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(7));
-
-        // Alice burns 2 ICP.
-        follow_as(alice);
-        let pid = 760_003u64;
-        open_proposal(pid, 10_000_000_000); // unreachable threshold
-        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
-
-        // Bob stakes and casts a free staked vote — no escrow.
-        set_mock_caller(bob);
-        stake(500_000_000, StakeTier::OneYear).await.unwrap();
-        cast_lossless_vote(pid, Stance::Reject).unwrap();
-
-        process_proposal_cutoff(pid).await.unwrap();
-
-        // Alice's burn is refunded; bob has nothing to refund.
-        let akey = CommitmentKey { proposal_id: pid, principal: alice };
-        assert_eq!(
-            COMMITMENTS.with(|m| m.borrow().get(&akey)).unwrap().status,
-            CommitmentStatus::Returned
-        );
-        let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
-        assert_eq!(
-            payouts.iter().filter(|po| po.payout_type == PayoutType::CommitmentRefund).count(),
-            1,
-            "exactly one refund — the burner's"
-        );
-        assert!(payouts.iter().all(|po| po.user != bob), "staked voter gets no payout");
-        let bkey = CommitmentKey { proposal_id: pid, principal: bob };
-        assert!(
-            COMMITMENTS.with(|m| m.borrow().get(&bkey)).is_none(),
-            "no escrow ever existed for the staked voter"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_lossless_first_vote_sets_tiebreak_stance() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        let bob = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(1));
-
-        set_mock_caller(alice);
-        stake(1_000_000_000, StakeTier::SixMonths).await.unwrap(); // 1 VP
-        let pid = 760_004u64;
-        open_proposal(pid, 50_000_000); // 0.5 ICP threshold
-        cast_lossless_vote(pid, Stance::Reject).unwrap(); // first stance = reject
-
-        set_mock_caller(bob);
-        stake(1_000_000_000, StakeTier::OneYear).await.unwrap(); // 1 VP
-        cast_lossless_vote(pid, Stance::Adopt).unwrap();
-
-        // 1 VP adopt vs 1 VP reject → exact tie; first stance (reject) wins.
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.status, "met");
-        assert_eq!(prop.first_stance, Some(Stance::Reject));
-        process_proposal_cutoff(pid).await.unwrap();
-        let vote = VOTES.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(vote.vote, Vote::No, "tie broken by first stance = reject");
-        // Pure staked settlement: nothing burned, nothing refunded.
-        assert_eq!(prop_burned(pid), 0);
-        assert!(PAYOUTS.with(|m| m.borrow().is_empty()));
-    }
-
-    fn prop_burned(pid: u64) -> u64 {
-        PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().total_burned_e8s.unwrap_or(0)
-    }
 
     // ===== Crash / Casino (Epic J) =====
 
@@ -21313,264 +18955,6 @@ mod tests {
         assert!(!valid_chat_text(&"x".repeat(CASINO_CHAT_MAX_LEN + 1)));
         assert!(!valid_chat_text("bad\u{0007}bell"));
         assert!(valid_chat_text("spaces are fine"));
-    }
-
-    #[test]
-    fn poker_hand_settles_zero_sum() {
-        casino_test_reset();
-        let now = current_time();
-        let players = [Principal::from_slice(&[0xA, 1]), Principal::from_slice(&[0xA, 2]), Principal::from_slice(&[0xA, 3])];
-        for &u in &players {
-            stake_for_test(u, 1_000 * ONE_ICP_E8S, now);
-        }
-        poker_ensure_tables();
-        let mut t = get_poker_table(1).unwrap();
-        for (i, &u) in players.iter().enumerate() {
-            t.seat_owners[i] = Some(u);
-        }
-        poker_begin_hand(&mut t, [9u8; 32], now);
-        assert!(t.engine.is_some(), "a hand should start with 3 funded seats");
-        // Drive the hand with the house heuristic until it completes.
-        let mut guard = 0;
-        while t.engine.as_ref().map(|e| e.phase != poker_engine::Phase::Done).unwrap_or(false) && guard < 400 {
-            guard += 1;
-            let eng = t.engine.as_ref().unwrap();
-            let seat = eng.acting;
-            let act = poker_house_decide(&t, eng, seat, PokerStyle::Tag);
-            let mut e2 = eng.clone();
-            if e2.apply_action(seat, act).is_err() {
-                let la = e2.legal_actions(seat);
-                let _ = e2.apply_action(seat, if la.can_check { EngAction::Check } else { EngAction::Fold });
-            }
-            t.engine = Some(e2);
-        }
-        assert_eq!(t.engine.as_ref().unwrap().phase, poker_engine::Phase::Done, "hand terminated");
-        // Settlement only transfers VP between players (0% rake) → the casino
-        // reconciliation identity is preserved at exactly 0.
-        poker_settle_hand(&mut t, now);
-        assert_eq!(casino_reconciliation_e8s(), 0, "poker settle stays zero-sum");
-    }
-
-    // ===== Agent Poker (Epic I) engine =====
-    mod poker_tests {
-        use crate::poker_engine::*;
-
-        fn card(rank: u8, suit: u8) -> u8 {
-            rank * 4 + suit
-        }
-
-        /// Slow, obviously-correct reference: rank multiset + flush/straight from
-        /// scratch, returning a comparable tuple. Cross-checked against eval5.
-        fn ref_eval5(cs: [u8; 5]) -> (u8, Vec<u8>) {
-            let mut rc = [0u8; 13];
-            let s0 = cs[0] % 4;
-            let mut flush = true;
-            for &c in &cs {
-                rc[(c / 4) as usize] += 1;
-                if c % 4 != s0 {
-                    flush = false;
-                }
-            }
-            let mut by: Vec<(u8, u8)> = (0..13u8).filter(|&r| rc[r as usize] > 0).map(|r| (rc[r as usize], r)).collect();
-            by.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-            let counts: Vec<u8> = by.iter().map(|x| x.0).collect();
-            let order: Vec<u8> = by.iter().map(|x| x.1).collect();
-            let straight = if order.len() == 5 {
-                if order[0] - order[4] == 4 {
-                    Some(order[0])
-                } else if order == [12, 3, 2, 1, 0] {
-                    Some(3)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if flush && straight.is_some() {
-                return (8, vec![straight.unwrap()]);
-            }
-            if counts == [4, 1] {
-                return (7, order);
-            }
-            if counts == [3, 2] {
-                return (6, order);
-            }
-            if flush {
-                return (5, order);
-            }
-            if let Some(h) = straight {
-                return (4, vec![h]);
-            }
-            if counts == [3, 1, 1] {
-                return (3, order);
-            }
-            if counts == [2, 2, 1] {
-                return (2, order);
-            }
-            if counts == [2, 1, 1, 1] {
-                return (1, order);
-            }
-            (0, order)
-        }
-
-        #[test]
-        fn eval5_categories() {
-            // royal/straight flush
-            let sf = [card(12, 0), card(11, 0), card(10, 0), card(9, 0), card(8, 0)];
-            assert_eq!(eval5(sf) >> 20, 8);
-            // wheel straight flush A-5
-            let wheel = [card(12, 1), card(0, 1), card(1, 1), card(2, 1), card(3, 1)];
-            assert_eq!(eval5(wheel) >> 20, 8);
-            // quads
-            let quads = [card(5, 0), card(5, 1), card(5, 2), card(5, 3), card(2, 0)];
-            assert_eq!(eval5(quads) >> 20, 7);
-            // full house
-            let fh = [card(5, 0), card(5, 1), card(5, 2), card(2, 0), card(2, 1)];
-            assert_eq!(eval5(fh) >> 20, 6);
-            // flush
-            let fl = [card(12, 0), card(10, 0), card(7, 0), card(4, 0), card(2, 0)];
-            assert_eq!(eval5(fl) >> 20, 5);
-            // wheel straight (mixed suits)
-            let wh = [card(12, 0), card(0, 1), card(1, 2), card(2, 3), card(3, 0)];
-            assert_eq!(eval5(wh) >> 20, 4);
-            // two pair beats one pair beats high card
-            let tp = [card(12, 0), card(12, 1), card(5, 0), card(5, 1), card(2, 0)];
-            let op = [card(12, 0), card(12, 1), card(7, 0), card(5, 1), card(2, 0)];
-            let hc = [card(12, 0), card(10, 1), card(7, 0), card(5, 1), card(2, 0)];
-            assert!(eval5(tp) > eval5(op));
-            assert!(eval5(op) > eval5(hc));
-            // kicker ordering: AAAK Q > AAAK J
-            let a = [card(12, 0), card(12, 1), card(12, 2), card(11, 0), card(10, 0)];
-            let b = [card(12, 0), card(12, 1), card(12, 2), card(11, 0), card(9, 0)];
-            assert!(eval5(a) > eval5(b));
-        }
-
-        #[test]
-        fn eval5_matches_reference_random() {
-            // Deterministic LCG over random distinct 5-card hands.
-            let mut state: u64 = 0x1234_5678_9abc_def0;
-            let mut rng = || {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                (state >> 33) as u32
-            };
-            for _ in 0..20_000 {
-                let mut cards = [0u8; 5];
-                let mut used = [false; 52];
-                let mut k = 0;
-                while k < 5 {
-                    let c = (rng() % 52) as u8;
-                    if !used[c as usize] {
-                        used[c as usize] = true;
-                        cards[k] = c;
-                        k += 1;
-                    }
-                }
-                let fast = eval5(cards);
-                let r = ref_eval5(cards);
-                // fast category must equal reference category, and ordering must
-                // agree with another random hand via the reference tuple.
-                assert_eq!(fast >> 20, r.0 as u32, "category mismatch for {:?}", cards);
-            }
-        }
-
-        fn seat(stack: u64) -> Seat {
-            Seat { occupied: true, stack, status: SeatStatus::Active, ..Default::default() }
-        }
-
-        #[test]
-        fn chip_conservation_random_hands() {
-            let mut state: u64 = 99;
-            let mut rng = |m: u64| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                (state >> 33) % m
-            };
-            for h in 0..2000u64 {
-                let n = 2 + (h % (NUM_SEATS as u64 - 1)) as usize;
-                let mut seats = vec![Seat::default(); NUM_SEATS];
-                let mut total_start = 0u64;
-                for s in seats.iter_mut().take(n) {
-                    let stack = 200 + (rng(2000));
-                    *s = seat(stack);
-                    total_start += stack;
-                }
-                let seed = [h as u8; 32];
-                let deck = shuffled_deck(&seed);
-                let mut e = Engine::start_hand(seats, (h as usize) % NUM_SEATS, deck);
-                let mut guard = 0;
-                while e.phase != Phase::Done && guard < 500 {
-                    guard += 1;
-                    let s = e.acting;
-                    let la = e.legal_actions(s);
-                    // random legal action
-                    let pick = rng(3);
-                    let act = if pick == 0 && !la.can_check {
-                        // facing a bet: 50/50 call or fold
-                        if rng(2) == 0 { Action::Call } else { Action::Fold }
-                    } else if pick == 0 {
-                        Action::Check
-                    } else if pick == 1 && la.can_check {
-                        Action::Check
-                    } else if la.min_raise_to > 0 {
-                        Action::BetTo(la.min_raise_to)
-                    } else if la.can_check {
-                        Action::Check
-                    } else {
-                        Action::Call
-                    };
-                    if e.apply_action(s, act).is_err() {
-                        // fall back to a guaranteed-legal action
-                        let _ = e.apply_action(s, if la.can_check { Action::Check } else { Action::Fold });
-                    }
-                }
-                assert_eq!(e.phase, Phase::Done, "hand {} did not terminate", h);
-                let total_end: u64 = e.seats.iter().map(|s| s.stack).sum();
-                assert_eq!(total_start, total_end, "chips not conserved in hand {}", h);
-                let dsum: i64 = e.deltas().iter().sum();
-                assert_eq!(dsum, 0, "deltas not zero-sum in hand {}", h);
-            }
-        }
-
-        #[test]
-        fn determinism_same_seed_same_result() {
-            let run = || {
-                let seats = vec![seat(1000), seat(1000), seat(1000), Seat::default(), Seat::default(), Seat::default(), Seat::default(), Seat::default(), Seat::default()];
-                let deck = shuffled_deck(&[7u8; 32]);
-                let mut e = Engine::start_hand(seats, 0, deck);
-                let mut g = 0;
-                while e.phase != Phase::Done && g < 200 {
-                    g += 1;
-                    let s = e.acting;
-                    let la = e.legal_actions(s);
-                    let _ = e.apply_action(s, if la.can_check { Action::Check } else { Action::Call });
-                }
-                (e.board.clone(), e.deltas())
-            };
-            assert_eq!(run(), run());
-        }
-
-        #[test]
-        fn side_pot_all_in_exact() {
-            // Three players, increasing stacks; short stack all-in builds a side
-            // pot the big stacks contest. Verify chip conservation through it.
-            let seats = vec![seat(100), seat(500), seat(500), Seat::default(), Seat::default(), Seat::default(), Seat::default(), Seat::default(), Seat::default()];
-            let deck = shuffled_deck(&[3u8; 32]);
-            let mut e = Engine::start_hand(seats, 0, deck);
-            let start: u64 = e.seats.iter().map(|s| s.stack + s.committed_total).sum();
-            let mut g = 0;
-            while e.phase != Phase::Done && g < 200 {
-                g += 1;
-                let s = e.acting;
-                let la = e.legal_actions(s);
-                // everyone jams/calls to force all-ins and side pots
-                let act = if la.max_raise_to > 0 { Action::BetTo(la.max_raise_to) } else if !la.can_check { Action::Call } else { Action::Check };
-                if e.apply_action(s, act).is_err() {
-                    let _ = e.apply_action(s, if la.can_check { Action::Check } else { Action::Call });
-                }
-            }
-            let end: u64 = e.seats.iter().map(|s| s.stack).sum();
-            assert_eq!(start, end, "side-pot chips not conserved");
-            assert_eq!(e.deltas().iter().sum::<i64>(), 0);
-        }
     }
 
 }

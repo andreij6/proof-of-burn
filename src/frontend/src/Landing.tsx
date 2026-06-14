@@ -26,9 +26,9 @@ const SECTIONS = [
   {
     icon: 'zap',
     eyebrow: 'Staking',
-    title: 'Lock time. Multiply your voice.',
-    body: 'Stake into 6-month, 1-year or 2-year pooled neurons. Voting power is your staked ICP ÷ 10 (10 staked = 1 burned of weight), longer terms earn more lottery tickets, and the treasury pays every transfer fee. Commit X, get X back. Zero loss, literally.',
-    chips: ['10 staked ICP = 1 VP', 'principal never spent', 'treasury pays the fees'],
+    title: 'Lock time. Stack tickets.',
+    body: 'Stake into 6-month, 1-year or 2-year pooled neurons to earn daily lossless-lottery tickets — longer terms earn more (5 / 10 / 20 per ICP per day), or go permanent for 100. The treasury pays every transfer fee. Commit X, get X back. Zero loss, literally.',
+    chips: ['up to 100 tickets/ICP/day', 'principal never spent', 'treasury pays the fees'],
   },
   {
     icon: 'target',
@@ -40,9 +40,9 @@ const SECTIONS = [
   {
     icon: 'bulb',
     eyebrow: 'Community R&D',
-    title: 'Pitch it. Back it. Get paid.',
-    body: 'Post ideas that burn more ICP and earn 25% of every upvote they attract — in ICP, ckBTC or ckETH. Back the ideas you want to survive, and fund the projects the treasury executes.',
-    chips: ['25% of upvotes to the poster', '3 tokens accepted', 'treasury-funded builds'],
+    title: 'Pitch it. Back it. Build it.',
+    body: 'Post ideas that burn more ICP, upvote the best for free, and fund the official projects the treasury executes — in ICP, ckBTC or ckETH toward a single USD goal.',
+    chips: ['free upvotes', '3 tokens accepted', 'treasury-funded builds'],
   },
   {
     icon: 'copy',
@@ -341,7 +341,7 @@ export default function Landing({ onEnter }: LandingProps) {
           <span style={{ color: 'var(--burn)' }}>Transmit it.</span>
         </h1>
         <p style={{ fontSize: 15.5, lineHeight: 1.6, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
-          Burn ICP to steer NNS votes. Stake to multiply your voice — at zero cost.
+          Burn ICP to steer NNS votes. Stake to stack lottery tickets — at zero cost.
           Win a yield-funded lottery nobody pays into. One protocol, every incentive pointed
           at the same thing: a louder, sharper Internet Computer.
         </p>

@@ -37,6 +37,7 @@ function fakeIdea(overrides: Partial<Idea> = {}): Idea {
     last_upvote_at: 1_000n,
     upvote_count: 0n,
     views: 0n,
+    has_upvoted: false,
     total_icp_e8s: 0n,
     total_ckbtc_e8s: 0n,
     total_cketh_wei: 0n,

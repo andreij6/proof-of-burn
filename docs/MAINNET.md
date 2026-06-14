@@ -91,7 +91,7 @@ now that you hold the neuron's controller key.
 ### B4 — Decide threshold & confirm fee math
 
 Default threshold is per-proposal flat (`default_threshold_e8s`). Minimum commit is
-1 ICP; protocol fee 0.005 ICP + ledger fees. Confirm these are the economics you
+1 ICP; commits are zero-fee (the treasury fronts settlement/refund ledger fees). Confirm these are the economics you
 want before going live — the threshold cannot be changed per-proposal without an
 admin call, and `primary_neuron_id` cannot be changed at all without a code change
 (see "Known gaps").

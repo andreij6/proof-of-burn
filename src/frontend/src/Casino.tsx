@@ -9,23 +9,21 @@ import {
   multiplierX100, fmtX, historyChipTone, betButton, recomputeCrashX100,
   effectiveTargetX100, type BetPhase,
 } from './crashMath';
-import Poker from './Poker';
 
 interface CasinoProps {
   actor: any;
   principal: Principal | null;
   isLocal: boolean;
   onSignIn: () => void;
-  /** Jump to the Staking tab — chips come from staking. */
+  /** Jump to the Staking tab — SVPP comes from staking. */
   onGoStaking: () => void;
   crashEnabled?: boolean;
-  pokerEnabled?: boolean;
 }
 
 // The C16 doctrine — repeated on the hub header, the game header, the bet panel
 // footer, and every bust screen. Enforced as copy, not memory.
 export const NO_LOSS_DOCTRINE =
-  'No loss of principal — ever. Chips are voting power earned by staking. Your staked ICP is never wagered, never at risk, and always unstakeable in full.';
+  'No loss of principal — ever. SVPP is minted by staking ICP. Your staked ICP is never wagered, never at risk, and always unstakeable in full.';
 
 function opt<T>(o: any): T | null {
   if (!o) return null;
@@ -34,25 +32,25 @@ function opt<T>(o: any): T | null {
   return null;
 }
 
-const VP_E8S = 100_000_000;
+// 1 SVPP (Staked Voting Power Point) = 1e5 weight-e8s; 1 staked ICP = 1,000 SVPP.
+const SVPP_E8S = 100_000;
 
-function vpFromE8s(e8s: bigint | number): string {
-  return (Number(e8s) / VP_E8S).toFixed(2);
+function svppFromE8s(e8s: bigint | number): string {
+  return Math.round(Number(e8s) / SVPP_E8S).toLocaleString();
 }
 
-export default function Casino({ actor, principal, isLocal, onSignIn, onGoStaking, crashEnabled = true, pokerEnabled = false }: CasinoProps) {
+export default function Casino({ actor, principal, isLocal, onSignIn, onGoStaking, crashEnabled = true }: CasinoProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   // Casino is a hub: a landing page of game cards, each opening a dedicated
-  // screen. The active screen lives in the hash (/casino, /casino/crash,
-  // /casino/poker) so deep links and the browser back button work.
-  const screenFromHash = (): 'hub' | 'crash' | 'poker' => {
+  // screen. The active screen lives in the hash (/casino, /casino/crash) so
+  // deep links and the browser back button work.
+  const screenFromHash = (): 'hub' | 'crash' => {
     const h = typeof window !== 'undefined' ? window.location.hash : '';
     if (h.includes('/casino/crash')) return 'crash';
-    if (h.includes('/casino/poker')) return 'poker';
     return 'hub';
   };
-  const [screen, setScreenState] = useState<'hub' | 'crash' | 'poker'>(screenFromHash());
-  const goScreen = (s: 'hub' | 'crash' | 'poker') => {
+  const [screen, setScreenState] = useState<'hub' | 'crash'>(screenFromHash());
+  const goScreen = (s: 'hub' | 'crash') => {
     setScreenState(s);
     if (typeof window !== 'undefined') {
       window.location.hash = s === 'hub' ? '#/casino' : `#/casino/${s}`;
@@ -65,14 +63,13 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
-  const [pokerLobby, setPokerLobby] = useState<{ tables: number; players: number; live: number } | null>(null);
   const [round, setRound] = useState<CrashRoundView | null>(null);
   const [history, setHistory] = useState<CrashHistoryItem[]>([]);
   const [me, setMe] = useState<MyCasinoView | null>(null);
   const [chat, setChat] = useState<ChatMsgView[]>([]);
   const [strategies, setStrategies] = useState<CrashStrategy[]>([]);
   const [autopilot, setAutopilot] = useState<AutopilotState | null>(null);
-  const [wager, setWager] = useState('5');
+  const [wager, setWager] = useState('100');
   const [targetX, setTargetX] = useState('2.00');
   const [autoCash, setAutoCash] = useState(true);
   const [chatText, setChatText] = useState('');
@@ -124,27 +121,6 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
     const t = setInterval(refresh, ms);
     return () => clearInterval(t);
   }, [refresh, phase, screen]);
-
-  // Light hub poll: a stat preview for each game card.
-  useEffect(() => {
-    if (screen !== 'hub' || !actor) return;
-    let stop = false;
-    const tickHub = async () => {
-      try {
-        if (pokerEnabled) {
-          const rows = await actor.get_poker_lobby();
-          if (!stop) {
-            const players = rows.reduce((a: number, r: any) => a + Number(r.seats_taken), 0);
-            const live = rows.filter((r: any) => r.phase !== 'idle' && r.phase !== 'waiting').length;
-            setPokerLobby({ tables: rows.length, players, live });
-          }
-        }
-      } catch { /* transient */ }
-    };
-    tickHub();
-    const t = setInterval(tickHub, 4000);
-    return () => { stop = true; clearInterval(t); };
-  }, [screen, actor, crashEnabled, pokerEnabled]);
 
   // Local animation clock for the live curve / countdown.
   useEffect(() => {
@@ -235,7 +211,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   };
 
   const placeBet = () => run('bet', async () => {
-    const chips = BigInt(Math.floor(Number(wager) * 1000)); // VP → chips
+    const chips = BigInt(Math.floor(Number(wager))); // wager is in SVPP (1 SVPP = 1 chip)
     // Auto cash-out off (or blank/invalid) = target 0 = manual only.
     const tNum = Number(targetX);
     const t = !autoCash || !targetX.trim() || !isFinite(tNum) || tNum <= 0 ? 0n : BigInt(Math.round(tNum * 100));
@@ -292,20 +268,20 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   const card: React.CSSProperties = { background: 'var(--char-925)', border: '1px solid var(--border)', borderRadius: 12, padding: 16 };
   const noVp = signedIn && me !== null && Number(me.chips) === 0;
 
-  // Payout-cap note: if wager × target would exceed 10,000 VP, the bet is
-  // auto-cashed at the capped multiplier.
+  // Payout-cap note: if wager × target would exceed the 10,000,000-SVPP
+  // per-round cap, the bet is auto-cashed at the capped multiplier.
   const capNote = (() => {
-    const wagerChips = Math.floor(Number(wager || 0) * 1000);
+    const wagerChips = Math.floor(Number(wager || 0));
     const target = Math.round(Number(targetX || 0) * 100);
-    if (!autoCash || !targetX.trim()) return 'Manual cash-out — hit SPACE or click CASH OUT during the round. Max payout 10,000 VP/round.';
-    if (wagerChips <= 0 || target < 101) return 'Max payout 10,000 VP/round.';
+    if (!autoCash || !targetX.trim()) return 'Manual cash-out — hit SPACE or click CASH OUT during the round. Max payout 10,000,000 SVPP/round.';
+    if (wagerChips <= 0 || target < 101) return 'Max payout 10,000,000 SVPP/round.';
     const eff = effectiveTargetX100(wagerChips, target);
     return eff < target
-      ? `Capped → auto-cash at ${fmtX(eff)}× (10,000 VP cap).`
-      : `Payout if it hits: ${((wagerChips * eff) / 100 / 1000).toLocaleString()} VP (cap 10,000).`;
+      ? `Capped → auto-cash at ${fmtX(eff)}× (10,000,000 SVPP cap).`
+      : `Payout if it hits: ${Math.floor((wagerChips * eff) / 100).toLocaleString()} SVPP (cap 10,000,000).`;
   })();
 
-  if (!crashEnabled && !pokerEnabled) {
+  if (!crashEnabled) {
     return <div style={{ padding: 24 }}><Eyebrow>Casino</Eyebrow><p style={{ color: 'var(--fg-2)' }}>The Casino is currently closed.</p></div>;
   }
 
@@ -316,7 +292,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   );
 
   // ── Hub: a landing page (Explorer-style) with one card per game ──
-  if (screen === 'hub' || (screen === 'crash' && !crashEnabled) || (screen === 'poker' && !pokerEnabled)) {
+  if (screen === 'hub' || (screen === 'crash' && !crashEnabled)) {
     const gameCard = (
       key: string, name: string, badge: { label: string; tone: 'ok' | 'muted' },
       blurb: string, footL: string, footR: React.ReactNode, go: () => void,
@@ -339,22 +315,23 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
       <div className="idea-board-container">
         {/* ── Page header (subtitle · title · how it works) ── */}
         <div className="col" style={{ gap: 6 }}>
-          <Eyebrow accent>Play for voting power</Eyebrow>
+          <Eyebrow accent>Play with SVPP</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
             <Icon name="zap" size={22} stroke="var(--burn)" />
             <h4 style={{ margin: 0 }}>Casino</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
-            Wager your voting power across our games — your staked ICP is never at risk.{' '}
+            Wager your SVPP across our games — your staked ICP is never at risk.{' '}
             <MoreInfo title="How the Casino works">
               <p style={{ margin: '0 0 8px' }}>
-                Chips are <b>voting power</b> (1 VP = 1,000 chips), earned by staking ICP. Games move only
-                this derived number — your staked ICP is never wagered, never at risk, and always
-                unstakeable in full. Go broke and your ICP is exactly where you left it.
+                <b>SVPP</b> (Staked Voting Power Points) are minted by staking ICP — 1 staked ICP =
+                1,000 SVPP (more the longer you stay staked). Games move only this derived number —
+                your staked ICP is never wagered, never at risk, and always unstakeable in full. Go
+                broke and your ICP is exactly where you left it.
               </p>
               <p style={{ margin: 0 }}>
-                <b>Crash</b> is house-banked with a 1% edge that's burned forever; <b>Poker</b> is
-                player-vs-player at 0% rake. A casino-wide stop-loss stands you down before zero.
+                <b>Crash</b> is house-banked with a 1% edge that's burned forever. A casino-wide
+                stop-loss stands you down before zero.
               </p>
             </MoreInfo>
           </p>
@@ -369,23 +346,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
             <>Watch <Icon name="zap" size={11} /></>,
             () => goScreen('crash'),
           )}
-          {pokerEnabled && gameCard(
-            'poker', 'Poker', { label: 'Agents only', tone: 'muted' },
-            "Caldera Hold'em — your agent plays No-Limit Hold'em while you watch. 0% rake, forever.",
-            'No-Limit 25/50 · 0% rake',
-            <>{pokerLobby ? `${pokerLobby.players} playing` : 'Watch'} <Icon name="zap" size={11} /></>,
-            () => goScreen('poker'),
-          )}
         </div>
-      </div>
-    );
-  }
-
-  if (screen === 'poker') {
-    return (
-      <div className="idea-board-container">
-        {backBar}
-        <Poker actor={actor} principal={principal} onSignIn={onSignIn} onGoStaking={onGoStaking} />
       </div>
     );
   }
@@ -403,10 +364,10 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
             <h4 style={{ margin: 0 }}>Crash</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
-            Cash out before the rising multiplier crashes. Chips are voting power — your staked ICP is never at risk.{' '}
+            Cash out before the rising multiplier crashes. You play in SVPP — your staked ICP is never at risk.{' '}
             <MoreInfo title="How Crash works">
-              <p>Chips are your <b>voting power</b> (1 VP = 1,000 chips), derived from your staked ICP. Betting moves only this derived number — your principal is never touched and is always unstakeable in full.</p>
-              <p>The house keeps a 1% edge, and <b>burns it</b>: the edge is destroyed forever, not collected. Destroyed VP can only re-enter the system by staking more ICP.</p>
+              <p><b>SVPP</b> (Staked Voting Power Points) are minted from your staked ICP — 1 staked ICP = 1,000 SVPP. Betting moves only this derived number — your principal is never touched and is always unstakeable in full.</p>
+              <p>The house keeps a 1% edge, and <b>burns it</b>: the edge is destroyed forever, not collected. Destroyed SVPP can only re-enter the system by staking more ICP.</p>
               <p>Every crash point was fixed at genesis by a hash chain — open any past round's <b>verify</b> dialog to recompute it yourself.</p>
             </MoreInfo>
           </p>
@@ -456,14 +417,14 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
               <Btn variant="primary" style={{ marginTop: 8 }} onClick={onSignIn}>Sign in to play</Btn>
             ) : noVp ? (
               <div className="col" style={{ gap: 8, marginTop: 8 }}>
-                <p style={{ color: 'var(--fg-2)', fontSize: 13 }}>You have no voting power yet. Chips are minted from staked ICP — stake to play (and you can unstake in full anytime).</p>
-                <Btn variant="primary" onClick={onGoStaking}>Stake ICP to mint chips →</Btn>
+                <p style={{ color: 'var(--fg-2)', fontSize: 13 }}>You have no SVPP yet. SVPP is minted from staked ICP (1 ICP = 1,000 SVPP) — stake to play (and you can unstake in full anytime).</p>
+                <Btn variant="primary" onClick={onGoStaking}>Stake ICP to mint SVPP →</Btn>
               </div>
             ) : (
               <>
                 <div className="row" style={{ gap: 10, marginTop: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
                   <label className="col" style={{ gap: 4, fontSize: 11, color: 'var(--fg-3)' }}>
-                    Wager (VP)
+                    Wager (SVPP)
                     <input value={wager} onChange={(e) => setWager(e.target.value)} inputMode="decimal"
                       style={{ width: 120, padding: '6px 8px', background: 'var(--char-950)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--fg)' }} />
                   </label>
@@ -505,7 +466,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                   <Btn variant="ghost" sm onClick={() => setAutopilotOpen(true)}>
                     <Icon name="refresh" size={13} /> Auto-pilot{autopilot && autopilot.active ? ' · ON' : ''}
                   </Btn>
-                  {me && <span style={{ color: 'var(--fg-3)', fontSize: 11 }}>{Number(me.available_chips).toLocaleString()} chips</span>}
+                  {me && <span style={{ color: 'var(--fg-3)', fontSize: 11 }}>{Number(me.available_chips).toLocaleString()} SVPP</span>}
                 </div>
 
                 <p style={{ color: 'var(--fg-3)', fontSize: 11, marginTop: 8 }}>
@@ -513,8 +474,8 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                 </p>
                 {me && (
                   <p style={{ color: 'var(--fg-2)', fontSize: 12, marginTop: 4 }}>
-                    Chips available: <b>{Number(me.available_chips).toLocaleString()}</b> ({vpFromE8s(me.effective_vp_e8s)} VP)
-                    {Number(me.reserved_chips) > 0 && <span style={{ color: 'var(--fg-3)' }}> · {Number(me.reserved_chips)} reserved this round</span>}
+                    SVPP available: <b>{Number(me.available_chips).toLocaleString()}</b>
+                    {Number(me.reserved_chips) > 0 && <span style={{ color: 'var(--fg-3)' }}> · {Number(me.reserved_chips).toLocaleString()} reserved this round</span>}
                   </p>
                 )}
                 {error && <p style={{ color: 'var(--ember)', fontSize: 12, marginTop: 6 }}>{error}</p>}
@@ -527,7 +488,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
             <div style={{ ...card, borderColor: myBet.outcome === 'won' ? 'var(--sprout)' : myBet.outcome === 'lost' ? 'var(--ember)' : 'var(--border)' }}>
               <div className="row" style={{ justifyContent: 'space-between' }}>
                 <span style={{ color: 'var(--fg-2)', fontSize: 13 }}>
-                  Your bet: {Number(myBet.wager_chips)} chips @ {fmtX(Number(myBet.target_x100))}×
+                  Your bet: {Number(myBet.wager_chips).toLocaleString()} SVPP @ {fmtX(Number(myBet.target_x100))}×
                   {myBet.auto_pilot && <Chip tone="muted" style={{ marginLeft: 6 }}>auto-pilot</Chip>}
                 </span>
                 <span style={{ fontWeight: 700, color: myBet.outcome === 'won' ? 'var(--sprout)' : myBet.outcome === 'lost' ? 'var(--ember)' : 'var(--fg)' }}>
@@ -536,7 +497,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
               </div>
               {myBet.outcome === 'lost' && (
                 <p style={{ color: 'var(--fg-3)', fontSize: 12, marginTop: 6 }}>
-                  Your staked ICP is exactly where you left it. <button onClick={onGoStaking} style={{ background: 'none', border: 'none', color: 'var(--burn)', cursor: 'pointer', padding: 0 }}>Stake more to mint chips →</button>
+                  Your staked ICP is exactly where you left it. <button onClick={onGoStaking} style={{ background: 'none', border: 'none', color: 'var(--burn)', cursor: 'pointer', padding: 0 }}>Stake more to mint SVPP →</button>
                 </p>
               )}
             </div>
@@ -561,22 +522,22 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                 const cashedRunning = phase === 'running' && !settledWon && !settledLost && (manual > 0 || liveX100 >= effStop);
                 let state: 'riding' | 'cashed' | 'busted' = 'riding';
                 let cashMult = 0;
-                let profitVp = 0;
+                let profitSvpp = 0;
                 if (settledWon) { state = 'cashed'; cashMult = Number(p.payout_x100); }
-                else if (settledLost) { state = 'busted'; profitVp = -wagerChips / 1000; }
+                else if (settledLost) { state = 'busted'; profitSvpp = -wagerChips; }
                 else if (cashedRunning) { state = 'cashed'; cashMult = manual > 0 ? manual : effStop; }
-                if (state === 'cashed') profitVp = (wagerChips * (cashMult - 100)) / 100 / 1000;
+                if (state === 'cashed') profitSvpp = (wagerChips * (cashMult - 100)) / 100;
                 const done = state !== 'riding';
-                return { key: p.user.toString() + i, p, wagerChips, cashMult, state, profitVp, done };
+                return { key: p.user.toString() + i, p, wagerChips, cashMult, state, profitSvpp, done };
               });
               rows.sort((a, b) => {
                 if (a.done !== b.done) return a.done ? 1 : -1;          // riding first
                 if (!a.done) return b.wagerChips - a.wagerChips;        // riding by bet desc
                 const aBust = a.state === 'busted' ? 1 : 0, bBust = b.state === 'busted' ? 1 : 0;
                 if (aBust !== bBust) return aBust - bBust;              // cashed above busted
-                return b.profitVp - a.profitVp;                        // best cashouts first
+                return b.profitSvpp - a.profitSvpp;                    // best cashouts first
               });
-              const fmtVp = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+              const fmtSvpp = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 });
               // Row highlight: profited = green, lost = red, still riding = gray.
               const bgFor = (s: string) => s === 'cashed' ? 'var(--sprout-dim)' : s === 'busted' ? 'var(--ember-dim)' : 'transparent';
               const fgFor = (s: string) => s === 'cashed' ? 'var(--sprout)' : s === 'busted' ? 'var(--ember)' : 'var(--fg-2)';
@@ -596,9 +557,9 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                       </span>
                       {/* Stop hidden until the player has actually cashed out. */}
                       <span style={{ flex: '1 1 0', textAlign: 'right' }}>{r.state === 'cashed' ? `${fmtX(r.cashMult)}×` : '—'}</span>
-                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>{fmtVp(r.wagerChips / 1000)}</span>
+                      <span style={{ flex: '1 1 0', textAlign: 'right' }}>{fmtSvpp(r.wagerChips)}</span>
                       <span style={{ flex: '1 1 0', textAlign: 'right' }}>
-                        {r.state === 'riding' ? '—' : `${r.profitVp >= 0 ? '+' : ''}${fmtVp(r.profitVp)}`}
+                        {r.state === 'riding' ? '—' : `${r.profitSvpp >= 0 ? '+' : ''}${fmtSvpp(r.profitSvpp)}`}
                       </span>
                     </div>
                   ))}
@@ -670,7 +631,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
             {autopilot && autopilot.active ? (
               <div className="col" style={{ gap: 8, marginTop: 10 }}>
                 <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>
-                  Running · {Number(autopilot.rounds_played)} rounds · net {vpFromE8s(autopilot.session_pnl_e8s)} VP
+                  Running · {Number(autopilot.rounds_played)} rounds · net {svppFromE8s(autopilot.session_pnl_e8s)} SVPP
                 </span>
                 <Btn variant="secondary" onClick={() => run('stopap', async () => { await actor.stop_autopilot(); })}>STOP auto-pilot</Btn>
               </div>

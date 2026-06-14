@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
 import {} from "./bindings/backend";
 import { IdeaToken } from "./tokens";
+import { fmtUsd } from "./tokens";
 import type { Idea, IdeaBoardInfo, Project } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal } from "./ui";
 
 // ==========================================
 // Community R&D — ideas + admin-curated projects
-// Ideas: post for a 1 ICP fee; upvotes split 75% treasury / 25% poster;
+// Ideas: post for a 1 ICP fee; upvotes are free (one per user per idea);
 // deleted after 30 days without an upvote.
 // Projects: admin-created funding goals; contributions go 100% to treasury.
 // Minimum amounts are value-aligned across tokens (~$1 equivalent).
@@ -140,10 +141,9 @@ const SORT_OPTIONS: { key: IdeaSort; label: string }[] = [
   { key: 'views', label: 'Most viewed' },
 ];
 
-// What the pay modal is paying for.
-type PayTarget =
-  | { kind: 'upvote'; idea: Idea }
-  | { kind: 'fund'; project: Project };
+// What the pay modal is paying for. Upvotes are free (no payment) — the pay
+// modal is only ever used to fund a project.
+type PayTarget = { kind: 'fund'; project: Project };
 
 interface IdeaBoardProps {
   actor: any;
@@ -183,13 +183,10 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   const [projTitle, setProjTitle] = useState('');
   const [projDescription, setProjDescription] = useState('');
   const [projDetail, setProjDetail] = useState('');
-  const [projGoals, setProjGoals] = useState<{ [k: string]: string }>({ ICP: '', CkBTC: '', CkETH: '' });
+  const [projGoalUsd, setProjGoalUsd] = useState('');
   const [projError, setProjError] = useState<string | null>(null);
   const [isSavingProject, setIsSavingProject] = useState(false);
   const [editingProject, setEditingProject] = useState<Project | null>(null);
-  const [acceptIcp, setAcceptIcp] = useState(true);
-  const [acceptCkbtc, setAcceptCkbtc] = useState(true);
-  const [acceptCketh, setAcceptCketh] = useState(true);
 
   // Detail modals
   const [detailIdea, setDetailIdea] = useState<Idea | null>(null);
@@ -206,6 +203,9 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   const [payError, setPayError] = useState<string | null>(null);
   const [payBusy, setPayBusy] = useState(false);
   const [paySuccess, setPaySuccess] = useState(false);
+
+  // Free upvote (no payment): id of the idea currently being upvoted.
+  const [upvotingId, setUpvotingId] = useState<bigint | null>(null);
 
   const refreshAll = async (currentActor = actor) => {
     if (!currentActor) return;
@@ -246,20 +246,28 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
     return () => { cancelled = true; };
   }, [payTarget, payToken, identity, info]);
 
+  // Free upvote — one per user per idea. No payment, no modal.
+  const handleUpvote = async (idea: Idea) => {
+    if (!actor || upvotingId !== null) return;
+    if (!signedIn) { onSignIn(); return; }
+    if (idea.has_upvoted) return;
+    setUpvotingId(idea.id);
+    try {
+      const res = await actor.upvote_idea(idea.id);
+      if (res.__kind__ === "Err") throw new Error(res.Err);
+      await refreshAll();
+    } catch (err: any) {
+      console.error("Upvote error:", err);
+      alert(`Upvote failed: ${err.message || err}`);
+    } finally {
+      setUpvotingId(null);
+    }
+  };
+
   const openPay = (target: PayTarget) => {
     setPayTarget(target);
-    let initialToken = IdeaToken.ICP;
-    if (target.kind === 'fund') {
-      const pr = target.project;
-      if (pr.accept_icp) {
-        initialToken = IdeaToken.ICP;
-      } else if (pr.accept_ckbtc) {
-        initialToken = IdeaToken.CkBTC;
-      } else if (pr.accept_cketh) {
-        initialToken = IdeaToken.CkETH;
-      }
-    }
-    setPayToken(initialToken);
+    // Every project accepts any supported crypto; default to ICP.
+    setPayToken(IdeaToken.ICP);
     setPayAmount('');
     setPayError(null);
     setPaySuccess(false);
@@ -289,8 +297,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
     if (!actor || !payTarget || !identity || payBusy) return;
     const meta = tokenMeta(payToken, info);
     if (!meta.ledger) { setPayError("Token ledger unavailable."); return; }
-    const isUpvote = payTarget.kind === 'upvote';
-    const targetId = isUpvote ? payTarget.idea.id : payTarget.project.id;
+    const targetId = payTarget.project.id;
 
     const units = parseTokenAmount(payAmount, meta.decimals);
     if (units === null || units <= 0n) {
@@ -301,9 +308,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
       setPayError(`Minimum is ${fmtTokenAmount(meta.min, meta.decimals)} ${meta.label}.`);
       return;
     }
-    // Upvotes split twice (2 fees in escrow); fundings transfer once (1 fee).
-    const escrowFees = isUpvote ? 2n * meta.fee : meta.fee;
-    const deposit = units + escrowFees;
+    const deposit = units + meta.fee;
     if (payBalance !== null && deposit + meta.fee > payBalance) {
       setPayError(`Insufficient ${meta.label} balance — need ${fmtTokenAmount(deposit + meta.fee, meta.decimals)} ${meta.label} (amount + fees).`);
       return;
@@ -313,9 +318,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
     setPayError(null);
     try {
       setPayStep("Deriving escrow subaccount...");
-      const acct = isUpvote
-        ? await actor.get_idea_deposit_address(targetId)
-        : await actor.get_project_deposit_address(targetId);
+      const acct = await actor.get_project_deposit_address(targetId);
 
       setPayStep(`Step 1/2: Depositing ${meta.label} into escrow...`);
       const ledgerActor = createLedgerActor(meta.ledger.toString(), {
@@ -340,18 +343,14 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
         throw new Error(`Ledger transfer failed (${kind}): ${detail}`);
       }
 
-      setPayStep(isUpvote ? "Step 2/2: Recording upvote on-chain..." : "Step 2/2: Recording funding on-chain...");
-      const res = isUpvote
-        ? await actor.upvote_idea(targetId, payToken, units)
-        : await actor.fund_project(targetId, payToken, units);
+      setPayStep("Step 2/2: Recording funding on-chain...");
+      const res = await actor.fund_project(targetId, payToken, units);
       if (res.__kind__ === "Err") {
-        throw new Error(`${isUpvote ? 'Upvote' : 'Funding'} failed: ${res.Err}`);
+        throw new Error(`Funding failed: ${res.Err}`);
       }
 
       setPaySuccess(true);
-      setPayStep(isUpvote
-        ? "Upvote recorded — 75% to treasury, 25% to the poster."
-        : "Funding recorded — 100% to the protocol treasury.");
+      setPayStep("Funding recorded — 100% to the protocol treasury.");
       await refreshAll();
     } catch (err: any) {
       console.error("Payment error:", err);
@@ -425,20 +424,10 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
     if (!title || title.length > 80) { setProjError("Title is required (max 80 chars)."); return; }
     if (!description || description.length > 280) { setProjError("Description is required (max 280 chars)."); return; }
 
-    const goals: Record<string, bigint> = {};
-    for (const t of TOKEN_ORDER) {
-      const raw = projGoals[t].trim();
-      if (!raw) { goals[t] = 0n; continue; }
-      const units = parseTokenAmount(raw, tokenMeta(t, info).decimals);
-      if (units === null) { setProjError(`Invalid ${tokenMeta(t, info).label} goal amount.`); return; }
-      goals[t] = units;
-    }
-    if (goals[IdeaToken.ICP] === 0n && goals[IdeaToken.CkBTC] === 0n && goals[IdeaToken.CkETH] === 0n) {
-      setProjError("Set at least one funding goal.");
-      return;
-    }
-    if (!acceptIcp && !acceptCkbtc && !acceptCketh) {
-      setProjError("Select at least one accepted cryptocurrency.");
+    // Single USD goal — USD has 8 decimals ($1 = 100_000_000 USD e8s).
+    const goalUsdE8s = parseTokenAmount(projGoalUsd.trim(), 8);
+    if (goalUsdE8s === null || goalUsdE8s < 100_000_000n) {
+      setProjError("Set a funding goal of at least $1 (USD).");
       return;
     }
 
@@ -449,8 +438,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
         const res = await actor.admin_update_project(
           editingProject.id,
           title, description, projDetail.trim(),
-          goals[IdeaToken.ICP], goals[IdeaToken.CkBTC], goals[IdeaToken.CkETH],
-          acceptIcp, acceptCkbtc, acceptCketh
+          goalUsdE8s
         );
         if (res.__kind__ === "Err") {
           throw new Error(res.Err);
@@ -458,8 +446,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
       } else {
         const res = await actor.admin_add_project(
           title, description, projDetail.trim(),
-          goals[IdeaToken.ICP], goals[IdeaToken.CkBTC], goals[IdeaToken.CkETH],
-          acceptIcp, acceptCkbtc, acceptCketh
+          goalUsdE8s
         );
         if (res.__kind__ === "Err") {
           throw new Error(res.Err);
@@ -467,7 +454,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
       }
       setIsProjectFormOpen(false);
       setProjTitle(''); setProjDescription(''); setProjDetail('');
-      setProjGoals({ ICP: '', CkBTC: '', CkETH: '' });
+      setProjGoalUsd('');
       setEditingProject(null);
       await refreshAll();
       setTab('projects');
@@ -484,30 +471,12 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
     setProjTitle(project.title);
     setProjDescription(project.description);
     setProjDetail(project.detail);
-
-    const icpMeta = tokenMeta(IdeaToken.ICP, info);
-    const ckbtcMeta = tokenMeta(IdeaToken.CkBTC, info);
-    const ckethMeta = tokenMeta(IdeaToken.CkETH, info);
-
-    setProjGoals({
-      ICP: project.goal_icp_e8s > 0n
-        ? fmtTokenAmount(project.goal_icp_e8s, icpMeta.decimals)
-            .replace(/,/g, '')
-        : '',
-      CkBTC: project.goal_ckbtc_e8s > 0n
-        ? fmtTokenAmount(project.goal_ckbtc_e8s, ckbtcMeta.decimals)
-            .replace(/,/g, '')
-        : '',
-      CkETH: project.goal_cketh_wei > 0n
-        ? fmtTokenAmount(project.goal_cketh_wei, ckethMeta.decimals)
-            .replace(/,/g, '')
-        : '',
-    });
-
-    setAcceptIcp(project.accept_icp);
-    setAcceptCkbtc(project.accept_ckbtc);
-    setAcceptCketh(project.accept_cketh);
-
+    // Single USD goal (8 decimals); strip thousands separators for the input.
+    setProjGoalUsd(
+      project.goal_usd_e8s > 0n
+        ? fmtTokenAmount(project.goal_usd_e8s, 8).replace(/,/g, '')
+        : ''
+    );
     setIsProjectFormOpen(true);
     setDetailProject(null);
   };
@@ -582,44 +551,35 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
     </div>
   );
 
-  // Per-token goal rows with a progress bar (only goals > 0 are shown).
+  // Single USD funding goal with a progress bar. Contributions in any crypto
+  // are valued in USD by the backend (raised_usd_e8s).
   const projectGoals = (project: Project) => {
-    const rows: { token: IdeaToken; raised: bigint; goal: bigint }[] = [
-      { token: IdeaToken.ICP, raised: project.raised_icp_e8s, goal: project.goal_icp_e8s },
-      { token: IdeaToken.CkBTC, raised: project.raised_ckbtc_e8s, goal: project.goal_ckbtc_e8s },
-      { token: IdeaToken.CkETH, raised: project.raised_cketh_wei, goal: project.goal_cketh_wei },
-    ].filter(r => r.goal > 0n);
+    const goal = project.goal_usd_e8s;
+    const raised = project.raised_usd_e8s;
+    const pct = goalPct(raised, goal);
+    const met = goal > 0n && raised >= goal;
     return (
-      <div className="col" style={{ gap: 8 }}>
-        {rows.map(r => {
-          const meta = tokenMeta(r.token, info);
-          const pct = goalPct(r.raised, r.goal);
-          const met = r.raised >= r.goal;
-          return (
-            <div key={r.token} className="col" style={{ gap: 4 }}>
-              <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                <span className="mono" style={{ fontSize: 11, color: 'var(--fg-2)' }}>{meta.label}</span>
-                <span className="mono" style={{ fontSize: 11, color: met ? 'var(--sprout)' : 'var(--fg-3)' }}>
-                  {fmtTokenAmount(r.raised, meta.decimals)} / {fmtTokenAmount(r.goal, meta.decimals)} · {pct}%
-                </span>
-              </div>
-              <div style={{ height: 6, borderRadius: 999, background: 'var(--char-800)', overflow: 'hidden' }}>
-                <div style={{
-                  width: `${pct}%`, height: '100%', borderRadius: 999,
-                  background: met ? 'var(--sprout)' : 'var(--burn)',
-                  transition: 'width .6s var(--ease-out)',
-                }} />
-              </div>
-            </div>
-          );
-        })}
+      <div className="col" style={{ gap: 4 }}>
+        <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--fg-2)' }}>Goal</span>
+          <span className="mono" style={{ fontSize: 11, color: met ? 'var(--sprout)' : 'var(--fg-3)' }}>
+            {fmtUsd(raised)} / {fmtUsd(goal)} · {pct}%
+          </span>
+        </div>
+        <div style={{ height: 6, borderRadius: 999, background: 'var(--char-800)', overflow: 'hidden' }}>
+          <div style={{
+            width: `${pct}%`, height: '100%', borderRadius: 999,
+            background: met ? 'var(--sprout)' : 'var(--burn)',
+            transition: 'width .6s var(--ease-out)',
+          }} />
+        </div>
+        <span style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>accepts ICP · ckBTC · ckETH</span>
       </div>
     );
   };
 
   const payMeta = tokenMeta(payToken, info);
-  const payIsUpvote = payTarget?.kind === 'upvote';
-  const payTitle = payTarget ? (payTarget.kind === 'upvote' ? payTarget.idea.title : payTarget.project.title) : '';
+  const payTitle = payTarget ? payTarget.project.title : '';
 
   return (
     <div className="idea-board-container">
@@ -635,13 +595,12 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             Pitch ways to burn more ICP, back the best ideas, and fund official projects.{' '}
             <MoreInfo title="How Community R&D works">
               <p style={{ margin: 0 }}>
-                Pitch ways to burn more ICP and grow the token's value, back the best ideas with
-                ICP, ckBTC, or ckETH, and fund official projects.
+                Pitch ways to burn more ICP and grow the token's value, upvote the best ideas for
+                free, and fund official projects with ICP, ckBTC, or ckETH.
               </p>
               <p style={{ margin: 0 }}>
-                <b>75%</b> of every idea upvote goes to the protocol treasury and <b>25%</b> pays
-                the poster; project funding goes 100% to the treasury. Ideas with no upvotes for
-                30 days are deleted.
+                <b>Upvotes are free</b> — one per person per idea, no crypto required. Project
+                funding goes 100% to the treasury. Ideas with no upvotes for 30 days are deleted.
               </p>
             </MoreInfo>
           </p>
@@ -768,14 +727,15 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                           Details
                         </Btn>
                         <Btn
-                          variant="primary" sm
+                          variant={idea.has_upvoted ? 'secondary' : 'primary'} sm
                           style={{ height: 26, padding: '0 10px', fontSize: 11.5 }}
-                          onClick={() => {
-                            if (!signedIn) { onSignIn(); return; }
-                            openPay({ kind: 'upvote', idea });
-                          }}
+                          disabled={idea.has_upvoted || upvotingId === idea.id}
+                          onClick={() => handleUpvote(idea)}
                         >
-                          <Icon name="arrowUp" size={11} stroke="var(--char-950)" /> Upvote
+                          {upvotingId === idea.id
+                            ? <LiveDot size={6} color="var(--char-950)" />
+                            : <Icon name={idea.has_upvoted ? 'check' : 'arrowUp'} size={11} stroke={idea.has_upvoted ? 'var(--sprout)' : 'var(--char-950)'} />}
+                          {idea.has_upvoted ? ' Upvoted' : ' Upvote'}
                         </Btn>
                       </span>
                     </div>
@@ -814,10 +774,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                 setProjTitle('');
                 setProjDescription('');
                 setProjDetail('');
-                setProjGoals({ ICP: '', CkBTC: '', CkETH: '' });
-                setAcceptIcp(true);
-                setAcceptCkbtc(true);
-                setAcceptCketh(true);
+                setProjGoalUsd('');
                 setEditingProject(null);
                 setIsProjectFormOpen(true);
               }}>
@@ -863,22 +820,13 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                     <Btn
                       variant="primary" sm
                       style={{ height: 26, padding: '0 10px', fontSize: 11.5 }}
-                      disabled={
-                        !project.accept_icp &&
-                        !project.accept_ckbtc &&
-                        !project.accept_cketh
-                      }
                       onClick={() => {
                         if (!signedIn) { onSignIn(); return; }
                         openPay({ kind: 'fund', project });
                       }}
                     >
                       <Icon name="coins" size={11} stroke="var(--char-950)" />
-                      {!project.accept_icp &&
-                      !project.accept_ckbtc &&
-                      !project.accept_cketh
-                        ? 'Disabled'
-                        : 'Fund'}
+                      Fund
                     </Btn>
                   </div>
                 </div>
@@ -926,7 +874,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             <Eyebrow accent>How it works</Eyebrow>
             <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
               <li><b>Post an idea (1 ICP fee):</b> a title, a short description for the card, and as much detail as you like. The fee goes to the treasury and keeps the board signal-rich.</li>
-              <li><b>Upvote with funds:</b> anyone can back an idea with ICP, ckBTC, or ckETH. <b>75%</b> goes to the protocol treasury, <b>25%</b> goes straight to the poster's wallet — good ideas literally pay. Minimums are value-aligned across tokens (≈ $1 equivalent).</li>
+              <li><b>Upvote for free:</b> anyone signed in can upvote an idea — one upvote per person per idea, no crypto required. Upvotes surface the best ideas and reset the expiry clock.</li>
               <li><b>Expiry:</b> an idea that goes 30 days without a single upvote is deleted from the board. Every upvote resets the clock.</li>
               <li><b>Projects:</b> the team curates official projects with funding goals. Contributions in any of the three tokens go 100% to the treasury, which pays for the build.</li>
             </ol>
@@ -1003,7 +951,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
 
             <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
               <Icon name="info" size={12} stroke="var(--fg-3)" />
-              Posting costs {info ? fmtTokenAmount(info.post_fee_e8s, 8) : '1'} ICP (to the treasury, anti-spam). You earn 25% of every upvote your idea receives.
+              Posting costs {info ? fmtTokenAmount(info.post_fee_e8s, 8) : '1'} ICP (to the treasury, anti-spam). Upvotes are free — they surface the best ideas and keep yours from expiring.
             </span>
 
             {isPosting && postStep && (
@@ -1060,40 +1008,19 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                 style={{ resize: 'vertical', fontFamily: 'var(--font-body)', fontSize: 13 }} />
             </div>
 
-            <div className="col" style={{ gap: 8 }}>
-              <label style={LABEL_STYLE}>Funding goals (leave blank to skip a token)</label>
-              {TOKEN_ORDER.map(t => {
-                const meta = tokenMeta(t, info);
-                return (
-                  <div key={t} style={{ position: 'relative' }}>
-                    <input type="text" inputMode="decimal" className="burn-input" placeholder={`${meta.label} goal`}
-                      value={projGoals[t]}
-                      onChange={e => { setProjGoals(g => ({ ...g, [t]: e.target.value })); setProjError(null); }}
-                      style={{ fontFamily: 'var(--font-mono)' }} />
-                    <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>
-                      {meta.label}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-
             <div className="col" style={{ gap: 6 }}>
-              <label style={LABEL_STYLE}>Accepted Cryptocurrencies</label>
-              <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
-                <label className="row" style={{ gap: 6, cursor: 'pointer', fontSize: 13, userSelect: 'none' }}>
-                  <input type="checkbox" checked={acceptIcp} onChange={e => { setAcceptIcp(e.target.checked); setProjError(null); }} />
-                  ICP
-                </label>
-                <label className="row" style={{ gap: 6, cursor: 'pointer', fontSize: 13, userSelect: 'none' }}>
-                  <input type="checkbox" checked={acceptCkbtc} onChange={e => { setAcceptCkbtc(e.target.checked); setProjError(null); }} />
-                  ckBTC
-                </label>
-                <label className="row" style={{ gap: 6, cursor: 'pointer', fontSize: 13, userSelect: 'none' }}>
-                  <input type="checkbox" checked={acceptCketh} onChange={e => { setAcceptCketh(e.target.checked); setProjError(null); }} />
-                  ckETH
-                </label>
+              <label style={LABEL_STYLE}>Funding goal (USD)</label>
+              <div style={{ position: 'relative' }}>
+                <span className="mono" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 14, color: 'var(--fg-3)', pointerEvents: 'none' }}>$</span>
+                <input type="text" inputMode="decimal" className="burn-input" placeholder="50000"
+                  value={projGoalUsd}
+                  onChange={e => { setProjGoalUsd(e.target.value); setProjError(null); }}
+                  style={{ fontFamily: 'var(--font-mono)', paddingLeft: 24 }} />
               </div>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                One goal in USD. Funders contribute in any supported crypto (ICP, ckBTC, ckETH) — each
+                contribution is valued in USD toward this goal.
+              </span>
             </div>
 
             <Btn variant="primary" style={{ width: '100%' }} onClick={executeSaveProject} disabled={isSavingProject || !projTitle.trim() || !projDescription.trim()}>
@@ -1137,16 +1064,16 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             )}
 
             <Btn
-              variant="primary" style={{ width: '100%' }}
-              onClick={() => {
-                if (!signedIn) { onSignIn(); return; }
+              variant={detailIdea.has_upvoted ? 'secondary' : 'primary'} style={{ width: '100%' }}
+              disabled={detailIdea.has_upvoted || upvotingId === detailIdea.id}
+              onClick={async () => {
                 const idea = detailIdea;
+                await handleUpvote(idea);
                 setDetailIdea(null);
-                openPay({ kind: 'upvote', idea });
               }}
             >
-              <Icon name="arrowUp" size={14} stroke="var(--char-950)" />
-              {signedIn ? 'Upvote with funds' : 'Sign in to upvote'}
+              <Icon name={detailIdea.has_upvoted ? 'check' : 'arrowUp'} size={14} stroke={detailIdea.has_upvoted ? 'var(--sprout)' : 'var(--char-950)'} />
+              {detailIdea.has_upvoted ? 'Upvoted' : (signedIn ? 'Upvote' : 'Sign in to upvote')}
             </Btn>
             {isAdmin && (
               <div
@@ -1213,11 +1140,6 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
 
             <Btn
               variant="primary" style={{ width: '100%' }}
-              disabled={
-                !detailProject.accept_icp &&
-                !detailProject.accept_ckbtc &&
-                !detailProject.accept_cketh
-              }
               onClick={() => {
                 if (!signedIn) { onSignIn(); return; }
                 const project = detailProject;
@@ -1226,11 +1148,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
               }}
             >
               <Icon name="coins" size={14} stroke="var(--char-950)" />
-              {!detailProject.accept_icp &&
-              !detailProject.accept_ckbtc &&
-              !detailProject.accept_cketh
-                ? 'No accepted tokens'
-                : (signedIn ? 'Fund this project' : 'Sign in to fund')}
+              {signedIn ? 'Fund this project' : 'Sign in to fund'}
             </Btn>
             {isAdmin && (
               <div
@@ -1287,8 +1205,8 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
           <div className="card col" style={MODAL_CARD}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name={payIsUpvote ? 'arrowUp' : 'coins'} size={18} stroke="var(--burn)" />
-                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>{payIsUpvote ? 'Upvote idea' : 'Fund project'}</h4>
+                <Icon name="coins" size={18} stroke="var(--burn)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Fund project</h4>
               </span>
               <button onClick={() => setPayTarget(null)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
                 <Icon name="x" size={16} />
@@ -1304,9 +1222,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                 <div style={{ padding: 12, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout)', fontSize: 13, lineHeight: 1.5 }}>
                   <span className="row" style={{ gap: 8 }}>
                     <Icon name="checkCircle" size={16} stroke="var(--sprout)" />
-                    {payIsUpvote && payTarget.kind === 'upvote'
-                      ? <>Upvote settled — 75% to the treasury, 25% to {formatPrincipal(payTarget.idea.poster)}.</>
-                      : <>Funding settled — 100% to the protocol treasury.</>}
+                    Funding settled — 100% to the protocol treasury.
                   </span>
                 </div>
                 <Btn variant="primary" style={{ width: '100%' }} onClick={() => setPayTarget(null)}>Done</Btn>
@@ -1317,15 +1233,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                 <div className="col" style={{ gap: 6 }}>
                   <label style={LABEL_STYLE}>Pay with</label>
                   <div className="row" style={{ gap: 6 }}>
-                    {TOKEN_ORDER.filter(t => {
-                      if (payTarget.kind === 'fund') {
-                        const pr = payTarget.project;
-                        if (t === IdeaToken.ICP) return pr.accept_icp;
-                        if (t === IdeaToken.CkBTC) return pr.accept_ckbtc;
-                        if (t === IdeaToken.CkETH) return pr.accept_cketh;
-                      }
-                      return true;
-                    }).map(t => {
+                    {TOKEN_ORDER.map(t => {
                       const m = tokenMeta(t, info);
                       return (
                         <Btn key={t} variant={payToken === t ? 'primary' : 'secondary'} sm
@@ -1366,31 +1274,15 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                   </span>
                 </div>
 
-                {/* Split preview */}
+                {/* Split preview — funding goes 100% to the treasury. */}
                 {(() => {
                   const units = parseTokenAmount(payAmount, payMeta.decimals);
                   if (units === null || units <= 0n) return null;
-                  if (!payIsUpvote) {
-                    return (
-                      <div className="col" style={{ gap: 4, padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)', fontSize: 12 }}>
-                        <div className="row" style={{ justifyContent: 'space-between' }}>
-                          <span style={{ color: 'var(--fg-3)' }}>→ Protocol treasury (100%)</span>
-                          <span className="mono" style={{ color: 'var(--fg-1)' }}>{fmtTokenAmount(units, payMeta.decimals)} {payMeta.label}</span>
-                        </div>
-                      </div>
-                    );
-                  }
-                  const treasury = units / 4n * 3n;
-                  const poster = units - treasury;
                   return (
                     <div className="col" style={{ gap: 4, padding: '8px 10px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)', fontSize: 12 }}>
                       <div className="row" style={{ justifyContent: 'space-between' }}>
-                        <span style={{ color: 'var(--fg-3)' }}>→ Protocol treasury (75%)</span>
-                        <span className="mono" style={{ color: 'var(--fg-1)' }}>{fmtTokenAmount(treasury, payMeta.decimals)} {payMeta.label}</span>
-                      </div>
-                      <div className="row" style={{ justifyContent: 'space-between' }}>
-                        <span style={{ color: 'var(--fg-3)' }}>→ Idea poster (25%)</span>
-                        <span className="mono" style={{ color: 'var(--sprout)' }}>{fmtTokenAmount(poster, payMeta.decimals)} {payMeta.label}</span>
+                        <span style={{ color: 'var(--fg-3)' }}>→ Protocol treasury (100%)</span>
+                        <span className="mono" style={{ color: 'var(--fg-1)' }}>{fmtTokenAmount(units, payMeta.decimals)} {payMeta.label}</span>
                       </div>
                     </div>
                   );
@@ -1408,8 +1300,8 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                 )}
 
                 <Btn variant="primary" style={{ width: '100%' }} onClick={executePay} disabled={payBusy || !payAmount}>
-                  {payBusy ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name={payIsUpvote ? 'arrowUp' : 'coins'} size={14} stroke="var(--char-950)" />}
-                  {payBusy ? ' Processing…' : payIsUpvote ? ' Confirm upvote' : ' Confirm funding'}
+                  {payBusy ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="coins" size={14} stroke="var(--char-950)" />}
+                  {payBusy ? ' Processing…' : ' Confirm funding'}
                 </Btn>
                 <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--fg-3)' }}>
                   <Icon name="info" size={11} stroke="var(--fg-3)" /> Funds move in two steps: deposit to escrow, then settlement. Ledger fees apply per transfer.

@@ -229,8 +229,8 @@ re-introduce the F-101 / F-102 mainnet bypass).
 
 **What it controls:** When the canister's cycle balance falls below
 5 T, `cycle_topup_check` sweeps the treasury subaccount to the CMC and
-calls `notify_top_up`. The treasury is funded by commit fees
-(0.0005 ICP per commit) routed through the `commit` flow.
+calls `notify_top_up`. The treasury is funded by the 50% burn share of
+settled proposals (commits themselves are zero-fee) and other protocol inflows.
 
 **How to change it:** Edit the constants and rebuild. No admin setter
 for the thresholds.
@@ -279,7 +279,7 @@ verify the cutoff constant in tests still matches (`test_cutoff_constant_matches
 `call_ledger_transfer(... Some(10_000))` invocation.
 
 **What it controls:** The fee paid to the ledger on every `icrc1_transfer`
-call (commit fee, burn transfer, refund, treasury top-up). Must match
+call (commit/deposit transfer, burn transfer, refund, treasury top-up). Must match
 the ICRC-1 ledger's `transfer_fee`.
 
 **How to change it:** Find-and-replace `10_000` and rebuild. There is

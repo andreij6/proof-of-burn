@@ -12,7 +12,7 @@ Every settled commitment runs through `settle_burn_split` in `lib.rs`. The split
 - **25% → backend canister cycles** (via CMC)
 - **25% → frontend canister cycles** (via CMC)
 
-There is also a **flat protocol fee of 0.005 ICP** (`500_000` e8s, line 2578) charged at commitment time, before the commitment amount is recorded. This goes directly to treasury and is also hardcoded.
+There is **no protocol fee** on commitments — the escrow deposit equals the commitment amount exactly, and the treasury fronts all settlement/refund ledger fees (zero-fee commits). Treasury income from voting comes entirely from the 50% burn share above.
 
 Pool neuron registration fees (`pool_initiation_fee_e8s`) use the same 50/25/25 split.
 
@@ -48,7 +48,6 @@ These are the only runtime-tunable levers. Everything else requires a canister u
 | `early_adopters` | **OFF** | Ships dark, admin enables |
 
 **NOT runtime-configurable** (requires code change + upgrade):
-- Protocol fee per commitment: `500_000` e8s (0.005 ICP), line 2578
 - Treasury/cycles split ratio (50/25/25), inside `settle_burn_split`
 - Lottery minimum pot: `LOTTERY_MIN_POT_E8S` = `2_500_000_000` (25 ICP — lowered June 2026, see GROWTH_TARGETS.md)
 - AI reviewer price: `ai_price_e8s` = `5_000_000` (0.05 ICP), set at `init`
@@ -87,7 +86,7 @@ admin_set_feature_flag("arcade", false)
 Send at least 15 ICP directly to the treasury deposit address (get it from `get_treasury_deposit_address()`). The cycle top-up check silently skips if treasury ≤ 10 ICP (line 3694 in `lib.rs`: `Ok(b) if b > 1_000_000_000 => b`). Your canisters will run out of cycles and go dark without this buffer.
 
 **Revenue math at 5 ICP threshold:**
-- Per commitment flat fee: 0.005 ICP → treasury
+- Commits are zero-fee — treasury income comes solely from the 50% burn share.
 - Per settled proposal (if threshold met with ~10 ICP total committed): ~5 ICP → treasury
 - Monthly break-even: 8.8 ICP ÷ 5 ICP/proposal ≈ **2 settled proposals/month** (1 every 15 days)
 
@@ -180,7 +179,7 @@ admin_set_feature_flag("early_adopters", true)
 
 ### Staking Yields
 
-Lossless staking yield flows from the pool neuron's NNS maturity, split **80% lottery prize pot / 20% treasury** (rebalanced from 50/50, June 2026). Users receive 0% of the raw NNS yield directly — their "yield" is entirely lottery-denominated.
+Lossless staking yield flows from the pool neuron's NNS maturity, split **50% lottery prize pot / 50% treasury**. Users receive 0% of the raw NNS yield directly — their "yield" is entirely lottery-denominated.
 
 At 10,000 ICP TVL and the pool neuron's current ~7–8.75% APY (post-Mission 70, 2-year max dissolve): ~700–875 ICP/year maturity → ~350–437 ICP/year to lottery pot → ~2.2–2.8 ICP per draw (3 draws/week, 156/year). At this TVL draws are modest; prize per draw scales linearly with TVL — 100,000 ICP staked produces ~22–28 ICP/draw.
 
@@ -256,18 +255,18 @@ These disclosures must be confirmed by the user (checkbox + signature) before th
 
 **Revenue formula per settled proposal:**
 ```
-treasury_income = (total_committed_e8s × 0.50) + (commitments_count × 500_000)
+treasury_income = total_committed_e8s × 0.50
 ```
 
-The table below uses a conservative assumption of 1 commitment per proposal (flat fee once) and symmetric burn (total committed = threshold × 1 since one side just barely meets threshold).
+The table below uses a conservative assumption of symmetric burn (total committed = threshold × 1, since one side just barely meets the threshold). Commits are zero-fee, so treasury income is exactly 50% of what burns.
 
 | Threshold (ICP) | Committed at settlement (est.) | Treasury per proposal | Proposals/month to break even | Daily revenue at 1 proposal/day |
 |---|---|---|---|---|
-| 2 ICP | 2 ICP | ~1.005 ICP | ~9 | ~0.34 ICP/day |
-| 5 ICP | 5 ICP | ~2.505 ICP | ~4 | ~0.84 ICP/day |
-| 10 ICP | 10 ICP | ~5.005 ICP | ~2 | ~1.67 ICP/day |
-| 20 ICP | 20 ICP | ~10.005 ICP | ~1 | ~3.34 ICP/day |
-| 50 ICP | 50 ICP | ~25.005 ICP | <1 | ~8.34 ICP/day |
+| 2 ICP | 2 ICP | ~1.0 ICP | ~9 | ~0.33 ICP/day |
+| 5 ICP | 5 ICP | ~2.5 ICP | ~4 | ~0.83 ICP/day |
+| 10 ICP | 10 ICP | ~5.0 ICP | ~2 | ~1.67 ICP/day |
+| 20 ICP | 20 ICP | ~10.0 ICP | ~1 | ~3.33 ICP/day |
+| 50 ICP | 50 ICP | ~25.0 ICP | <1 | ~8.33 ICP/day |
 
 **Realistic model** (multiple users, both sides commit):
 

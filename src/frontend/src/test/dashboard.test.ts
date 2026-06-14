@@ -31,21 +31,10 @@ describe('countdownShort', () => {
 });
 
 describe('attentionItems', () => {
-  const base = { nowNs: NOW_NS, claimableE8s: 0n, lottery: null, proposals: [] as Proposal[], actedProposalIds: new Set<string>() };
+  const base = { nowNs: NOW_NS, lottery: null, proposals: [] as Proposal[], actedProposalIds: new Set<string>() };
 
   it('empty when nothing is actionable', () => {
     expect(attentionItems(base)).toEqual([]);
-  });
-
-  it('claimable yield ranks first and routes to early_adopters', () => {
-    const items = attentionItems({
-      ...base,
-      claimableE8s: 250_000_000n,
-      lottery: { nextDrawAt: NOW_NS + HOUR_NS, myTickets: 5n },
-    });
-    expect(items[0].kind).toBe('claim_yield');
-    expect(items[0].page).toBe('early_adopters');
-    expect(items[0].title).toContain('2.5');
   });
 
   it('flags open proposals closing within 24h that the user has not acted on', () => {

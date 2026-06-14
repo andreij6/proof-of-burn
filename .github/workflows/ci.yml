@@ -1,0 +1,47 @@
+name: CI
+
+# Fast per-PR gate (free on GitHub-hosted Linux runners). Mirrors the testing
+# plan's per-PR gate: ideas/course-nft/testing/00-testing-overview.md §6.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save free CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (lib)
+        run: cargo test -p backend --lib --locked
+      # When PB-301 lands and `src/course_nft` is added to the workspace:
+      #   - run: cargo test -p course_nft --locked
+
+  frontend:
+    name: Frontend typecheck + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # No package-lock.json in the repo, so `npm install` (not `npm ci`).
+      - name: Install deps
+        run: npm install
+      # Candid bindings (src/bindings) are gitignored — generate them from the
+      # committed .did files first. `typecheck` runs `gen:bindings` then tsc.
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npx vitest run

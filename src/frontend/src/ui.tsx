@@ -1,6 +1,27 @@
-import React from 'react';
+import React, { createContext, useContext, useEffect, type ReactNode, type DependencyList } from 'react';
 import { createPortal } from 'react-dom';
 import { Principal } from "@icp-sdk/core/principal";
+
+// ==========================================
+// Dev-controls registry
+// Lets a page surface its local/dev controls inside App's "Dashboard &
+// Controls" panel. App supplies the setter via the provider; each page
+// registers (and clears on unmount) through `usePageDevControls`.
+// ==========================================
+
+export const DevControlsContext = createContext<(node: ReactNode) => void>(() => {});
+
+/** Register page-local dev controls to show in the Dashboard & Controls panel
+ *  while this page is mounted. Pass a render fn + deps; clears on unmount. */
+export function usePageDevControls(enabled: boolean, render: () => ReactNode, deps: DependencyList) {
+  const set = useContext(DevControlsContext);
+  useEffect(() => {
+    if (!enabled) { set(null); return; }
+    set(render());
+    return () => set(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, set, ...deps]);
+}
 
 // ==========================================
 // Shared design-system primitives

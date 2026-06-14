@@ -35,9 +35,9 @@ only matters for translating 2,500 ICP into $50k.
 | **Lossless staking TVL** | **12,000 ICP — deliberately NOT equal: 2,000 / 3,000 / 7,000** (6mo / 1y / 2y) | §5 |
 | **Lottery** | Self-sustaining at that TVL: pot refills ≥ 25 ICP in < 1 month, ~monthly winners, ~20–25 ICP prizes | §6 |
 
-**Both enabling constant changes shipped June 2026 (see §8):** the EA bands
-are now 50/150/600 and the staking-yield split is 80/20 — the numbers below
-assume them.
+**Note (see §8):** the staking-yield split shipped at **50/50** lottery/treasury
+(the 80/20 rebalance was proposed but NOT shipped) — the numbers below assume
+the live 50/50 split.
 
 ---
 
@@ -122,13 +122,14 @@ must hold the majority of TVL for both the lottery and user returns to work:
 | 2 years | 7,000 ICP | 7.8% | 546 |
 | **Total** | **12,000 ICP** | blended 5.9% | **~703 ICP/year (~59/month)** |
 
-User return math (with the **80/20 lottery/treasury split** from §8, and
+User return math (with the live **50/50 lottery/treasury split**, and
 ticket weights of 1×/2×/4× per ICP making the lottery EV stake- and
 term-proportional):
 
-- 2-year stakers: ~78% of the ticket pool → EV ≈ **6.2%/year** ✓
-- 1-year stakers: ≈ 3.1% — 6-month: ≈ 1.6%. The ladder is the pitch:
-  *maximum commitment earns the 6%; short terms are the trial tier.*
+- 2-year stakers: ~78% of the ticket pool → EV ≈ **3.1%/year**
+- 1-year stakers: ≈ 1.6% — 6-month: ≈ 0.8%. The ladder is the pitch:
+  *maximum commitment earns the most; short terms are the trial tier.*
+  (A future 80/20 rebalance — see §8, not shipped — would roughly double these.)
 
 At ~75 ICP average stake, 12,000 ICP TVL ≈ **160 stakers**.
 
@@ -136,9 +137,8 @@ At ~75 ICP average stake, 12,000 ICP TVL ≈ **160 stakers**.
 
 ## 6. Lottery Self-Sufficiency (50 ICP Seed, 25 ICP Minimum)
 
-Pot inflow at the §5 TVL = 80% × 703/year ≈ **47 ICP/month** (≈29/month under
-the current 50/50 split — viable either way, but the 80/20 split is what gets
-stakers to 6%).
+Pot inflow at the §5 TVL = 50% × 703/year ≈ **29 ICP/month** (a future 80/20
+rebalance — §8, not shipped — would lift this to ≈47/month and stakers toward 6%).
 
 - **Day 1:** the 50 ICP seed already clears the 25 ICP minimum — draws are
   live immediately. First win pays out 80% (≈40 ICP), leaving ~10 + rollover.
@@ -147,8 +147,8 @@ stakers to 6%).
   ~one winner a month, ~96% chance of at least one per quarter, prizes in the
   20–40 ICP range.
 - **Self-sufficiency condition:** monthly inflow ≥ ~20 ICP, i.e. staking TVL
-  ≥ ~8,000 ICP (2y-heavy) under 80/20, or ≥ ~13,000 under 50/50. The §5 goal
-  clears it. Below that TVL the pot gate simply slows the cadence — the
+  ≥ ~13,000 ICP under the live 50/50 split (≥ ~8,000 ICP if 80/20 is ever
+  shipped). The §5 goal (12,000 ICP) is in range. Below that TVL the pot gate simply slows the cadence — the
   lottery never goes insolvent by construction; it just draws less often.
 
 No further treasury top-ups ("sweeten the pot") are required after the seed.
@@ -190,13 +190,15 @@ Already done (June 2026):
 - ✅ Dynamic lottery odds (1-in-13 per drawing) + stake-weighted tickets.
 - ✅ Whole-ICP staking; treasury-fronted fees (zero-haircut unstake/restake).
 
-Implemented June 2026 (same release as this doc):
+Constant changes (June 2026):
 
 1. ✅ **EA bands recalibrated**: restake-below 500 → **50**, treasury cut
    1,000 → **150** (capped — overflow goes to members), membership-close
    2,000 → **600** ICP/month.
-2. ✅ **Staking-yield split 50/50 → 80/20 (lottery/treasury)** — lifts
-   2-year stakers to ~6.2%; the treasury gives up ~140 ICP/year.
+2. ⬜ **Staking-yield split 50/50 → 80/20 (lottery/treasury)** — PROPOSED, NOT
+   SHIPPED. The code still splits **50/50** (`settle_yield_split`). Shipping it
+   would lift 2-year stakers from ~3.1% to ~6.2% at the cost of ~140 ICP/year
+   of treasury.
 
 Operational settings (runtime, no upgrade):
 - `admin_set_default_threshold(200_000_000)` — hold at 2 ICP (the per-vote cap).

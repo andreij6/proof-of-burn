@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "gen:bindings": "icp-bindgen --did-file ../backend/backend.did --out-dir ./src/bindings --force && icp-bindgen --did-file ../backend/ledger.did --out-dir ./src/bindings --force",
+    "typecheck": "npm run gen:bindings && tsc -b",
+    "build": "npm run gen:bindings && tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",

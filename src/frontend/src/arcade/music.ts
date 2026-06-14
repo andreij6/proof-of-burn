@@ -4,10 +4,9 @@
 // instead of bundling tracks means the music is unambiguously royalty-free
 // (it's ours), adds zero asset weight, and loops seamlessly by construction.
 //
-// Three songs: "fairway" (Mini Golf — upbeat, lighthearted, 112 BPM),
+// Two songs: "fairway" (Mini Golf — upbeat, lighthearted, 112 BPM) and
 // "pressure" (Field Goal — tense E-minor at 150 BPM: clock-tick hats, a
-// relentless bass, a heartbeat thump and sparse minor stabs) and "turbo"
-// (Turbo Rush — 164 BPM motorik four-on-the-floor highway driver).
+// relentless bass, a heartbeat thump and sparse minor stabs).
 // ==========================================
 
 const LOOKAHEAD_MS = 30;
@@ -116,59 +115,6 @@ const PRESSURE: Song = {
     1, 0, 1, 0, 0, 0, 0, 0,
     1, 0, 1, 0, 0, 0, 0, 0,
     1, 0, 1, 0, 1, 0, 1, 0, // racing at the loop turn
-  ],
-  leadVol: 0.13,
-  bassVol: 0.26,
-};
-
-// ── Song 3: "turbo" — A-Mixolydian at 164 BPM, motorik and relentless.
-// Four-on-the-floor thump, droning eighth-note bass, a sawing two-bar
-// arpeggio that climbs and never quite rests — open-highway energy.
-const TURBO: Song = {
-  bpm: 164,
-  lead: [
-    // Arpeggio up A–C#–E–G (Mixolydian b7), answer down.
-    440, 554, 659, 784, 659, 554, 440, 554,
-    659, 784, 880, 784, 659, 554, 440, 0,
-    // Shift to G–B–D and back — gear change.
-    392, 494, 587, 740, 587, 494, 392, 494,
-    440, 554, 659, 784, 880, 0, 784, 659,
-    440, 554, 659, 784, 659, 554, 440, 554,
-    659, 784, 880, 784, 659, 554, 440, 0,
-    // Overdrive bar: high straight 8ths, then dive home.
-    880, 880, 784, 784, 659, 659, 554, 554,
-    440, 0, 392, 0, 440, 0, 0, 0,
-  ],
-  bass: [
-    110, 110, 110, 110, 110, 110, 110, 110,
-    110, 110, 110, 110, 110, 110, 98, 98,
-    98, 98, 98, 98, 98, 98, 98, 98,
-    110, 110, 110, 110, 110, 110, 110, 110,
-    110, 110, 110, 110, 110, 110, 110, 110,
-    147, 147, 147, 147, 131, 131, 124, 124,
-    110, 110, 110, 110, 110, 110, 110, 110,
-    110, 110, 98, 98, 110, 110, 110, 0,
-  ],
-  hat: [
-    0, 1, 0, 1, 0, 1, 0, 1,
-    0, 1, 0, 1, 0, 1, 0, 1,
-    0, 1, 0, 1, 0, 1, 0, 1,
-    0, 1, 0, 1, 0, 1, 1, 1,
-    0, 1, 0, 1, 0, 1, 0, 1,
-    0, 1, 0, 1, 0, 1, 0, 1,
-    1, 1, 1, 1, 1, 1, 1, 1,
-    0, 1, 0, 1, 0, 1, 1, 1,
-  ],
-  kick: [
-    // Four on the floor — the engine.
-    1, 0, 1, 0, 1, 0, 1, 0,
-    1, 0, 1, 0, 1, 0, 1, 0,
-    1, 0, 1, 0, 1, 0, 1, 0,
-    1, 0, 1, 0, 1, 0, 1, 0,
-    1, 0, 1, 0, 1, 0, 1, 0,
-    1, 0, 1, 0, 1, 0, 1, 0,
-    1, 0, 1, 0, 1, 0, 1, 0,
-    1, 0, 1, 0, 1, 0, 1, 1,
   ],
   leadVol: 0.13,
   bassVol: 0.26,
@@ -304,5 +250,3 @@ export class ArcadeMusic {
 export const arcadeMusic = new ArcadeMusic(FAIRWAY);
 /** Field Goal's high-pressure loop. */
 export const pressureMusic = new ArcadeMusic(PRESSURE);
-/** Turbo Rush's motorik open-highway loop. */
-export const turboMusic = new ArcadeMusic(TURBO);

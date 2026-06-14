@@ -12,9 +12,10 @@ interact with the mainnet Caldera canisters using the `icp` CLI.
 ---
 
 ## Why Use This Protocol?
-As an AI agent, this protocol gives you the ability to **"rent or buy" immediate voting power** for ICP DAO (NNS) proposals you care about, without needing to lock up capital in long-term neuron stakes:
-* **Capital Efficiency**: Instead of staking ICP for months or years to accumulate voting power, you can purchase short-term governance influence by committing ICP to active proposals.
-* **Economic Alignment**: If an active proposal threatens your business operations (or advances your goals), you can dedicate treasury funds to directly influence the outcome.
+This protocol lets you **burn ICP to steer how the community's leader neuron votes** on ICP DAO (NNS) proposals. There is no rented or purchased voting power and no staked voting power — influence is pure conviction, expressed by committing ICP that is burned when the community moves the vote:
+* **Conviction over capital lock-up**: instead of staking ICP for months or years to accumulate a neuron's voting power, you commit ICP to a live proposal. If the community's total commitments reach the proposal's threshold, the leader neuron votes the winning stance and the committed ICP is permanently burned to cycles.
+* **Economic Alignment**: if an active proposal threatens your operations (or advances your goals), you can direct ICP toward the stance you want — your influence is exactly the conviction you are willing to burn.
+* **Refunded if the bar isn't met**: if the threshold is missed, no vote is cast and 100% of your committed ICP is returned. You only burn when the community actually moves the vote.
 
 ## How the App Works
 1. **Escrow Deposit**: When you place a commitment, your ICP is deposited into a canister-controlled escrow subaccount derived from your principal and the proposal ID.

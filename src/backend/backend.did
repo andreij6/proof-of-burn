@@ -34,12 +34,9 @@ type ArcadeInfo = record {
   // Per-game kill switches (only meaningful when `enabled` is true).
   minigolf_enabled : bool;
   hair_options : nat8;
-  turborush_enabled : bool;
   // $1.00 in USD e8s — convert with get_arcade_customize_quote.
   customize_fee_usd_e8s : nat64;
   enabled : bool;
-  // Turbo Rush car — fields map hair→body, skin→wheels, outfit→stripe.
-  my_car : opt ArcadeCharacter;
   my_character : opt ArcadeCharacter;
   has_stake : bool;
   // Field Goal kicker persona — fields map hair→helmet, outfit→jersey.
@@ -413,6 +410,8 @@ type Idea = record {
   total_ckbtc_e8s : nat64;
   // Detail-view opens by signed-in users (drives "most viewed" sorting).
   views : nat64;
+  // Whether the calling principal has upvoted this idea (per-caller, computed).
+  has_upvoted : bool;
   description : text;
   created_at : nat64;
   detail : text;
@@ -489,14 +488,6 @@ type Listing = record {
   // For Crash: the strategy id whose body unlocks on license.
   item_id : nat64;
 };
-type LosslessVote = record {
-  stance : Stance;
-  "principal" : principal;
-  cast_at : nat64;
-  // Stake snapshot at cast time — later stake changes don't retro-apply.
-  weight_e8s : nat64;
-  proposal_id : nat64;
-};
 // Journal for one drawing — persisted before the prize transfer so a trap
 // can't lose (or double-pay) a win. Same idempotency pattern as
 // `settle_burn_split` / `settle_yield_split`.
@@ -544,7 +535,7 @@ type LotteryInfo = record {
   my_tickets : nat64;
   round : nat64;
 };
-type MarketKind = variant { Poker; Crash };
+type MarketKind = variant { Crash };
 type MaturityDisbursement = record {
   amount_e8s : nat64;
   // When the minted ICP should arrive in the yield inbox (~+7 days).
@@ -558,20 +549,6 @@ type MyCasinoView = record {
   staking_weight_e8s : nat64;
   effective_vp_e8s : nat64;
   delta_e8s : int64;
-};
-type MyPokerAgentView = record {
-  stop_loss_e8s : nat64;
-  model : text;
-  waitlist_pos : opt nat64;
-  chips : nat64;
-  mode : text;
-  seat : opt nat8;
-  table_id : opt nat8;
-  agent_principal : opt principal;
-  claimed : bool;
-  state : text;
-  style : PokerStyle;
-  effective_vp_e8s : nat64;
 };
 type NeuronFollowStatus = record {
   topics_following_primary : vec int32;
@@ -643,66 +620,6 @@ type PendingUnstake = record {
   child_e8s : opt nat64;
   settled_at : opt nat64;
 };
-type PokerActionInput = variant { Call; Fold; BetTo : nat64; Check };
-type PokerHandSeatView = record {
-  model : text;
-  "principal" : principal;
-  delta_chips : int64;
-  hole : opt blob;
-};
-type PokerHandView = record {
-  at : nat64;
-  id : nat64;
-  hand_no : nat64;
-  table_id : nat8;
-  seed_hex : text;
-  winners_msg : text;
-  seats : vec PokerHandSeatView;
-  board : blob;
-};
-type PokerLegalView = record {
-  call_amount : nat64;
-  can_check : bool;
-  min_raise_to : nat64;
-  max_raise_to : nat64;
-};
-type PokerLobbyRow = record {
-  waitlist_len : nat64;
-  pot_chips : nat64;
-  hand_no : nat64;
-  table_id : nat8;
-  seats_taken : nat8;
-  max_seats : nat8;
-  phase : text;
-  paused : bool;
-};
-type PokerSeatView = record {
-  status : text;
-  model : text;
-  "principal" : opt principal;
-  occupied : bool;
-  hole : opt blob;
-  seat : nat8;
-  committed_chips : nat64;
-  stack_chips : nat64;
-  is_acting : bool;
-};
-type PokerStyle = variant { Lag; Nit; Tag; Station };
-type PokerTableView = record {
-  my_seat : opt nat8;
-  pot_chips : nat64;
-  hand_no : nat64;
-  acting_seat : opt nat8;
-  table_id : nat8;
-  last_result : opt text;
-  legal : opt PokerLegalView;
-  seats : vec PokerSeatView;
-  action_deadline : nat64;
-  board : blob;
-  phase : text;
-  button : nat8;
-  paused : bool;
-};
 type PoolInfo = record {
   total_pool_voting_power : nat64;
   active_neurons : vec ActivePoolNeuron;
@@ -725,6 +642,10 @@ type ProgressionRule = record { action : BetAction; factor_x100 : nat64 };
 // execution. Per-token goals of 0 mean "not seeking that token".
 type Project = record {
   id : nat64;
+  // The single funding goal, in USD e8s ($1 = 100_000_000).
+  goal_usd_e8s : nat64;
+  // Total raised across all tokens, valued in USD e8s (computed per query).
+  raised_usd_e8s : nat64;
   raised_ckbtc_e8s : nat64;
   title : text;
   goal_ckbtc_e8s : nat64;
@@ -904,17 +825,9 @@ service : (InitPayload) -> {
   // Admin: add a permanent curated listing (no payment, no badge, no expiry).
   admin_add_dapp : (text, text, text) -> (Result_1);
   // Admin: add a fundable project. At least one per-token goal must be set.
-  admin_add_project : (
-      text,
-      text,
-      text,
-      nat64,
-      nat64,
-      nat64,
-      bool,
-      bool,
-      bool,
-    ) -> (Result_1);
+  // Add a fundable project with a single USD goal (USD e8s). Every project
+  // accepts any supported crypto; contributions are valued in USD.
+  admin_add_project : (text, text, text, nat64) -> (Result_1);
   // Admin: approve a pending community listing. Its paid `days` window starts
   // now.
   admin_approve_dapp : (nat64) -> (Result);
@@ -946,7 +859,6 @@ service : (InitPayload) -> {
   // Pause/unpause the round loop. The current round still settles; no new
   // betting window opens while paused.
   admin_pause_crash : (bool) -> (Result);
-  admin_pause_poker_table : (nat8, bool) -> (Result);
   // Admin: reject a pending community listing. The payment is refunded from
   // the treasury (minus one ledger fee), then the listing is deleted.
   // The listing is REMOVED before the refund transfer (and restored if it
@@ -1012,24 +924,11 @@ service : (InitPayload) -> {
   // an emergency seed that the next successful XRC refresh overwrites.
   admin_set_usd_rate : (IdeaToken, nat64) -> (Result);
   admin_trigger_sweep : () -> (Result);
-  // Admin: update a project's details, funding goals, and cryptocurrency toggles.
-  admin_update_project : (
-      nat64,
-      text,
-      text,
-      text,
-      nat64,
-      nat64,
-      nat64,
-      bool,
-      bool,
-      bool,
-    ) -> (Result);
+  // Admin: update a project's details and its single USD funding goal (USD e8s).
+  admin_update_project : (nat64, text, text, text, nat64) -> (Result);
   // Catastrophic-wedge escape hatch (writer #4): refund every wager in the
   // current round (delta 0 for all, house delta 0) and archive it void.
   admin_void_crash_round : () -> (Result);
-  // Void the current hand: refund every committed chip (delta 0), archive a void.
-  admin_void_poker_hand : (nat8) -> (Result);
   // Admin: withdraw ICP from the treasury subaccount to a destination
   // principal. Guarded by the 15 ICP floor unless `override_floor`.
   admin_withdraw_treasury : (principal, nat64, bool) -> (Result);
@@ -1043,13 +942,6 @@ service : (InitPayload) -> {
   // both kinds). The buyer must have pre-approved the canister via icrc2_approve.
   buy_license : (nat64, IdeaToken) -> (Result_1);
   cancel_pool_draft : (nat64) -> (Result);
-  // Cast a free vote with the caller's staked weight. NO ICP moves and nothing
-  // is escrowed — this only bumps the proposal's staked-weight tallies. It
-  // therefore has nothing to refund at settlement: the cutoff path only
-  // settles burned COMMITMENTS, never LOSSLESS_VOTES. The weight joins the
-  // adopt/reject balance of power AND can carry the proposal to its threshold;
-  // one immutable vote per user per proposal, snapshotted at cast time.
-  cast_lossless_vote : (nat64, Stance) -> (Result);
   // Credit today's tickets (once per UTC day). Requires an active stake —
   // the grant scales with the staked tiers (see `user_daily_tickets`). The
   // frontend calls this on login / page load; returns the caller's
@@ -1058,11 +950,6 @@ service : (InitPayload) -> {
   // Claim the caller's current monthly share. Shares not claimed before the
   // next settlement are forfeited to the treasury.
   claim_early_adopter_yield : () -> (Result_1);
-  // Claim your one poker agent (Profile → Agent Space). Passing your own
-  // principal = a house-mode agent (the canister plays your style); a different
-  // principal registers an external bot. One agent per user; an agent principal
-  // serves one owner; re-claim allowed after a 24 h cooldown, never while seated.
-  claim_poker_agent : (principal, text) -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
   // Commit a vote in ANY supported token. The token is ESCROWED — it only
   // converts to ICP if the proposal passes its threshold and the vote is cast
@@ -1098,10 +985,6 @@ service : (InitPayload) -> {
   // pre-approved the canister via icrc2_approve). ≤ 20 per author, ≤ 4 KB.
   create_crash_strategy : (CrashStrategyInput, IdeaToken) -> (Result_1);
   create_pool_draft : (nat64) -> (Result);
-  // Change the Turbo Rush car's look (body/wheels/stripe palette indices)
-  // for $1, paid in any supported token — same quote + deposit flow as the
-  // golfer and kicker.
-  customize_car : (nat8, nat8, nat8, IdeaToken) -> (Result);
   // Change the golfer's look (palette indices) for $1, paid in any supported
   // token (ICP / ckBTC / ckETH / ckUSDC / ckUSDT) at the quoted rate.
   customize_character : (nat8, nat8, nat8, IdeaToken) -> (Result);
@@ -1135,6 +1018,9 @@ service : (InitPayload) -> {
   // Local-dev: hold a drawing immediately. `force_win` rigs the winning ticket
   // to index 0 so the full payout path can be exercised without 1-in-292M luck.
   dev_run_lottery_draw : (bool) -> (Result);
+  // Local-dev: grant the caller `count` lottery tickets in the current round
+  // (demo a non-empty holding without staking). Returns the new ticket count.
+  dev_grant_lottery_tickets : (nat64) -> (Result_1);
   // Local-dev: run one staking sweep pass immediately (instead of waiting for
   // the 5-minute timer).
   dev_run_staking_sweep : () -> (Result);
@@ -1146,9 +1032,6 @@ service : (InitPayload) -> {
   // Local-dev: seed a varied set of mock payout records for the caller so the
   // Profile page has realistic data. No-op if the caller already has payouts.
   dev_seed_payouts : () -> (Result);
-  // Local-dev only (admin): grant the caller chips and seat six house agents at
-  // Caldera 1 so a hand is always in progress to watch. Idempotent-ish.
-  dev_seed_poker_play : () -> (Result_2);
   // Local-dev: insert an Active pool neuron with an explicit voting power, so we
   // can seed mock pool members (with varied VP) for UI testing. Rejected on
   // mainnet (ledger canister ID check). Never callable by anonymous.
@@ -1244,21 +1127,16 @@ service : (InitPayload) -> {
   get_my_casino : () -> (MyCasinoView) query;
   get_my_commitments : () -> (vec Commitment) query;
   get_my_licenses : () -> (vec License) query;
-  get_my_lossless_votes : () -> (vec LosslessVote) query;
   // The caller's payout history, newest first (capped).
   get_my_payouts : () -> (vec Payout) query;
-  get_my_poker_agent : () -> (MyPokerAgentView) query;
   get_my_pool_neuron : () -> (opt PoolNeuron) query;
   get_my_stake : () -> (UserStakeInfo) query;
-  get_my_table_view : () -> (opt PokerTableView) query;
   // The caller's full transaction history — spends AND payouts. Out legs come
   // from the audit log (ICP flows: commits, idea posts, pool fees, stake
   // lockups) plus the token-typed upvote/funding journals; In legs are the
   // payout records. Newest first, capped.
   get_my_transactions : () -> (vec TransactionRecord) query;
   get_my_twitter_handle : () -> (opt text) query;
-  get_poker_history : (nat8, nat64) -> (vec PokerHandView) query;
-  get_poker_lobby : () -> (vec PokerLobbyRow) query;
   get_pool_info : () -> (PoolInfo) query;
   // The caller's deposit account for funding `project_id`. Fund it on the
   // chosen token's ledger with `amount + fee`, then call `fund_project`.
@@ -1269,7 +1147,6 @@ service : (InitPayload) -> {
   // then call `stake(amount)`.
   get_stake_deposit_address : () -> (LedgerAccount) query;
   get_staking_pool_info : () -> (StakingPoolInfo) query;
-  get_table_public : (nat8) -> (opt PokerTableView) query;
   get_treasury_balance : () -> (BalanceResult);
   // The treasury's ledger account — deposit ICP here to fund it directly
   // (admin top-ups, external donations). Not secret: it's just the backend
@@ -1323,17 +1200,6 @@ service : (InitPayload) -> {
   // checked against every platform neuron id before any governance call.
   merge_unstake : (nat64, StakeTier) -> (Result);
   notify_top_up : (NotifyTopUpArgs) -> (NotifyTopUpResult);
-  // External agent acts. Buffered and revealed on the table's pacing timer
-  // (D18). `hand_no` guards against stale actions.
-  poker_act : (nat8, nat64, PokerActionInput) -> (Result);
-  // Enter matchmaking: the canister seats the agent at the table with the most
-  // open seats (tie → lowest id); all full ⇒ FIFO waitlist. Idempotent.
-  poker_find_seat : () -> (Result);
-  // Stand up (after the current hand) or leave the waitlist.
-  poker_leave : () -> (Result);
-  // Public nudge that advances every active table (timers don't fire on a quiet
-  // local replica; the spectator UI calls this each poll). Async (draws RNG).
-  poker_poke : () -> ();
   // Post to the global casino chat (signed-in only, 200 chars, 1 msg/5 s).
   // Rendered as plain text by the UI — no markup, no links: zero injection
   // surface. Muted users' posts are silently accepted but only echoed to them.
@@ -1354,10 +1220,6 @@ service : (InitPayload) -> {
   record_idea_view : (nat64) -> (Result);
   refund_registration : () -> (Result);
   remove_admin : (principal) -> (Result);
-  set_poker_model : (text) -> (Result);
-  // Set the stop-loss effective-VP floor (0 = off). Owner-only, between hands.
-  set_poker_stop_loss : (nat64) -> (Result);
-  set_poker_style : (PokerStyle) -> (Result);
   // Set (or clear, with an empty string) the caller's X handle. A leading @
   // is stripped; X's own rules apply (1–15 chars, [A-Za-z0-9_]).
   set_twitter_handle : (text) -> (Result);
@@ -1381,11 +1243,8 @@ service : (InitPayload) -> {
   // Returns the pending-unstake id. The user nets amount − 0.0002 ICP (split +
   // disburse fees).
   unstake : (nat64, StakeTier) -> (BalanceResult);
-  // Upvote an idea with deposited funds. 75% of the amount goes to the
-  // protocol treasury, 25% to the idea poster's wallet. The caller must first
-  // transfer `amount + 2×fee` to their `get_idea_deposit_address` subaccount
-  // on the chosen token's ledger.
-  upvote_idea : (nat64, IdeaToken, nat64) -> (Result);
+  // Upvote an idea — FREE. No crypto is collected; one upvote per user per idea.
+  upvote_idea : (nat64) -> (Result);
   // Provably-fair verification for a finished round (C14): returns the seed, the
   // recomputed crash point, and the chain-link proof back to the genesis terminal.
   verify_crash_round : (nat64) -> (Result_5) query;

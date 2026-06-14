@@ -9,7 +9,6 @@ import { CommitmentStatus, type Backend } from "./bindings/backend";
 import type {
   Proposal,
   Commitment,
-  LosslessVote,
   UserStakeInfo,
   GlobalStats,
   LotteryInfo,
@@ -80,7 +79,7 @@ function MiniStat({ label, value }: { label: string; value: React.ReactNode }) {
 
 export default function Dashboard({
   actor, principal, isAdmin, tier, holdings, proposals,
-  myCommitments, myLosslessVotes, myStake, globalStats, flags, go, onSignIn,
+  myCommitments, myStake, globalStats, flags, go, onSignIn,
 }: {
   actor: Backend | null;
   principal: Principal | null;
@@ -89,7 +88,6 @@ export default function Dashboard({
   holdings: bigint;
   proposals: Proposal[];
   myCommitments: Commitment[];
-  myLosslessVotes: LosslessVote[];
   myStake: UserStakeInfo | null;
   globalStats: GlobalStats | null;
   flags: { staking: boolean; lottery: boolean; ideas: boolean; explorer: boolean; arcade: boolean; earlyAdopters: boolean };
@@ -126,12 +124,11 @@ export default function Dashboard({
   }, [actor, signedIn, flags.lottery, flags.earlyAdopters, flags.ideas]);
 
   // Usage signals — drive personalized vs promo card states.
-  const votingUsed = myCommitments.length > 0 || myLosslessVotes.length > 0;
+  const votingUsed = myCommitments.length > 0;
   const stakedE8s = myStake?.total_staked_e8s ?? 0n;
   const stakingUsed = stakedE8s > 0n;
   const myTickets = lottery?.my_tickets ?? 0n;
   const eaStaked = ea?.my_staked_e8s ?? 0n;
-  const claimable = ea?.my_claimable_e8s ?? 0n;
   const newUser = signedIn && tier <= 1 && !votingUsed && !stakingUsed;
 
   const escrowE8s = myCommitments
@@ -139,13 +136,11 @@ export default function Dashboard({
     .reduce((s, c) => s + c.amount_e8s, 0n);
 
   const nowNs = BigInt(nowMs) * 1_000_000n;
-  const actedIds = new Set<string>([
-    ...myCommitments.map(c => c.proposal_id.toString()),
-    ...myLosslessVotes.map(v => v.proposal_id.toString()),
-  ]);
+  const actedIds = new Set<string>(
+    myCommitments.map(c => c.proposal_id.toString()),
+  );
   const attention = signedIn ? attentionItems({
     nowNs,
-    claimableE8s: claimable,
     lottery: lottery ? { nextDrawAt: lottery.next_draw_at, myTickets } : null,
     proposals,
     actedProposalIds: actedIds,
@@ -158,8 +153,8 @@ export default function Dashboard({
   const checklist: { label: string; done: boolean; page: AppPage }[] = [
     { label: 'Sign in with Internet Identity', done: true, page: 'dashboard' },
     { label: 'Follow the leader neuron & verify', done: tier >= 2, page: 'voting' },
-    { label: 'Cast your first vote — staked (free) or burned', done: votingUsed, page: 'voting' },
-    ...(flags.staking ? [{ label: 'Stake ICP — voting power plus lottery tickets', done: stakingUsed, page: 'staking' as AppPage }] : []),
+    { label: 'Cast your first vote — burn ICP to steer the leader', done: votingUsed, page: 'voting' },
+    ...(flags.staking ? [{ label: 'Stake ICP — earn daily lottery tickets', done: stakingUsed, page: 'lottery' as AppPage }] : []),
   ];
 
   return (
@@ -175,8 +170,8 @@ export default function Dashboard({
           <HubCard span2 eyebrow="Welcome" icon="flame">
             <Big>Governance with skin in the game</Big>
             <Sub>
-              Burn ICP to steer NNS votes, stake losslessly for voting power and lottery
-              tickets, and fund community R&D — every action provably shrinks ICP supply.
+              Burn ICP to steer NNS votes, stake losslessly for daily lottery tickets, and fund
+              community R&D — every action provably shrinks ICP supply.
             </Sub>
             <div className="row" style={{ gap: 14, flexWrap: 'wrap', alignItems: 'center', marginTop: 4 }}>
               <Btn variant="primary" onClick={onSignIn}>Sign in with Internet Identity</Btn>
@@ -217,7 +212,7 @@ export default function Dashboard({
                 <MiniStat label="Tickets" value={myTickets.toString()} />
               )}
               {flags.earlyAdopters && eaStaked > 0n && (
-                <MiniStat label="Founder stake" value={`${fmtICP(eaStaked)} ICP`} />
+                <MiniStat label="Perm stake" value={`${fmtICP(eaStaked)} ICP`} />
               )}
             </div>
             <Sub>Full transaction history and payouts live on your profile.</Sub>
@@ -237,7 +232,7 @@ export default function Dashboard({
           chip={openCount > 0 ? <Chip tone="pending">{openCount} open</Chip> : undefined}>
           {votingUsed ? (
             <>
-              <Big>{myCommitments.length + myLosslessVotes.length} votes placed</Big>
+              <Big>{myCommitments.length} votes placed</Big>
               <Sub>{fmtICP(escrowE8s)} ICP currently committed in escrow. Open proposals await your conviction.</Sub>
             </>
           ) : (
@@ -249,12 +244,12 @@ export default function Dashboard({
         </HubCard>
 
         {flags.staking && (
-          <HubCard eyebrow="Staking" icon="zap" onClick={() => go('staking')}
+          <HubCard eyebrow="Staking" icon="zap" onClick={() => go('lottery')}
             chip={signedIn && !stakingUsed ? <Chip tone="muted">new to you</Chip> : undefined}>
             {stakingUsed ? (
               <>
                 <Big>{fmtICP(stakedE8s)} ICP staked</Big>
-                <Sub>Earning voting power{flags.lottery ? ' and daily lottery tickets' : ''} across your term pools. Zero-loss by design.</Sub>
+                <Sub>Earning daily lottery tickets across your term pools. Zero-loss by design.</Sub>
               </>
             ) : (
               <>
@@ -303,23 +298,17 @@ export default function Dashboard({
         )}
 
         {flags.earlyAdopters && (
-          <HubCard eyebrow="Early Adopters" icon="spark" onClick={() => go('early_adopters')}
-            chip={ea ? (
-              ea.membership_closed
-                ? <Chip tone="muted">membership closed</Chip>
-                : <Chip tone="ok"><LiveDot size={5} /> open</Chip>
-            ) : undefined}>
+          <HubCard eyebrow="Perm" icon="spark" onClick={() => go('lottery')}
+            chip={<Chip tone="ok">100 tickets/ICP/day</Chip>}>
             {eaStaked > 0n ? (
               <>
-                <Big>{fmtICP(eaStaked)} ICP seat</Big>
-                <Sub>{claimable > 0n
-                  ? `${fmtICP(claimable)} ICP claimable from the latest settlement.`
-                  : 'Your permanent seat shares the platform neuron\'s monthly yield, proportional to stake.'}</Sub>
+                <Big>{fmtICP(eaStaked)} ICP staked</Big>
+                <Sub>Earning {(Number(eaStaked / 100_000_000n) * 100).toLocaleString()} lottery tickets/day. Permanent stake — no exit.</Sub>
               </>
             ) : (
               <>
-                <Big>{ea && ea.early_adopter_count > 0n ? `${ea.early_adopter_count.toString()} founders` : 'Founding seats'}</Big>
-                <Sub>Permanent stake into the platform's 2-year neuron for a monthly share of its yield. No exit — conviction only.</Sub>
+                <Big>Max lottery boost</Big>
+                <Sub>Stake ICP permanently for 100 lottery tickets/day per ICP — the highest rate. You're never paid ICP from it.</Sub>
               </>
             )}
           </HubCard>

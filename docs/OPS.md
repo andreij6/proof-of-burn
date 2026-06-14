@@ -96,7 +96,7 @@ and reimburses all three cycle fees (0.0003 ICP, `fee_refund_block` on the
 PendingUnstake, retried by the sweep) with the disbursement. Staking is also the lossless-lottery eligibility gate (the
 daily ticket grant = base 5 × multiplier per staked tier). Maturity from all
 three neurons is harvested on the 5-minute sweep into the shared yield inbox
-(`[2u8;32]`) and split **80% lottery prize pot (`[3u8;32]`) / 20% treasury** (rebalanced from 50/50 June 2026 — GROWTH_TARGETS.md §5).
+(`[2u8;32]`) and split **50% lottery prize pot (`[3u8;32]`) / 50% treasury**.
 
 Tier dissolve delays are FIXED in code; `admin_set_staking_config` only tunes
 `(min_stake_e8s, min_unstake_e8s, maturity_threshold_e8s)` (null = keep).
