@@ -473,7 +473,9 @@ export default function App() {
   useErrorImpression(addMoreTxError, 'add_more');
 
   // Tweak / simulator options
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    try { return localStorage.getItem('theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
+  });
   // Visual presentation is now fixed (the per-style selectors were removed from
   // the Dashboard & Controls panel): gating blurs locked content, AI review is
   // off by default, and motion is always the expressive page-transition style.
@@ -1571,13 +1573,14 @@ export default function App() {
     }
   };
 
-  // Apply light theme data attribute to documentElement
+  // Apply the theme to documentElement and remember the choice across reloads.
   useEffect(() => {
     if (theme === 'light') {
       document.documentElement.setAttribute('data-theme', 'light');
     } else {
       document.documentElement.removeAttribute('data-theme');
     }
+    try { localStorage.setItem('theme', theme); } catch { /* sandboxed */ }
   }, [theme]);
 
   const openPoolWizard = () => {

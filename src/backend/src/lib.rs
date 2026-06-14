@@ -5559,6 +5559,12 @@ fn upvote_idea(idea_id: u64) -> Result<(), String> {
         return Err("IDEA_EXPIRED".to_string());
     }
 
+    // Creators can't upvote their own idea (the UI also hides the button).
+    if idea.poster == caller {
+        return Err("OWN_IDEA".to_string());
+    }
+
+    // One upvote per user per idea — enforced here, not just in the UI.
     let key = IdeaUpvoteKey { idea_id, user: caller };
     if IDEA_UPVOTERS.with(|m| m.borrow().contains_key(&key)) {
         return Err("ALREADY_UPVOTED".to_string());

@@ -14,7 +14,7 @@
     "headers": {
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "DENY",
-      "Content-Security-Policy": "default-src 'self' https://identity.ic0.app; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self' https://ic0.app https://*.ic0.app https://icp-api.io"
+      "Content-Security-Policy": "default-src 'self' https://identity.ic0.app; script-src 'self' 'unsafe-inline' https://www.googletagmanager.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://www.googletagmanager.com https://*.google-analytics.com; connect-src 'self' https://ic0.app https://*.ic0.app https://icp-api.io https://firebase.googleapis.com https://firebaseinstallations.googleapis.com https://www.googletagmanager.com https://*.google-analytics.com https://*.analytics.google.com"
     }
   }
 ]
