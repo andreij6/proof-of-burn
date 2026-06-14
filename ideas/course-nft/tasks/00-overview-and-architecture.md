@@ -145,6 +145,14 @@ table in the same change.
   `<Eyebrow accent>` + icon + `<h4>` + subtitle + `<MoreInfo>`. Candid bindings are
   **generated** from `backend.did` (never hand-edit `src/bindings`); `opt T` decodes via
   the `{__kind__}` wrapper; `nat64`/`nat` are `bigint`. See skill `.claude/skills/frontend-dev`.
+- **Visuals are a swappable render layer (art must be upgradable).** On-chain
+  `course_data` and the physics engine carry **logical, art-agnostic** data only
+  (element kind, transform, gameplay params, canonical collision geometry); **all**
+  drawing lives in a pluggable `RenderKit` keyed by `(ElementKind, Theme)`. Upgrading
+  element art (the first-pass sand/walls/windmill are deliberately low-fi) is a
+  client-side render-layer change — no schema bump, no physics change, no re-mint, and
+  it lifts the editor and the game together. The render-layer contract is specified in
+  [PB-303 A.6](03-minigolf-engine-and-course-format.md) and reused by [PB-302](02-course-editor.md)/[PB-309](09-leaderboard-removal-and-arcade-migration.md).
 - **Ticket crediting** reuses the existing lottery system: `LOTTERY_TICKETS:
   StableBTreeMap<Principal, TicketEntry{round,count,last_claim_day}>` (per-round counts).
   Course tickets add to the caller/owner's current-round `count` (model after

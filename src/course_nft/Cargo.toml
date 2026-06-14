@@ -1,0 +1,17 @@
+[package]
+name = "course_nft"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candid = "0.10"
+ic-cdk = "0.19"
+ic-stable-structures = "0.7"
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"
+
+[dev-dependencies]
+candid = "0.10"

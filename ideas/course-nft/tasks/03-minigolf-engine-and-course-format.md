@@ -119,6 +119,62 @@ the new format + engine paths alongside so PB-302/304/305 can build against the 
 format while the old built-in still runs until PB-309 cuts it over. New code must not
 extend `ArcadeHoleDef`.
 
+### A.6 Visual rendering layer — designed for upgrade (art is swappable)
+
+The first-pass art for several elements (sand traps, walls, the windmill, …) is
+intentionally low-fidelity. The design **must** let visuals be upgraded later — to
+richer sprites, vector art, themed art packs, or even a different canvas/WebGL
+backend — **without** touching the data format, the physics, already-minted NFTs, or
+a course's playability. This is an explicit invariant of the feature.
+
+**Separation contract (hard rule):**
+
+| Layer | Owns | Must NOT contain |
+|---|---|---|
+| `course_data` (on-chain, B.1) | logical elements only: `ElementKind`, grid transform (`x,y,rot`), gameplay `params` (speed/phase/path) | any pixels, colours, px sizes, sprites, or art references |
+| Engine (`engine.ts`) | physics + **canonical collision geometry** (`HoleDef`, `moverGeometry`) + gameplay events | drawing / art |
+| **Render layer** (`MiniGolf.tsx` + a new `RenderKit`) | all visuals: how each `(ElementKind, Theme)` is drawn/animated, sprites, palettes, FX | gameplay rules or collision geometry |
+
+Because art lives only in the render layer (shipped with the frontend), an art
+upgrade is a **pure client-side change**: no `CourseDataV1` version bump, no re-mint,
+no physics edit. Every existing course — including minted NFTs — renders with the new
+art automatically on next load (art is *not* stored on-chain; only logical kinds are).
+
+**Pluggable `RenderKit`.** Drawing is routed through a kit interface keyed by element
+kind so a better kit drops in behind the same contract:
+
+```ts
+// The engine hands the render layer canonical geometry; the kit only decides looks.
+export interface RenderKit {
+  id: string;                 // 'primitive-v1' (today) | 'sprite-v2' | …
+  drawTerrain(ctx: Renderer, hole: HoleDef, theme: Theme): void;
+  drawElement(ctx: Renderer, el: PlacedElement, view: ElementView, theme: Theme, tSec: number): void;
+  drawBall(ctx: Renderer, ball: BallView, theme: Theme): void;
+}
+```
+
+- `ElementView` / `BallView` are derived from the engine's canonical state (position,
+  rotation, and for movers the `moverGeometry(m, tSec)` segment). The kit **consumes**
+  geometry; it never recomputes physics.
+- Today's primitive shapes become **`RenderKit` `primitive-v1`**. A future `sprite-v2`
+  (or a per-`Theme` art pack) is selected at render time behind a single swap point
+  (config / feature flag); kits may even be chosen per `Theme`.
+- The editor palette/canvas (PB-302) and the play view (PB-309) **render through the
+  same `RenderKit`**, so they always match and upgrade together.
+
+**Visual vs. collision geometry.** The engine's hitbox (the windmill-arm segment from
+`moverGeometry`, a wall segment, a sand-cell mask) is canonical and **frozen by
+gameplay**. A `RenderKit` may draw something far more detailed or animated on top (a
+textured spinning windmill, beveled walls, granular sand) as long as it visually tracks
+that same geometry. So "make the windmill look good" is a render-only task that cannot
+change how it plays — or a course's `par` / difficulty bucket.
+
+**Theme as a render concern.** `Theme` already has no physics effect; the render layer
+resolves `(ElementKind, Theme, RenderKit)` → art, so adding a theme or art pack needs
+no schema or engine change. New themes beyond the current five are additive at the
+render layer; the `course_data` `Theme` enum gains a variant (`#[serde(default)]`-safe),
+old courses unaffected.
+
 ---
 
 ## Part B — Implementation
@@ -289,8 +345,8 @@ bounce (`collideBar`/`bounceFrom`), slope acceleration, water penalty, friction
      immediately re-enter the exit (which is itself the paired entrance's mate).
 
 5. **Events**: extend `HoleState.event` union with `'bumper' | 'tunnel' | 'ramp' |
-   'tile'` for renderer SFX/FX (renderer in `MiniGolf.tsx` reads these; render work
-   is mostly PB-302/PB-309's surface but the engine must emit the events).
+   'tile'` for render-layer SFX/FX. The active `RenderKit` (A.6) consumes these; the
+   engine only **emits** them and never draws. Render work is PB-302/PB-309's surface.
 
 No change to the public putt API (`dragToShot`, `strike`, cup capture, stroke cap,
 water) — new courses play with the same controls.
@@ -383,7 +439,10 @@ Run: `cd src/frontend && npx tsc -b && npx vitest run`.
 - Editor UI (palette, canvas, drag/rotate, drafts, playtest) — **PB-302**.
 - Backend `validate_course_data` Rust mirror + mint re-validation — **PB-304**
   (this spec defines the schema both sides implement).
-- Renderer art/themes for the new elements (visual polish) — PB-302/PB-309.
+- Renderer *art content* for the new elements (higher-fidelity sprites/themes, e.g.
+  upgrading the low-quality sand/walls/windmill) — later work. The first cut ships
+  `RenderKit primitive-v1`. The **upgradable render-layer architecture this content must
+  use is specified in A.6** and is in scope; only the art content itself is deferred.
 - On-chain / Rust port of the physics engine — explicitly **not needed** (D1:
   anti-cheat is the signed session in PB-306, not physics replay).
 - Removal of the old built-in `COURSE` / `ArcadeHoleDef` — **PB-309**.
