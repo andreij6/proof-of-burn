@@ -13879,6 +13879,14 @@ thread_local! {
     static TEST_MOCK_INCREMENT_PLAY: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
     /// Force `course_nft_custodial_transfer` to reject (C3 ordering/refund tests).
     static TEST_MOCK_TRANSFER_FAIL: RefCell<bool> = const { RefCell::new(false) };
+    /// Force `course_nft_burn` to reject (burn-failure tests).
+    static TEST_MOCK_BURN_FAIL: RefCell<bool> = const { RefCell::new(false) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+fn set_mock_burn_fail(fail: bool) {
+    TEST_MOCK_BURN_FAIL.with(|c| *c.borrow_mut() = fail);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -13992,6 +14000,35 @@ async fn course_nft_increment_play(token_id: u64) {
 #[cfg(not(target_arch = "wasm32"))]
 async fn course_nft_increment_play(token_id: u64) {
     TEST_MOCK_INCREMENT_PLAY.with(|v| v.borrow_mut().push(token_id));
+}
+
+/// PB-3xx: burn a token via the course_nft canister's `burn(nat) -> Result`.
+/// The canister gates burn to owner-or-minter; the backend is the minter, so it
+/// can burn on the verified owner's behalf (caller-is-live-owner is checked in
+/// `burn_course_nft` BEFORE this is called). The token id is passed as a candid
+/// `nat`. A "token already gone" reject is mapped to Ok so the destructive path
+/// is idempotent (caller has already authorized removal of this token id).
+#[cfg(target_arch = "wasm32")]
+async fn course_nft_burn(token_id: u64) -> Result<(), String> {
+    let id = course_nft_canister_id()?;
+    let res: Result<(Result<(), String>,), _> =
+        ic_cdk::call(id, "burn", (candid::Nat::from(token_id),)).await;
+    match res {
+        Ok((Ok(()),)) => Ok(()),
+        Ok((Err(e),)) => Err(format!("BURN_ERR: {}", e)),
+        Err((c, m)) => Err(format!("BURN_REJECTED ({:?}): {}", c, m)),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn course_nft_burn(token_id: u64) -> Result<(), String> {
+    // Forced-failure seam for burn-failure tests.
+    if TEST_MOCK_BURN_FAIL.with(|c| *c.borrow()) {
+        return Err("BURN_REJECTED (mock failure)".to_string());
+    }
+    // Mirror the real canister: clearing the live owner makes the token "gone".
+    clear_mock_owner(token_id);
+    Ok(())
 }
 
 // ── Difficulty bucket (PB-305) ───────────────────────────────────────────────
@@ -14524,6 +14561,52 @@ async fn refresh_course_listing(token_id: u64) -> Result<(), String> {
             Err("LISTING_NOT_FOUND".to_string())
         }
     })
+}
+
+/// Owner-initiated burn of a course NFT, with backend marketplace cleanup
+/// (PB-3xx). Destructive + a security boundary, so:
+///   1. Reject anonymous.
+///   2. Verify the caller is the LIVE owner via `course_nft.icrc7_owner_of`
+///      (never the cached listing row — the cache can be stale / spoofable).
+///      A non-owner gets `NOT_OWNER`; a missing token gets `TOKEN_NOT_FOUND`.
+///   3. Burn on the verified owner's behalf via `course_nft.burn(nat)` (the
+///      backend is the allowlisted minter, which the canister also accepts for
+///      burn). A "token already gone" reject is treated as success by the
+///      wrapper so the path is idempotent.
+///   4. Clean up backend state: drop the COURSE_LISTINGS row and clear
+///      FEATURED_SLOT if it pointed at this token. Favorites are per-user lists
+///      that already skip missing tokens (list_my_favorite_courses), so they are
+///      left to lazy cleanup rather than scanned here.
+#[ic_cdk::update(guard = "require_authenticated")]
+async fn burn_course_nft(token_id: u64) -> Result<(), String> {
+    require_arcade_game_enabled(ARCADE_GAME_MINIGOLF)?;
+    let caller = get_caller();
+    if caller == Principal::anonymous() {
+        return Err("NOT_AUTHENTICATED".to_string());
+    }
+
+    // Auth against the LIVE owner — never the cached listing row.
+    let owner = course_nft_owner_of(token_id)
+        .await?
+        .ok_or_else(|| "TOKEN_NOT_FOUND".to_string())?;
+    if owner != caller {
+        return Err("NOT_OWNER".to_string());
+    }
+
+    // Burn on the verified owner's behalf (idempotent if already gone).
+    course_nft_burn(token_id).await?;
+
+    // Backend state cleanup (safe if the row / featured slot are already absent).
+    COURSE_LISTINGS.with(|m| {
+        m.borrow_mut().remove(&token_id);
+    });
+    if featured_slot_get().map(|s| s.token_id) == Some(token_id) {
+        featured_slot_set(None);
+    }
+    // Favorites left to lazy cleanup (list_my_favorite_courses skips missing).
+
+    log_dapp_event("course_burn", token_id, caller, 0);
+    Ok(())
 }
 
 #[ic_cdk::update(guard = "require_admin")]
@@ -22563,6 +22646,123 @@ mod tests {
         assert!(!c.for_sale, "off-sale");
         assert_eq!(c.price_e8s, 0);
         assert!(c.listed, "still playable / visible");
+    }
+
+    // ── Burn (owner-initiated, destructive) ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_burn_by_live_owner_removes_listing() {
+        sale_test_setup();
+        set_mock_burn_fail(false);
+        seed_listing(1, alice(), 27, 0, true); // live owner = alice
+        set_mock_caller(alice());
+
+        burn_course_nft(1).await.unwrap();
+
+        // Listing row gone + token no longer owned (burned in the mock).
+        assert!(get_course(1).is_none(), "listing removed on burn");
+        assert_eq!(course_nft_owner_of(1).await.unwrap(), None, "token burned");
+    }
+
+    #[tokio::test]
+    async fn test_burn_clears_featured_slot_when_featured() {
+        sale_test_setup();
+        set_mock_burn_fail(false);
+        seed_listing(1, alice(), 27, 0, true);
+        seed_listing(2, alice(), 27, 0, true);
+        // Pin token 1 as the featured slot.
+        featured_slot_set(Some(FeaturedSlot {
+            token_id: 1,
+            bidder: alice(),
+            token: ExplorerToken::CkBTC,
+            amount: 1,
+            usd_value_e8s: 1,
+            at: 1,
+        }));
+        set_mock_caller(alice());
+
+        burn_course_nft(1).await.unwrap();
+        assert!(featured_slot_get().is_none(), "featured slot cleared on burn");
+
+        // Burning a DIFFERENT (non-featured) token must not disturb the slot.
+        featured_slot_set(Some(FeaturedSlot {
+            token_id: 2,
+            bidder: alice(),
+            token: ExplorerToken::CkBTC,
+            amount: 1,
+            usd_value_e8s: 1,
+            at: 1,
+        }));
+        // Re-seed token 1 so we can burn token... actually burn token 2's sibling.
+        seed_listing(3, alice(), 27, 0, true);
+        burn_course_nft(3).await.unwrap();
+        assert_eq!(
+            featured_slot_get().map(|s| s.token_id),
+            Some(2),
+            "burning a non-featured token leaves the slot intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_burn_rejects_non_owner_checks_live_owner() {
+        sale_test_setup();
+        set_mock_burn_fail(false);
+        // Cached listing owner is bob, but the LIVE icrc7 owner is alice.
+        seed_listing(1, alice(), 27, 0, true);
+        COURSE_LISTINGS.with(|m| {
+            let mut map = m.borrow_mut();
+            let mut row = map.get(&1).unwrap();
+            row.owner = Some(bob()); // poison the cache
+            map.insert(1, row);
+        });
+        // bob (the cached owner) must NOT be able to burn — auth is the live owner.
+        set_mock_caller(bob());
+        assert_eq!(burn_course_nft(1).await.unwrap_err(), "NOT_OWNER");
+        // Nothing was burned or removed.
+        assert!(get_course(1).is_some(), "rejected burn leaves the listing");
+        assert_eq!(course_nft_owner_of(1).await.unwrap(), Some(alice()));
+    }
+
+    #[tokio::test]
+    async fn test_burn_already_gone_token_is_safe() {
+        sale_test_setup();
+        set_mock_burn_fail(false);
+        // No listing, no live owner for token 42.
+        set_mock_caller(alice());
+        // Live owner is None → TOKEN_NOT_FOUND (idempotent: nothing to remove).
+        assert_eq!(burn_course_nft(42).await.unwrap_err(), "TOKEN_NOT_FOUND");
+        assert!(get_course(42).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_marketplace_skips_burned_token() {
+        sale_test_setup();
+        set_mock_burn_fail(false);
+        seed_listing(1, alice(), 27, 0, true);
+        seed_listing(2, alice(), 34, 0, true);
+        set_mock_caller(alice());
+        burn_course_nft(1).await.unwrap();
+
+        let page = list_marketplace_courses(MarketplaceFilter {
+            difficulty: DifficultyFilter::Any,
+            theme: None,
+            listed: ListedFilter::Any,
+            mine_only: false,
+        });
+        let ids: Vec<u64> = page.courses.iter().map(|c| c.token_id).collect();
+        assert!(!ids.contains(&1), "burned token absent from marketplace");
+        assert!(ids.contains(&2), "surviving token still listed");
+    }
+
+    #[tokio::test]
+    async fn test_burn_rejects_anonymous() {
+        sale_test_setup();
+        set_mock_burn_fail(false);
+        seed_listing(1, alice(), 27, 0, true);
+        set_mock_caller(Principal::anonymous());
+        // require_authenticated guard fires first; either way it must not burn.
+        assert!(burn_course_nft(1).await.is_err());
+        assert!(get_course(1).is_some(), "anonymous burn leaves the listing");
     }
 
     // ── Happy path: ordering + split (accounting ledger) ─────────────────────

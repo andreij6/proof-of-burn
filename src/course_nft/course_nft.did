@@ -1,5 +1,17 @@
 // Standard ICRC account. This collection only ever uses the default subaccount.
 type Account = record { owner : principal; subaccount : opt blob };
+// Standard candid HTTP gateway records (`blob` body == `Vec<u8>`).
+type HttpRequest = record {
+  url : text;
+  method : text;
+  body : blob;
+  headers : vec record { text; text };
+};
+type HttpResponse = record {
+  body : blob;
+  headers : vec record { text; text };
+  status_code : nat16;
+};
 type InitArgs = record {
   supply_cap : opt nat64;
   admin : principal;
@@ -69,8 +81,23 @@ type Vec = vec record {
 service : (InitArgs) -> {
   add_tickets_distributed : (nat64, nat64) -> (Result);
   bump_play_count : (nat64, nat64) -> (Result);
+  // Permanently destroy a token. Callable by the token's **current owner** OR the
+  // **minter** (mirrors `icrc7_transfer`'s owner check plus the minter allowlist).
+  // 
+  // Burning:
+  // - removes the token from `TOKENS`,
+  // - removes its `OWNER_TOKENS` index entry,
+  // - decrements supply (implicitly, via the `TOKENS` length),
+  // - **permanently retires the id**. `NEXT_TOKEN_ID` only ever increases, so a
+  // burned id is never re-minted. After burn, `icrc7_owner_of` /
+  // `icrc7_token_metadata` / `http_request` for that id return None / 404.
+  // 
+  // Anonymous callers are rejected (also enforced by `inspect_message`). Burning a
+  // nonexistent / already-burned id returns `NON_EXISTING_TOKEN`.
+  burn : (nat) -> (Result_1);
   custodial_transfer : (nat64, principal) -> (Result_1);
   get_nft_config : () -> (NftConfig) query;
+  http_request : (HttpRequest) -> (HttpResponse) query;
   icrc7_balance_of : (vec Account) -> (vec nat) query;
   icrc7_collection_metadata : () -> (vec record { text; Value }) query;
   icrc7_description : () -> (opt text) query;

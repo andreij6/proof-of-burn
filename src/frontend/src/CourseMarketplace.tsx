@@ -8,7 +8,7 @@ import { parseTokenUnits, fmtUsd } from './tokens';
 import { makeApprover } from './minters';
 import {
   difficultyBucket, themeLabel, poolOrder, pageSlice, pageCount, freshSeed,
-  formatRating, tokenAmountUsdE8s, bidBeats, toggleFavoriteId,
+  formatRating, tokenAmountUsdE8s, bidBeats, toggleFavoriteId, courseNftTokenUrl,
   DIFFICULTY_OPTIONS, LISTED_OPTIONS, THEME_OPTIONS, GRID_PAGE_SIZE,
 } from './arcade/courseMarket';
 
@@ -71,6 +71,11 @@ export default function CourseMarketplace({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // course_nft canister id (for "View NFT ↗" per-token links). `opt principal`:
+  // decoded to `Config.course_nft_canister?: Principal` — undefined ⇒ None ⇒
+  // the link is hidden (no dead anchors). Fetched once.
+  const [courseNftId, setCourseNftId] = useState<string | undefined>(undefined);
+
   // A fresh shuffle seed per load + per filter change (PB-305 A5).
   const seedRef = useRef<number>(freshSeed());
 
@@ -79,6 +84,7 @@ export default function CourseMarketplace({
   const [buyCard, setBuyCard] = useState<CourseCard | null>(null);
   const [bidCard, setBidCard] = useState<CourseCard | null>(null);
   const [rateCard, setRateCard] = useState<CourseCard | null>(null);
+  const [burnCard, setBurnCard] = useState<CourseCard | null>(null);
 
   const filter: MarketplaceFilter = useMemo(
     () => ({ difficulty, theme, listed, mine_only: mineOnly }),
@@ -130,6 +136,20 @@ export default function CourseMarketplace({
   }, [actor, difficulty, theme, listed, mineOnly]);
 
   useEffect(() => { refreshFeatured(); refreshFavorites(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor, signedIn]);
+
+  // course_nft canister id for the per-token "View NFT ↗" links. The wrapper
+  // layer decodes `opt principal` to `course_nft_canister?: Principal`; None ⇒
+  // undefined ⇒ the links stay hidden.
+  useEffect(() => {
+    if (!actor) return;
+    let cancelled = false;
+    actor.get_config()
+      .then((cfg: { course_nft_canister?: Principal }) => {
+        if (!cancelled) setCourseNftId(cfg.course_nft_canister?.toString());
+      })
+      .catch(() => { /* link is best-effort; hidden if config unavailable */ });
+    return () => { cancelled = true; };
+  }, [actor]);
 
   // The Favorites filter re-rolls the shuffle + resets paging like other pills.
   const setFavFilter = (on: boolean) => {
@@ -368,11 +388,14 @@ export default function CourseMarketplace({
               featuredToBeat={featuredSlot?.usd_value_e8s}
               principal={principal}
               isFav={favoriteIds.has(featuredCard.token_id)}
+              courseNftId={courseNftId}
+              isLocal={isLocal}
               onPlay={onPlay}
               onManage={setManageCard}
               onBuy={setBuyCard}
               onBid={setBidCard}
               onRate={setRateCard}
+              onBurn={setBurnCard}
               onToggleFavorite={onToggleFavorite}
               onSignIn={onSignIn}
             />
@@ -396,11 +419,14 @@ export default function CourseMarketplace({
                 card={card}
                 principal={principal}
                 isFav={favoriteIds.has(card.token_id)}
+                courseNftId={courseNftId}
+                isLocal={isLocal}
                 onPlay={onPlay}
                 onManage={setManageCard}
                 onBuy={setBuyCard}
                 onBid={setBidCard}
                 onRate={setRateCard}
+                onBurn={setBurnCard}
                 onToggleFavorite={onToggleFavorite}
                 onSignIn={onSignIn}
               />
@@ -466,6 +492,15 @@ export default function CourseMarketplace({
           onDone={() => { setRateCard(null); refresh(); }}
         />
       )}
+      {burnCard && (
+        <BurnModal
+          actor={actor}
+          card={burnCard}
+          onClose={() => setBurnCard(null)}
+          onError={(msg) => { setBurnCard(null); setError(msg); }}
+          onDone={() => { setBurnCard(null); refresh(); refreshFeatured(); refreshFavorites(); }}
+        />
+      )}
     </div>
   );
 }
@@ -481,18 +516,22 @@ function bucketForFilter(d: DifficultyFilter): string {
 }
 
 // ── Course card (shared by featured + pool) ──
-function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFav, onPlay, onManage, onBuy, onBid, onRate, onToggleFavorite, onSignIn }: {
+function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFav, courseNftId, isLocal, onPlay, onManage, onBuy, onBid, onRate, onBurn, onToggleFavorite, onSignIn }: {
   actor: any;
   card: CourseCard;
   featured?: boolean;
   featuredToBeat?: bigint;
   principal: Principal | null;
   isFav: boolean;
+  /** course_nft canister id; undefined ⇒ unwired ⇒ hide the "View NFT" link. */
+  courseNftId?: string;
+  isLocal: boolean;
   onPlay: (c: CourseCard) => void;
   onManage: (c: CourseCard) => void;
   onBuy: (c: CourseCard) => void;
   onBid: (c: CourseCard) => void;
   onRate: (c: CourseCard) => void;
+  onBurn: (c: CourseCard) => void;
   onToggleFavorite: (c: CourseCard) => void;
   onSignIn: () => void;
 }) {
@@ -501,6 +540,7 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
   const diff = difficultyBucket(par);
   const forSale = card.for_sale && card.price_e8s > 0n;
   const ownerDiffers = card.creator && card.owner && card.creator.toString() !== card.owner.toString();
+  const nftUrl = courseNftTokenUrl(courseNftId, card.token_id, isLocal);
 
   // Per-card rating aggregate (cheap query, one per rendered card).
   const [rating, setRating] = useState<CourseRatingSummary | null>(null);
@@ -570,6 +610,17 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
       </span>
 
       <div className="row" style={{ justifyContent: 'flex-end', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
+        {nftUrl && (
+          <a
+            href={nftUrl}
+            target="_blank"
+            rel="noreferrer"
+            title="Open this course's NFT metadata in a new tab"
+            style={{ color: 'var(--fg-3)', fontSize: 11.5, display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}
+          >
+            View NFT <Icon name="external" size={11} stroke="var(--fg-3)" />
+          </a>
+        )}
         {signedIn && (
           <Btn variant="ghost" sm onClick={() => onBid(card)} title="Promote this course to the featured slot">
             <Icon name="spark" size={11} /> Feature
@@ -582,6 +633,11 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
         )}
         {card.is_caller_owner && (
           <Btn variant="ghost" sm onClick={() => onManage(card)}><Icon name="edit" size={11} /> Manage</Btn>
+        )}
+        {card.is_caller_owner && (
+          <Btn variant="danger" sm onClick={() => onBurn(card)} title="Permanently destroy this course NFT">
+            <Icon name="flame" size={11} stroke="var(--ember)" /> Burn
+          </Btn>
         )}
         {forSale && !card.is_caller_owner && (
           <Btn variant="secondary" sm onClick={() => (signedIn ? onBuy(card) : onSignIn())}>Buy — {fmtICP(card.price_e8s)} ICP</Btn>
@@ -658,6 +714,56 @@ function ManageModal({ actor, card, onClose, onDone }: {
       </div>
     </ModalShell>
   );
+}
+
+// ── Owner: burn_course_nft (permanent destroy) ──
+function BurnModal({ actor, card, onClose, onError, onDone }: {
+  actor: any;
+  card: CourseCard;
+  onClose: () => void;
+  onError: (msg: string) => void;
+  onDone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const label = card.name || `Course #${card.token_id}`;
+
+  const burn = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const res = await actor.burn_course_nft(card.token_id);
+      if (res.__kind__ === 'Err') throw new Error(burnErr(res.Err));
+      onDone();
+    } catch (e: any) {
+      // Surface in the page-level error banner (consistent with buy/bid flows).
+      onError(`Couldn't burn "${label}": ${e?.message || String(e)}`);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <ModalShell title={`Burn "${label}"`} onClose={() => !busy && onClose()}>
+      <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0 }}>
+        Burn this course NFT? This permanently destroys it and removes it from the
+        marketplace. This cannot be undone.
+      </p>
+      <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+        <Btn variant="ghost" sm disabled={busy} onClick={onClose}>Cancel</Btn>
+        <Btn variant="danger" sm disabled={busy} onClick={burn}>
+          <Icon name="flame" size={11} stroke="var(--ember)" /> {busy ? 'Burning…' : 'Burn permanently'}
+        </Btn>
+      </div>
+    </ModalShell>
+  );
+}
+
+// Friendly text for backend burn error codes.
+function burnErr(code: string): string {
+  switch (code) {
+    case 'NOT_OWNER': return 'You no longer own this course.';
+    case 'NO_COURSE': return 'This course no longer exists.';
+    case 'BURN_IN_PROGRESS': return 'A burn is already in progress — try again in a moment.';
+    default: return code;
+  }
 }
 
 // ── Buyer: approve + buy_course_nft (PB-307) ──

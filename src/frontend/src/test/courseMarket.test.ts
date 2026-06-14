@@ -4,7 +4,7 @@ import {
   difficultyBucket, themeLabel, mulberry32, shuffleSeeded, poolOrder,
   pageSlice, pageCount, GRID_PAGE_SIZE,
   isFavorite, applyFavoritesFilter, toggleFavoriteId,
-  formatRating, tokenAmountUsdE8s, bidBeats,
+  formatRating, tokenAmountUsdE8s, bidBeats, courseNftTokenUrl,
 } from '../arcade/courseMarket';
 
 function card(id: number, overrides: Partial<CourseCard> = {}): CourseCard {
@@ -177,5 +177,24 @@ describe('featured bid USD compare (PB-308)', () => {
     const btcUsd = tokenAmountUsdE8s(100_000n, 60_000n * 100_000_000n, 8); // 0.001 BTC = $60
     const usdcUsd = tokenAmountUsdE8s(50_000_000n, 1n * 100_000_000n, 6);  // 50 USDC = $50
     expect(bidBeats(btcUsd, usdcUsd)).toBe(true);
+  });
+});
+
+describe('courseNftTokenUrl', () => {
+  const ID = 'be2us-64aaa-aaaaa-qaabq-cai';
+
+  it('builds the local canister-subdomain URL', () => {
+    expect(courseNftTokenUrl(ID, 7n, true)).toBe(`http://${ID}.localhost:8000/token/7`);
+  });
+
+  it('builds the mainnet icp0.io URL', () => {
+    expect(courseNftTokenUrl(ID, 42n, false)).toBe(`https://${ID}.icp0.io/token/42`);
+  });
+
+  it('returns null when the course_nft canister is unwired (None)', () => {
+    expect(courseNftTokenUrl(undefined, 1n, false)).toBeNull();
+    expect(courseNftTokenUrl(null, 1n, true)).toBeNull();
+    expect(courseNftTokenUrl('', 1n, false)).toBeNull();
+    expect(courseNftTokenUrl('   ', 1n, true)).toBeNull();
   });
 });

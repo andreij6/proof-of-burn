@@ -159,3 +159,29 @@ export function tokenAmountUsdE8s(amount: bigint, rateUsdE8s: bigint, decimals: 
 export function bidBeats(bidUsdE8s: bigint, toBeatUsdE8s: bigint): boolean {
   return bidUsdE8s > toBeatUsdE8s;
 }
+
+// ── "View NFT ↗" link (PB-3xx) — the course_nft canister serves per-token
+//    metadata at `/token/<id>` over the gateway. We build the canister-subdomain
+//    URL from the wired course_nft canister id and the environment, mirroring how
+//    the app distinguishes local vs mainnet elsewhere (App.tsx `isLocal`):
+//      local:   http://<id>.localhost:8000/token/<id>
+//      mainnet: https://<id>.icp0.io/token/<id>
+//    Returns null when the course_nft canister is unwired (`opt principal` = None)
+//    so the caller hides the link instead of rendering a dead anchor. ──
+
+/**
+ * Build the course_nft per-token metadata URL, or null if the canister is
+ * unwired. `courseNftCanisterId` is the decoded `Config.course_nft_canister`
+ * (undefined ⇒ None ⇒ no link).
+ */
+export function courseNftTokenUrl(
+  courseNftCanisterId: string | undefined | null,
+  tokenId: bigint,
+  isLocal: boolean,
+): string | null {
+  const id = courseNftCanisterId?.trim();
+  if (!id) return null;
+  return isLocal
+    ? `http://${id}.localhost:8000/token/${tokenId}`
+    : `https://${id}.icp0.io/token/${tokenId}`;
+}

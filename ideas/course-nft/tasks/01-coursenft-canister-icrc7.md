@@ -97,8 +97,50 @@ colliding with any future standard method): `mint`, `custodial_transfer`,
 `bump_play_count`, `add_tickets_distributed`, plus admin `set_minter` / `set_admin`
 and a `get_nft_config` query.
 
+Owner/minter lifecycle: `burn` (see A.6). HTTP read gateway: `http_request` (see A.7).
+
 **Out** (D2): `icrc37_*` (approvals), `icrc3_*` (tx log), batch-mint, royalty
 standard (royalty is enforced by the backend off the immutable `creator` field).
+
+### A.6 Burn (owner-or-minter)
+
+`burn(token_id: nat) -> variant { Ok; Err: text }` permanently destroys a token.
+
+- **Authorization:** callable by the token's **current owner** OR the **minter**
+  (mirrors `icrc7_transfer`'s owner-equality check plus the minter allowlist).
+  Anonymous callers are rejected (`require_authenticated` + `inspect_message`).
+- **Effect:** removes the token from `TOKENS`, removes its `OWNER_TOKENS` index
+  entry, and decrements supply (implicitly, via the `TOKENS` length). After burn,
+  `icrc7_owner_of` / `icrc7_token_metadata` / `http_request` for that id return
+  `null` / 404, and `icrc7_transfer` / `custodial_transfer` of it error.
+- **Id retirement:** `NEXT_TOKEN_ID` is **never** decremented, so a burned id is
+  **never re-minted** — the id is retired forever (ids only ever increase).
+- **Rejections:** burning a nonexistent / already-burned id (and any out-of-`u64`
+  id) returns `NON_EXISTING_TOKEN`; a non-owner non-minter caller returns
+  `UNAUTHORIZED`. The method never traps on bad input.
+
+### A.7 HTTP read gateway (`http_request`)
+
+A query-only `http_request(HttpRequest) -> HttpResponse` (standard candid records)
+gives each token an openable URL serving **JSON** (`Content-Type: application/json`):
+
+| Route | Returns |
+|---|---|
+| `GET /` | collection metadata: `name`, `symbol`, `description`, `total_supply`, `supply_cap` |
+| `GET /token/<id>` | token metadata: `token_id`, `name`, `creator`, `owner`, `created_at`, `par_total`, `play_count`, `tickets_distributed`, `mint_fee_e8s`, `course_data_len`, `course_data_url` |
+| `GET /token/<id>/course_data` | the raw blob as `course_data_base64` (standard base64) |
+
+- The per-token JSON does **not** inline the raw `course_data` (it exposes its byte
+  length + a separate `/token/<id>/course_data` route); both responses stay well
+  under the 2 MiB message cap (the raw blob is capped at 64 KiB by `mint`, A.5).
+- **Safety:** query-only (no state mutation); never panics on malformed paths
+  (unknown route / non-numeric / out-of-`u64` / extra segments → **404**,
+  non-`GET`/`HEAD` → 405); the id is parsed robustly; unknown/burned id → **404**.
+  All string fields are emitted as escaped JSON (no HTML is produced) so no field
+  can break the document or inject. `X-Content-Type-Options: nosniff` is set.
+- Responses are **uncertified** read-only metadata. Certification
+  (IC-Certificate header) is intentionally out of scope and documented as a future
+  hardening; nothing trust-bearing should be derived from these responses without it.
 
 ### A.5 Hard limits
 
@@ -118,6 +160,37 @@ standard (royalty is enforced by the backend off the immutable `creator` field).
   a time (PB-305 `get_course_data`) or in ≤ 25-id metadata batches. Over-cap calls
   return `Err`/trap with a clear `BATCH_TOO_LARGE` message.
 - `name` (the `icrc7:name`): 1–60 chars (matches the editor's course-name rule).
+
+### A.8 Security (guarantees)
+
+This canister holds value-bearing ownership records; the following invariants are
+enforced and covered by unit tests:
+
+- **Guards match the trust model.** Minter-only: `mint`, `custodial_transfer`,
+  `bump_play_count`, `add_tickets_distributed` (`guard = require_minter`).
+  Owner-or-minter: `icrc7_transfer` (per-token owner-equality check), `burn`
+  (owner-equality OR minter). Admin-or-controller: `set_minter`, `set_admin`.
+- **No anonymous updates.** `#[inspect_message]` rejects anonymous callers on every
+  update at ingress; update bodies also call `require_authenticated` defensively.
+- **No ownership forgery / hijack.** No method lets a caller mint without being the
+  minter, move or burn a token they don't own, or set themselves as minter/admin
+  without being admin/controller. `creator` is set once at mint and never written
+  again (immutable royalty anchor) — verified across custodial + owner transfers.
+- **No reuse of burned ids.** `NEXT_TOKEN_ID` is monotonic and only ever increases;
+  a burned id is permanently retired and can never be re-minted, re-owned, or
+  transferred.
+- **No untrusted input can trap the canister (DoS).** ICRC-7 `nat → u64`
+  conversions return `None`/errors instead of panicking; batch args are capped
+  (100 light / 25 metadata) with a clear `BATCH_TOO_LARGE`; `http_request` handles
+  every malformed path gracefully (404/405, never traps) and is query-only;
+  responses are bounded under 2 MiB.
+- **No integer overflow/underflow.** Id allocation uses `checked_add`
+  (`ID_SPACE_EXHAUSTED` on the unreachable wraparound); the monotonic counters use
+  `saturating_add`.
+- **Upgrade safety.** All stable structures keep their MemoryIds (0–3, no reuse);
+  later-added fields carry `#[serde(default)]`; no heap state to rebuild.
+- **Out of scope (documented):** HTTP responses are uncertified read-only metadata
+  (future hardening); no ICRC-37 approvals / ICRC-3 tx log (D2).
 
 ---
 

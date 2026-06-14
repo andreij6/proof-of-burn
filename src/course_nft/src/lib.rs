@@ -445,12 +445,15 @@ fn mint(args: MintArgs) -> Result<u64, String> {
         }
     }
 
+    // Allocate the next id. `checked_add` so a (practically unreachable) id-space
+    // exhaustion returns an error instead of trapping on overflow.
     let token_id = NEXT_TOKEN_ID.with(|c| {
         let mut cell = c.borrow_mut();
         let id = *cell.get();
-        cell.set(id + 1);
-        id
-    });
+        let next = id.checked_add(1).ok_or("ID_SPACE_EXHAUSTED")?;
+        cell.set(next);
+        Ok::<u64, String>(id)
+    })?;
 
     let token = CourseToken {
         owner: args.to,
@@ -772,10 +775,237 @@ fn icrc7_transfer(args: Vec<TransferArg>) -> Vec<Option<TransferResult>> {
         .collect()
 }
 
+// ==========================================
+// 10. Burn (owner-or-minter)
+// ==========================================
+
+/// Permanently destroy a token. Callable by the token's **current owner** OR the
+/// **minter** (mirrors `icrc7_transfer`'s owner check plus the minter allowlist).
+///
+/// Burning:
+/// - removes the token from `TOKENS`,
+/// - removes its `OWNER_TOKENS` index entry,
+/// - decrements supply (implicitly, via the `TOKENS` length),
+/// - **permanently retires the id**. `NEXT_TOKEN_ID` only ever increases, so a
+///   burned id is never re-minted. After burn, `icrc7_owner_of` /
+///   `icrc7_token_metadata` / `http_request` for that id return None / 404.
+///
+/// Anonymous callers are rejected (also enforced by `inspect_message`). Burning a
+/// nonexistent / already-burned id returns `NON_EXISTING_TOKEN`.
+#[ic_cdk::update]
+fn burn(token_id: Nat) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let id = nat_to_u64(&token_id).ok_or("NON_EXISTING_TOKEN")?;
+
+    TOKENS.with(|t| {
+        let mut tokens = t.borrow_mut();
+        let token = tokens.get(&id).ok_or("NON_EXISTING_TOKEN")?;
+        let owner = token.owner;
+        // Authorization: current owner OR the configured minter.
+        if caller != owner && caller != config().minter {
+            return Err("UNAUTHORIZED".to_string());
+        }
+        tokens.remove(&id);
+        unindex_owner(owner, id);
+        // NEXT_TOKEN_ID is untouched — the id is retired forever.
+        Ok(())
+    })
+}
+
+// ==========================================
+// 11. HTTP gateway (per-token & collection JSON)
+// ==========================================
+//
+// SECURITY / SCOPE: `http_request` is a `query` — it never mutates state and never
+// traps on malformed input (bad paths return 400/404). Responses are
+// **uncertified** read-only metadata; certification (IC-Certificate header /
+// `http_request`+`http_request_streaming`) is intentionally out of scope here and
+// is a documented future hardening. All string fields are emitted as JSON with
+// proper escaping (no HTML is ever produced) to avoid injection. Every response is
+// bounded well under the 2 MiB message cap: per-token JSON omits the raw
+// `course_data` (it exposes only its byte length plus a separate
+// `/token/<id>/course_data` raw route), and that raw blob is itself capped at
+// `MAX_COURSE_DATA_BYTES` (64 KiB) by `mint`.
+
+/// Standard candid HTTP gateway records (`blob` body == `Vec<u8>`).
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct HttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct HttpResponse {
+    pub status_code: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+fn http_text(status: u16, content_type: &str, body: Vec<u8>) -> HttpResponse {
+    HttpResponse {
+        status_code: status,
+        headers: vec![
+            ("Content-Type".to_string(), content_type.to_string()),
+            ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
+        ],
+        body,
+    }
+}
+
+fn json_response(status: u16, json: String) -> HttpResponse {
+    http_text(status, "application/json", json.into_bytes())
+}
+
+fn json_error(status: u16, message: &str) -> HttpResponse {
+    json_response(status, format!("{{\"error\":{}}}", json_string(message)))
+}
+
+/// Minimal RFC 8259 string escaper. We only ever embed token `name` and principal
+/// text (already ASCII), but escape fully so no field can break the JSON or inject.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Dependency-free standard base64 (RFC 4648) encoder for the raw `course_data`
+/// route. Output length is bounded by `MAX_COURSE_DATA_BYTES`.
+fn base64_encode(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { TABLE[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+/// Strip the query string and any URL fragment, returning just the path. Never
+/// panics on malformed input.
+fn path_only(url: &str) -> &str {
+    let end = url.find(['?', '#']).unwrap_or(url.len());
+    &url[..end]
+}
+
+/// Collection-level metadata JSON for `GET /`.
+fn collection_json() -> String {
+    let cfg = config();
+    let mut s = String::from("{");
+    s.push_str(&format!("\"name\":{},", json_string(&cfg.name)));
+    s.push_str(&format!("\"symbol\":{},", json_string(&cfg.symbol)));
+    s.push_str(&format!("\"description\":{},", json_string(&cfg.description)));
+    s.push_str(&format!("\"total_supply\":{},", token_count()));
+    match cfg.supply_cap {
+        Some(cap) => s.push_str(&format!("\"supply_cap\":{}", cap)),
+        None => s.push_str("\"supply_cap\":null"),
+    }
+    s.push('}');
+    s
+}
+
+/// Per-token metadata JSON for `GET /token/<id>`.
+fn token_json(id: u64, tok: &CourseToken) -> String {
+    let mut s = String::from("{");
+    s.push_str(&format!("\"token_id\":{},", id));
+    s.push_str(&format!("\"name\":{},", json_string(&tok.name)));
+    s.push_str(&format!("\"creator\":{},", json_string(&tok.creator.to_text())));
+    s.push_str(&format!("\"owner\":{},", json_string(&tok.owner.to_text())));
+    s.push_str(&format!("\"created_at\":{},", tok.created_at));
+    s.push_str(&format!("\"par_total\":{},", tok.par_total));
+    s.push_str(&format!("\"play_count\":{},", tok.play_count));
+    s.push_str(&format!("\"tickets_distributed\":{},", tok.tickets_distributed));
+    s.push_str(&format!("\"mint_fee_e8s\":{},", tok.mint_fee_e8s));
+    s.push_str(&format!("\"course_data_len\":{},", tok.course_data.len()));
+    s.push_str(&format!(
+        "\"course_data_url\":{}",
+        json_string(&format!("/token/{}/course_data", id))
+    ));
+    s.push('}');
+    s
+}
+
+/// Parse a `u64` token id from a path segment without trapping. Rejects empty,
+/// non-digit, and overflowing inputs (→ `None` → 404).
+fn parse_id_segment(seg: &str) -> Option<u64> {
+    if seg.is_empty() {
+        return None;
+    }
+    seg.parse::<u64>().ok()
+}
+
+#[ic_cdk::query]
+fn http_request(req: HttpRequest) -> HttpResponse {
+    // Only GET/HEAD are meaningful for read-only metadata.
+    if req.method != "GET" && req.method != "HEAD" {
+        return json_error(405, "method not allowed");
+    }
+
+    let path = path_only(&req.url);
+    // Normalize: split into non-empty segments, tolerant of trailing slashes.
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    match segments.as_slice() {
+        // GET / -> collection metadata
+        [] => json_response(200, collection_json()),
+
+        // GET /token/<id> -> token metadata JSON
+        ["token", id_str] => match parse_id_segment(id_str) {
+            None => json_error(404, "not found"),
+            Some(id) => TOKENS.with(|t| match t.borrow().get(&id) {
+                Some(tok) => json_response(200, token_json(id, &tok)),
+                None => json_error(404, "not found"),
+            }),
+        },
+
+        // GET /token/<id>/course_data -> raw blob as base64 JSON (bounded < 64 KiB raw)
+        ["token", id_str, "course_data"] => match parse_id_segment(id_str) {
+            None => json_error(404, "not found"),
+            Some(id) => TOKENS.with(|t| match t.borrow().get(&id) {
+                Some(tok) => json_response(
+                    200,
+                    format!(
+                        "{{\"token_id\":{},\"course_data_base64\":{}}}",
+                        id,
+                        json_string(&base64_encode(&tok.course_data))
+                    ),
+                ),
+                None => json_error(404, "not found"),
+            }),
+        },
+
+        // Anything else: not found (never trap).
+        _ => json_error(404, "not found"),
+    }
+}
+
 ic_cdk::export_candid!();
 
 // ==========================================
-// 10. Tests
+// 12. Tests
 // ==========================================
 
 #[cfg(test)]
@@ -1327,5 +1557,271 @@ mod tests {
         assert_eq!(back.minter, cfg.minter);
         assert_eq!(back.admin, cfg.admin);
         assert_eq!(back.supply_cap, cfg.supply_cap);
+    }
+
+    // ---- burn (owner-or-minter) ----
+
+    #[test]
+    fn burn_by_owner_removes_token_and_index() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        assert_eq!(icrc7_total_supply(), Nat::from(1u64));
+        // owner burns
+        set_mock_caller(p(10));
+        assert!(burn(Nat::from(id)).is_ok());
+        // gone from TOKENS, index, supply
+        assert!(icrc7_owner_of(vec![Nat::from(id)])[0].is_none());
+        assert!(icrc7_token_metadata(vec![Nat::from(id)])[0].is_none());
+        assert!(icrc7_tokens_of(Account::from_owner(p(10)), None, None).is_empty());
+        assert_eq!(icrc7_balance_of(vec![Account::from_owner(p(10))]), vec![Nat::from(0u64)]);
+        assert_eq!(icrc7_total_supply(), Nat::from(0u64));
+    }
+
+    #[test]
+    fn burn_by_minter_allowed() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        // minter (default caller) burns someone else's token
+        set_mock_caller(minter());
+        assert!(burn(Nat::from(id)).is_ok());
+        assert!(icrc7_owner_of(vec![Nat::from(id)])[0].is_none());
+    }
+
+    #[test]
+    fn burn_rejects_non_owner_non_minter() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        set_mock_caller(p(99));
+        assert_eq!(burn(Nat::from(id)), Err("UNAUTHORIZED".to_string()));
+        // token still present
+        assert_eq!(icrc7_owner_of(vec![Nat::from(id)])[0].as_ref().unwrap().owner, p(10));
+    }
+
+    #[test]
+    fn burn_rejects_anonymous() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        set_mock_caller(Principal::anonymous());
+        assert_eq!(burn(Nat::from(id)), Err("ANONYMOUS_NOT_ALLOWED".to_string()));
+    }
+
+    #[test]
+    fn burn_rejects_unknown_and_already_burned() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        set_mock_caller(p(10));
+        assert!(burn(Nat::from(id)).is_ok());
+        // already burned
+        assert_eq!(burn(Nat::from(id)), Err("NON_EXISTING_TOKEN".to_string()));
+        // never existed
+        assert_eq!(burn(Nat::from(424242u64)), Err("NON_EXISTING_TOKEN".to_string()));
+        // out-of-u64 id
+        let over = Nat::from(u64::MAX) + Nat::from(1u64);
+        assert_eq!(burn(over), Err("NON_EXISTING_TOKEN".to_string()));
+    }
+
+    #[test]
+    fn burned_id_is_never_reminted_or_transferable() {
+        fresh();
+        let id1 = mint(good_mint(p(10), "A")).unwrap();
+        assert_eq!(id1, 1);
+        set_mock_caller(p(10));
+        assert!(burn(Nat::from(id1)).is_ok());
+        // next mint gets a FRESH id, never reuses 1
+        set_mock_caller(minter());
+        let id2 = mint(good_mint(p(11), "B")).unwrap();
+        assert_eq!(id2, 2, "burned id must never be re-minted");
+        // owner-of / metadata for burned id stay None
+        assert!(icrc7_owner_of(vec![Nat::from(id1)])[0].is_none());
+        // transfer of a burned id -> NonExistingTokenId
+        set_mock_caller(p(10));
+        let res = icrc7_transfer(vec![TransferArg {
+            token_id: Nat::from(id1),
+            to: Account::from_owner(p(50)),
+            from_subaccount: None,
+            memo: None,
+            created_at_time: None,
+        }]);
+        assert!(matches!(res[0], Some(Err(TransferError::NonExistingTokenId))));
+        // custodial_transfer of a burned id -> error
+        set_mock_caller(minter());
+        assert_eq!(custodial_transfer(id1, p(50)), Err("NON_EXISTING_TOKEN".to_string()));
+    }
+
+    // ---- http_request ----
+
+    fn get(url: &str) -> HttpResponse {
+        http_request(HttpRequest {
+            method: "GET".to_string(),
+            url: url.to_string(),
+            headers: vec![],
+            body: vec![],
+        })
+    }
+
+    fn body_str(r: &HttpResponse) -> String {
+        String::from_utf8(r.body.clone()).unwrap()
+    }
+
+    #[test]
+    fn http_collection_root_returns_json() {
+        fresh();
+        mint(good_mint(p(10), "A")).unwrap();
+        let r = get("/");
+        assert_eq!(r.status_code, 200);
+        assert!(r.headers.iter().any(|(k, v)| k == "Content-Type" && v == "application/json"));
+        let b = body_str(&r);
+        assert!(b.contains("\"total_supply\":1"), "{b}");
+        assert!(b.contains("\"symbol\":\"CALCRS\""), "{b}");
+    }
+
+    #[test]
+    fn http_token_returns_json_metadata() {
+        fresh();
+        let mut args = good_mint(p(10), "My \"Course\"");
+        args.creator = p(77);
+        let id = mint(args).unwrap();
+        bump_play_count(id, 4).unwrap();
+        let r = get(&format!("/token/{id}"));
+        assert_eq!(r.status_code, 200);
+        let b = body_str(&r);
+        assert!(b.contains(&format!("\"token_id\":{id}")), "{b}");
+        // name is JSON-escaped (no injection)
+        assert!(b.contains("\"name\":\"My \\\"Course\\\"\""), "{b}");
+        assert!(b.contains(&format!("\"creator\":\"{}\"", p(77).to_text())), "{b}");
+        assert!(b.contains(&format!("\"owner\":\"{}\"", p(10).to_text())), "{b}");
+        assert!(b.contains("\"play_count\":4"), "{b}");
+        assert!(b.contains("\"course_data_len\":4"), "{b}");
+        // raw blob NOT inlined here
+        assert!(!b.contains("course_data_base64"), "{b}");
+    }
+
+    #[test]
+    fn http_course_data_route_returns_base64() {
+        fresh();
+        let mut args = good_mint(p(10), "A");
+        args.course_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let id = mint(args).unwrap();
+        let r = get(&format!("/token/{id}/course_data"));
+        assert_eq!(r.status_code, 200);
+        let b = body_str(&r);
+        // base64 of DEADBEEF == "3q2+7w=="
+        assert!(b.contains("\"course_data_base64\":\"3q2+7w==\""), "{b}");
+    }
+
+    #[test]
+    fn http_404_for_missing_and_burned() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        // missing
+        assert_eq!(get("/token/999999").status_code, 404);
+        // burn then 404
+        set_mock_caller(p(10));
+        burn(Nat::from(id)).unwrap();
+        assert_eq!(get(&format!("/token/{id}")).status_code, 404);
+        assert_eq!(get(&format!("/token/{id}/course_data")).status_code, 404);
+    }
+
+    #[test]
+    fn http_malformed_paths_never_trap() {
+        fresh();
+        // these must all return a status, not panic
+        assert_eq!(get("/token/").status_code, 404);
+        assert_eq!(get("/token/abc").status_code, 404);
+        assert_eq!(get("/token/-1").status_code, 404);
+        assert_eq!(get("/token/99999999999999999999999999").status_code, 404); // > u64
+        assert_eq!(get("/token/1/2/3/4").status_code, 404);
+        assert_eq!(get("/nonsense").status_code, 404);
+        assert_eq!(get("////").status_code, 200); // collapses to root
+        // query string + fragment tolerated
+        assert_eq!(get("/?foo=bar").status_code, 200);
+        // POST rejected, not trapped
+        let r = http_request(HttpRequest {
+            method: "POST".to_string(),
+            url: "/".to_string(),
+            headers: vec![],
+            body: vec![],
+        });
+        assert_eq!(r.status_code, 405);
+    }
+
+    #[test]
+    fn http_request_does_not_mutate_state() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        let supply_before = icrc7_total_supply();
+        let _ = get(&format!("/token/{id}"));
+        let _ = get("/");
+        let _ = get("/token/999");
+        assert_eq!(icrc7_total_supply(), supply_before);
+        assert_eq!(icrc7_owner_of(vec![Nat::from(id)])[0].as_ref().unwrap().owner, p(10));
+    }
+
+    // ---- security invariants ----
+
+    #[test]
+    fn base64_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn json_string_escapes_control_and_quotes() {
+        assert_eq!(json_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(json_string("\n\t"), "\"\\n\\t\"");
+        assert_eq!(json_string("\u{01}"), "\"\\u0001\"");
+        // no raw HTML/quote can escape the JSON string context
+        assert!(!json_string("</script>\"").contains("\"</script>\""));
+    }
+
+    #[test]
+    fn creator_is_immutable_across_custodial_and_owner_transfers() {
+        fresh();
+        let mut args = good_mint(p(10), "A");
+        args.creator = p(77);
+        let id = mint(args).unwrap();
+        let creator_of = |id: u64| -> String {
+            let md = icrc7_token_metadata(vec![Nat::from(id)]);
+            let map = md[0].clone().unwrap();
+            match map.iter().find(|(k, _)| k == "caldera:creator").unwrap().1.clone() {
+                Value::Text(t) => t,
+                _ => panic!("creator not text"),
+            }
+        };
+        assert_eq!(creator_of(id), p(77).to_text());
+        custodial_transfer(id, p(20)).unwrap();
+        assert_eq!(creator_of(id), p(77).to_text());
+        set_mock_caller(p(20));
+        icrc7_transfer(vec![TransferArg {
+            token_id: Nat::from(id),
+            to: Account::from_owner(p(30)),
+            from_subaccount: None,
+            memo: None,
+            created_at_time: None,
+        }]);
+        assert_eq!(creator_of(id), p(77).to_text());
+    }
+
+    #[test]
+    fn id_allocation_uses_checked_add_no_panic() {
+        fresh();
+        // Drive NEXT_TOKEN_ID to the very top so checked_add must engage.
+        NEXT_TOKEN_ID.with(|c| c.borrow_mut().set(u64::MAX));
+        let err = mint(good_mint(p(10), "A")).unwrap_err();
+        assert_eq!(err, "ID_SPACE_EXHAUSTED");
+    }
+
+    #[test]
+    fn counters_saturate_no_overflow() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        bump_play_count(id, u64::MAX).unwrap();
+        assert_eq!(bump_play_count(id, 5).unwrap(), u64::MAX);
+        add_tickets_distributed(id, u64::MAX).unwrap();
+        assert_eq!(add_tickets_distributed(id, 5).unwrap(), u64::MAX);
     }
 }
