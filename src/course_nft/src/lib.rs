@@ -15,6 +15,11 @@ use candid::{CandidType, Nat, Principal};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
+use ic_http_certification::{
+    utils::add_v2_certificate_header, DefaultCelBuilder, DefaultResponseCertification,
+    HttpCertification, HttpCertificationPath, HttpCertificationTree, HttpCertificationTreeEntry,
+    HttpResponse as CertHttpResponse, StatusCode, CERTIFICATE_EXPRESSION_HEADER_NAME,
+};
 use ic_stable_structures::{
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
     storable::Bound,
@@ -353,11 +358,17 @@ fn init(args: InitArgs) {
         supply_cap: args.supply_cap,
     };
     put_config(cfg);
+    // Build the (heap-only) HTTP certification tree and publish its root hash so the
+    // HTTP routes verify on the normal gateway domain from the first request.
+    rebuild_cert_tree();
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
-    // Stable structures auto-restore; this canister has no heap state and no timers.
+    // Stable structures auto-restore. The certification tree is HEAP state and is
+    // lost across upgrades, so it must be rebuilt from stable storage here (and the
+    // root hash re-published) or every HTTP response would fail verification.
+    rebuild_cert_tree();
 }
 
 // ==========================================
@@ -470,48 +481,67 @@ fn mint(args: MintArgs) -> Result<u64, String> {
     TOKENS.with(|t| t.borrow_mut().insert(token_id, token));
     index_owner(args.to, token_id);
 
+    // Certify the new token's routes and refresh `/` (total_supply changed).
+    certify_token(token_id);
+    certify_root();
+    publish_certified_data();
+
     Ok(token_id)
 }
 
 #[ic_cdk::update(guard = "require_minter")]
 fn custodial_transfer(token_id: u64, to: Principal) -> Result<(), String> {
-    TOKENS.with(|t| {
+    let changed = TOKENS.with(|t| {
         let mut tokens = t.borrow_mut();
         let mut token = tokens.get(&token_id).ok_or("NON_EXISTING_TOKEN")?;
         let old_owner = token.owner;
         if old_owner == to {
-            return Ok(());
+            return Ok::<bool, String>(false);
         }
         token.owner = to;
         tokens.insert(token_id, token);
         unindex_owner(old_owner, token_id);
         index_owner(to, token_id);
-        Ok(())
-    })
+        Ok(true)
+    })?;
+    // owner changed → `/token/<id>` JSON changed; re-certify just that token.
+    if changed {
+        certify_token(token_id);
+        publish_certified_data();
+    }
+    Ok(())
 }
 
 #[ic_cdk::update(guard = "require_minter")]
 fn bump_play_count(token_id: u64, by: u64) -> Result<u64, String> {
-    TOKENS.with(|t| {
+    let new = TOKENS.with(|t| {
         let mut tokens = t.borrow_mut();
         let mut token = tokens.get(&token_id).ok_or("NON_EXISTING_TOKEN")?;
         token.play_count = token.play_count.saturating_add(by);
         let new = token.play_count;
         tokens.insert(token_id, token);
-        Ok(new)
-    })
+        Ok::<u64, String>(new)
+    })?;
+    // play_count is in `/token/<id>` JSON; re-certify that token.
+    certify_token(token_id);
+    publish_certified_data();
+    Ok(new)
 }
 
 #[ic_cdk::update(guard = "require_minter")]
 fn add_tickets_distributed(token_id: u64, by: u64) -> Result<u64, String> {
-    TOKENS.with(|t| {
+    let new = TOKENS.with(|t| {
         let mut tokens = t.borrow_mut();
         let mut token = tokens.get(&token_id).ok_or("NON_EXISTING_TOKEN")?;
         token.tickets_distributed = token.tickets_distributed.saturating_add(by);
         let new = token.tickets_distributed;
         tokens.insert(token_id, token);
-        Ok(new)
-    })
+        Ok::<u64, String>(new)
+    })?;
+    // tickets_distributed is in `/token/<id>` JSON; re-certify that token.
+    certify_token(token_id);
+    publish_certified_data();
+    Ok(new)
 }
 
 // ==========================================
@@ -744,7 +774,9 @@ fn icrc7_transfer(args: Vec<TransferArg>) -> Vec<Option<TransferResult>> {
     }
     let caller = get_caller();
 
-    args.into_iter()
+    let mut changed: Vec<u64> = Vec::new();
+    let out = args
+        .into_iter()
         .map(|arg| {
             let token_id = match nat_to_u64(&arg.token_id) {
                 Some(id) => id,
@@ -767,12 +799,21 @@ fn icrc7_transfer(args: Vec<TransferArg>) -> Vec<Option<TransferResult>> {
                     tokens.insert(token_id, token);
                     unindex_owner(old_owner, token_id);
                     index_owner(new_owner, token_id);
+                    changed.push(token_id);
                 }
                 Ok(Nat::from(token_id))
             });
             Some(result)
         })
-        .collect()
+        .collect();
+    // Re-certify every token whose owner actually moved (`/token/<id>` JSON changed).
+    if !changed.is_empty() {
+        for id in changed {
+            certify_token(id);
+        }
+        publish_certified_data();
+    }
+    out
 }
 
 // ==========================================
@@ -810,23 +851,43 @@ fn burn(token_id: Nat) -> Result<(), String> {
         unindex_owner(owner, id);
         // NEXT_TOKEN_ID is untouched — the id is retired forever.
         Ok(())
-    })
+    })?;
+    // Drop the burned token's cert entries (its routes now 404 → wildcard) and
+    // refresh `/` (total_supply changed).
+    decertify_token(id);
+    certify_root();
+    publish_certified_data();
+    Ok(())
 }
 
 // ==========================================
-// 11. HTTP gateway (per-token & collection JSON)
+// 11. HTTP gateway (per-token & collection JSON) — CERTIFIED (Response Verification v2)
 // ==========================================
 //
 // SECURITY / SCOPE: `http_request` is a `query` — it never mutates state and never
-// traps on malformed input (bad paths return 400/404). Responses are
-// **uncertified** read-only metadata; certification (IC-Certificate header /
-// `http_request`+`http_request_streaming`) is intentionally out of scope here and
-// is a documented future hardening. All string fields are emitted as JSON with
-// proper escaping (no HTML is ever produced) to avoid injection. Every response is
-// bounded well under the 2 MiB message cap: per-token JSON omits the raw
-// `course_data` (it exposes only its byte length plus a separate
+// traps on malformed input (bad paths return a certified 404). All string fields
+// are emitted as JSON with proper escaping (no HTML is ever produced) to avoid
+// injection. Every response is bounded well under the 2 MiB message cap: per-token
+// JSON omits the raw `course_data` (it exposes only its byte length plus a separate
 // `/token/<id>/course_data` raw route), and that raw blob is itself capped at
 // `MAX_COURSE_DATA_BYTES` (64 KiB) by `mint`.
+//
+// CERTIFICATION (PB-301 hardening): responses are certified with IC Response
+// Verification v2 via the official `ic-http-certification` crate, so they verify on
+// the NORMAL gateway domain (`<id>.icp0.io` / `<id>.localhost:8000`) — no `.raw.`
+// needed. We maintain an `HttpCertificationTree` (heap state) whose root hash is
+// published with `certified_data_set`. Content is dynamic, so the tree is patched
+// on every mutation (mint / burn / transfers / counter bumps) and rebuilt from
+// stable storage in `post_upgrade`. `http_request` attaches the `IC-Certificate` +
+// `IC-CertificateExpression` headers for the matched path; unknown / burned ids
+// fall through to a certified 404 via a root wildcard entry.
+//
+// The cert tree is keyed by the request PATH and certifies, per response: the body,
+// the status code, and the `Content-Type` + `X-Content-Type-Options` headers (the
+// only headers we set besides the certificate machinery). The exact bytes that are
+// certified MUST equal the exact bytes served — `build_route_response` is the single
+// source of truth used both to certify (at mutation time) and to serve (in the
+// query), so the two can never drift.
 
 /// Standard candid HTTP gateway records (`blob` body == `Vec<u8>`).
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -844,15 +905,18 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+/// The fixed, non-certificate headers every response carries. These are the
+/// headers the CEL expression certifies (see `CERTIFIED_RESPONSE_HEADERS`), so the
+/// served set and the certified set are identical by construction.
+fn base_headers(content_type: &str) -> Vec<(String, String)> {
+    vec![
+        ("Content-Type".to_string(), content_type.to_string()),
+        ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
+    ]
+}
+
 fn http_text(status: u16, content_type: &str, body: Vec<u8>) -> HttpResponse {
-    HttpResponse {
-        status_code: status,
-        headers: vec![
-            ("Content-Type".to_string(), content_type.to_string()),
-            ("X-Content-Type-Options".to_string(), "nosniff".to_string()),
-        ],
-        body,
-    }
+    HttpResponse { status_code: status, headers: base_headers(content_type), body }
 }
 
 fn json_response(status: u16, json: String) -> HttpResponse {
@@ -957,22 +1021,31 @@ fn parse_id_segment(seg: &str) -> Option<u64> {
     seg.parse::<u64>().ok()
 }
 
-#[ic_cdk::query]
-fn http_request(req: HttpRequest) -> HttpResponse {
-    // Only GET/HEAD are meaningful for read-only metadata.
-    if req.method != "GET" && req.method != "HEAD" {
+/// Per-token base64 `course_data` JSON for `GET /token/<id>/course_data`.
+fn course_data_json(id: u64, tok: &CourseToken) -> String {
+    format!(
+        "{{\"token_id\":{},\"course_data_base64\":{}}}",
+        id,
+        json_string(&base64_encode(&tok.course_data))
+    )
+}
+
+/// Build the canonical (un-certified) response body for a request method + path.
+///
+/// **Single source of truth**: this is called both when certifying a route (at
+/// mutation time, to compute the hash) and when serving a query (to produce the
+/// bytes). Because both go through here, the certified bytes and served bytes are
+/// identical by construction — the v2 gateway is unforgiving about any mismatch.
+///
+/// Returns the bare response (Content-Type + nosniff headers only); the
+/// certificate / expression headers are layered on afterwards by `serve_certified`.
+fn build_route_response(method: &str, path: &str) -> HttpResponse {
+    if method != "GET" && method != "HEAD" {
         return json_error(405, "method not allowed");
     }
-
-    let path = path_only(&req.url);
-    // Normalize: split into non-empty segments, tolerant of trailing slashes.
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-
     match segments.as_slice() {
-        // GET / -> collection metadata
         [] => json_response(200, collection_json()),
-
-        // GET /token/<id> -> token metadata JSON
         ["token", id_str] => match parse_id_segment(id_str) {
             None => json_error(404, "not found"),
             Some(id) => TOKENS.with(|t| match t.borrow().get(&id) {
@@ -980,26 +1053,259 @@ fn http_request(req: HttpRequest) -> HttpResponse {
                 None => json_error(404, "not found"),
             }),
         },
-
-        // GET /token/<id>/course_data -> raw blob as base64 JSON (bounded < 64 KiB raw)
         ["token", id_str, "course_data"] => match parse_id_segment(id_str) {
             None => json_error(404, "not found"),
             Some(id) => TOKENS.with(|t| match t.borrow().get(&id) {
-                Some(tok) => json_response(
-                    200,
-                    format!(
-                        "{{\"token_id\":{},\"course_data_base64\":{}}}",
-                        id,
-                        json_string(&base64_encode(&tok.course_data))
-                    ),
-                ),
+                Some(tok) => json_response(200, course_data_json(id, &tok)),
                 None => json_error(404, "not found"),
             }),
         },
-
-        // Anything else: not found (never trap).
         _ => json_error(404, "not found"),
     }
+}
+
+// ------------------------------------------------------------------
+// 11a. Response Verification v2 certification
+// ------------------------------------------------------------------
+
+/// Response headers that are folded into the certification hash. Must list exactly
+/// the headers `build_route_response` sets (besides the certificate machinery),
+/// otherwise the gateway recomputes a different response hash and rejects.
+const CERTIFIED_RESPONSE_HEADERS: [&str; 2] = ["Content-Type", "X-Content-Type-Options"];
+
+/// Wildcard path that backs the certified 404 for any unknown / burned route.
+const WILDCARD_404_PATH: &str = "";
+
+thread_local! {
+    /// The HTTP certification tree. Heap state — **not** persisted across upgrades,
+    /// so it is rebuilt from stable storage in `init` / `post_upgrade`.
+    static HTTP_TREE: RefCell<HttpCertificationTree> =
+        RefCell::new(HttpCertificationTree::default());
+}
+
+/// The response-only CEL expression string, identical for every route. Added as the
+/// `IC-CertificateExpression` header (certified + served) and hashed into the cert.
+fn cel_expr_string() -> String {
+    DefaultCelBuilder::response_only_certification()
+        .with_response_certification(DefaultResponseCertification::certified_response_headers(
+            CERTIFIED_RESPONSE_HEADERS.to_vec(),
+        ))
+        .build()
+        .to_string()
+}
+
+/// Build the `ic-http-certification` response (with the expression header attached)
+/// used to compute the certification hash for a route. Mirrors the bytes/headers of
+/// the candid `HttpResponse` from `build_route_response`.
+fn cert_response_for(path: &str) -> CertHttpResponse<'static> {
+    let r = build_route_response("GET", path);
+    let mut headers: Vec<(String, String)> = r.headers;
+    headers.push((CERTIFICATE_EXPRESSION_HEADER_NAME.to_string(), cel_expr_string()));
+    CertHttpResponse::builder()
+        .with_status_code(StatusCode::from_u16(r.status_code).unwrap_or(StatusCode::OK))
+        .with_headers(headers)
+        .with_body(r.body)
+        .build()
+}
+
+/// Compute the certification entry (path + cert) for a given tree path string.
+/// `tree_path` is the exact request path (e.g. `/token/5`) for normal routes, or
+/// `WILDCARD_404_PATH` for the wildcard 404 fallback.
+fn insert_cert(tree: &mut HttpCertificationTree, tree_path: &str, is_wildcard: bool) {
+    let cel_expr = DefaultCelBuilder::response_only_certification()
+        .with_response_certification(DefaultResponseCertification::certified_response_headers(
+            CERTIFIED_RESPONSE_HEADERS.to_vec(),
+        ))
+        .build();
+    // The wildcard 404 certifies the 404 body; a request to an unknown path is what
+    // it answers, so hash the 404 response (any unmatched path yields the same one).
+    let response_path = if is_wildcard { "/__unmatched__" } else { tree_path };
+    let response = cert_response_for(response_path);
+    let certification = HttpCertification::response_only(&cel_expr, &response, None)
+        .expect("response_only certification must succeed");
+    let path = if is_wildcard {
+        HttpCertificationPath::wildcard(WILDCARD_404_PATH)
+    } else {
+        HttpCertificationPath::exact(tree_path)
+    };
+    let entry = HttpCertificationTreeEntry::new(&path, &certification);
+    tree.insert(&entry);
+}
+
+/// Remove the entry (or entries) at an exact path subtree. Used before re-inserting
+/// an updated entry: the prior entry was hashed against the OLD body, which is no
+/// longer reconstructible after the body changed, so we delete the whole exact-path
+/// subtree rather than trying to recompute the old cert key. Safe if absent.
+fn delete_exact_cert(tree: &mut HttpCertificationTree, tree_path: &str) {
+    tree.delete_by_path(&HttpCertificationPath::exact(tree_path));
+}
+
+/// Publish the tree's current root hash as the canister's certified variable.
+/// No-op off-wasm (the `certified_data_set` syscall traps outside the IC).
+fn publish_certified_data() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let root = HTTP_TREE.with(|t| t.borrow().root_hash());
+        ic_cdk::api::certified_data_set(root);
+    }
+}
+
+/// Insert/refresh the certification for the collection root (`/`). Its JSON embeds
+/// `total_supply`, so it must be refreshed whenever supply changes (mint / burn).
+fn certify_root() {
+    HTTP_TREE.with(|t| {
+        let mut tree = t.borrow_mut();
+        // delete-then-insert: the prior `/` entry hashed the old body.
+        delete_exact_cert(&mut tree, "/");
+        insert_cert(&mut tree, "/", false);
+    });
+}
+
+/// Insert/refresh the certifications for a single token's two routes
+/// (`/token/<id>` and `/token/<id>/course_data`). Called on mint and whenever the
+/// token's served JSON changes (owner / play_count / tickets_distributed).
+fn certify_token(id: u64) {
+    let meta_path = format!("/token/{}", id);
+    let blob_path = format!("/token/{}/course_data", id);
+    HTTP_TREE.with(|t| {
+        let mut tree = t.borrow_mut();
+        delete_exact_cert(&mut tree, &meta_path);
+        delete_exact_cert(&mut tree, &blob_path);
+        insert_cert(&mut tree, &meta_path, false);
+        insert_cert(&mut tree, &blob_path, false);
+    });
+}
+
+/// Remove a burned token's certifications. The routes now 404 (the wildcard covers
+/// them); we drop the exact entries so the tree no longer witnesses a 200 for them.
+fn decertify_token(id: u64) {
+    let meta_path = format!("/token/{}", id);
+    let blob_path = format!("/token/{}/course_data", id);
+    HTTP_TREE.with(|t| {
+        let mut tree = t.borrow_mut();
+        delete_exact_cert(&mut tree, &meta_path);
+        delete_exact_cert(&mut tree, &blob_path);
+    });
+}
+
+/// (Re)build the full certification tree from stable storage and publish the root.
+/// Idempotent — called from `init`, `post_upgrade`, and reused by tests.
+fn rebuild_cert_tree() {
+    HTTP_TREE.with(|t| {
+        let mut tree = t.borrow_mut();
+        tree.clear();
+        // wildcard 404 fallback
+        insert_cert(&mut tree, WILDCARD_404_PATH, true);
+        // collection root
+        insert_cert(&mut tree, "/", false);
+    });
+    // per-token routes
+    let ids: Vec<u64> = TOKENS.with(|t| t.borrow().iter().map(|e| *e.key()).collect());
+    for id in ids {
+        certify_token(id);
+    }
+    publish_certified_data();
+}
+
+#[ic_cdk::query]
+fn http_request(req: HttpRequest) -> HttpResponse {
+    let path = path_only(&req.url);
+    let mut response = build_route_response(&req.method, path);
+
+    // Always advertise the CEL expression (certified + uncertified paths alike).
+    response
+        .headers
+        .push((CERTIFICATE_EXPRESSION_HEADER_NAME.to_string(), cel_expr_string()));
+
+    // `data_certificate()` is only populated inside a (non-replicated) query call.
+    // If absent (e.g. replicated context), serve without the cert header rather than
+    // trap — the gateway only verifies the query path anyway.
+    let data_cert = data_certificate_opt();
+    if let Some(cert) = data_cert {
+        attach_certificate(&mut response, &req.method, path, &cert);
+    }
+    response
+}
+
+/// `ic_cdk::api::data_certificate()` is unavailable off-wasm; in tests it returns a
+/// mock (set via `set_mock_data_certificate`) so the cert-header wiring is exercised.
+fn data_certificate_opt() -> Option<Vec<u8>> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        ic_cdk::api::data_certificate()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        TEST_MOCK_DATA_CERT.with(|c| c.borrow().clone())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// Off-wasm stand-in for `data_certificate()`. `None` by default (mirrors a
+    /// replicated context); tests set `Some(..)` to mimic a query call.
+    static TEST_MOCK_DATA_CERT: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+fn set_mock_data_certificate(cert: Option<Vec<u8>>) {
+    TEST_MOCK_DATA_CERT.with(|c| *c.borrow_mut() = cert);
+}
+
+/// Attach the `IC-Certificate` header for the matched path, producing a witness from
+/// the cert tree. Exact routes (`/`, `/token/<id>`, `/token/<id>/course_data`) use
+/// the exact path; everything else (unknown / burned ids → 404) uses the wildcard.
+fn attach_certificate(response: &mut HttpResponse, method: &str, path: &str, data_cert: &[u8]) {
+    let r404 = build_route_response(method, path).status_code == 404
+        || (method != "GET" && method != "HEAD");
+    let is_known_exact = !r404 && is_exact_certified_path(path);
+
+    let (cert_path, request_url, response_path) = if is_known_exact {
+        (HttpCertificationPath::exact(path), path.to_string(), path.to_string())
+    } else {
+        (
+            HttpCertificationPath::wildcard(WILDCARD_404_PATH),
+            path.to_string(),
+            "/__unmatched__".to_string(),
+        )
+    };
+
+    let cel_expr = DefaultCelBuilder::response_only_certification()
+        .with_response_certification(DefaultResponseCertification::certified_response_headers(
+            CERTIFIED_RESPONSE_HEADERS.to_vec(),
+        ))
+        .build();
+    let cert_resp = cert_response_for(&response_path);
+    let certification = match HttpCertification::response_only(&cel_expr, &cert_resp, None) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let entry = HttpCertificationTreeEntry::new(&cert_path, &certification);
+
+    let witness = HTTP_TREE.with(|t| t.borrow().witness(&entry, &request_url));
+    let witness = match witness {
+        Ok(w) => w,
+        Err(_) => return,
+    };
+    let expr_path = cert_path.to_expr_path();
+
+    // `add_v2_certificate_header` wants the crate's HttpResponse; layer the header
+    // onto a throwaway crate response and copy it back to our candid response.
+    let mut tmp = CertHttpResponse::builder().build();
+    add_v2_certificate_header(data_cert, &mut tmp, &witness, &expr_path);
+    for (k, v) in tmp.headers() {
+        response.headers.push((k.clone(), v.clone()));
+    }
+}
+
+/// Whether `path` is one of the exact routes we keep an exact cert entry for.
+fn is_exact_certified_path(path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    matches!(
+        segments.as_slice(),
+        [] | ["token", _] | ["token", _, "course_data"]
+    )
 }
 
 ic_cdk::export_candid!();
@@ -1058,6 +1364,16 @@ mod tests {
         });
         set_mock_controllers(vec![]);
         set_mock_caller(minter());
+        // Start each test from a clean, fully-built certification tree (mirrors what
+        // `init` does on the canister). Mutations then patch this tree.
+        rebuild_cert_tree();
+    }
+
+    /// Current root hash of the HTTP certification tree (the value that, on-canister,
+    /// is published via `certified_data_set`). Used by tests to assert the tree
+    /// changes on mutation, since `certified_data_set` itself is a no-op off-wasm.
+    fn cert_root() -> [u8; 32] {
+        HTTP_TREE.with(|t| t.borrow().root_hash())
     }
 
     fn good_mint(to: Principal, name: &str) -> MintArgs {
@@ -1823,5 +2139,189 @@ mod tests {
         assert_eq!(bump_play_count(id, 5).unwrap(), u64::MAX);
         add_tickets_distributed(id, u64::MAX).unwrap();
         assert_eq!(add_tickets_distributed(id, 5).unwrap(), u64::MAX);
+    }
+
+    // ==========================================
+    // HTTP certification (Response Verification v2)
+    // ==========================================
+
+    /// Pull the `IC-Certificate` header value off a response, if present.
+    fn cert_header(r: &HttpResponse) -> Option<String> {
+        r.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("IC-Certificate"))
+            .map(|(_, v)| v.clone())
+    }
+
+    fn cert_expr_header(r: &HttpResponse) -> Option<String> {
+        r.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(CERTIFICATE_EXPRESSION_HEADER_NAME))
+            .map(|(_, v)| v.clone())
+    }
+
+    /// `http_request` with a mock data certificate present (mimics a query call).
+    fn get_certified(url: &str) -> HttpResponse {
+        set_mock_data_certificate(Some(vec![1, 2, 3, 4]));
+        let r = get(url);
+        set_mock_data_certificate(None);
+        r
+    }
+
+    #[test]
+    fn cert_root_changes_on_mint() {
+        fresh();
+        let before = cert_root();
+        mint(good_mint(p(10), "A")).unwrap();
+        let after = cert_root();
+        assert_ne!(before, after, "minting must change the cert tree root hash");
+    }
+
+    #[test]
+    fn cert_root_changes_on_burn() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        let before = cert_root();
+        set_mock_caller(p(10));
+        burn(Nat::from(id)).unwrap();
+        let after = cert_root();
+        assert_ne!(before, after, "burning must change the cert tree root hash");
+    }
+
+    #[test]
+    fn cert_root_changes_on_transfer() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        // custodial transfer changes the token's owner JSON → cert changes.
+        let before = cert_root();
+        custodial_transfer(id, p(20)).unwrap();
+        let after_custodial = cert_root();
+        assert_ne!(before, after_custodial, "custodial transfer must change root");
+
+        // owner (icrc7) transfer also changes it.
+        set_mock_caller(p(20));
+        icrc7_transfer(vec![TransferArg {
+            token_id: Nat::from(id),
+            to: Account::from_owner(p(30)),
+            from_subaccount: None,
+            memo: None,
+            created_at_time: None,
+        }]);
+        let after_owner = cert_root();
+        assert_ne!(after_custodial, after_owner, "owner transfer must change root");
+    }
+
+    #[test]
+    fn cert_root_changes_on_counter_bumps() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        let r0 = cert_root();
+        bump_play_count(id, 1).unwrap();
+        let r1 = cert_root();
+        assert_ne!(r0, r1, "play_count bump must change root");
+        add_tickets_distributed(id, 1).unwrap();
+        let r2 = cert_root();
+        assert_ne!(r1, r2, "tickets bump must change root");
+    }
+
+    #[test]
+    fn http_token_response_carries_certificate_header() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        let r = get_certified(&format!("/token/{id}"));
+        assert_eq!(r.status_code, 200);
+        let ic_cert = cert_header(&r).expect("IC-Certificate header must be present");
+        // v2 header shape: certificate=, tree=, expr_path=, version=2.
+        assert!(ic_cert.contains("certificate="), "{ic_cert}");
+        assert!(ic_cert.contains("tree="), "{ic_cert}");
+        assert!(ic_cert.contains("expr_path="), "{ic_cert}");
+        assert!(ic_cert.contains("version=2"), "{ic_cert}");
+        // expression header advertised too.
+        assert!(cert_expr_header(&r).is_some(), "expression header missing");
+    }
+
+    #[test]
+    fn http_collection_root_carries_certificate_header() {
+        fresh();
+        mint(good_mint(p(10), "A")).unwrap();
+        let r = get_certified("/");
+        assert_eq!(r.status_code, 200);
+        let ic_cert = cert_header(&r).expect("IC-Certificate header must be present for /");
+        assert!(ic_cert.contains("version=2"), "{ic_cert}");
+        assert!(cert_expr_header(&r).is_some());
+    }
+
+    #[test]
+    fn http_course_data_route_carries_certificate_header() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        let r = get_certified(&format!("/token/{id}/course_data"));
+        assert_eq!(r.status_code, 200);
+        assert!(cert_header(&r).is_some(), "course_data route must be certified");
+    }
+
+    #[test]
+    fn http_unknown_id_returns_certified_404() {
+        fresh();
+        mint(good_mint(p(10), "A")).unwrap();
+        let r = get_certified("/token/999999");
+        assert_eq!(r.status_code, 404);
+        // the 404 is certified via the wildcard entry.
+        let ic_cert = cert_header(&r).expect("unknown-id 404 must carry IC-Certificate");
+        assert!(ic_cert.contains("expr_path="), "{ic_cert}");
+        assert!(ic_cert.contains("version=2"), "{ic_cert}");
+    }
+
+    #[test]
+    fn http_burned_id_returns_certified_404() {
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        set_mock_caller(p(10));
+        burn(Nat::from(id)).unwrap();
+        let r = get_certified(&format!("/token/{id}"));
+        assert_eq!(r.status_code, 404);
+        assert!(cert_header(&r).is_some(), "burned-id 404 must be certified");
+        // the raw blob route for the burned id is also a certified 404.
+        let r2 = get_certified(&format!("/token/{id}/course_data"));
+        assert_eq!(r2.status_code, 404);
+        assert!(cert_header(&r2).is_some());
+    }
+
+    #[test]
+    fn http_no_certificate_without_data_certificate() {
+        // In a replicated/non-query context `data_certificate()` is None; we must
+        // still return the body (no trap) but omit the IC-Certificate header.
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        set_mock_data_certificate(None);
+        let r = get(&format!("/token/{id}"));
+        assert_eq!(r.status_code, 200);
+        assert!(cert_header(&r).is_none(), "no cert header without data_certificate");
+        // expression header is still advertised.
+        assert!(cert_expr_header(&r).is_some());
+    }
+
+    #[test]
+    fn certified_body_matches_served_body_for_token() {
+        // The bytes certified at mutation time must equal the bytes served, or the
+        // gateway rejects. Both go through `build_route_response`, so assert equality.
+        fresh();
+        let id = mint(good_mint(p(10), "A")).unwrap();
+        let served = get(&format!("/token/{id}"));
+        let certified = cert_response_for(&format!("/token/{id}"));
+        assert_eq!(served.body, certified.body().to_vec());
+    }
+
+    #[test]
+    fn rebuild_cert_tree_is_deterministic() {
+        // post_upgrade rebuilds the tree from stable storage; the root hash must be
+        // identical to the incrementally-patched tree for the same token set.
+        fresh();
+        mint(good_mint(p(10), "A")).unwrap();
+        mint(good_mint(p(11), "B")).unwrap();
+        let incremental = cert_root();
+        rebuild_cert_tree();
+        let rebuilt = cert_root();
+        assert_eq!(incremental, rebuilt, "rebuilt tree must match patched tree");
     }
 }

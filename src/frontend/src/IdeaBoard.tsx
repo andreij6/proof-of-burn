@@ -562,7 +562,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
       <div className="col" style={{ gap: 4 }}>
         <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
           <span className="mono" style={{ fontSize: 11, color: 'var(--fg-2)' }}>Goal</span>
-          <span className="mono" style={{ fontSize: 11, color: met ? 'var(--sprout)' : 'var(--fg-3)' }}>
+          <span className="mono" style={{ fontSize: 11, color: met ? 'var(--sprout-ink)' : 'var(--fg-3)' }}>
             {fmtUsd(raised)} / {fmtUsd(goal)} · {pct}%
           </span>
         </div>
@@ -588,7 +588,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>Burn more ICP</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
-            <Icon name="bulb" size={22} stroke="var(--burn)" />
+            <Icon name="bulb" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Community R&amp;D</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
@@ -619,7 +619,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             fontSize: 11.5, textDecoration: 'underline dotted', textUnderlineOffset: 3,
             display: 'flex', alignItems: 'center', gap: 5,
           }}>
-            <Icon name={skillsCopied ? 'check' : 'copy'} size={11} stroke={skillsCopied ? 'var(--sprout)' : 'var(--fg-3)'} />
+            <Icon name={skillsCopied ? 'check' : 'copy'} size={11} stroke={skillsCopied ? 'var(--sprout-ink)' : 'var(--fg-3)'} />
             {skillsCopied ? 'Copied' : 'Copy agent instructions'}
           </button>
         </span>
@@ -637,7 +637,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             onClick={() => setTab(key)}
             style={{
               background: 'transparent', border: 'none',
-              color: tab === key ? 'var(--burn)' : 'var(--fg-3)',
+              color: tab === key ? 'var(--burn-ink)' : 'var(--fg-3)',
               fontSize: 14, fontWeight: tab === key ? 600 : 500,
               cursor: 'pointer', padding: '6px 4px', position: 'relative', whiteSpace: 'nowrap',
               transition: 'color var(--dur-fast) var(--ease-out)',
@@ -656,7 +656,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
         <>
           <div className="row" style={{ justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
             <span className="row" style={{ gap: 8 }}>
-              <LiveDot color="var(--sprout)" size={7} />
+              <LiveDot color="var(--sprout-ink)" size={7} />
               <b style={{ fontSize: 14, color: 'var(--fg)' }}>Ideas</b>
               <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {ideas.length} active</span>
             </span>
@@ -670,7 +670,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                   style={{
                     background: sortBy === opt.key ? 'var(--burn-950)' : 'transparent',
                     border: `1px solid ${sortBy === opt.key ? 'var(--burn)' : 'var(--border)'}`,
-                    color: sortBy === opt.key ? 'var(--burn)' : 'var(--fg-3)',
+                    color: sortBy === opt.key ? 'var(--burn-ink)' : 'var(--fg-3)',
                     borderRadius: 999, padding: '3px 10px', fontSize: 11.5, fontWeight: 500,
                     cursor: 'pointer', transition: 'all var(--dur-fast) var(--ease-out)',
                   }}
@@ -683,7 +683,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
 
           {isLoading ? (
             <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
-              <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
+              <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
               Loading ideas...
             </div>
           ) : pageIdeas.length === 0 ? (
@@ -701,10 +701,10 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                   }}>
                     <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                       <Chip tone="ok" style={{ height: 19, fontSize: 10 }}>
-                        <LiveDot color="var(--sprout)" size={5} /> Active
+                        <LiveDot color="var(--sprout-ink)" size={5} /> Active
                       </Chip>
                       {daysLeft !== null && (
-                        <span className="mono row" style={{ gap: 4, fontSize: 10.5, color: daysLeft <= 5 ? 'var(--haze)' : 'var(--fg-3)' }}
+                        <span className="mono row" style={{ gap: 4, fontSize: 10.5, color: daysLeft <= 5 ? 'var(--haze-ink)' : 'var(--fg-3)' }}
                           title="Deleted after 30 days without an upvote">
                           <Icon name="clock" size={11} /> {daysLeft}d left
                         </span>
@@ -734,7 +734,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                         >
                           {upvotingId === idea.id
                             ? <LiveDot size={6} color="var(--char-950)" />
-                            : <Icon name={idea.has_upvoted ? 'check' : 'arrowUp'} size={11} stroke={idea.has_upvoted ? 'var(--sprout)' : 'var(--char-950)'} />}
+                            : <Icon name={idea.has_upvoted ? 'check' : 'arrowUp'} size={11} stroke={idea.has_upvoted ? 'var(--sprout-ink)' : 'var(--char-950)'} />}
                           {idea.has_upvoted ? ' Upvoted' : ' Upvote'}
                         </Btn>
                       </span>
@@ -764,7 +764,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
         <>
           <div className="row" style={{ justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
             <span className="row" style={{ gap: 8 }}>
-              <Icon name="target" size={14} stroke="var(--burn)" />
+              <Icon name="target" size={14} stroke="var(--burn-ink)" />
               <b style={{ fontSize: 14, color: 'var(--fg)' }}>Official projects</b>
               <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· funding goes 100% to the treasury</span>
             </span>
@@ -778,14 +778,14 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                 setEditingProject(null);
                 setIsProjectFormOpen(true);
               }}>
-                <Icon name="key" size={12} stroke="var(--burn)" /> Add project
+                <Icon name="key" size={12} stroke="var(--burn-ink)" /> Add project
               </Btn>
             )}
           </div>
 
           {isLoading ? (
             <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
-              <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
+              <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
               Loading projects...
             </div>
           ) : pageProjects.length === 0 ? (
@@ -906,7 +906,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
           <div className="card col" style={MODAL_CARD}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="bulb" size={18} stroke="var(--burn)" />
+                <Icon name="bulb" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Post an idea</h4>
               </span>
               <button onClick={() => setIsPostOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
@@ -974,7 +974,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
           <div className="card col" style={MODAL_CARD}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="target" size={18} stroke="var(--burn)" />
+                <Icon name="target" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>
                   {editingProject ? 'Edit project (admin)' : 'Add project (admin)'}
                 </h4>
@@ -1038,7 +1038,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
               <div className="col" style={{ gap: 6, minWidth: 0 }}>
                 <Chip tone="ok" style={{ height: 19, fontSize: 10, alignSelf: 'flex-start' }}>
-                  <LiveDot color="var(--sprout)" size={5} /> Active
+                  <LiveDot color="var(--sprout-ink)" size={5} /> Active
                 </Chip>
                 <h4 style={{ margin: 0, fontSize: 18, overflowWrap: 'anywhere' }}>{detailIdea.title}</h4>
                 <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
@@ -1072,7 +1072,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                 setDetailIdea(null);
               }}
             >
-              <Icon name={detailIdea.has_upvoted ? 'check' : 'arrowUp'} size={14} stroke={detailIdea.has_upvoted ? 'var(--sprout)' : 'var(--char-950)'} />
+              <Icon name={detailIdea.has_upvoted ? 'check' : 'arrowUp'} size={14} stroke={detailIdea.has_upvoted ? 'var(--sprout-ink)' : 'var(--char-950)'} />
               {detailIdea.has_upvoted ? 'Upvoted' : (signedIn ? 'Upvote' : 'Sign in to upvote')}
             </Btn>
             {isAdmin && (
@@ -1165,14 +1165,14 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                     background: 'none',
                     border: 'none',
                     cursor: 'pointer',
-                    color: 'var(--burn)',
+                    color: 'var(--burn-ink)',
                     fontSize: 12,
                     display: 'flex',
                     alignItems: 'center',
                     gap: 5,
                   }}
                 >
-                  <Icon name="edit" size={12} stroke="var(--burn)" />
+                  <Icon name="edit" size={12} stroke="var(--burn-ink)" />
                   Edit project (admin)
                 </button>
                 <button
@@ -1205,7 +1205,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
           <div className="card col" style={MODAL_CARD}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="coins" size={18} stroke="var(--burn)" />
+                <Icon name="coins" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Fund project</h4>
               </span>
               <button onClick={() => setPayTarget(null)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
@@ -1219,9 +1219,9 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
 
             {paySuccess ? (
               <>
-                <div style={{ padding: 12, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout)', fontSize: 13, lineHeight: 1.5 }}>
+                <div style={{ padding: 12, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout-ink)', fontSize: 13, lineHeight: 1.5 }}>
                   <span className="row" style={{ gap: 8 }}>
-                    <Icon name="checkCircle" size={16} stroke="var(--sprout)" />
+                    <Icon name="checkCircle" size={16} stroke="var(--sprout-ink)" />
                     Funding settled — 100% to the protocol treasury.
                   </span>
                 </div>
@@ -1244,8 +1244,8 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                     })}
                   </div>
                   {payMeta.onIcpFallback && (
-                    <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--haze)' }}>
-                      <Icon name="info" size={11} stroke="var(--haze)" /> Local fallback: this token resolves to the test ICP ledger.
+                    <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--haze-ink)' }}>
+                      <Icon name="info" size={11} stroke="var(--haze-ink)" /> Local fallback: this token resolves to the test ICP ledger.
                     </span>
                   )}
                 </div>

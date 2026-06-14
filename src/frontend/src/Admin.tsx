@@ -81,7 +81,7 @@ function Section({ icon, title, children }: { icon: string; title: string; child
           cursor: 'pointer', width: '100%', textAlign: 'left', color: 'var(--fg)',
         }}
       >
-        <Icon name={icon} size={14} stroke="var(--burn)" />
+        <Icon name={icon} size={14} stroke="var(--burn-ink)" />
         <b style={{ fontSize: 13.5, flex: 1 }}>{title}</b>
         <Icon name={open ? 'chevDown' : 'chevRight'} size={14} stroke="var(--fg-3)" />
       </button>
@@ -96,7 +96,7 @@ function Section({ icon, title, children }: { icon: string; title: string; child
 
 const Li = ({ children }: { children: React.ReactNode }) => (
   <span className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
-    <span style={{ color: 'var(--burn)', lineHeight: '19px' }}>·</span>
+    <span style={{ color: 'var(--burn-ink)', lineHeight: '19px' }}>·</span>
     <span style={{ flex: 1 }}>{children}</span>
   </span>
 );
@@ -414,7 +414,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
         <span className="row" style={{ gap: 8 }}>
-          <Icon name="key" size={16} stroke="var(--burn)" />
+          <Icon name="key" size={16} stroke="var(--burn-ink)" />
           <Eyebrow accent>Admin console</Eyebrow>
         </span>
         <b style={{ fontSize: 17 }}>Every protocol dial, grouped by job.</b>
@@ -434,7 +434,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
         <div className="row" style={{
           gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
           border: `1px solid ${error ? 'var(--ember)' : 'var(--sprout)'}`,
-          color: error ? 'var(--ember)' : 'var(--sprout)',
+          color: error ? 'var(--ember)' : 'var(--sprout-ink)',
           background: 'var(--surface)',
         }}>
           <Icon name={error ? "x" : "checkCircle"} size={13} stroke="currentColor" />
@@ -470,7 +470,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           </div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             <Btn variant="secondary" sm onClick={triggerSweep} disabled={busy !== null}>
-              {busy === 'sweep' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} stroke="var(--burn)" />} Run sweep now
+              {busy === 'sweep' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} stroke="var(--burn-ink)" />} Run sweep now
             </Btn>
             <Btn variant="ghost" sm onClick={() => { refreshHealth(); refreshBalances(); }} disabled={busy !== null}>
               <Icon name="undo" size={13} /> Refresh
@@ -514,7 +514,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             {/* Deposit */}
             <div className="col" style={{ ...card, gap: 10, flex: '1 1 300px', minWidth: 280 }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="arrowUp" size={14} stroke="var(--sprout)" />
+                <Icon name="arrowUp" size={14} stroke="var(--sprout-ink)" />
                 <Eyebrow>Deposit to treasury</Eyebrow>
               </span>
               <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
@@ -525,7 +525,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               <input type="text" placeholder={`Amount (${depMeta.label})`} className="burn-input" style={{ ...inputStyle, maxWidth: 220 }}
                 value={depAmount} onChange={e => setDepAmount(e.target.value)} />
               <Btn variant="secondary" sm onClick={depositToken} disabled={busy !== null || !depAmount} style={{ alignSelf: 'flex-start' }}>
-                {busy === 't-deposit' ? <LiveDot size={7} /> : <Icon name="arrowUp" size={13} stroke="var(--burn)" />} Deposit from my wallet
+                {busy === 't-deposit' ? <LiveDot size={7} /> : <Icon name="arrowUp" size={13} stroke="var(--burn-ink)" />} Deposit from my wallet
               </Btn>
               <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
                 Comes straight from your signed-in wallet on the selected token's ledger.
@@ -535,7 +535,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             {/* Withdraw */}
             <div className="col" style={{ ...card, gap: 10, flex: '1 1 300px', minWidth: 280 }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="wallet" size={14} stroke="var(--burn)" />
+                <Icon name="wallet" size={14} stroke="var(--burn-ink)" />
                 <Eyebrow>Withdraw from treasury</Eyebrow>
               </span>
               <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
@@ -622,7 +622,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
               <Eyebrow>Platform neurons — live from NNS governance</Eyebrow>
               <Btn variant="secondary" sm onClick={checkFollowing} disabled={busy !== null}>
-                {busy === 'follow' ? <LiveDot size={7} /> : <Icon name="eye" size={13} stroke="var(--burn)" />} Check live (NNS)
+                {busy === 'follow' ? <LiveDot size={7} /> : <Icon name="eye" size={13} stroke="var(--burn-ink)" />} Check live (NNS)
               </Btn>
             </span>
             {followStatus && (
@@ -635,7 +635,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                     <span className="mono" style={{ minWidth: 130 }}>{f.label}</span>
                     <span className="mono" style={{ color: 'var(--fg-3)' }}>#{f.neuron_id.toString()}</span>
                     <span className="mono">stake {fmtICP(f.stake_e8s)}</span>
-                    <span className="mono" style={{ color: f.maturity_e8s > 0n ? 'var(--sprout)' : 'var(--fg-3)' }}>
+                    <span className="mono" style={{ color: f.maturity_e8s > 0n ? 'var(--sprout-ink)' : 'var(--fg-3)' }}>
                       yield {fmtICP(f.maturity_e8s)} uncollected
                     </span>
                     <span className="mono" style={{ color: 'var(--fg-3)' }}>topics {f.topics_following_primary.join('/')}</span>
@@ -677,7 +677,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                         : u.status === UnstakeStatus.Dissolving ? <Chip tone="pending" style={{ height: 17, fontSize: 10 }}>dissolving</Chip>
                         : <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>splitting</Chip>}
                       <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${u.split_neuron_id.toString()}`}
-                        target="_blank" rel="noreferrer" style={{ color: 'var(--sprout)' }}>
+                        target="_blank" rel="noreferrer" style={{ color: 'var(--sprout-ink)' }}>
                         #{u.split_neuron_id.toString()}
                       </a>
                       <span className="mono">{fmtICP(u.amount_e8s)} ICP</span>
@@ -733,7 +733,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
               <Eyebrow>Settlement</Eyebrow>
               <Btn variant="secondary" sm onClick={triggerSweep} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-                {busy === 'sweep' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} stroke="var(--burn)" />} Trigger sweep now
+                {busy === 'sweep' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} stroke="var(--burn-ink)" />} Trigger sweep now
               </Btn>
               <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
                 Proposals sitting in "met" settle on the next sweep — run it manually instead of
@@ -851,7 +851,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
         <>
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8 }}>
-              <Icon name="zap" size={13} stroke="var(--burn)" />
+              <Icon name="zap" size={13} stroke="var(--burn-ink)" />
               <Eyebrow>Feature kill switches</Eyebrow>
             </span>
             <div className="col" style={{ gap: 0 }}>
@@ -900,7 +900,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
         <>
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8 }}>
-              <Icon name="gamepad" size={13} stroke="var(--burn)" />
+              <Icon name="gamepad" size={13} stroke="var(--burn-ink)" />
               <Eyebrow>Mini Golf — course editor</Eyebrow>
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>

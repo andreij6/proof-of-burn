@@ -47,7 +47,7 @@ function HubCard({ span2, accent, onClick, eyebrow, icon, chip, children }: {
     >
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
         <span className="row" style={{ gap: 7, alignItems: 'center' }}>
-          <Icon name={icon} size={13} stroke={accent ? 'var(--burn)' : 'var(--fg-3)'} />
+          <Icon name={icon} size={13} stroke={accent ? 'var(--burn-ink)' : 'var(--fg-3)'} />
           <Eyebrow>{eyebrow}</Eyebrow>
         </span>
         <span className="row" style={{ gap: 6, alignItems: 'center' }}>
@@ -160,7 +160,7 @@ export default function Dashboard({
   return (
     <div className="col" style={{ gap: 18, padding: '22px 22px 40px', maxWidth: 1060, margin: '0 auto', width: '100%' }}>
       <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-        <Icon name="list" size={14} stroke="var(--burn)" />
+        <Icon name="list" size={14} stroke="var(--burn-ink)" />
         <Eyebrow accent>Dashboard</Eyebrow>
       </div>
 
@@ -195,7 +195,7 @@ export default function Dashboard({
                   textDecoration: step.done ? 'line-through' : 'none',
                 }}>
                   <Icon name={step.done ? 'checkCircle' : 'chevRight'} size={14}
-                    stroke={step.done ? 'var(--sprout)' : 'var(--burn)'} />
+                    stroke={step.done ? 'var(--sprout-ink)' : 'var(--burn-ink)'} />
                   {step.label}
                 </button>
               ))}

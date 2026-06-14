@@ -268,7 +268,7 @@ export default function CourseMarketplace({
       {signedIn && favCards.length > 0 && !onlyFavs && (
         <div className="card col" style={{ gap: 8 }}>
           <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-            <Icon name="heart" size={13} stroke="var(--burn)" fill="var(--burn)" />
+            <Icon name="heart" size={13} stroke="var(--burn-ink)" fill="var(--burn)" />
             <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: 'var(--font-mono)' }}>Your favorites</span>
           </span>
           <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
@@ -281,7 +281,7 @@ export default function CourseMarketplace({
                   {c.name || `Course #${c.token_id}`}
                 </span>
                 <Btn variant="ghost" sm onClick={() => onPlay(c)} style={{ padding: '2px 6px' }}>
-                  <Icon name="flame" size={11} stroke="var(--burn)" /> Play
+                  <Icon name="flame" size={11} stroke="var(--burn-ink)" /> Play
                 </Btn>
                 <Btn variant="ghost" sm onClick={() => onToggleFavorite(c)} style={{ padding: '2px 5px' }} title="Remove from favorites">
                   <Icon name="x" size={11} />
@@ -300,7 +300,7 @@ export default function CourseMarketplace({
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>Play &amp; earn</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
-            <Icon name="gamepad" size={22} stroke="var(--burn)" />
+            <Icon name="gamepad" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Course Marketplace</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
@@ -362,7 +362,7 @@ export default function CourseMarketplace({
 
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
-          <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
+          <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
           Loading courses…
         </div>
       ) : isEmpty ? (
@@ -405,7 +405,7 @@ export default function CourseMarketplace({
               borderStyle: 'dashed', borderColor: 'var(--border)',
             }}>
               <span className="row" style={{ gap: 8, color: 'var(--fg-3)', fontSize: 12.5 }}>
-                <Icon name="spark" size={14} stroke="var(--fg-dim)" /> No featured course — promote any course to the top of the marketplace
+                <Icon name="spark" size={14} stroke="var(--fg-3)" /> No featured course — promote any course to the top of the marketplace
               </span>
             </div>
           )}
@@ -557,7 +557,7 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
       <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
         <span className="row" style={{ gap: 6, alignItems: 'center' }}>
           {featured ? (
-            <Chip tone="burn" style={{ height: 19, fontSize: 10 }}><LiveDot color="var(--burn)" size={5} /> Featured</Chip>
+            <Chip tone="burn" style={{ height: 19, fontSize: 10 }}><LiveDot color="var(--burn-ink)" size={5} /> Featured</Chip>
           ) : forSale ? (
             <Chip tone="ok" style={{ height: 19, fontSize: 10 }}>For sale</Chip>
           ) : (
@@ -572,7 +572,7 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
               opacity: signedIn ? 1 : 0.4, display: 'flex', alignItems: 'center',
             }}
           >
-            <Icon name="heart" size={14} stroke={isFav ? 'var(--burn)' : 'var(--fg-3)'} fill={isFav ? 'var(--burn)' : 'none'} />
+            <Icon name="heart" size={14} stroke={isFav ? 'var(--burn-ink)' : 'var(--fg-3)'} fill={isFav ? 'var(--burn)' : 'none'} />
           </button>
         </span>
         <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>Par {par} · {diff}</span>
@@ -585,7 +585,7 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
 
       <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
         by {formatPrincipal(card.creator ?? null)}
-        {ownerDiffers && <span style={{ color: 'var(--fg-dim)' }}> · owned by {formatPrincipal(card.owner ?? null)}</span>}
+        {ownerDiffers && <span style={{ color: 'var(--fg-3)' }}> · owned by {formatPrincipal(card.owner ?? null)}</span>}
       </span>
 
       <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
@@ -605,7 +605,7 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
           {forSale ? <b>{fmtICP(card.price_e8s)} ICP</b> : <span style={{ color: 'var(--fg-3)' }}>Not for sale</span>}
         </span>
         {featured && featuredToBeat !== undefined && (
-          <span className="mono" style={{ fontSize: 11, color: 'var(--burn)' }}>Featured bid to beat: {fmtUsd(featuredToBeat)}</span>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--burn-ink)' }}>Featured bid to beat: {fmtUsd(featuredToBeat)}</span>
         )}
       </span>
 
@@ -955,7 +955,7 @@ function BidModal({ actor, card, identity, host, rootKey, backendCanisterId, toB
           <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0 }}>
             Pin this course to the featured slot. The highest USD bid wins.
             {toBeatUsdE8s !== undefined && (
-              <> Current bid to beat: <b className="mono" style={{ color: 'var(--burn)' }}>{fmtUsd(toBeatUsdE8s)}</b>.</>
+              <> Current bid to beat: <b className="mono" style={{ color: 'var(--burn-ink)' }}>{fmtUsd(toBeatUsdE8s)}</b>.</>
             )}
           </p>
           <div className="col" style={{ gap: 6 }}>
@@ -1056,7 +1056,7 @@ function RateModal({ actor, card, onClose, onDone }: {
           <div className="row" style={{ gap: 4 }}>
             {[1, 2, 3, 4, 5].map((n) => (
               <button key={n} onClick={() => setStars(n)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 2 }} title={`${n} star${n === 1 ? '' : 's'}`}>
-                <Icon name="star" size={22} stroke="var(--burn)" fill={n <= stars ? 'var(--burn)' : 'none'} />
+                <Icon name="star" size={22} stroke="var(--burn-ink)" fill={n <= stars ? 'var(--burn)' : 'none'} />
               </button>
             ))}
           </div>
@@ -1086,7 +1086,7 @@ function RateModal({ actor, card, onClose, onDone }: {
             <div key={i} className="col" style={{ gap: 2 }}>
               <span className="row" style={{ gap: 4 }}>
                 {Array.from({ length: 5 }, (_, n) => (
-                  <Icon key={n} name="star" size={11} stroke="var(--burn)" fill={n < r.stars ? 'var(--burn)' : 'none'} />
+                  <Icon key={n} name="star" size={11} stroke="var(--burn-ink)" fill={n < r.stars ? 'var(--burn)' : 'none'} />
                 ))}
                 <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>{formatPrincipal(r.rater)}</span>
               </span>
@@ -1145,7 +1145,7 @@ function Pill({ active, onClick, children }: { active: boolean; onClick: () => v
     <button onClick={onClick} style={{
       background: active ? 'var(--burn-950)' : 'transparent',
       border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
-      color: active ? 'var(--burn)' : 'var(--fg-3)',
+      color: active ? 'var(--burn-ink)' : 'var(--fg-3)',
       borderRadius: 999, padding: '5px 11px', fontSize: 11.5, fontWeight: 500,
       cursor: 'pointer', transition: 'all var(--dur-fast) var(--ease-out)',
     }}>{children}</button>

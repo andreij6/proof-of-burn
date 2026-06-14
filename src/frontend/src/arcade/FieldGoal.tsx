@@ -366,7 +366,7 @@ export default function FieldGoal({ kicker, fullAccess, onRoundComplete, onExit,
         {/* Round intro */}
         {phase === 'intro' && (
           <Overlay>
-            <span className="mono" style={{ fontSize: 11, color: 'var(--burn)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+            <span className="mono" style={{ fontSize: 11, color: 'var(--burn-ink)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
               Kick {roundIdx + 1} of {ROUNDS_PER_GAME}
             </span>
             <h3 style={{ margin: 0 }}>{spec.distanceYds}-yarder · {hashLabel(spec.hashOffsetFt)}</h3>
@@ -387,7 +387,7 @@ export default function FieldGoal({ kicker, fullAccess, onRoundComplete, onExit,
                 ? `+${perKick[perKick.length - 1]} points`
                 : 'No points — shake it off.'}
             </span>
-            <span className="mono" style={{ fontSize: 30, fontWeight: 800, color: 'var(--burn)', lineHeight: 1 }}>
+            <span className="mono" style={{ fontSize: 30, fontWeight: 800, color: 'var(--burn-ink)', lineHeight: 1 }}>
               {nextIn}
             </span>
             <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
@@ -399,7 +399,7 @@ export default function FieldGoal({ kicker, fullAccess, onRoundComplete, onExit,
         {/* Participation gate after kick 1 */}
         {phase === 'gate' && (
           <Overlay>
-            <Icon name="lock" size={26} stroke="var(--haze)" />
+            <Icon name="lock" size={26} stroke="var(--haze-ink)" />
             <h3 style={{ margin: 0 }}>That's the free preview</h3>
             <span style={{ color: 'var(--fg-2)', fontSize: 13, maxWidth: 380, textAlign: 'center' }}>
               Kicks 2–5 (and the leaderboard) unlock for protocol participants: stake any
@@ -433,13 +433,13 @@ export default function FieldGoal({ kicker, fullAccess, onRoundComplete, onExit,
                   <tr>
                     <td style={SC_TD}>Pts</td>
                     {perKick.map((p, i) => (
-                      <td key={i} style={{ ...SC_TD, color: p > 0 ? 'var(--sprout)' : 'var(--haze)' }}>{p}</td>
+                      <td key={i} style={{ ...SC_TD, color: p > 0 ? 'var(--sprout-ink)' : 'var(--haze-ink)' }}>{p}</td>
                     ))}
                   </tr>
                 </tbody>
               </table>
             </div>
-            {submitNote && <span style={{ fontSize: 12.5, color: 'var(--burn)' }}>{submitNote}</span>}
+            {submitNote && <span style={{ fontSize: 12.5, color: 'var(--burn-ink)' }}>{submitNote}</span>}
             <Btn variant="primary" onClick={onExit}>Back to Arcade</Btn>
           </Overlay>
         )}

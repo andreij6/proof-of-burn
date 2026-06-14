@@ -252,7 +252,7 @@ export default function CourseEditor({
       <div className="col" style={{ gap: 6 }}>
         <Eyebrow accent>Arcade · Course NFT</Eyebrow>
         <span className="row" style={{ gap: 10 }}>
-          <Icon name="gamepad" size={22} stroke="var(--burn)" />
+          <Icon name="gamepad" size={22} stroke="var(--burn-ink)" />
           <h4 style={{ margin: 0 }}>Course Editor</h4>
         </span>
         <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 580, margin: 0 }}>

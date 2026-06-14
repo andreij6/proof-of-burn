@@ -137,7 +137,7 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
   if (!holes) {
     return (
       <div style={{ textAlign: 'center', padding: 48, color: 'var(--fg-3)' }}>
-        <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
+        <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
         Loading {card.name || 'course'}…
       </div>
     );
@@ -228,7 +228,7 @@ function CompletionRateModal({ actor, card, onClose }: { actor: any; card: Cours
             <div className="row" style={{ gap: 4 }}>
               {[1, 2, 3, 4, 5].map((n) => (
                 <button key={n} onClick={() => setStars(n)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 2 }} title={`${n} star${n === 1 ? '' : 's'}`}>
-                  <Icon name="star" size={24} stroke="var(--burn)" fill={n <= stars ? 'var(--burn)' : 'none'} />
+                  <Icon name="star" size={24} stroke="var(--burn-ink)" fill={n <= stars ? 'var(--burn)' : 'none'} />
                 </button>
               ))}
             </div>

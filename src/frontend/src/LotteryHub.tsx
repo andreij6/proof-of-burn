@@ -106,7 +106,7 @@ export default function LotteryHub({
       <div className="col" style={{ gap: 6 }}>
         <Eyebrow accent>Lossless lottery</Eyebrow>
         <span className="row" style={{ gap: 10 }}>
-          <Icon name="target" size={22} stroke="var(--burn)" />
+          <Icon name="target" size={22} stroke="var(--burn-ink)" />
           <h4 style={{ margin: 0 }}>Lottery</h4>
         </span>
         <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>

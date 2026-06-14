@@ -102,7 +102,7 @@ export function Eyebrow({ children, accent, style }: { children: React.ReactNode
   return (
     <span className="mono" style={{
       fontSize: 10.5, fontWeight: 500, letterSpacing: '0.09em', textTransform: 'uppercase',
-      color: accent ? 'var(--burn)' : 'var(--fg-3)', ...style
+      color: accent ? 'var(--burn-ink)' : 'var(--fg-3)', ...style
     }}>
       {children}
     </span>
@@ -184,12 +184,12 @@ export function MoreInfo({ label = 'How it works', title, children, style }: {
         onClick={() => setOpen(true)}
         style={{
           background: 'none', border: 'none', padding: 0, cursor: 'pointer',
-          color: 'var(--burn)', fontSize: 12, textDecoration: 'underline',
+          color: 'var(--burn-ink)', fontSize: 12, textDecoration: 'underline',
           display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'inherit',
           ...style,
         }}
       >
-        <Icon name="info" size={11} stroke="var(--burn)" /> {label}
+        <Icon name="info" size={11} stroke="var(--burn-ink)" /> {label}
       </button>
       {/* Portaled: MoreInfo often sits inside <p>/<span>, where a block modal
           would be invalid DOM. */}

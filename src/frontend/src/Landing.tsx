@@ -77,7 +77,7 @@ function Soma({ x, y, lit, flip }: { x: number; y: number; lit: boolean; flip?: 
     <g style={{ transition: 'opacity 600ms ease' }} opacity={lit ? 1 : 0.45}>
       <circle cx={x} cy={y} r={64} fill="url(#somaHalo)" opacity={lit ? 0.9 : 0.35} />
       {dendrites.map((d, i) => (
-        <path key={i} d={d} fill="none" stroke="var(--sprout)" strokeOpacity={0.55}
+        <path key={i} d={d} fill="none" stroke="var(--sprout-ink)" strokeOpacity={0.55}
           strokeWidth={2.2 - (i % 3) * 0.5} strokeLinecap="round" />
       ))}
       <circle cx={x} cy={y} r={17} fill="url(#somaCore)" filter="url(#glow)" />
@@ -232,7 +232,7 @@ export default function Landing({ onEnter }: LandingProps) {
         background: 'linear-gradient(color-mix(in srgb, var(--char-950) 88%, transparent), transparent)',
       }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 15 }}>
-          <Icon name="flame" size={16} stroke="var(--burn)" /> Caldera
+          <Icon name="flame" size={16} stroke="var(--burn-ink)" /> Caldera
         </span>
         <Btn variant="primary" sm onClick={onEnter}>
           Go to App <Icon name="chevRight" size={13} stroke="var(--char-950)" />
@@ -280,8 +280,8 @@ export default function Landing({ onEnter }: LandingProps) {
           })}
 
           {/* resting axon (myelinated look: faint double stroke) */}
-          <path d={geom.d} fill="none" stroke="var(--sprout)" strokeOpacity={0.14} strokeWidth={7} strokeLinecap="round" />
-          <path d={geom.d} fill="none" stroke="var(--sprout)" strokeOpacity={0.30} strokeWidth={1.6}
+          <path d={geom.d} fill="none" stroke="var(--sprout-ink)" strokeOpacity={0.14} strokeWidth={7} strokeLinecap="round" />
+          <path d={geom.d} fill="none" stroke="var(--sprout-ink)" strokeOpacity={0.30} strokeWidth={1.6}
             strokeDasharray="2 9" strokeLinecap="round" />
 
           {/* depolarized (traveled) portion */}
@@ -329,7 +329,7 @@ export default function Landing({ onEnter }: LandingProps) {
       }}>
         <span style={{
           fontSize: 11.5, letterSpacing: '0.18em', textTransform: 'uppercase',
-          color: 'var(--sprout)', fontWeight: 600,
+          color: 'var(--sprout-ink)', fontWeight: 600,
         }}>
           Internet Computer governance, with skin in the game
         </span>
@@ -338,7 +338,7 @@ export default function Landing({ onEnter }: LandingProps) {
           lineHeight: 1.06, margin: 0, maxWidth: 760, textWrap: 'balance',
         }}>
           Your conviction is a signal.<br />
-          <span style={{ color: 'var(--burn)' }}>Transmit it.</span>
+          <span style={{ color: 'var(--burn-ink)' }}>Transmit it.</span>
         </h1>
         <p style={{ fontSize: 15.5, lineHeight: 1.6, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
           Burn ICP to steer NNS votes. Stake to stack lottery tickets — at zero cost.
@@ -378,8 +378,8 @@ export default function Landing({ onEnter }: LandingProps) {
               transform: seen[i] ? 'none' : 'translateY(26px)',
               transition: 'opacity 600ms ease, transform 600ms ease',
             }}>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--burn)', fontSize: 11.5, letterSpacing: '0.14em', textTransform: 'uppercase', fontWeight: 600 }}>
-                <Icon name={s.icon} size={14} stroke="var(--burn)" /> {s.eyebrow}
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--burn-ink)', fontSize: 11.5, letterSpacing: '0.14em', textTransform: 'uppercase', fontWeight: 600 }}>
+                <Icon name={s.icon} size={14} stroke="var(--burn-ink)" /> {s.eyebrow}
               </span>
               <h2 style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(22px, 3.2vw, 32px)', margin: '10px 0 10px', lineHeight: 1.15 }}>
                 {s.title}
@@ -412,7 +412,7 @@ export default function Landing({ onEnter }: LandingProps) {
           opacity: arrived ? 1 : 0.35, transition: 'opacity 600ms ease',
         }}>
           The signal arrived.<br />
-          <span style={{ color: 'var(--burn)' }}>Now send yours.</span>
+          <span style={{ color: 'var(--burn-ink)' }}>Now send yours.</span>
         </h2>
         <p style={{ fontSize: 14, color: 'var(--fg-2)', maxWidth: 480, margin: 0, lineHeight: 1.6 }}>
           Sign in with Internet Identity. Burn, stake, play, pitch — every payout finds your

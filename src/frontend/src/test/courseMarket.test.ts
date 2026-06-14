@@ -184,11 +184,11 @@ describe('courseNftTokenUrl', () => {
   const ID = 'be2us-64aaa-aaaaa-qaabq-cai';
 
   it('builds the local canister-subdomain URL', () => {
-    expect(courseNftTokenUrl(ID, 7n, true)).toBe(`http://${ID}.raw.localhost:8000/token/7`);
+    expect(courseNftTokenUrl(ID, 7n, true)).toBe(`http://${ID}.localhost:8000/token/7`);
   });
 
   it('builds the mainnet icp0.io URL', () => {
-    expect(courseNftTokenUrl(ID, 42n, false)).toBe(`https://${ID}.raw.icp0.io/token/42`);
+    expect(courseNftTokenUrl(ID, 42n, false)).toBe(`https://${ID}.icp0.io/token/42`);
   });
 
   it('returns null when the course_nft canister is unwired (None)', () => {

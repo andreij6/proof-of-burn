@@ -164,11 +164,10 @@ export function bidBeats(bidUsdE8s: bigint, toBeatUsdE8s: bigint): boolean {
 //    metadata at `/token/<id>` over the gateway. We build the canister-subdomain
 //    URL from the wired course_nft canister id and the environment, mirroring how
 //    the app distinguishes local vs mainnet elsewhere (App.tsx `isLocal`).
-//    NOTE: the responses are uncertified read-only metadata, so we must use the
-//    **raw** domain — the certifying gateway rejects uncertified responses on the
-//    normal domain ("retry using the raw domain"):
-//      local:   http://<id>.raw.localhost:8000/token/<id>
-//      mainnet: https://<id>.raw.icp0.io/token/<id>
+//    course_nft certifies these responses (IC Response Verification v2, §11 of
+//    its lib.rs), so the link uses the NORMAL gateway domain (no `.raw.` needed):
+//      local:   http://<id>.localhost:8000/token/<id>
+//      mainnet: https://<id>.icp0.io/token/<id>
 //    Returns null when the course_nft canister is unwired (`opt principal` = None)
 //    so the caller hides the link instead of rendering a dead anchor. ──
 
@@ -185,6 +184,6 @@ export function courseNftTokenUrl(
   const id = courseNftCanisterId?.trim();
   if (!id) return null;
   return isLocal
-    ? `http://${id}.raw.localhost:8000/token/${tokenId}`
-    : `https://${id}.raw.icp0.io/token/${tokenId}`;
+    ? `http://${id}.localhost:8000/token/${tokenId}`
+    : `https://${id}.icp0.io/token/${tokenId}`;
 }

@@ -281,7 +281,7 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
         {/* Hole intro card */}
         {phase === 'intro' && (
           <Overlay>
-            <span className="mono" style={{ fontSize: 11, color: 'var(--burn)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Hole {holeIdx + 1} of 9</span>
+            <span className="mono" style={{ fontSize: 11, color: 'var(--burn-ink)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Hole {holeIdx + 1} of 9</span>
             <h3 style={{ margin: 0 }}>{def.name}</h3>
             <span style={{ color: 'var(--fg-2)', fontSize: 13 }}>Par {def.par} · drag back from the ball and release to putt</span>
             <Btn variant="primary" onClick={beginHole}><Icon name="flame" size={13} stroke="var(--char-950)" /> Putt</Btn>
@@ -302,7 +302,7 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
         {/* Participation gate after hole 1 */}
         {phase === 'gate' && (
           <Overlay>
-            <Icon name="lock" size={26} stroke="var(--haze)" />
+            <Icon name="lock" size={26} stroke="var(--haze-ink)" />
             <h3 style={{ margin: 0 }}>That's the free preview</h3>
             <span style={{ color: 'var(--fg-2)', fontSize: 13, maxWidth: 380, textAlign: 'center' }}>
               Holes 2–9 (and the leaderboard) unlock for protocol participants: stake any
@@ -336,13 +336,13 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
                   <tr>
                     <td style={SC_TD}>You</td>
                     {perHole.map((s, i) => (
-                      <td key={i} style={{ ...SC_TD, color: s < course[i].par ? 'var(--sprout)' : s > course[i].par ? 'var(--haze)' : 'var(--fg)' }}>{s}</td>
+                      <td key={i} style={{ ...SC_TD, color: s < course[i].par ? 'var(--sprout-ink)' : s > course[i].par ? 'var(--haze-ink)' : 'var(--fg)' }}>{s}</td>
                     ))}
                   </tr>
                 </tbody>
               </table>
             </div>
-            {submitNote && <span style={{ fontSize: 12.5, color: 'var(--burn)' }}>{submitNote}</span>}
+            {submitNote && <span style={{ fontSize: 12.5, color: 'var(--burn-ink)' }}>{submitNote}</span>}
             <Btn variant="primary" onClick={onExit}>Back to Arcade</Btn>
           </Overlay>
         )}

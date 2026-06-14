@@ -392,7 +392,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>Play &amp; compete</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
-            <Icon name="gamepad" size={22} stroke="var(--burn)" />
+            <Icon name="gamepad" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Arcade</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
@@ -424,7 +424,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
 
       {isLoading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
-          <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
+          <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
           Loading arcade...
         </div>
       ) : activeTab === 'minigolf' ? (
@@ -468,7 +468,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             <div className="card col" style={{ gap: 10 }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                 <Chip tone="burn" style={{ height: 19, fontSize: 10 }}>
-                  <LiveDot color="var(--burn)" size={5} /> Game 2
+                  <LiveDot color="var(--burn-ink)" size={5} /> Game 2
                 </Chip>
                 <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
                   {FG_ROUNDS} kicks · {MIN_DISTANCE_YDS}–{MAX_DISTANCE_YDS} yds
@@ -534,7 +534,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
           }} onClick={e => e.stopPropagation()}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="edit" size={15} stroke="var(--burn)" />
+                <Icon name="edit" size={15} stroke="var(--burn-ink)" />
                 <b>Customize your {editorTarget}</b>
               </span>
               <Btn variant="ghost" sm onClick={() => !editorBusy && setIsEditorOpen(false)}><Icon name="x" size={14} /></Btn>
@@ -574,7 +574,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
                     style={{
                       background: payToken === t.token ? 'var(--burn-950)' : 'transparent',
                       border: `1px solid ${payToken === t.token ? 'var(--burn)' : 'var(--border)'}`,
-                      color: payToken === t.token ? 'var(--burn)' : 'var(--fg-3)',
+                      color: payToken === t.token ? 'var(--burn-ink)' : 'var(--fg-3)',
                       borderRadius: 999, padding: '5px 10px', fontSize: 11.5, fontWeight: 500,
                       cursor: 'pointer', transition: 'all var(--dur-fast) var(--ease-out)',
                     }}>
@@ -616,7 +616,7 @@ function LeaderboardSection({ title, sub, scoreHeader, rows, empty, principal }:
   return (
     <div className="col" style={{ gap: 10 }}>
       <span className="row" style={{ gap: 8 }}>
-        <Icon name="target" size={14} stroke="var(--burn)" />
+        <Icon name="target" size={14} stroke="var(--burn-ink)" />
         <b style={{ fontSize: 14, color: 'var(--fg)' }}>{title}</b>
         <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>{sub}</span>
       </span>
@@ -645,7 +645,7 @@ function LeaderboardSection({ title, sub, scoreHeader, rows, empty, principal }:
                     borderTop: '1px solid var(--border)',
                     background: mine ? 'var(--burn-950)' : 'transparent',
                   }}>
-                    <td style={{ ...LB_TD, color: r.rank <= 3 ? 'var(--burn)' : 'var(--fg-3)', fontWeight: r.rank <= 3 ? 700 : 400 }}>{r.rank}</td>
+                    <td style={{ ...LB_TD, color: r.rank <= 3 ? 'var(--burn-ink)' : 'var(--fg-3)', fontWeight: r.rank <= 3 ? 700 : 400 }}>{r.rank}</td>
                     <td style={{ ...LB_TD, textAlign: 'left' }} className="mono">
                       {formatPrincipal(r.player)}{mine ? ' · you' : ''}
                     </td>
