@@ -40,7 +40,7 @@ function HubCard({ span2, accent, onClick, eyebrow, icon, chip, children }: {
       style={{
         display: 'flex', flexDirection: 'column', gap: 10,
         padding: '16px 18px', borderRadius: 12,
-        background: accent ? 'var(--burn-950)' : 'var(--surface)',
+        background: accent ? 'color-mix(in srgb, var(--burn) 12%, var(--surface))' : 'var(--surface)',
         border: `1px solid ${accent ? 'var(--burn)' : 'var(--border)'}`,
         cursor: onClick ? 'pointer' : 'default',
       }}

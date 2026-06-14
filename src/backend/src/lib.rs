@@ -2987,15 +2987,10 @@ async fn commit_inner(
     target_e8s: u64,
     token_commit: Option<(ExplorerToken, u64)>,
 ) -> Result<(), String> {
-    let user_neuron = USER_NEURONS.with(|map| map.borrow().get(&caller));
-    let user_neuron = match user_neuron {
-        Some(state) => state,
-        None => return Err("NEURON_NOT_REGISTERED".to_string()),
-    };
-
-    if !user_neuron.is_following {
-        return Err("NOT_FOLLOWING".to_string());
-    }
+    // Voting requires only authentication (enforced by the public `commit` /
+    // `commit_token` entrypoints). Following the leader neuron is self-attested
+    // and encouraged in the UI, but it is NOT a precondition for committing a
+    // burn — the ICP burn itself is the skin in the game.
 
     let key = CommitmentKey {
         proposal_id,
@@ -3022,11 +3017,10 @@ async fn commit_inner(
         return Err("TOO_MANY_COMMITMENTS".to_string());
     }
 
-    if token_commit.is_none() && target_e8s < MIN_COMMIT_E8S {
-        return Err("BELOW_MINIMUM".to_string());
-    }
-    if token_commit.is_some() && icp_amount_usd_e8s(target_e8s) < USD_E8S_PER_USD {
-        // Token commits clear a $1 floor (presets start at $1).
+    // $1 minimum, valued in USD via the XRC oracle, for BOTH ICP and token
+    // commits (presets start at $1). `target_e8s` is the ICP-equivalent for
+    // token commits too, so one check covers both paths.
+    if icp_amount_usd_e8s(target_e8s) < USD_E8S_PER_USD {
         return Err("BELOW_MINIMUM".to_string());
     }
 
@@ -3176,8 +3170,8 @@ async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), 
         return Err("COMMITMENT_NOT_PENDING".to_string());
     }
 
-    // 2. Validate additional amount
-    if additional_e8s < MIN_COMMIT_E8S {
+    // 2. Validate additional amount — $1 USD floor (matches commit()).
+    if icp_amount_usd_e8s(additional_e8s) < USD_E8S_PER_USD {
         return Err("BELOW_MINIMUM".to_string());
     }
     let new_amount = commitment.amount_e8s
@@ -4061,11 +4055,19 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
     // PB-123: majority of committed (burned) ICP wins; an exact tie is broken by
     // the first stance committed on this proposal (first vote wins). Voting is
     // burn-only — the staked `lossless_*` pots no longer join the tally.
-    let vote_choice = decide_vote_choice(
-        proposal.adopt_pot_e8s,
-        proposal.reject_pot_e8s,
-        proposal.first_stance.clone(),
-    );
+    //
+    // When the threshold is NOT met, the leader neuron still votes, but always
+    // ADOPTS (Yes) rather than following the committed-pot majority. The staking
+    // tier neurons below echo this same `vote_choice`, so they adopt in lockstep.
+    let vote_choice = if met {
+        decide_vote_choice(
+            proposal.adopt_pot_e8s,
+            proposal.reject_pot_e8s,
+            proposal.first_stance.clone(),
+        )
+    } else {
+        1 // Yes / Adopt
+    };
 
     let mut vote_success = false;
     match proposal.nns_proposal_id {
@@ -20585,6 +20587,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_commit_without_following_succeeds() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        let pid = 700_002u64;
+        open_proposal(pid, 300_000_000);
+
+        // Alice never called confirm_follow — no USER_NEURONS entry at all.
+        set_mock_caller(alice);
+        assert!(USER_NEURONS.with(|m| m.borrow().get(&alice)).is_none());
+
+        // She can still vote: voting requires only authentication.
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.amount_e8s, 200_000_000);
+        assert!(matches!(c.stance, Stance::Adopt));
+    }
+
+    #[tokio::test]
     async fn test_commit_validation_gauntlet() {
         install_staking_test_config();
         let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
@@ -20593,19 +20616,12 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
 
-        // Must hold a registered, following neuron first.
+        // Voting no longer requires registering or following the leader neuron —
+        // only authentication (set here via the mock caller).
         set_mock_caller(alice);
-        assert_eq!(commit(pid, Stance::Adopt, 200_000_000).await.unwrap_err(), "NEURON_NOT_REGISTERED");
-        USER_NEURONS.with(|m| {
-            m.borrow_mut().insert(alice, UserNeuronState {
-                neuron_id: 7, is_following: false, verified_at: 1, cached_stake_e8s: 0,
-            });
-        });
-        assert_eq!(commit(pid, Stance::Adopt, 200_000_000).await.unwrap_err(), "NOT_FOLLOWING");
-        follow_as(alice);
 
         // Amount bounds.
-        assert_eq!(commit(pid, Stance::Adopt, MIN_COMMIT_E8S - 1).await.unwrap_err(), "BELOW_MINIMUM");
+        assert_eq!(commit(pid, Stance::Adopt, 1).await.unwrap_err(), "BELOW_MINIMUM"); // 1 e8s ≪ $1 floor
         assert_eq!(commit(pid, Stance::Adopt, MAX_COMMIT_E8S + 1).await.unwrap_err(), "EXCEEDS_GLOBAL_CAP");
 
         // Proposal must exist and be open.
@@ -20676,7 +20692,7 @@ mod tests {
         assert_eq!(add_to_commitment(pid, 100_000_000).await.unwrap_err(), "NO_EXISTING_COMMITMENT");
         commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
 
-        assert_eq!(add_to_commitment(pid, MIN_COMMIT_E8S - 1).await.unwrap_err(), "BELOW_MINIMUM");
+        assert_eq!(add_to_commitment(pid, 1).await.unwrap_err(), "BELOW_MINIMUM"); // 1 e8s ≪ $1 floor
 
         // Escrow must cover the NEW total + the 30k settlement reserve.
         set_mock_ledger_balance(250_000_000);
@@ -20980,6 +20996,32 @@ mod tests {
         assert!(payouts.iter().any(|po| po.user == alice
             && po.payout_type == PayoutType::CommitmentRefund
             && po.amount == 200_000_000));
+    }
+
+    #[tokio::test]
+    async fn test_cutoff_unmet_always_votes_adopt() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(7));
+        let pid = 700_045u64;
+        open_proposal(pid, 10_000_000_000); // unreachable threshold
+        // The only commit leans REJECT — under the committed-pot majority rule
+        // the leader would have voted No. An unmet threshold must override that
+        // to Adopt (and the staking-tier neurons echo the same vote_choice).
+        commit(pid, Stance::Reject, 200_000_000).await.unwrap();
+
+        process_proposal_cutoff(pid).await.unwrap();
+
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.status, "abstained", "under threshold");
+        assert!(prop.vote_executed_at.is_some(), "leader neuron still voted");
+
+        let vote = VOTES.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(vote.vote, Vote::Yes, "unmet threshold → forced Adopt despite Reject-leaning pot");
+        assert_eq!(vote.nns_outcome, Some("adopted".to_string()));
+        assert_eq!(vote.icp_burned_e8s, 0, "unmet → nothing burned");
     }
 
     #[tokio::test]

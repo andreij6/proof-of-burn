@@ -1,9 +1,10 @@
-Changes to the course editor
-1. remove the course type option we dont need this at all.
-2. move the button to go back to the marketplace out of the card - check how the lottery page places the "Lottery" back link and copy that style
-3. Remove "Save draft" functionality all together.
-4. The Course Editor should be laid out like this
-	1. Course name ------- play test (full width card )
-	2. Hole selector - (full width card )
-	3. Split 3-Pane  1. column of Items to add to the course 2. the course map. 3. the course rendered as it appears in the game. ( no ball or player visible )
-5. add a new "Rules" link that lets user know low rated courses can be hidden or burned with no warning.334625
+- there is a "Needs Attention" card that shows on the dashboard it does not look good in light mode.  make sure to correct it or use another style.  dark text on the dark backbround is not good.  there are other cards on other pages with the same problem.
+- the badges dont always look great in light mode either 
+- the "Your activity" row also looks bad in dark mode for the same reason.
+- in the "Confirm Conviction Burn" dialog - make the dollar amount selectable too. if the user clicks another currency the dollar amount should immediately recalculate the price for that currency
+- If the user doesnt have enough funds in the selected currency to vote change the submit button text to not enough funds and disable it.
+- Change the minimum to $1 dollar instead of 1 ICP - as shown in the Confirm Conviction Burn dialog
+- Dont show the wallet funds on the proposal card
+- in the dialog dont show the wallet amount just show then min requirement.
+- on the Community R&D the background of the Newest, Most votes, Most viewed makes it hard to see in light mode. "The Brief" card is difficult to read for the same reason.
+- many of the badges are also difficult to see in light mode.

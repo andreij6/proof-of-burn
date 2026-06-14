@@ -437,7 +437,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
   const card: React.CSSProperties = {
     border: '1px dashed var(--burn)', borderRadius: 10,
-    background: 'var(--burn-950)', padding: 14,
+    background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))', padding: 14,
   };
   const inputStyle: React.CSSProperties = { fontFamily: 'var(--font-mono)', flex: 1 };
   const base = config ? Number(config.lottery_tickets_per_day) : 5;

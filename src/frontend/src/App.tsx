@@ -39,7 +39,7 @@ import Landing from "./Landing";
 import Dashboard from "./Dashboard";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext } from "./ui";
-import { WALLET_TOKEN_META, parseTokenUnits, fmtUsd, thresholdProgress } from "./tokens";
+import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress } from "./tokens";
 import { useErrorImpression } from "./analytics";
 
 // ── Shareable URL routing (hash-based; this is a static asset canister) ──
@@ -317,7 +317,7 @@ function poolIs(status: PoolNeuron['status'], variant: 'Active' | 'Draft' | 'Ina
 // AIPanel Component
 function AIPanel({ open, onToggle, score, text }: { open: boolean; onToggle: () => void; score: string; text: string }) {
   return (
-    <div style={{ border: '1px solid var(--burn)', borderRadius: 8, background: 'var(--burn-950)', overflow: 'hidden' }}>
+    <div style={{ border: '1px solid var(--burn)', borderRadius: 8, background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))', overflow: 'hidden' }}>
       <button onClick={onToggle} style={{
         width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         gap: 10, padding: '9px 12px', background: 'transparent', border: 'none', cursor: 'pointer'
@@ -433,7 +433,8 @@ export default function App() {
   const [txError, setTxError] = useState<string | null>(null);
   const [txSuccess, setTxSuccess] = useState(false);
   const [confirmProposalId, setConfirmProposalId] = useState<bigint | null>(null);
-  const [confirmAmount, setConfirmAmount] = useState<string>("");
+  const [confirmAmount, setConfirmAmount] = useState<string>(""); // token amount (derived from USD)
+  const [confirmUsd, setConfirmUsd] = useState<string>("");       // dollar amount (the input)
   const [confirmStance, setConfirmStance] = useState<Stance | null>(null);
   // Vote dialog: conviction burn (voting is burn-only).
   // Multi-token voting: which token funds the burn commitment.
@@ -938,8 +939,8 @@ export default function App() {
     const commitment = myCommitments.find(c => c.proposal_id === p.id);
     const stance = commitment?.stance;
     const text = stance !== undefined
-      ? `I'm backing ${stance === Stance.Adopt ? 'ADOPT' : 'REJECT'} on NNS proposal #${id} — “${title}” — on Caldera. Burn ICP, move the vote. 🔥`
-      : `NNS proposal #${id} — “${title}” — is live on Caldera. Burn ICP, move the vote. 🔥`;
+      ? `I'm backing ${stance === Stance.Adopt ? 'ADOPT' : 'REJECT'} on NNS proposal #${id} — “${title}” — on Caldera. Burn ICP, move the vote. 🔥 $ICP`
+      : `NNS proposal #${id} — “${title}” — is live on Caldera. Burn ICP, move the vote. 🔥 $ICP`;
     const url = `${window.location.origin}/#proposal-${id}`;
     window.open(
       `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
@@ -1102,11 +1103,10 @@ export default function App() {
     }
   };
 
-  // Deriving the tier dynamically
+  // Deriving the tier dynamically. Following the leader neuron is optional
+  // (self-attested encouragement), so any signed-in user can vote (tier ≥ 2).
   const tier = !principal || principal.isAnonymous()
     ? 0
-    : !isFollowing
-    ? 1
     : (myCommitments.length > 0 || (eligibility?.has_committed ?? false))
     ? 3
     : 2;
@@ -1305,11 +1305,29 @@ export default function App() {
     setTimeout(() => setSkillsCopied(false), 2000);
   };
 
+  // Keep the token amount (confirmAmount — what executeTransaction spends) in
+  // sync with the USD the user entered and the selected currency. Switching
+  // currency re-prices the same dollars into the new token.
+  useEffect(() => {
+    const usd = parseFloat(confirmUsd);
+    if (!isFinite(usd) || usd <= 0) { setConfirmAmount(""); return; }
+    const meta = WALLET_TOKEN_META[voteToken];
+    const rate = usdRates[meta.variant] ?? 0n;
+    if (rate <= 0n) { setConfirmAmount(""); return; }
+    const usdE8s = BigInt(Math.round(usd * 1e8));
+    const smallest = usdE8s * BigInt(10) ** BigInt(meta.decimals) / rate;
+    const d = BigInt(10) ** BigInt(meta.decimals);
+    const whole = smallest / d;
+    const frac = (smallest % d).toString().padStart(meta.decimals, '0').replace(/0+$/, '');
+    setConfirmAmount(frac ? `${whole}.${frac}` : whole.toString());
+  }, [confirmUsd, voteToken, usdRates]);
+
   // Open modal with stance pre-selected; amount is entered inside the modal
   const handleCommitClick = (proposalId: bigint, stance: Stance) => {
     setConfirmProposalId(proposalId);
     setConfirmStance(stance);
     setConfirmAmount("");
+    setConfirmUsd("");
     setIsConfirming(true);
     setTxSuccess(false);
     setTxError(null);
@@ -1966,7 +1984,7 @@ export default function App() {
           </button>
           <span style={{
             width: 32, height: 32, flexShrink: 0, display: 'grid', placeItems: 'center',
-            border: '1px solid var(--burn)', borderRadius: 8, background: 'var(--burn-950)'
+            border: '1px solid var(--burn)', borderRadius: 8, background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))'
           }}>
             <Icon name="flame" size={17} stroke="var(--burn-ink)" />
           </span>
@@ -2060,7 +2078,7 @@ export default function App() {
                       <div className="col" style={{
                         gap: 10, padding: '14px 16px', borderRadius: 10, minWidth: 0,
                         border: '1px solid var(--border-hi)',
-                        background: 'color-mix(in srgb, var(--burn-950) 40%, transparent)',
+                        background: 'color-mix(in srgb, var(--burn) 14%, transparent)',
                       }}>
                         <div className="col" style={{ gap: 6 }}>
                           <span className="row" style={{ gap: 6, alignItems: 'center' }}>
@@ -2272,7 +2290,7 @@ export default function App() {
                     <Eyebrow>Your activity</Eyebrow>
                   </div>
                   <div className="row" data-testid="user-stats-strip" style={{
-                    border: '1px solid var(--burn)', borderRadius: 12, background: 'var(--burn-950)',
+                    border: '1px solid var(--burn)', borderRadius: 12, background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))',
                     padding: '18px 8px', boxShadow: '0 0 0 1px color-mix(in srgb, var(--burn) 25%, transparent)'
                   }}>
                     <div className="col" style={{ gap: 4, flex: 1, alignItems: 'center', textAlign: 'center' }}>
@@ -2737,15 +2755,11 @@ export default function App() {
                                   </Btn>
                                 </div>
 
-                                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-                                  <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-2)', flexWrap: 'wrap' }}>
-                                    <span className="row" style={{ gap: 4 }}>
-                                      <Icon name="coins" size={12} stroke="var(--fg-3)" />
-                                      <span>Wallet: <span className="mono" style={{ color: 'var(--fg)' }}>{fmtICP(holdings)}</span></span>
-                                    </span>
-                                  </span>
-                                  {mineBadge}
-                                </div>
+                                {mineBadge && (
+                                  <div className="row" style={{ justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                                    {mineBadge}
+                                  </div>
+                                )}
 
                                 {/* AI Review Panel */}
                                 {aiReview && aiMode !== 'hidden' && (
@@ -3230,7 +3244,7 @@ export default function App() {
               </button>
             </div>
 
-            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', padding: '10px 12px', borderRadius: 6, background: 'var(--burn-950)', border: '1px solid var(--burn)' }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', padding: '10px 12px', borderRadius: 6, background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))', border: '1px solid var(--burn)' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>Treasury balance</span>
               <span className="mono" style={{ fontSize: 18, fontWeight: 600, color: 'var(--fg)' }}>
                 {treasuryBalance !== null ? `${fmtICP(treasuryBalance)} ICP` : "…"}
@@ -3780,7 +3794,7 @@ export default function App() {
                 <div className="col" style={{ gap: 4 }}>
                   <h5 style={{ margin: 0, color: 'var(--fg)' }}>Commitment Registered!</h5>
                   <p style={{ fontSize: 13, color: 'var(--fg-2)' }}>
-                    Your {confirmAmount} ICP is locked in escrow. If the proposal reaches threshold and the neuron votes, it's spent — <b>50% treasury / 25% backend cycles / 25% frontend cycles</b> (with active pool neurons: 25% treasury / 25% backend / 25% frontend / 25% pool). If threshold isn't met, it's returned to your wallet.
+                    Your {confirmAmount} {voteToken} is locked in escrow. If the proposal reaches threshold and the neuron votes, it's spent — <b>50% treasury / 25% backend cycles / 25% frontend cycles</b> (with active pool neurons: 25% treasury / 25% backend / 25% frontend / 25% pool). If threshold isn't met, it's returned to your wallet.
                   </p>
                 </div>
                 <Btn variant="primary" style={{ width: '100%', marginTop: 8 }} onClick={() => setIsConfirming(false)}>
@@ -3805,7 +3819,8 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Amount input — any supported token; non-ICP converts at commit */}
+                {/* Amount — entered in USD; priced into the selected currency.
+                    Switching currency re-prices the same dollars (see effect). */}
                 <div className="col" style={{ gap: 8 }}>
                   <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                     {WALLET_TOKENS.map(t => (
@@ -3816,80 +3831,53 @@ export default function App() {
                     ))}
                   </div>
                   <label style={{ fontSize: 12, color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-                    How much {voteToken} to burn?
+                    How much to burn? (USD)
                   </label>
-                  {/* USD presets — the token amount is computed for you */}
+                  {/* USD presets */}
                   <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                    {[1, 2, 5, 10, 20, 100].map(usd => {
-                      const meta = WALLET_TOKEN_META[voteToken];
-                      const rate = usdRates[meta.variant] ?? 0n;
-                      return (
-                        <Btn key={usd} variant="ghost" sm disabled={rate <= 0n}
-                          onClick={() => {
-                            const smallest = BigInt(usd) * 100_000_000n * BigInt(10) ** BigInt(meta.decimals) / rate;
-                            const d = BigInt(10) ** BigInt(meta.decimals);
-                            const whole = smallest / d;
-                            const frac = (smallest % d).toString().padStart(meta.decimals, '0').replace(/0+$/, '');
-                            setConfirmAmount(frac ? `${whole}.${frac}` : whole.toString());
-                            setTxError(null);
-                          }}>
-                          ${usd}
-                        </Btn>
-                      );
-                    })}
+                    {[1, 2, 5, 10, 20, 100].map(usd => (
+                      <Btn key={usd} variant={confirmUsd === String(usd) ? 'primary' : 'ghost'} sm
+                        onClick={() => { setConfirmUsd(String(usd)); setTxError(null); }}>
+                        ${usd}
+                      </Btn>
+                    ))}
                   </div>
                   <div style={{ position: 'relative' }}>
+                    <span className="mono" style={{
+                      position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)',
+                      fontSize: 22, color: 'var(--fg-3)', pointerEvents: 'none'
+                    }}>$</span>
                     <input
                       type="number"
                       min="0"
-                      step="0.1"
-                      placeholder="0.0"
+                      step="1"
+                      placeholder="0"
                       className="burn-input"
-                      style={{ fontSize: 22, padding: '10px 78px 10px 14px', fontFamily: 'var(--font-mono)' }}
-                      value={confirmAmount}
-                      onChange={(e) => { setConfirmAmount(e.target.value); setTxError(null); }}
+                      style={{ fontSize: 22, padding: '10px 14px 10px 30px', fontFamily: 'var(--font-mono)' }}
+                      value={confirmUsd}
+                      onChange={(e) => { setConfirmUsd(e.target.value); setTxError(null); }}
                       autoFocus
                     />
-                    <span className="mono" style={{
-                      position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
-                      fontSize: 14, color: 'var(--fg-3)', pointerEvents: 'none'
-                    }}>{voteToken}</span>
                   </div>
-                  {(() => {
-                    const meta = WALLET_TOKEN_META[voteToken];
-                    const smallest = parseTokenUnits(confirmAmount || '0', meta.decimals) ?? 0n;
-                    const rate = usdRates[meta.variant] ?? 0n;
-                    const icpRate = usdRates[ExplorerToken.ICP] ?? 0n;
-                    if (smallest <= 0n || rate <= 0n) return null;
-                    const usd = smallest * rate / BigInt(10) ** BigInt(meta.decimals);
-                    const estIcp = icpRate > 0n ? usd * 100_000_000n / icpRate : 0n;
-                    return (
-                      <span className="row" style={{ gap: 8, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                        <Icon name="info" size={11} stroke="var(--fg-3)" />
-                        ≈ {fmtUsd(usd)}{voteToken !== 'ICP' ? <> · stays escrowed as {voteToken}; converts to ~{fmtICP(estIcp)} ICP only if the vote passes — refunded in {voteToken} if it doesn't</> : null}
-                      </span>
-                    );
-                  })()}
-                  {/* Inline limits */}
+                  {/* Priced into the selected token */}
+                  {confirmAmount && (
+                    <span className="row" style={{ gap: 8, fontSize: 11.5, color: 'var(--fg-3)' }}>
+                      <Icon name="info" size={11} stroke="var(--fg-3)" />
+                      ≈ {confirmAmount} {voteToken}{voteToken !== 'ICP' ? <> · stays escrowed as {voteToken}; converts to ICP only if the vote passes — refunded in {voteToken} if it doesn't</> : null}
+                    </span>
+                  )}
+                  {/* Min only — no wallet balance shown here */}
                   <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', width: '100%', flexWrap: 'wrap', gap: 8 }}>
-                    <div className="row" style={{ gap: 12, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
-                      <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>1.0 ICP</span></span>
-                      <span>Wallet: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(holdings)} ICP</span></span>
-                    </div>
+                    <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                      Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>$1</span>
+                    </span>
                     <button
                       type="button"
                       onClick={() => setIsHelpOpen(true)}
                       style={{
-                        background: 'none',
-                        border: 'none',
-                        color: 'var(--burn-ink)',
-                        fontSize: 11.5,
-                        cursor: 'pointer',
-                        padding: 0,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 4,
-                        textDecoration: 'underline'
+                        background: 'none', border: 'none', color: 'var(--burn-ink)',
+                        fontSize: 11.5, cursor: 'pointer', padding: 0,
+                        display: 'flex', alignItems: 'center', gap: 4, textDecoration: 'underline'
                       }}
                     >
                       <Icon name="info" size={11} stroke="var(--burn-ink)" /> What is this?
@@ -3919,11 +3907,25 @@ export default function App() {
                     <LiveDot size={8} color="var(--burn-ink)" />
                     <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>{txStep}</span>
                   </div>
-                ) : (
+                ) : (() => {
+                  // Balance of the SELECTED currency vs the priced token amount.
+                  const meta = WALLET_TOKEN_META[voteToken];
+                  const needed = parseTokenUnits(confirmAmount || '0', meta.decimals) ?? 0n;
+                  const bal = voteToken === 'ICP' ? holdings
+                    : voteToken === 'ckBTC' ? (tokenBalances.ckbtc ?? 0n)
+                    : voteToken === 'ckETH' ? (tokenBalances.cketh ?? 0n)
+                    : voteToken === 'ckUSDC' ? (tokenBalances.ckusdc ?? 0n)
+                    : (tokenBalances.ckusdt ?? 0n);
+                  const usd = parseFloat(confirmUsd);
+                  const hasAmount = isFinite(usd) && usd > 0 && needed > 0n;
+                  const belowMin = hasAmount && usd < 1;
+                  const insufficient = hasAmount && needed > bal;
+                  const canSubmit = tier >= 2 && hasAmount && !belowMin && !insufficient;
+                  return (
                   <div className="col" style={{ gap: 8 }}>
                     {tier < 2 && (
                       <span style={{ fontSize: 11.5, color: 'var(--haze-ink)' }}>
-                        Burning needs a followed leader neuron — hit "Confirm follow" on the dashboard first.
+                        Sign in to burn and cast your vote.
                       </span>
                     )}
                     <div className="row" style={{ gap: 12 }}>
@@ -3932,14 +3934,16 @@ export default function App() {
                       </Btn>
                       <Btn
                         variant="primary"
-                        style={{ flex: 1, opacity: tier >= 2 && confirmAmount && parseFloat(confirmAmount) >= (voteToken === 'ICP' ? 1 : 0) && parseFloat(confirmAmount) > 0 ? 1 : 0.45 }}
-                        onClick={() => { if (tier >= 2) executeTransaction(); }}
+                        style={{ flex: 1 }}
+                        disabled={!canSubmit}
+                        onClick={() => { if (canSubmit) executeTransaction(); }}
                       >
-                        <Icon name="flame" size={14} stroke="var(--char-950)" /> Submit
+                        <Icon name="flame" size={14} stroke="var(--char-950)" /> {insufficient ? 'Not enough funds' : belowMin ? 'Minimum is $1' : 'Submit'}
                       </Btn>
                     </div>
                   </div>
-                )}
+                  );
+                })()}
               </div>
             )}
           </div>
@@ -4260,7 +4264,7 @@ export default function App() {
           <span className="row" style={{ gap: 8 }}>
             <span style={{
               width: 28, height: 28, display: 'grid', placeItems: 'center',
-              border: '1px solid var(--burn)', borderRadius: 6, background: 'var(--burn-950)'
+              border: '1px solid var(--burn)', borderRadius: 6, background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))'
             }}>
               <Icon name="flame" size={15} stroke="var(--burn-ink)" />
             </span>

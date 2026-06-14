@@ -547,7 +547,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
                       {TOKEN_ORDER.map(t => (
                         <button key={t} onClick={() => { setSubToken(t); setSubError(null); }}
                           style={{
-                            background: subToken === t ? 'var(--burn-950)' : 'transparent',
+                            background: subToken === t ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
                             border: `1px solid ${subToken === t ? 'var(--burn)' : 'var(--border)'}`,
                             color: subToken === t ? 'var(--burn-ink)' : 'var(--fg-3)',
                             borderRadius: 999, padding: '5px 10px', fontSize: 11.5, fontWeight: 500,

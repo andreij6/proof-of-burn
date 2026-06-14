@@ -673,7 +673,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                   key={opt.key}
                   onClick={() => { setSortBy(opt.key); setGridPage(0); }}
                   style={{
-                    background: sortBy === opt.key ? 'var(--burn-950)' : 'transparent',
+                    background: sortBy === opt.key ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
                     border: `1px solid ${sortBy === opt.key ? 'var(--burn)' : 'var(--border)'}`,
                     color: sortBy === opt.key ? 'var(--burn-ink)' : 'var(--fg-3)',
                     borderRadius: 999, padding: '3px 10px', fontSize: 11.5, fontWeight: 500,
@@ -856,7 +856,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
       {/* ── About tab ── */}
       {tab === 'about' && (
         <div className="col" style={{ gap: 18, maxWidth: 720 }}>
-          <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'var(--burn-950)' }}>
+          <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
             <Eyebrow accent>The brief</Eyebrow>
             <p style={{ fontSize: 13.5, lineHeight: 1.6 }}>
               We want ideas for <b>anything we could build on the ICP blockchain that burns more ICP

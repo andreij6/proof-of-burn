@@ -216,7 +216,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
       {info?.last_winner != null && (
         <div className="row" style={{
           gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
-          border: '1px solid var(--burn)', background: 'var(--burn-950)',
+          border: '1px solid var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))',
         }}>
           <Icon name="spark" size={13} stroke="var(--burn-ink)" />
           <span>
@@ -324,7 +324,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         </div>
 
         {/* ── Earn tickets → Staking ── */}
-        <div className="col" style={{ ...card, gap: 10, flex: '1 1 240px', minWidth: 240, border: '1px solid var(--burn)', background: 'var(--burn-950)' }}>
+        <div className="col" style={{ ...card, gap: 10, flex: '1 1 240px', minWidth: 240, border: '1px solid var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
           <Eyebrow accent>Earn tickets</Eyebrow>
           <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
             Tickets come from lossless staking — your ICP keeps earning, and every

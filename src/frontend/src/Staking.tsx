@@ -320,7 +320,7 @@ export default function Staking({
         flex: 1, padding: '7px 4px', borderRadius: 7, cursor: 'pointer', fontSize: 12,
         fontWeight: active ? 700 : 500, fontFamily: 'inherit',
         border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
-        background: active ? 'var(--burn-950)' : 'transparent',
+        background: active ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
         color: active ? 'var(--burn-ink)' : 'var(--fg-2)',
       }}
     >
@@ -338,7 +338,7 @@ export default function Staking({
         flex: 1, padding: '7px 4px', borderRadius: 7, cursor: 'pointer', fontSize: 12,
         fontWeight: boosterSel ? 700 : 500, fontFamily: 'inherit',
         border: `1px solid ${boosterSel ? 'var(--burn)' : 'var(--border)'}`,
-        background: boosterSel ? 'var(--burn-950)' : 'transparent',
+        background: boosterSel ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
         color: boosterSel ? 'var(--burn-ink)' : 'var(--fg-2)',
       }}
     >
@@ -421,7 +421,7 @@ export default function Staking({
                   </div>
 
                   {/* What makes the Booster neuron special */}
-                  <div className="col" style={{ gap: 6, border: '1px solid var(--burn)', borderRadius: 8, padding: '10px 12px', background: 'var(--burn-950)' }}>
+                  <div className="col" style={{ gap: 6, border: '1px solid var(--burn)', borderRadius: 8, padding: '10px 12px', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
                     <span className="row" style={{ gap: 6, alignItems: 'center', fontSize: 12.5, color: 'var(--fg)' }}>
                       <Icon name="spark" size={13} stroke="var(--burn-ink)" /> <b>The 2-year Perm neuron</b>
                     </span>
@@ -534,7 +534,7 @@ export default function Staking({
                 gap: 10, padding: '14px 16px', borderRadius: 10,
                 flex: '1 1 240px', minWidth: 0,
                 border: `1px solid ${t === tier ? 'var(--border-hi)' : 'var(--border)'}`,
-                background: t === tier ? 'color-mix(in srgb, var(--burn-950) 40%, transparent)' : 'transparent',
+                background: t === tier ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
               }}>
                 <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                   <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>{TIER_META[t].label}</b>
@@ -596,7 +596,7 @@ export default function Staking({
                 gap: 10, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
                 flex: '1 1 240px', minWidth: 0,
                 border: `1px solid ${boosterSel ? 'var(--burn)' : 'var(--border-hi)'}`,
-                background: boosterSel ? 'color-mix(in srgb, var(--burn-950) 40%, transparent)' : 'transparent',
+                background: boosterSel ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
               }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                 <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>★ Perm · 2 years</b>
