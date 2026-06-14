@@ -10,7 +10,7 @@ canisters:
       # On-chain auto top-up (cycle_topup_check timer) refills from the treasury
       # before this threshold is hit. Never set below 30 days for a value-holding canister.
       freezing_threshold: 7776000
-    init_args: '(record { owner = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe"; primary_neuron_id = (4821667 : nat64); default_threshold_e8s = (200000000 : nat64); ai_price_e8s = (5000000 : nat64); ledger_canister_id = opt principal "a5dhi-k7777-77775-aaabq-cai" })'
+    init_args: '(record { owner = principal "gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe"; primary_neuron_id = (4821667 : nat64); default_threshold_e8s = (200000000 : nat64); ai_price_e8s = (5000000 : nat64); ledger_canister_id = opt principal "a2cb4-hh777-77775-aaaba-cai" })'
   # CourseNFT (ICRC-7) ledger for the Course NFT marketplace (PB-300/301). The
   # backend is the allowlisted minter/custodian — its local canister id is the
   # init `minter`. After deploy, wire the backend at this canister via

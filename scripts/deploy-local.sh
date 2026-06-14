@@ -109,16 +109,19 @@ icp canister call course_nft set_minter "(principal \"$BACKEND_ID\")" -e "$ENV" 
 icp canister call backend admin_set_course_nft_canister "(principal \"$COURSE_NFT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 ok "CourseNFT wired (backend=$BACKEND_ID is minter; backend → course_nft=$COURSE_NFT_ID)"
 
-# Seed one sample course so the marketplace isn't empty (idempotent).
+# Mint the genesis default/system course (PB-309) so the marketplace is never
+# empty. Idempotent: minted ONCE to the admin principal (guarded by
+# SYSTEM_COURSE_MINTED), and the admin can later sell it via the normal sale
+# path. Safe to call on every deploy — re-attempts a no-op'd upgrade seed (B6).
 if icp canister call backend list_marketplace_courses \
      '(record { difficulty = variant { Any }; theme = null; listed = variant { Any }; mine_only = false })' \
      --query -e "$ENV" | grep -q 'token_id = '; then
-  ok "Marketplace already has ≥1 course — skipping sample seed"
+  ok "Marketplace already has ≥1 course — skipping system-course seed"
 else
-  note "Seeding 1 sample course…"
-  icp canister call backend dev_seed_course '()' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null \
-    && ok "Sample course minted + listed" \
-    || note "Sample course seed skipped (already seeded or course_nft not ready)"
+  note "Minting the genesis default course…"
+  icp canister call backend admin_seed_system_course '()' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null \
+    && ok "Default course minted + listed (admin-owned, sellable)" \
+    || note "Default course seed skipped (already minted or course_nft not ready)"
 fi
 # Casino (Crash) is DISABLED pending the SVPP/points redesign. Force the flag
 # OFF (earlier deploys may have turned it on; flags persist across upgrades) and

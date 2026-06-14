@@ -727,6 +727,7 @@ type CourseCard = record {
   price_e8s : nat64;
   created_at : nat64;
   is_caller_owner : bool;
+  for_sale : bool;
 };
 type MarketplacePage = record {
   courses : vec CourseCard;
@@ -882,16 +883,19 @@ service : (InitPayload) -> {
   get_course : (nat64) -> (opt CourseCard) query;
   // Passthrough of the verbatim course_data blob for Play (PB-305).
   get_course_data : (nat64) -> (opt blob);
-  // Listing visibility only — no payment (buy is Phase 2) (PB-305).
+  // Put a (live-owned) course up for fixed-price sale / take it off sale (PB-307).
   list_course_for_sale : (nat64, nat64) -> (Result);
   delist_course : (nat64) -> (Result);
   refresh_course_listing : (nat64) -> (Result);
+  // Buy a listed-for-sale course: pure-escrow saga, 75/10/5/5/5 split (PB-307).
+  buy_course_nft : (nat64) -> (Result);
   // Play-to-earn pipeline + anti-cheat (PB-306).
   start_play_session : (nat64) -> (StartSessionResult);
   record_hole_event : (nat64, nat8) -> (RecordHoleResult);
   complete_round : (nat64) -> (CompleteRoundResult);
-  // Local-dev: mint + list one sample course so the marketplace isn't empty.
-  dev_seed_course : () -> (Result_1);
+  // Admin: mint the genesis default course once (idempotent), so the
+  // marketplace is never empty. Re-seed recovery for a no-op upgrade (PB-309).
+  admin_seed_system_course : () -> (Result_1);
   // Admin: add a permanent curated listing (no payment, no badge, no expiry).
   admin_add_dapp : (text, text, text) -> (Result_1);
   // Admin: add a fundable project. At least one per-token goal must be set.

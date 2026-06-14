@@ -112,7 +112,9 @@ most recent). **All new backend stable structures for this feature use 76+:**
 | 83 | `MINT_SAGAS: Principal → MintSaga` (two-canister mint idempotency) | [04](04-minting-flow.md) |
 | 84 | `COURSE_SALES: u64(token_id) → CourseSale` (buy-saga idempotency) | [07](07-secondary-market-royalties.md) |
 | 85 | `COURSE_PAIR_CAPS: (Principal, u64 token_id, u32 day) → u32` (per-course/day farm cap) | [06](06-play-to-earn-and-anticheat.md) |
-| 86–89 | **reserved** for this feature's growth | — |
+| 86 | `SYSTEM_COURSE_MINTED: StableCell<bool>` (default/system course minted-once flag) | [09](09-leaderboard-removal-and-arcade-migration.md) |
+| 87 | `FAVORITE_COURSES: Principal → FavoriteList{ ids: Vec<u64> }` (point-access by principal; capped) | [11](11-favorite-courses.md) |
+| 88–89 | **reserved** for this feature's growth | — |
 
 The **course_nft canister** has its own independent MemoryId space starting at 0:
 
@@ -197,10 +199,13 @@ then ratings).
 | **PB-308** | [08-featured-slot-auction.md](08-featured-slot-auction.md) | 3 | 305 |
 | **PB-309** | [09-leaderboard-removal-and-arcade-migration.md](09-leaderboard-removal-and-arcade-migration.md) | 1 | 303, 305 |
 | **PB-310** | [10-ratings-and-reviews.md](10-ratings-and-reviews.md) | 3 | 305 |
+| **PB-311** | [11-favorite-courses.md](11-favorite-courses.md) | 2 | 305 |
+| **PB-312** | [12-local-dev-options.md](12-local-dev-options.md) | 1 | 305, 307, 308 |
 
-**Phase 1 (MVP):** PB-301, 303, 302, 304, 305, 306, 309.
-**Phase 2 (Secondary market):** PB-307.
+**Phase 1 (MVP):** PB-301, 303, 302, 304, 305, 306, 309. (Default/system course: PB-309 §A.7.)
+**Phase 2 (Secondary market):** PB-307, 311 (favorites).
 **Phase 3 (Featured slot + ratings):** PB-308, 310.
+**Dev tooling (local-only, ongoing):** PB-312 — surfaced in the Dashboard & Controls panel.
 
 ---
 

@@ -65,10 +65,19 @@ frontend defaults in `arcade/engine.ts` `COURSE`):
 remove the `ARCADE_COURSE` override mechanism.** Rationale: it gives the
 marketplace non-empty, known-good content on day one (avoids a dead launch),
 preserves work already done and playtested, and gives users a reference course.
-The system course is owned by a system principal so its owner tickets either go
-to the treasury's exclusion bucket or are simply not credited (it is admin-owned;
-the lottery already excludes admins — overview §6 ticket-crediting note), which
-keeps it from siphoning lottery value.
+
+**This is "the default course" (per product direction).** It is minted to the
+**admin principal** (the deploy owner) as a normal ICRC-7 course NFT, auto-listed
+and immediately playable. Because it is a real, admin-owned token:
+- Owner tickets it would earn are not credited (the lottery already excludes
+  admins — overview §6 — so it never siphons lottery value while admin-held).
+- **The admin can sell it at any time** via the normal `list_course_for_sale`
+  (PB-307) — there is no special-casing; once sold, the new owner earns its play
+  tickets like any course. It is "default" only in that it always exists from
+  genesis and is featured/first in the picker, not in any transfer restriction.
+- It is minted exactly **once** (idempotent: B3 checks a `system_course_minted`
+  flag / token-id-1 existence) so re-deploys/upgrades don't duplicate it, and so
+  selling it never causes a re-seed to mint a second copy.
 
 Concretely:
 - The `course_data` blob format (PB-303) must be able to represent the existing
