@@ -299,7 +299,7 @@ export default function Dashboard({
 
         {flags.earlyAdopters && (
           <HubCard eyebrow="Perm" icon="spark" onClick={() => go('lottery')}
-            chip={<Chip tone="ok">100 tickets/ICP/day</Chip>}>
+            chip={<Chip tone="ok">40 tickets/ICP/day</Chip>}>
             {eaStaked > 0n ? (
               <>
                 <Big>{fmtICP(eaStaked)} ICP staked</Big>
@@ -308,7 +308,7 @@ export default function Dashboard({
             ) : (
               <>
                 <Big>Max lottery boost</Big>
-                <Sub>Stake ICP permanently for 100 lottery tickets/day per ICP — the highest rate. You're never paid ICP from it.</Sub>
+                <Sub>Stake ICP permanently for 40 lottery tickets/day per ICP — the highest rate. You're never paid ICP from it.</Sub>
               </>
             )}
           </HubCard>
@@ -324,7 +324,7 @@ export default function Dashboard({
         {isAdmin && (
           <HubCard eyebrow="Admin" icon="key" onClick={() => go('admin')}>
             <Big>Console</Big>
-            <Sub>Feature flags, thresholds, lottery config, course editor and treasury controls.</Sub>
+            <Sub>Feature flags, thresholds, lottery config and treasury controls.</Sub>
           </HubCard>
         )}
 

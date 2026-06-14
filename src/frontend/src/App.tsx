@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AuthClient } from "@icp-sdk/auth/client";
 import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
 import { Principal } from "@icp-sdk/core/principal";
@@ -72,15 +72,21 @@ const PATH_PAGE: Record<string, AppPage> = Object.fromEntries(
   Object.entries(PAGE_PATH).map(([p, path]) => [path, p as AppPage])
 ) as Record<string, AppPage>;
 
-/** IC docs on NNS neuron hotkeys (Verified Followers onboarding). */
+/** IC docs on NNS neuron hotkeys (Neuron Syndicate onboarding). */
 const NNS_HOTKEY_DOCS = "https://docs.internetcomputer.org/concepts/governance/#neuron-hotkeys";
 
 /** Page named by the current URL hash, or null when at the root / unknown. */
+// Hub pages keep their active sub-screen in a trailing hash segment (e.g.
+// /casino/crash, /arcade/course-play, /lottery/staking — see useHashScreen).
+// Resolve any such deep path back to its hub page so the top-level router stays
+// on the hub while the sub-screen changes.
+const HUB_PATHS = ['/casino', '/arcade', '/lottery'] as const;
 export function pageFromHash(hash: string): AppPage | null {
   const h = hash.replace(/^#/, '');
   if (/^proposal-\d+$/.test(h)) return 'voting'; // shared proposal deep link
   const path = '/' + h.replace(/^\//, '');
-  if (path.startsWith('/casino/')) return 'casino';
+  const hub = HUB_PATHS.find((p) => path === p || path.startsWith(p + '/'));
+  if (hub) return PATH_PAGE[hub];
   return PATH_PAGE[path] ?? null;
 }
 
@@ -472,8 +478,6 @@ export default function App() {
   // Input states for each proposal
   const [aiOpenMap, setAiOpenMap] = useState<Record<string, boolean>>({});
 
-  // Neuron copy status
-  const [copied, setCopied] = useState(false);
   const [skillsCopied, setSkillsCopied] = useState(false);
 
   // Active tab selection
@@ -494,6 +498,13 @@ export default function App() {
       return pageFromHash(window.location.hash) ?? 'landing';
     }
   );
+  // User navigations push a history entry (Back works); a redirect/alias/bounce
+  // calls `redirect()` so the hash is *replaced* — Back then skips the page that
+  // would only bounce forward again.
+  // Seeded true so the first (mount) hash normalization replaces rather than
+  // stacking an entry on a deep-linked URL.
+  const navReplaceRef = useRef(true);
+  const redirect = (p: AppPage) => { navReplaceRef.current = true; setPage(p); };
   // Proposal id from a shared link — scrolled to + highlighted once loaded.
   const [sharedProposalId, setSharedProposalId] = useState<string | null>(
     () => (typeof window !== 'undefined' && /^#proposal-\d+$/.test(window.location.hash))
@@ -943,14 +954,21 @@ export default function App() {
   }, [sharedProposalId, proposals.length]);
 
   // ── Keep the URL hash in sync with the current page (shareable links) ──
+  // Genuine navigations push a history entry so the Back button returns to the
+  // previous page; redirects/aliases/bounces (see `redirect()`) replace instead,
+  // so Back never lands on a page that just bounces forward again. A page change
+  // that originated from Back/Forward already has the matching hash, so the
+  // guard below skips it and we never double-push.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const desired = `#${PAGE_PATH[page]}`;
     // Don't clobber an unconsumed #proposal-<id> deep link.
     if (sharedProposalId && /^#proposal-\d+$/.test(window.location.hash)) return;
     if (window.location.hash !== desired && !(page === 'landing' && window.location.hash === '')) {
-      history.replaceState(null, '', desired);
+      if (navReplaceRef.current) history.replaceState(null, '', desired);
+      else history.pushState(null, '', desired);
     }
+    navReplaceRef.current = false;
   }, [page, sharedProposalId]);
 
   // Back/forward (or someone pasting a new hash) re-routes the page —
@@ -970,7 +988,7 @@ export default function App() {
   // landing page (only an explicit "Go to App" / a page link leaves it).
   useEffect(() => {
     if (page === 'landing' && principal && !principal.isAnonymous()) {
-      setPage('dashboard');
+      redirect('dashboard');
     }
   }, [page, principal]);
 
@@ -1095,42 +1113,42 @@ export default function App() {
   // bounce them back to the dashboard.
   useEffect(() => {
     if (page === 'ideas' && featureFlags.length > 0 && !ideaBoardEnabled) {
-      setPage('dashboard');
+      redirect('dashboard');
     }
     // Staking moved onto the lottery page — redirect the legacy route alias.
     if (page === 'staking') {
-      setPage('lottery');
+      redirect('lottery');
     }
     if (page === 'lottery' && featureFlags.length > 0 && !lotteryEnabled) {
-      setPage('dashboard');
+      redirect('dashboard');
     }
     if (page === 'explorer' && featureFlags.length > 0 && !explorerEnabled) {
-      setPage('dashboard');
+      redirect('dashboard');
     }
     // The Course Marketplace lives inside the arcade — redirect its alias.
     if (page === 'course_market') {
-      setPage('arcade');
+      redirect('arcade');
     }
     if (page === 'arcade' && featureFlags.length > 0 && !arcadeEnabled) {
-      setPage('dashboard');
+      redirect('dashboard');
     }
     if (page === 'casino' && featureFlags.length > 0 && !casinoEnabled) {
-      setPage('dashboard');
+      redirect('dashboard');
     }
     if (page === 'faucet' && featureFlags.length > 0 && !faucetEnabled) {
-      setPage('dashboard');
+      redirect('dashboard');
     }
     // Boosters (formerly Early Adopters) moved onto the lottery page —
     // redirect the legacy route alias.
     if (page === 'early_adopters') {
-      setPage('lottery');
+      redirect('lottery');
     }
     // Profile is account-scoped: bounce signed-out visitors — but only once
     // auth has resolved (principal === null means AuthClient is still
     // initializing; bouncing then killed #/profile deep links for
     // signed-in users — review 2026-06-11).
     if (page === 'payouts' && principal && principal.isAnonymous()) {
-      setPage('dashboard');
+      redirect('dashboard');
     }
   }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
 
@@ -1266,14 +1284,6 @@ export default function App() {
     setMyCommitments([]);
     setCycleBalance(null);
     setTreasuryBalance(null);
-  };
-
-  // Handle Neuron Copy
-  const handleCopy = () => {
-    if (!config) return;
-    navigator.clipboard.writeText(config.primary_neuron_id.toString());
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
   };
 
   const handleCopyAgentSkills = () => {
@@ -1730,6 +1740,10 @@ export default function App() {
           <Icon name="flame" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
           Voting
         </Btn>
+        <Btn variant={onEarn ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('earn')}>
+          <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
+          Neuron Syndicate
+        </Btn>
         {ideaBoardEnabled && (
           <Btn variant={page === 'ideas' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ideas')}>
             <Icon name="bulb" size={14} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
@@ -1742,10 +1756,6 @@ export default function App() {
             Explorer
           </Btn>
         )}
-        <Btn variant={onEarn ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('earn')}>
-          <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
-          Verified Followers
-        </Btn>
         {faucetEnabled && (
           <Btn variant={page === 'faucet' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('faucet')}>
             <Icon name="zap" size={14} stroke={page === 'faucet' ? 'var(--char-950)' : 'currentColor'} />
@@ -1910,10 +1920,18 @@ export default function App() {
   // anonymous visitors too — they browse view-only until they sign in).
   if (page === 'landing') {
     return (
-      <Landing onEnter={() => {
-        window.scrollTo(0, 0);
-        setPage('dashboard');
-      }} />
+      <Landing
+        flags={{
+          staking: losslessEnabled,
+          lottery: lotteryEnabled,
+          ideas: ideaBoardEnabled,
+          explorer: explorerEnabled,
+        }}
+        onEnter={() => {
+          window.scrollTo(0, 0);
+          setPage('dashboard');
+        }}
+      />
     );
   }
 
@@ -1992,7 +2010,7 @@ export default function App() {
             />
           ) : (EARN_PAGES as string[]).includes(page) ? (
             <div className="col" style={{ minHeight: '100%' }}>
-              {/* ── Verified Followers (the Earn page is now a single view) ── */}
+              {/* ── Neuron Syndicate (the Earn page is now a single view) ── */}
               {
                 <div className="idea-board-container" style={{ paddingTop: 18 }}>
                   {/* ── Page header (eyebrow · title · how it works) — Explorer style ── */}
@@ -2001,39 +2019,13 @@ export default function App() {
                       <Eyebrow accent>Govern with the community</Eyebrow>
                       <span className="row" style={{ gap: 10, alignItems: 'center' }}>
                         <NeuronGlyph size={22} />
-                        <h4 style={{ margin: 0 }}>Verified Followers</h4>
+                        <h4 style={{ margin: 0 }}>Neuron Syndicate</h4>
                         <span className="mono" style={{ fontSize: 12, color: 'var(--fg-3)' }}>
                           {poolInfo?.active_count.toString() ?? '0'} active
                         </span>
                       </span>
                       <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
-                        Verify that your NNS neuron follows the leader and earn a share of every burn.{' '}
-                        <MoreInfo title="How Verified Followers works">
-                      <p style={{ margin: 0 }}>
-                        <b>Become a Verified Follower:</b> on the NNS, set the community leader neuron as
-                        a followee and add this app's canister as a <b>hotkey</b>. The hotkey lets the
-                        canister verify on-chain that you follow the leader and vote your neuron with the
-                        pool — it <b>cannot move or unstake your ICP</b>.
-                      </p>
-                      <p style={{ margin: 0 }}>
-                        <b>One-time activation fee{config ? ` (${fmtICP(config.pool_initiation_fee_e8s + 30_000n)} ICP)` : ''}:</b> a
-                        spam guard that registers your neuron. It funds the protocol — there's no
-                        per-vote cost after that.
-                      </p>
-                      <p style={{ margin: 0 }}>
-                        <b>What you earn:</b> whenever a proposal settles as a burn, <b>25% of the burned
-                        ICP</b> is paid out to Verified Followers — split <b>equally</b> among the owners of
-                        the <b>top 100 neurons by voting power</b>, straight to your wallet. Voting power sets
-                        whether you make the top 100, not the size of your share. (Ties for the last paid slot
-                        go to the higher voting power.)
-                      </p>
-                      <p style={{ margin: 0 }}>
-                        New to hotkeys? See{' '}
-                        <a href={NNS_HOTKEY_DOCS} target="_blank" rel="noreferrer" style={{ color: 'var(--burn-ink)' }}>
-                          how NNS neuron hotkeys work ↗
-                        </a>.
-                      </p>
-                    </MoreInfo>
+                        <b style={{ color: 'var(--burn-ink)' }}>Earn</b> a share of every burn by verifying your NNS neuron follows the leader.
                       </p>
                     </div>
                     <Btn variant="secondary" sm onClick={() => setPoolDetailsOpen(true)}>
@@ -2041,15 +2033,14 @@ export default function App() {
                     </Btn>
                   </div>
 
-                  {!myPoolNeuron && (
+                  {!myPoolNeuron && principal && !principal.isAnonymous() && (
                     <Btn
                       variant="primary"
                       style={{ alignSelf: 'flex-start' }}
                       onClick={() => openPoolWizard()}
-                      disabled={!principal || principal.isAnonymous()}
                     >
                       <Icon name="spark" size={14} stroke="var(--char-950)" />
-                      {!principal || principal.isAnonymous() ? 'Sign in to join' : 'Join Pool'}
+                      Join Pool
                     </Btn>
                   )}
 
@@ -2062,42 +2053,41 @@ export default function App() {
                         border: '1px solid var(--border-hi)',
                         background: 'color-mix(in srgb, var(--burn-950) 40%, transparent)',
                       }}>
-                        <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                          <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>Your neuron</b>
-                          {poolIs(myPoolNeuron.status, 'Active')
-                            ? (myPoolRank != null && myPoolRank <= 100
-                                ? <Chip tone="ok"><Icon name="check" size={11} /> Active - Paid</Chip>
-                                : <Chip tone="muted">Active</Chip>)
-                            : poolIs(myPoolNeuron.status, 'Draft')
-                            ? <Chip tone="pending">Draft</Chip>
-                            : <Chip tone="muted">Inactive</Chip>}
+                        <div className="col" style={{ gap: 6 }}>
+                          <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+                            {poolIs(myPoolNeuron.status, 'Active')
+                              ? (myPoolRank != null
+                                  ? <Chip tone={myPoolRank <= 100 ? 'ok' : 'muted'}>Rank {myPoolRank}</Chip>
+                                  : <Chip tone="muted">Active</Chip>)
+                              : poolIs(myPoolNeuron.status, 'Draft')
+                              ? <Chip tone="pending">Draft</Chip>
+                              : <Chip tone="muted">Inactive</Chip>}
+                            <Chip tone="muted">You</Chip>
+                          </span>
+                          {isLocal ? (
+                            <b className="mono" style={{ fontSize: 14.5, overflowWrap: 'anywhere' }}>#{myPoolNeuron.neuron_id.toString()}</b>
+                          ) : (
+                            <a className="mono"
+                              href={`https://dashboard.internetcomputer.org/neuron/${myPoolNeuron.neuron_id.toString()}`}
+                              target="_blank" rel="noreferrer"
+                              style={{ fontSize: 14.5, fontWeight: 700, color: 'var(--fg)', textDecoration: 'none', overflowWrap: 'anywhere', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                              title="View this neuron on the NNS dashboard"
+                            >
+                              #{myPoolNeuron.neuron_id.toString()} <Icon name="external" size={12} stroke="var(--fg-3)" />
+                            </a>
+                          )}
                         </div>
-                        <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
-                          {poolIs(myPoolNeuron.status, 'Active') && (
+                        {poolIs(myPoolNeuron.status, 'Active') && (
+                          <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
                             <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                               <span style={{ color: 'var(--fg-3)' }}>Voting power</span>
                               <span className="mono" style={{ color: 'var(--sprout-ink)' }}>{fmtVP(myPoolNeuron.voting_power)} VP</span>
                             </div>
-                          )}
-                          <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
-                            <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
-                            {isLocal ? (
-                              <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
-                                #{myPoolNeuron.neuron_id.toString()}
-                              </span>
-                            ) : (
-                              <a
-                                className="mono"
-                                href={`https://dashboard.internetcomputer.org/neuron/${myPoolNeuron.neuron_id.toString()}`}
-                                target="_blank" rel="noreferrer"
-                                style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                                title="View this neuron on the NNS dashboard"
-                              >
-                                #{myPoolNeuron.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
-                              </a>
-                            )}
+                            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                              Registered {new Date(Number((myPoolNeuron.activated_at ?? myPoolNeuron.created_at) / 1_000_000n)).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                            </span>
                           </div>
-                        </div>
+                        )}
                         {(poolIs(myPoolNeuron.status, 'Draft') || poolIs(myPoolNeuron.status, 'Inactive')) && (
                           <Btn variant="primary" sm style={{ alignSelf: 'flex-start' }} onClick={() => openPoolWizard()}>
                             <Icon name="arrowUp" size={13} stroke="var(--char-950)" />
@@ -2122,43 +2112,28 @@ export default function App() {
                     {(poolInfo?.active_neurons ?? [])
                       .filter(n => !myPoolNeuron || n.neuron_id !== myPoolNeuron.neuron_id)
                       .map(n => (
-                        <div key={n.neuron_id.toString()} className="col" style={{
-                          gap: 10, padding: '14px 16px', borderRadius: 10, minWidth: 0,
-                          border: '1px solid var(--border)', background: 'transparent',
-                        }}>
-                          <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                            <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>Pool member</b>
-                            {n.rank <= 100
-                              ? <Chip tone="ok"><Icon name="check" size={11} /> Active - Paid</Chip>
-                              : <Chip tone="muted">Active</Chip>}
+                        <div key={n.neuron_id.toString()} className="card col" style={{ gap: 8, minWidth: 0 }}>
+                          <div className="col" style={{ gap: 6 }}>
+                            <Chip tone={n.rank <= 100 ? 'ok' : 'muted'} style={{ alignSelf: 'flex-start' }}>Rank {n.rank}</Chip>
+                            {isLocal ? (
+                              <b className="mono" style={{ fontSize: 14.5, overflowWrap: 'anywhere' }}>#{n.neuron_id.toString()}</b>
+                            ) : (
+                              <a className="mono"
+                                href={`https://dashboard.internetcomputer.org/neuron/${n.neuron_id.toString()}`}
+                                target="_blank" rel="noreferrer"
+                                style={{ fontSize: 14.5, fontWeight: 700, color: 'var(--fg)', textDecoration: 'none', overflowWrap: 'anywhere', display: 'inline-flex', alignItems: 'center', gap: 5 }}
+                                title="View this neuron on the NNS dashboard"
+                              >
+                                #{n.neuron_id.toString()} <Icon name="external" size={12} stroke="var(--fg-3)" />
+                              </a>
+                            )}
                           </div>
-                          <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
-                            <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                              <span style={{ color: 'var(--fg-3)' }}>Voting power</span>
-                              <span className="mono" style={{ color: 'var(--sprout-ink)' }}>{fmtVP(n.voting_power)} VP</span>
-                            </div>
-                            <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
-                              <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
-                              {isLocal ? (
-                                <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
-                                  #{n.neuron_id.toString()}
-                                </span>
-                              ) : (
-                                <a
-                                  className="mono"
-                                  href={`https://dashboard.internetcomputer.org/neuron/${n.neuron_id.toString()}`}
-                                  target="_blank" rel="noreferrer"
-                                  style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                                  title="View this neuron on the NNS dashboard"
-                                >
-                                  #{n.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
-                                </a>
-                              )}
-                            </div>
+                          <div className="row" style={{ justifyContent: 'space-between', gap: 8, fontSize: 12.5 }}>
+                            <span style={{ color: 'var(--fg-3)' }}>Voting power</span>
+                            <span className="mono" style={{ color: 'var(--sprout-ink)' }}>{fmtVP(n.voting_power)} VP</span>
                           </div>
-                          <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout-ink)' }}>
-                            <Icon name="eye" size={12} stroke="var(--sprout-ink)" />
-                            Public on the NNS — audit it any time.
+                          <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                            Registered {new Date(Number(n.registered_at / 1_000_000n)).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
                           </span>
                         </div>
                       ))}
@@ -2166,7 +2141,7 @@ export default function App() {
 
                   {(poolInfo?.active_count ?? 0n) === 0n && !myPoolNeuron && (
                     <span style={{ fontSize: 13, color: 'var(--fg-3)', padding: '12px 0', lineHeight: 1.6 }}>
-                      No verified followers yet. Verify your neuron to start earning a share of every burn.
+                      No Neuron Syndicate members yet. Verify your neuron to start earning a share of every burn.
                     </span>
                   )}
                 </div>
@@ -2196,7 +2171,7 @@ export default function App() {
               isAdmin={isAdmin}
               onSignIn={handleLogin}
             />
-          ) : page === 'arcade' ? (
+          ) : page === 'arcade' && arcadeEnabled ? (
             <Arcade
               actor={actor}
               identity={identity}
@@ -2209,7 +2184,7 @@ export default function App() {
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
             />
-          ) : page === 'casino' ? (
+          ) : page === 'casino' && casinoEnabled ? (
             <Casino
               actor={actor}
               principal={principal}
@@ -2218,7 +2193,7 @@ export default function App() {
               onGoStaking={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
               crashEnabled={crashEnabled}
             />
-          ) : page === 'faucet' ? (
+          ) : page === 'faucet' && faucetEnabled ? (
             <Faucet
               actor={actor}
               principal={principal}
@@ -2465,60 +2440,23 @@ export default function App() {
             {/* ── PB-071: Neuron Identity Block — staking-card style ── */}
             <Reveal delay={70} motion={motion}>
               <div className="card col" style={{ gap: 12 }}>
-                <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>Community leader neuron</b>
-                  {isFollowing ? (
-                    <Chip tone="ok" style={{ height: 22 }}><Icon name="check" size={12} /> Following</Chip>
-                  ) : (
-                    <Chip tone="muted" style={{ height: 22 }}><LiveDot color="var(--fg-3)" on={false} /> Not following</Chip>
-                  )}
-                </div>
-
-                <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0, alignItems: 'center' }}>
-                    <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
-                    <span className="row" style={{ gap: 6, alignItems: 'center', minWidth: 0 }}>
-                      {isLocal ? (
-                        <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
-                          #{config?.primary_neuron_id.toString() ?? '…'}
-                        </span>
-                      ) : (
-                        <a
-                          className="mono"
-                          href={`https://dashboard.internetcomputer.org/neuron/${config?.primary_neuron_id.toString() ?? ''}`}
-                          target="_blank" rel="noreferrer"
-                          style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                          title="View the leader neuron on the NNS dashboard"
-                        >
-                          #{config?.primary_neuron_id.toString() ?? '…'} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
-                        </a>
-                      )}
-                      <button onClick={handleCopy} title="Copy neuron ID" style={{
-                        display: 'grid', placeItems: 'center', width: 22, height: 22, flexShrink: 0,
-                        borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', color: 'var(--fg-3)', cursor: 'pointer'
-                      }}>
-                        <Icon name={copied ? "check" : "copy"} size={11} stroke={copied ? "var(--sprout-ink)" : "var(--fg-3)"} />
-                      </button>
-                    </span>
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                    <span style={{ color: 'var(--fg-3)' }}>Combined voting power</span>
-                    <span className="mono" style={{ color: 'var(--sprout-ink)' }}>
-                      {leaderInfo && totalSyndicateVP > 0n ? `${fmtVP(totalSyndicateVP)} VP` : '…'}
-                    </span>
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                    <span style={{ color: 'var(--fg-3)' }}>Dissolve delay</span>
-                    <span className="mono">
-                      {leaderInfo ? `${(Number(leaderInfo.dissolve_delay_seconds) / 31_557_600).toFixed(1)} years` : '…'}
-                    </span>
-                  </div>
+                <div className="col" style={{ gap: 6 }}>
+                  <Chip tone="ok" style={{ height: 22, alignSelf: 'flex-start' }}>
+                    <Icon name="zap" size={12} /> {leaderInfo && totalSyndicateVP > 0n ? `${fmtVP(totalSyndicateVP)} VP` : '… VP'}
+                  </Chip>
+                  <b style={{ fontSize: 14.5 }}>Syndicate Voting Power</b>
+                  <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                    Rent voting power from a pool of neurons to multiply your influence on every vote — no ICP lock-up required.
+                  </span>
                 </div>
 
                 <div className="row" style={{
-                  justifyContent: 'flex-end', alignItems: 'center', paddingTop: 10,
+                  justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', paddingTop: 10,
                   borderTop: '1px solid var(--border)', marginTop: 1
                 }}>
+                  <Btn variant="secondary" sm onClick={() => setPage('earn')}>
+                    <Icon name="coins" size={13} /> Join the Neuron Syndicate
+                  </Btn>
                   {!isFollowing ? (
                     !principal || principal.isAnonymous() ? (
                       <span className="row" style={{ gap: 6, color: 'var(--burn-ink)', fontSize: 12.5, whiteSpace: 'nowrap' }}>
@@ -3475,9 +3413,9 @@ export default function App() {
             </div>
 
             <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
-              <Eyebrow>What is a Verified Follower?</Eyebrow>
+              <Eyebrow>What is the Neuron Syndicate?</Eyebrow>
               <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
-                Verified Followers point their NNS neuron at the community leader (verified on-chain via a hotkey). Each neuron automatically votes the way the leader votes, and their combined voting power gives the community more influence over NNS proposals.
+                Neuron Syndicate members point their NNS neuron at the community leader (verified on-chain via a hotkey). Each neuron automatically votes the way the leader votes, and their combined voting power gives the community more influence over NNS proposals.
               </p>
             </div>
 
@@ -3507,7 +3445,7 @@ export default function App() {
             <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
               <Eyebrow>How to join</Eyebrow>
               <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
-                Follow the community leader and add this app's canister as a hotkey, then pay the one-time initiation fee{config ? ` (${fmtICP(config.pool_initiation_fee_e8s + 30_000n)} ICP)` : ''} to activate. Once active, your neuron votes with the community and is eligible for payouts if it reaches the top 100.
+                Follow the community leader and add this app's canister as a hotkey, then pay the one-time initiation fee{config ? ` (${fmtICP(config.pool_initiation_fee_e8s)} ICP)` : ''} to activate. Once active, your neuron votes with the community and is eligible for payouts if it reaches the top 100.
               </p>
             </div>
 
@@ -3591,7 +3529,7 @@ export default function App() {
             {poolWizardStep === 1 && (
               <div className="col" style={{ gap: 14 }}>
                 <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
-                  <Eyebrow>What is a Verified Follower?</Eyebrow>
+                  <Eyebrow>What is the Neuron Syndicate?</Eyebrow>
                   <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
                     Point your neuron's voting power at the community leader (verified via a hotkey). Your neuron automatically votes the same way the leader does, and the top 100 by voting power earn a share of each settled burn.
                   </p>
@@ -3599,13 +3537,13 @@ export default function App() {
                 <div className="col" style={{ gap: 8, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
                   <Eyebrow>Initiation fee</Eyebrow>
                   <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-                    <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>One-time fee + cycle reserve</span>
+                    <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>One-time fee</span>
                     <span className="mono" style={{ fontSize: 16, fontWeight: 600, color: 'var(--fg)' }}>
-                      {config ? fmtICP(config.pool_initiation_fee_e8s + 30_000n) : '…'} ICP
+                      {config ? fmtICP(config.pool_initiation_fee_e8s) : '…'} ICP
                     </span>
                   </div>
                   <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                    Split 50% treasury / 25% backend cycles / 25% frontend cycles. Payment is the final step — nothing is charged until you confirm.
+                    Charged once when you confirm at the final step — there's no per-vote cost after that.
                   </span>
                 </div>
                 <div className="row" style={{ gap: 12, marginTop: 4 }}>
@@ -3620,7 +3558,7 @@ export default function App() {
             {/* Step 2 — Configure & Verify */}
             {poolWizardStep === 2 && (
               <div className="col" style={{ gap: 14 }}>
-                <Eyebrow accent>Step 2 of 3 — Verify your neuron (free)</Eyebrow>
+                <Eyebrow accent>Step 2 of 3 — Verify your neuron</Eyebrow>
 
                 {/* Hotkey instruction */}
                 <div className="col" style={{ gap: 8, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
@@ -3639,6 +3577,10 @@ export default function App() {
                       <Icon name="copy" size={12} stroke="var(--fg-3)" />
                     </button>
                   </div>
+                  <a href={NNS_HOTKEY_DOCS} target="_blank" rel="noreferrer"
+                    style={{ fontSize: 12, color: 'var(--burn-ink)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <Icon name="external" size={11} stroke="var(--burn-ink)" /> How NNS neuron hotkeys work
+                  </a>
                 </div>
 
                 {/* Follow instruction */}
@@ -3708,7 +3650,7 @@ export default function App() {
                       <Icon name="checkCircle" size={24} stroke="var(--sprout-ink)" />
                     </div>
                     <div className="col" style={{ gap: 4 }}>
-                      <h5 style={{ margin: 0, color: 'var(--fg)' }}>You're a Verified Follower!</h5>
+                      <h5 style={{ margin: 0, color: 'var(--fg)' }}>You're in the Neuron Syndicate!</h5>
                       <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0 }}>
                         Your neuron now follows the community leader and votes with it. Payouts land in your app wallet after each settled proposal (top 100 by voting power).
                       </p>
@@ -3725,20 +3667,9 @@ export default function App() {
                       </span>
                       <div className="col" style={{ gap: 6, padding: 12, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
                         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-                          <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Initiation fee</span>
-                          <span className="mono" style={{ fontSize: 14, fontWeight: 600, color: 'var(--fg)' }}>
-                            {config ? fmtICP(config.pool_initiation_fee_e8s) : '…'} ICP
-                          </span>
-                        </div>
-                        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-                          <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Cycle reserve</span>
-                          <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>0.0003 ICP</span>
-                        </div>
-                        <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
-                        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg)' }}>Total (from app wallet)</span>
+                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg)' }}>One-time fee (from app wallet)</span>
                           <span className="mono" style={{ fontSize: 16, fontWeight: 700, color: 'var(--burn-ink)' }}>
-                            {config ? fmtICP(config.pool_initiation_fee_e8s + 40_000n) : '…'} ICP
+                            {config ? fmtICP(config.pool_initiation_fee_e8s) : '…'} ICP
                           </span>
                         </div>
                       </div>
@@ -3766,15 +3697,22 @@ export default function App() {
                           {isCancellingDraft ? ' Cancelling…' : ' Discard'}
                         </Btn>
                       )}
-                      <Btn variant="primary" style={{ flex: 1 }}
-                        onClick={handlePoolPayAndFinalize}
-                        disabled={isPoolFinalizing || isCancellingDraft || (config ? holdings < config.pool_initiation_fee_e8s + 40_000n : false)}>
-                        {isPoolFinalizing ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="coins" size={14} stroke="var(--char-950)" />}
-                        {isPoolFinalizing ? ' Processing…' : ' Pay & Activate'}
-                      </Btn>
+                      {config && holdings < config.pool_initiation_fee_e8s ? (
+                        <Btn variant="primary" style={{ flex: 1 }}
+                          onClick={() => { setIsPoolWizardOpen(false); setPage('payouts'); setWalletRequest(n => n + 1); }}>
+                          <Icon name="wallet" size={14} stroke="var(--char-950)" /> Add ICP to wallet
+                        </Btn>
+                      ) : (
+                        <Btn variant="primary" style={{ flex: 1 }}
+                          onClick={handlePoolPayAndFinalize}
+                          disabled={isPoolFinalizing || isCancellingDraft}>
+                          {isPoolFinalizing ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="coins" size={14} stroke="var(--char-950)" />}
+                          {isPoolFinalizing ? ' Processing…' : ' Pay & Activate'}
+                        </Btn>
+                      )}
                     </div>
                     <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'center' }}>
-                      Closing this dialog keeps your Draft saved — resume anytime from the Verified Followers page.
+                      Closing this dialog keeps your Draft saved — resume anytime from the Neuron Syndicate page.
                     </span>
                   </>
                 )}

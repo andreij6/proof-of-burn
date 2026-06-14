@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon, Btn, DiscordMark, DISCORD_INVITE } from './ui';
 
 // ==========================================
@@ -11,24 +11,48 @@ import { Icon, Btn, DiscordMark, DISCORD_INVITE } from './ui';
 // design system's burn-orange as the traveling action potential.
 // ==========================================
 
-interface LandingProps {
-  onEnter: () => void;
+/** Feature-flag booleans that decide which marketed sections render. */
+export interface LandingFlags {
+  staking: boolean;
+  lottery: boolean;
+  ideas: boolean;
+  explorer: boolean;
 }
 
-const SECTIONS = [
+interface LandingProps {
+  onEnter: () => void;
+  /** When omitted, every section renders (default-safe — never blank the page). */
+  flags?: LandingFlags;
+}
+
+/** Which flag (if any) gates a section. `undefined` = always-on / core. */
+type SectionFlag = keyof LandingFlags;
+
+interface Section {
+  icon: string;
+  eyebrow: string;
+  title: string;
+  body: string;
+  chips: string[];
+  flag?: SectionFlag;
+}
+
+const SECTIONS: Section[] = [
   {
     icon: 'flame',
     eyebrow: 'Voting',
     title: 'Burn ICP. Move the vote.',
     body: 'Commit ICP behind adopt or reject on live NNS proposals. The heavier side steers the community leader neuron. The vote lands — the pot burns into cycles and treasury. The threshold misses — every e8 comes straight back.',
     chips: ['1 ICP minimum', 'majority steers the neuron', 'full refund on a miss'],
+    // Voting is core — always rendered.
   },
   {
     icon: 'zap',
     eyebrow: 'Staking',
     title: 'Lock time. Stack tickets.',
-    body: 'Stake into 6-month, 1-year or 2-year pooled neurons to earn daily lossless-lottery tickets — longer terms earn more (5 / 10 / 20 per ICP per day), or go permanent for 100. The treasury pays every transfer fee. Commit X, get X back. Zero loss, literally.',
-    chips: ['up to 100 tickets/ICP/day', 'principal never spent', 'treasury pays the fees'],
+    body: 'Stake into 6-month, 1-year or 2-year pooled neurons to earn daily lossless-lottery tickets — longer terms earn more (5 / 10 / 20 per ICP per day), or go permanent for 40. The treasury pays every transfer fee. Commit X, get X back. Zero loss, literally.',
+    chips: ['up to 40 tickets/ICP/day', 'principal never spent', 'treasury pays the fees'],
+    flag: 'staking',
   },
   {
     icon: 'target',
@@ -36,6 +60,7 @@ const SECTIONS = [
     title: 'A winner about once a month. Nobody loses.',
     body: 'Stakers collect free tickets daily — 5, 10 or 20 per ICP by term, scaling with your stake. Three drawings a week, each with a 1-in-13 chance of crowning a winner, and a pot funded purely by staking yield. Win, and 80% lands in your wallet automatically.',
     chips: ['3 drawings a week', '80% jackpot · 20% rolls over', 'paid instantly, no claiming'],
+    flag: 'lottery',
   },
   {
     icon: 'bulb',
@@ -43,6 +68,7 @@ const SECTIONS = [
     title: 'Pitch it. Back it. Build it.',
     body: 'Post ideas that burn more ICP, upvote the best for free, and fund the official projects the treasury executes — in ICP, ckBTC or ckETH toward a single USD goal.',
     chips: ['free upvotes', '3 tokens accepted', 'treasury-funded builds'],
+    flag: 'ideas',
   },
   {
     icon: 'copy',
@@ -50,8 +76,19 @@ const SECTIONS = [
     title: 'Your agent runs the routine.',
     body: 'Every flow ships as a copy-paste skill: vote on proposals, stake, claim lottery tickets, defend your ideas. Hand the daily loop to an AI agent — you keep the upside.',
     chips: ['copy-paste agent skills', 'CLI-first endpoints', 'cron-friendly daily claims'],
+    // Always-on — core pitch.
   },
-] as const;
+];
+
+/**
+ * The sections actually shown, given the current flags. A section renders when
+ * it has no gating flag (core/always-on) or its flag is on. If `flags` is
+ * undefined we fall back to showing everything so the landing never blanks.
+ */
+function visibleSections(flags?: LandingFlags): Section[] {
+  if (!flags) return SECTIONS;
+  return SECTIONS.filter((s) => !s.flag || flags[s.flag]);
+}
 
 /** Deterministic pseudo-random for the background "tissue" specks. */
 function speck(i: number) {
@@ -86,7 +123,11 @@ function Soma({ x, y, lit, flip }: { x: number; y: number; lit: boolean; flip?: 
   );
 }
 
-export default function Landing({ onEnter }: LandingProps) {
+export default function Landing({ onEnter, flags }: LandingProps) {
+  // Compute the flag-filtered section list ONCE — both the map below and every
+  // anchor-index calculation must agree on this same array.
+  const sections = useMemo(() => visibleSections(flags), [flags]);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const anchorRefs = useRef<(HTMLDivElement | null)[]>([]);
   const brightRef = useRef<SVGPathElement>(null);
@@ -191,7 +232,7 @@ export default function Landing({ onEnter }: LandingProps) {
   }, [pathLen]);
 
   // ── Section reveal on approach ──
-  const [seen, setSeen] = useState<boolean[]>(() => SECTIONS.map(() => false));
+  const [seen, setSeen] = useState<boolean[]>(() => sections.map(() => false));
   const sectionRefs = useRef<(HTMLElement | null)[]>([]);
   useEffect(() => {
     const io = new IntersectionObserver(
@@ -358,7 +399,7 @@ export default function Landing({ onEnter }: LandingProps) {
       </section>
 
       {/* ── Synapse sections: each feature fires as the pulse passes ── */}
-      {SECTIONS.map((s, i) => (
+      {sections.map((s, i) => (
         <section
           key={s.eyebrow}
           ref={(el) => { sectionRefs.current[i] = el; }}
@@ -404,7 +445,7 @@ export default function Landing({ onEnter }: LandingProps) {
         alignItems: 'center', justifyContent: 'center', textAlign: 'center',
         position: 'relative', zIndex: 1, padding: '60px 20px', gap: 18,
       }}>
-        <div ref={(el) => { anchorRefs.current[SECTIONS.length + 1] = el; }}
+        <div ref={(el) => { anchorRefs.current[sections.length + 1] = el; }}
           style={{ height: 150, width: 1, marginBottom: 10 }} />
         <h2 style={{
           fontFamily: 'var(--font-display)', fontSize: 'clamp(28px, 4.5vw, 48px)',

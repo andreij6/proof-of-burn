@@ -98,7 +98,9 @@ size, max elements/hole, paired tunnels/ramps balanced. Exact numbers defined in
 ## 5. MemoryId allocation (DO NOT COLLIDE)
 
 The existing **backend** canister uses MemoryIds `0–75` (75 = `POOL_REWARDS_PAID`,
-most recent). **All new backend stable structures for this feature use 76+:**
+most recent). This table is the **canonical cross-feature registry** for `76+` —
+every parked spec pins its ids here so nothing collides: **`76–89` = course-nft,
+`90–93` = cycles-faucet, `94–95` = AI reviewer.**
 
 | MemoryId | Map | Owner spec |
 |---|---|---|
@@ -115,6 +117,14 @@ most recent). **All new backend stable structures for this feature use 76+:**
 | 86 | `SYSTEM_COURSE_MINTED: StableCell<bool>` (default/system course minted-once flag) | [09](09-leaderboard-removal-and-arcade-migration.md) |
 | 87 | `FAVORITE_COURSES: Principal → FavoriteList{ ids: Vec<u64> }` (point-access by principal; capped) | [11](11-favorite-courses.md) |
 | 88–89 | **reserved** for this feature's growth | — |
+| 90 | `FAUCET_REGISTRATIONS: Principal(canister) → Registration` | `ideas/faucet/cycles-faucet.md` |
+| 91 | `FAUCET_DEV_LAST_CLAIM: Principal(dev) → u64(ns)` | `ideas/faucet/cycles-faucet.md` |
+| 92 | `FAUCET_CANISTER_USAGE: Principal(canister) → {last_claim_ns,count}` | `ideas/faucet/cycles-faucet.md` |
+| 93 | faucet counters/stats cell | `ideas/faucet/cycles-faucet.md` |
+| 94 | `AI_USER_CREDITS: Principal → u64` (prepaid credit e8s) | `ideas/ai-reviewer/ai-reviewer-spec.md` |
+| 95 | **reserved** for AI reviewer (audit/state) | `ideas/ai-reviewer/ai-reviewer-spec.md` |
+| 96 | `FAUCET_GRANTS: u64(grant_id) → FaucetGrant` (public grant tx list) | `ideas/faucet/cycles-faucet.md` |
+| 97+ | free (admin-revenue precompute, if built, starts here) | `ideas/admin-revenue/` |
 
 The **course_nft canister** has its own independent MemoryId space starting at 0:
 

@@ -85,6 +85,53 @@ read -r -p "Type exactly 'DEPLOY TO MAINNET' to continue: " CONFIRM
 icp deploy backend frontend -e "$ENV"
 ok "Deploy command completed"
 
+# ── Core-launch feature-flag policy ──────────────────────────────────────────
+# Features ship dark (flags default OFF) and persist across upgrades, so we
+# assert the EXACT launch policy explicitly here rather than trusting prior
+# state. Admin calls run as the current (already-verified mainnet) deploy
+# identity, which is the backend's admins[0] — same identity used for the deploy
+# above, so no separate --identity is needed. Idempotent: re-running re-asserts.
+#
+#   ENABLE  (true):  idea_board lossless_voting lossless_lottery dapp_explorer early_adopters
+#   DISABLE (false): arcade arcade_minigolf arcade_fieldgoal crash cycles_faucet
+CORE_ON=(idea_board lossless_voting lossless_lottery dapp_explorer early_adopters)
+CORE_OFF=(arcade arcade_minigolf arcade_fieldgoal crash cycles_faucet)
+
+note "Asserting core-launch feature-flag policy…"
+for f in "${CORE_ON[@]}"; do
+  icp canister call backend admin_set_feature_flag "(\"$f\", true)"  -e "$ENV" >/dev/null \
+    || die "admin_set_feature_flag(\"$f\", true) failed."
+done
+for f in "${CORE_OFF[@]}"; do
+  icp canister call backend admin_set_feature_flag "(\"$f\", false)" -e "$ENV" >/dev/null \
+    || die "admin_set_feature_flag(\"$f\", false) failed."
+done
+ok "Feature flags set (5 enabled, 5 disabled)"
+
+# Verify: read the raw flags back and FAIL LOUDLY if reality ≠ policy. We parse
+# the per-flag candid record (whitespace-collapsed) and assert the raw `state`
+# variant (On/Off) — not the caller-effective `enabled` field, which can read
+# true for an AdminOn flag when queried by an admin.
+note "Verifying feature-flag policy on-chain…"
+FLAGS_RAW=$(icp canister call backend list_feature_flags '()' --query -e "$ENV" | tr -d '\n' | tr -s ' ')
+flag_state() { # echo On|Off|AdminOn|MISSING for a given key
+  echo "$FLAGS_RAW" | grep -oE "record \{[^}]*key = \"$1\"[^}]*\}" \
+    | grep -oE 'state = variant \{ (On|Off|AdminOn) \}' | grep -oE '(On|Off|AdminOn)' | head -1
+}
+POLICY_OK=1
+for f in "${CORE_ON[@]}"; do
+  st=$(flag_state "$f"); [[ "$st" == "On" ]] || { echo -e "${RED}   ✗ $f expected On, got '${st:-MISSING}'${NC}"; POLICY_OK=0; }
+done
+for f in "${CORE_OFF[@]}"; do
+  st=$(flag_state "$f"); [[ "$st" == "Off" ]] || { echo -e "${RED}   ✗ $f expected Off, got '${st:-MISSING}'${NC}"; POLICY_OK=0; }
+done
+if [[ "$POLICY_OK" != "1" ]]; then
+  echo -e "${RED}Flags read back from mainnet:${NC}"
+  icp canister call backend list_feature_flags '()' --query -e "$ENV" | sed 's/^/     /'
+  die "Feature-flag policy verification FAILED — mainnet flags do not match the core-launch policy above."
+fi
+ok "Feature-flag policy verified (idea_board/lossless_voting/lossless_lottery/dapp_explorer/early_adopters ON; arcade*/crash/cycles_faucet OFF)"
+
 # ── 4. Smoke checks + reminders ──────────────────────────────────────────────
 BACKEND_ID=$(icp canister status backend -e "$ENV" 2>/dev/null | awk '/Canister Id:/ {print $3}')
 FRONTEND_ID=$(icp canister status frontend -e "$ENV" 2>/dev/null | awk '/Canister Id:/ {print $3}')

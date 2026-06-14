@@ -4,7 +4,8 @@ import { UnstakeStatus } from "./bindings/backend";
 import { FlagState } from "./bindings/backend";
 import type { Config, FeatureFlag, GlobalStats, LotteryInfo, EarlyAdopterInfo, StakingPoolInfo, PoolInfo, NeuronFollowStatus, AuditLogEntry, StakeTier, PendingUnstake } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import { Icon, Eyebrow, Btn, Chip, LiveDot, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
+import type { ModerationCandidate } from "./bindings/backend";
+import { Icon, Eyebrow, Btn, Chip, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 import CourseEditor from "./arcade/CourseEditor";
 
 // ==========================================
@@ -27,7 +28,7 @@ interface AdminProps {
   openTreasury: () => void;
 }
 
-type AdminSection = 'overview' | 'treasury' | 'neurons' | 'governance' | 'staking' | 'features' | 'content' | 'reference';
+type AdminSection = 'overview' | 'treasury' | 'neurons' | 'governance' | 'staking' | 'features' | 'content' | 'moderation' | 'reference';
 
 const SECTIONS: { key: AdminSection; label: string; icon: string }[] = [
   { key: 'overview', label: 'Overview', icon: 'eye' },
@@ -37,6 +38,7 @@ const SECTIONS: { key: AdminSection; label: string; icon: string }[] = [
   { key: 'staking', label: 'Staking & Lottery', icon: 'zap' },
   { key: 'features', label: 'Features', icon: 'zap' },
   { key: 'content', label: 'Content', icon: 'gamepad' },
+  { key: 'moderation', label: 'Course moderation', icon: 'eye' },
   { key: 'reference', label: 'Reference', icon: 'info' },
 ];
 
@@ -149,6 +151,9 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   const [ea, setEa] = useState<EarlyAdopterInfo | null>(null);
   const [staking, setStaking] = useState<StakingPoolInfo | null>(null);
   const [pool, setPool] = useState<PoolInfo | null>(null);
+
+  // ── course moderation ──
+  const [modCandidates, setModCandidates] = useState<ModerationCandidate[] | null>(null);
 
   // ── governance / diagnostics ──
   const [auditTail, setAuditTail] = useState<AuditLogEntry[]>([]);
@@ -400,6 +405,34 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       : `⚠ ${bad.length} neuron(s) NOT fully following — see the table.`;
   });
 
+  // ── course moderation ────────────────────────────────────────────────────
+  // Worst-first list of low-rated courses (avg < 2.0★ with ≥5 ratings); the
+  // backend already excludes hidden courses from the public marketplace.
+  const refreshModeration = async () => {
+    if (!actor) return;
+    try {
+      const list: ModerationCandidate[] = await actor.admin_list_moderation_candidates(200);
+      setModCandidates(list);
+    } catch { /* transient */ }
+  };
+
+  const hideCourse = (c: ModerationCandidate) => run(`mod-hide-${c.token_id}`, async () => {
+    const res = c.hidden
+      ? await actor.admin_unhide_course(c.token_id)
+      : await actor.admin_hide_course(c.token_id);
+    if (res.__kind__ === 'Err') { setError(res.Err); return null; }
+    await refreshModeration();
+    return `Course #${c.token_id} ${c.hidden ? 'unhidden — back in the marketplace' : 'hidden from the marketplace'}.`;
+  });
+
+  const burnCourse = (c: ModerationCandidate) => run(`mod-burn-${c.token_id}`, async () => {
+    if (!window.confirm(`Burn course #${c.token_id}? This permanently destroys the NFT — it cannot be undone.`)) return null;
+    const res = await actor.admin_burn_course(c.token_id);
+    if (res.__kind__ === 'Err') { setError(res.Err); return null; }
+    await refreshModeration();
+    return `Course #${c.token_id} burned permanently.`;
+  });
+
   const card: React.CSSProperties = {
     border: '1px dashed var(--burn)', borderRadius: 10,
     background: 'var(--burn-950)', padding: 14,
@@ -423,7 +456,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       {/* ── Section nav ── */}
       <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
         {SECTIONS.map(s => (
-          <Btn key={s.key} variant={section === s.key ? 'primary' : 'ghost'} sm onClick={() => { setSection(s.key); setError(null); setNotice(null); if (s.key === 'governance' || s.key === 'treasury') refreshAudit(); if (s.key === 'neurons') refreshSplitNeurons(); }}>
+          <Btn key={s.key} variant={section === s.key ? 'primary' : 'ghost'} sm onClick={() => { setSection(s.key); setError(null); setNotice(null); if (s.key === 'governance' || s.key === 'treasury') refreshAudit(); if (s.key === 'neurons') refreshSplitNeurons(); if (s.key === 'moderation') refreshModeration(); }}>
             <Icon name={s.icon} size={13} stroke={section === s.key ? 'var(--char-950)' : 'currentColor'} />
             {s.label}
           </Btn>
@@ -913,6 +946,75 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
         </>
       )}
 
+      {/* ════ COURSE MODERATION ════ */}
+      {section === 'moderation' && (
+        <>
+          <div className="col" style={{ ...card, gap: 10 }}>
+            <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="eye" size={13} stroke="var(--burn-ink)" />
+                <Eyebrow>Low-rated courses — moderation candidates</Eyebrow>
+              </span>
+              <Btn variant="ghost" sm onClick={refreshModeration} disabled={busy !== null}><Icon name="undo" size={12} /> Refresh</Btn>
+            </span>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              Courses rated below 2.0★ with at least 5 ratings, worst first.{' '}
+              <MoreInfo title="Course moderation">
+                These are surfaced for review only — nothing auto-hides. Hiding removes a course
+                from the public marketplace (existing owners keep the NFT); burning permanently
+                destroys the NFT and cannot be undone. Both are admin-discretion actions taken
+                without warning to the owner.
+              </MoreInfo>
+            </span>
+
+            {modCandidates === null && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Loading…</span>}
+            {modCandidates !== null && modCandidates.length === 0 && (
+              <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No low-rated courses — nothing to moderate.</span>
+            )}
+            {modCandidates !== null && modCandidates.length > 0 && (
+              <div className="col" style={{ gap: 0 }}>
+                {/* Header row */}
+                <div className="row" style={{ gap: 10, padding: '6px 8px', borderBottom: '1px solid var(--border-hi)', color: 'var(--fg-3)', fontSize: 11 }}>
+                  <span style={{ flex: '0 0 70px' }}>Token</span>
+                  <span style={{ flex: '1 1 0' }}>Owner</span>
+                  <span style={{ flex: '0 0 80px' }}>Rating</span>
+                  <span style={{ flex: '0 0 64px' }}>Ratings</span>
+                  <span style={{ flex: '0 0 70px' }}>Status</span>
+                  <span style={{ flex: '0 0 180px', textAlign: 'right' }}>Actions</span>
+                </div>
+                {modCandidates.map((c, i) => (
+                  <div key={c.token_id.toString()} className="row" style={{
+                    gap: 10, padding: '6px 8px', alignItems: 'center',
+                    borderBottom: '1px solid var(--border)',
+                    background: i % 2 ? 'transparent' : 'var(--surface)',
+                  }}>
+                    <span className="mono" style={{ flex: '0 0 70px', fontSize: 12.5 }}>#{c.token_id.toString()}</span>
+                    <span className="mono" style={{ flex: '1 1 0', fontSize: 12, color: 'var(--fg-3)' }}>
+                      {c.owner ? formatPrincipal(c.owner) : 'unowned'}
+                    </span>
+                    <span className="mono" style={{ flex: '0 0 80px', fontSize: 12.5 }}>{(c.avg_x10 / 10).toFixed(1)} ★</span>
+                    <span className="mono" style={{ flex: '0 0 64px', fontSize: 12.5, color: 'var(--fg-3)' }}>{c.rating_count}</span>
+                    <span style={{ flex: '0 0 70px' }}>
+                      <Chip tone={c.hidden ? 'muted' : 'ok'} style={{ height: 18, fontSize: 10.5 }}>{c.hidden ? 'hidden' : 'visible'}</Chip>
+                    </span>
+                    <span className="row" style={{ flex: '0 0 180px', gap: 6, justifyContent: 'flex-end' }}>
+                      <Btn variant="secondary" sm onClick={() => hideCourse(c)} disabled={busy !== null}>
+                        {busy === `mod-hide-${c.token_id}` ? <LiveDot size={7} /> : <Icon name={c.hidden ? 'eye' : 'x'} size={12} stroke="var(--burn-ink)" />}
+                        {c.hidden ? 'Unhide' : 'Hide'}
+                      </Btn>
+                      <Btn variant="danger" sm onClick={() => burnCourse(c)} disabled={busy !== null}>
+                        {busy === `mod-burn-${c.token_id}` ? <LiveDot size={7} color="var(--ember)" /> : <Icon name="flame" size={12} stroke="currentColor" />}
+                        Burn
+                      </Btn>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
       {/* ════ REFERENCE ════ */}
       {section === 'reference' && (
         <>
@@ -932,9 +1034,9 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <Li>Every transfer is journaled with per-leg block indices; the 5-minute sweep retries any failed leg without ever double-spending.</Li>
           </Section>
 
-          <Section icon="target" title="Verified Followers — earn 25% of every burn">
-            <Li>Neuron owners pay a one-time initiation fee (current: {config ? fmtICP(config.pool_initiation_fee_e8s) : '…'} ICP, split 50% treasury / 25% backend cycles / 25% frontend cycles) to register their neuron as a Verified Follower.</Li>
-            <Li>When a proposal settles as burned, 25% of the burned total is split equally among the owners of the top 100 verified-follower neurons by voting power (ties for the last slot go to the higher voting power), paid from the treasury.</Li>
+          <Section icon="target" title="Neuron Syndicate — earn 25% of every burn">
+            <Li>Neuron owners pay a one-time initiation fee (current: {config ? fmtICP(config.pool_initiation_fee_e8s) : '…'} ICP, split 50% treasury / 25% backend cycles / 25% frontend cycles) to register their neuron in the Neuron Syndicate.</Li>
+            <Li>When a proposal settles as burned, 25% of the burned total is split equally among the owners of the top 100 Neuron Syndicate neurons by voting power (ties for the last slot go to the higher voting power), paid from the treasury.</Li>
             <Li>Each payout lands in the recipient's wallet and their payout history. Deactivating keeps the registration — reactivating never re-charges the fee.</Li>
           </Section>
 
@@ -962,17 +1064,17 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
           <Section icon="spark" title="Perm tier — the platform's permanent stake">
             <Li>Permanent (no unstake, by design) stake into a platform-controlled 2-year neuron that follows the primary on every topic. Open to everyone, forever — no membership cap or close.</Li>
-            <Li>Perm stakes earn <b>lottery tickets only</b>: a flat 100 tickets/day per whole ICP staked. No ICP yield is ever paid to Perm stakers.</Li>
+            <Li>Perm stakes earn <b>lottery tickets only</b>: a flat 40 tickets/day per whole ICP staked. No ICP yield is ever paid to Perm stakers.</Li>
             <Li>The Perm neuron's harvested yield is split <b>50% treasury / 50% lottery prize pot</b> — never distributed to users.</Li>
           </Section>
 
           <Section icon="coins" title="Payout history — every satoshi accounted for">
-            <Li>Every transfer the canister makes to a user is recorded: lottery jackpots, unstake disbursements, commitment refunds, and verified-follower rewards.</Li>
+            <Li>Every transfer the canister makes to a user is recorded: lottery jackpots, unstake disbursements, commitment refunds, and Neuron Syndicate rewards.</Li>
             <Li>Each record carries the token, amount, timestamp and source id — the user-facing mirror of the append-only audit log.</Li>
           </Section>
 
           <Section icon="wallet" title="Treasury & cycles — how the lights stay on">
-            <Li>Treasury inflows: 50% of burns, 50% of staking yield, 50% of Perm-neuron yield, idea post fees, project funding, verified-follower initiation fees, explorer and arcade payments.</Li>
+            <Li>Treasury inflows: 50% of burns, 50% of staking yield, 50% of Perm-neuron yield, idea post fees, project funding, Neuron Syndicate initiation fees, explorer and arcade payments.</Li>
             <Li>Cycles: 25% of each burn tops up each canister via the CMC. If the backend dips below 5T cycles, the sweep auto-converts treasury ICP into cycles (two-phase, idempotent).</Li>
             <Li>Withdrawals and neuron allocations are guarded by the 15 ICP floor (override available) — below ~10 ICP the cycle top-up silently stops.</Li>
           </Section>

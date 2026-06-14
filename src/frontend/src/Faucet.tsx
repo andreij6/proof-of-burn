@@ -43,7 +43,7 @@ function gateLabel(gate: any, claimWindowNs: bigint, voteWindowNs: bigint): stri
     case 'Eligible': return 'Eligible — you can claim now.';
     case 'FaucetDisabled': return 'The faucet is currently closed.';
     case 'CanisterNotRegistered': return 'Register your canister first (it must call register_faucet_canister on itself).';
-    case 'NoPoolNeuron': return 'You need an active pool neuron (a Verified Follower) to claim.';
+    case 'NoPoolNeuron': return 'You need an active pool neuron (a Neuron Syndicate member) to claim.';
     case 'NotVotedInWindow': return `You must have burn-voted in the last ${days(voteWindowNs)} days.`;
     case 'ClaimedThisWeek': return `Already claimed this period (one claim per ${days(claimWindowNs)} days, per dev and per canister).`;
     case 'CanisterLifetimeReached': return 'This canister has reached its lifetime grant cap.';

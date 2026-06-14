@@ -68,7 +68,7 @@ const TX_META: Record<string, { label: string; icon: string; blurb: string }> = 
   UnstakeDisbursement: { label: 'Unstake disbursement', icon: 'zap', blurb: 'Dissolved stake returned to your wallet' },
   IdeaUpvoteShare: { label: 'Idea upvote share', icon: 'bulb', blurb: 'Legacy — upvoting is now free, no poster share' },
   CommitmentRefund: { label: 'Commitment refund', icon: 'undo', blurb: 'Escrow returned — threshold unmet' },
-  PoolReward: { label: 'Verified follower reward', icon: 'arrowUp', blurb: '25% of a settled burn, split equally among the top 100 verified-follower neurons' },
+  PoolReward: { label: 'Neuron Syndicate reward', icon: 'arrowUp', blurb: '25% of a settled burn, split equally among the top 100 Neuron Syndicate neurons' },
   EarlyAdopterYield: { label: 'Early Adopter yield', icon: 'spark', blurb: 'Legacy — Perm-tier stakes earn lottery tickets only, no ICP yield' },
   // Out — what you put in.
   deposit: { label: 'Burn commitment', icon: 'flame', blurb: 'Escrowed behind a proposal stance' },

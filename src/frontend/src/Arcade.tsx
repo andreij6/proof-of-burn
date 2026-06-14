@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useHashScreen } from './nav';
 import { Principal } from "@icp-sdk/core/principal";
 import { ExplorerToken } from "./bindings/backend";
 import type { ArcadeInfo, ArcadeLeaderboardRow, ExplorerInfo, ExplorerQuote } from "./bindings/backend";
@@ -173,7 +174,9 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   const [isLoading, setIsLoading] = useState(true);
   // Mini Golf is now the Course Marketplace (PB-309): the tab shows the
   // marketplace; "create" opens the editor; "play" opens a course in the engine.
-  const [view, setView] = useState<'lobby' | 'fieldgoal' | 'course-editor' | 'course-play'>('lobby');
+  // The active view lives in the hash (#/arcade, #/arcade/course-play, …) so the
+  // Back button returns to the lobby instead of leaving the page.
+  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'course-editor' | 'course-play'>('/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
   // Lobby sub-page — one per game (its card, persona and leaderboard).
   const [tab, setTab] = useState<'minigolf' | 'fieldgoal'>('minigolf');

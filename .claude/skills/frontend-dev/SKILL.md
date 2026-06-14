@@ -1,6 +1,6 @@
 ---
 name: frontend-dev
-description: Edit the React frontend (src/frontend). Use when building or changing UI pages (follow the established page anatomy so new pages stay consistent), calling backend canister methods from TypeScript, working with generated candid bindings, or debugging "dead button" / undefined-data issues caused by candid optional decoding.
+description: Edit the React frontend (src/frontend). Use when building or changing UI pages (follow the established page anatomy so new pages stay consistent), calling backend canister methods from TypeScript, working with generated candid bindings, debugging "dead button" / undefined-data issues caused by candid optional decoding, or checking/fixing color contrast and light-mode accessibility (WCAG).
 ---
 
 # Frontend development
@@ -118,6 +118,82 @@ A page isn't reachable until all four are done — follow how an existing page
    entry only when enabled, and add the redirect guard so a disabled page
    bounces (`~1172`). New games/features ship dark (flag default OFF).
 4. Add the nav button/tab next to its peers (Earn/Participate/Play groups).
+
+## Color contrast & light-mode accessibility
+
+Low-contrast UI is almost always a **light-mode** bug here, and it has a single
+structural cause worth understanding before you touch colors.
+
+### The thresholds (WCAG 2.2 AA — the target)
+
+- **Normal text ≥ 4.5:1** against its background.
+- **Large text ≥ 3:1** — "large" = ≥ 24px, or ≥ 18.66px **bold**.
+- **Non-text / UI ≥ 3:1** (SC 1.4.11): meaningful icons, the border that *is* an
+  input/control, focus rings. Purely decorative hairlines are exempt.
+- Disabled/inactive components are exempt from text contrast — but only if
+  they're genuinely disabled.
+- (AAA is 7:1 / 4.5:1. APCA is the emerging WCAG 3 successor — Lc 60 ≈ 4.5:1 —
+  but WCAG 2.2 ratios are what we check today.)
+
+### The structural trap in THIS codebase
+
+The token system (`index.css`) defines accents — `--burn`, `--sprout`, `--haze`
+— **once at `:root` and the `[data-theme="light"]` block does NOT override
+them.** It remaps `--fg-*` / `--bg` / `--border`, but the accents are
+theme-invariant. They're tuned for the **dark** surface (near-black), where they
+have huge contrast. Flipped onto the light surface (near-white) they collapse:
+
+| Token as text/icon | on light `--bg` | verdict |
+|---|---|---|
+| `--burn` #FF6A1F | 2.6:1 | fails text **and** 3:1 icon |
+| `--sprout` #4CB580 | 2.3:1 | fails |
+| `--haze` #D4A84B | 2.0:1 | fails (worst) |
+| `--fg-3` #78716C | 4.36:1 | fails 4.5 normal (OK for large only) |
+| `--fg-dim` #A8A29E | 2.3:1 | OK only as *disabled* |
+
+So: **an accent or muted-grey that looks fine in dark mode can be unreadable in
+light mode.** Always verify both themes — the app defaults to dark, so light-mode
+contrast bugs hide.
+
+### How to spot it (do all three when touching color)
+
+1. **Toggle the theme and look.** Set `data-theme="light"` on the root (the theme
+   button in the top bar) and eyeball muted text, chips, eyebrows, icons, and
+   any accent-colored text.
+2. **DevTools per element.** Inspect → the color swatch in the Styles pane shows
+   the live contrast ratio with AA/AAA ticks and a suggested passing color; or
+   run Lighthouse / axe DevTools for a page sweep.
+3. **Token-level math** (fastest for the design system) — compute the ratio for a
+   token pair instead of guessing:
+
+   ```python
+   def lin(c):
+       c/=255; return c/12.92 if c<=0.04045 else ((c+0.055)/1.055)**2.4
+   def lum(h):
+       h=h.lstrip('#'); r,g,b=(int(h[i:i+2],16) for i in (0,2,4))
+       return 0.2126*lin(r)+0.7152*lin(g)+0.0722*lin(b)
+   def ratio(a,b):
+       la,lb=lum(a),lum(b); return (max(la,lb)+0.05)/(min(la,lb)+0.05)
+   ```
+
+   Rule: **every token used as a foreground (text or meaningful icon) must clear
+   4.5 (3 if large/icon) against EVERY surface it lands on — `--bg`, `--surface`,
+   `--bg-alt` — in BOTH themes.** Bright-on-dark accents need a darker `-ink`
+   variant for light mode (see the fix pattern below).
+
+### The fix pattern (don't darken the global accent)
+
+The bright accents are correct as **fills** (e.g. a burn-filled primary button).
+The problem is only the accent used as **foreground text/icon on a light
+surface.** So add theme-aware `*-ink` tokens rather than changing `--burn` etc.:
+
+```css
+:root              { --burn-ink: var(--burn);   --sprout-ink: var(--sprout); --haze-ink: var(--haze); }
+[data-theme=light] { --burn-ink: #AD3F0F;       --sprout-ink: #15663A;       --haze-ink: #8A5A00; }
+```
+
+Then use `--burn-ink` (not `--burn`) wherever the accent is text/icon. Verify
+candidate values with the snippet above before committing.
 
 ## Candid bindings — generated, never edited
 

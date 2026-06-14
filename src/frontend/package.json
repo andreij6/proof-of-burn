@@ -16,6 +16,7 @@
   "dependencies": {
     "@icp-sdk/auth": "^5.0.0",
     "@icp-sdk/core": "^5.4.0",
+    "firebase": "^12.14.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },

@@ -210,6 +210,9 @@ pub struct ActivePoolNeuron {
     pub voting_power: u64,
     pub registered_by: Principal,
     pub rank: u32,
+    /// When the neuron joined the syndicate (activation time; falls back to
+    /// draft-creation time for older records).
+    pub registered_at: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -342,7 +345,7 @@ pub struct LedgerAccount {
 // ==========================================
 
 fn default_pool_initiation_fee_e8s() -> u64 {
-    12_500_000_000
+    1_000_000_000 // 10 ICP
 }
 
 /// Minimum stake per call once the pool neuron exists (the very first stake
@@ -654,7 +657,7 @@ thread_local! {
             ledger_canister_id: Principal::anonymous(),
             is_local: false,
             frontend_canister_id: None,
-            pool_initiation_fee_e8s: 12_500_000_000, // 125 ICP
+            pool_initiation_fee_e8s: 1_000_000_000, // 10 ICP
             ckbtc_ledger_canister_id: None,
             cketh_ledger_canister_id: None,
             ckusdc_ledger_canister_id: None,
@@ -950,6 +953,7 @@ fn get_pool_info() -> PoolInfo {
             voting_power: n.voting_power,
             registered_by: n.registered_by,
             rank: (i + 1) as u32,
+            registered_at: n.activated_at.unwrap_or(n.created_at),
         });
     }
 
@@ -4985,11 +4989,17 @@ thread_local! {
 
 fn feature_default(key: &str) -> bool {
     match key {
-        // Default OFF: Crash (casino, pending the points redesign) and the
-        // Cycles Faucet (PB-400, moves treasury value — ships dark).
+        // Default OFF (ship dark): Crash (casino, pending the points redesign),
+        // the Cycles Faucet (PB-400, moves treasury value), and the whole Arcade
+        // surface — Arcade + both games (Mini Golf, Field Goal) launch dark and
+        // are turned on deliberately by an admin, never on a fresh install.
         FLAG_CRASH => false,
         FLAG_CYCLES_FAUCET => false,
-        // Every other SHIPPED feature defaults ON; unknown keys stay OFF.
+        FLAG_ARCADE => false,
+        FLAG_ARCADE_MINIGOLF => false,
+        FLAG_ARCADE_FIELDGOAL => false,
+        // Every other SHIPPED feature (Idea Board, Lossless Voting/Lottery,
+        // Explorer, Early Adopters) defaults ON; unknown keys stay OFF.
         k => KNOWN_FEATURE_FLAGS.contains(&k),
     }
 }
@@ -8556,7 +8566,7 @@ fn user_daily_tickets(user: Principal) -> u64 {
             acc
         }
     });
-    // Boosters (permanent stake): a flat 100 tickets/day per whole ICP, on top
+    // Boosters (permanent stake): a flat 40 tickets/day per whole ICP, on top
     // of any tier stake. Sub-1-ICP still earns one unit.
     let booster_e8s = EARLY_ADOPTERS
         .with(|m| m.borrow().get(&user))
@@ -10919,8 +10929,8 @@ const EARLY_ADOPTER_DISSOLVE_SECS: u32 = 63_115_200;
 const EARLY_ADOPTER_MIN_DISTRIBUTION_E8S: u64 = 10_000_000_000;
 /// 1 ICP minimum buy-in.
 const MIN_EARLY_ADOPTER_STAKE_E8S: u64 = 100_000_000;
-/// Boosters earn a flat 100 lottery tickets/day per whole ICP staked.
-const BOOSTER_TICKETS_PER_ICP_PER_DAY: u64 = 100;
+/// Boosters earn a flat 40 lottery tickets/day per whole ICP staked.
+const BOOSTER_TICKETS_PER_ICP_PER_DAY: u64 = 40;
 /// Settlement period: 30-day months indexed from the Unix epoch.
 const EARLY_ADOPTER_PERIOD_NANOS: u64 = 30 * DAY_NANOS;
 const MAX_EARLY_ADOPTERS: u64 = 10_000;
@@ -13756,6 +13766,13 @@ pub struct CourseListing {
     pub rating_sum: u64, // sum of stars
     #[serde(default)]
     pub rating_count: u32, // distinct raters
+    /// PB-3xx moderation: admin-discretion soft-hide. Hidden courses are
+    /// excluded from public marketplace browsing but remain resolvable
+    /// directly by token id (so the owner isn't fully locked out). NEVER set
+    /// automatically — only `admin_hide_course` / `admin_unhide_course` flip it;
+    /// the rating threshold merely SURFACES candidates to the admin.
+    #[serde(default)]
+    pub hidden: bool,
 }
 impl_storable!(CourseListing);
 
@@ -14319,6 +14336,7 @@ async fn mint_course_nft_inner(
                     for_sale: false,
                     rating_sum: 0,
                     rating_count: 0,
+                    hidden: false,
                 },
             );
         });
@@ -14474,11 +14492,22 @@ fn list_marketplace_courses(filter: MarketplaceFilter) -> MarketplacePage {
         };
     }
     // PB-308: pin the featured course (dropping a dangling slot via get_featured_slot).
-    let featured_token_id: Option<u64> = get_featured_slot().map(|s| s.token_id);
+    let mut featured_token_id: Option<u64> = get_featured_slot().map(|s| s.token_id);
+    // Moderation visibility (PB-3xx): hidden courses must vanish from public
+    // browsing — both from the card list AND from the featured pin. Direct
+    // resolution by token id (get_course / get_course_data) is intentionally
+    // left intact so the owner of a hidden course isn't fully locked out.
+    if let Some(ft) = featured_token_id {
+        let ft_hidden = COURSE_LISTINGS.with(|m| m.borrow().get(&ft).map(|l| l.hidden).unwrap_or(false));
+        if ft_hidden {
+            featured_token_id = None;
+        }
+    }
     let mut matched: Vec<CourseCard> = COURSE_LISTINGS.with(|m| {
         m.borrow()
             .iter()
             .map(|e| e.value())
+            .filter(|l| !l.hidden)
             .filter(|l| listing_matches(l, &filter, caller))
             .filter(|l| Some(l.token_id) != featured_token_id)
             .map(|l| listing_to_card(&l, caller))
@@ -14560,6 +14589,7 @@ async fn list_course_for_sale(token_id: u64, price_e8s: u64) -> Result<(), Strin
             for_sale: false,
             rating_sum: 0,
             rating_count: 0,
+            hidden: false,
         });
         row.listed = true;
         row.for_sale = true;
@@ -14646,17 +14676,22 @@ async fn burn_course_nft(token_id: u64) -> Result<(), String> {
     // Burn on the verified owner's behalf (idempotent if already gone).
     course_nft_burn(token_id).await?;
 
-    // Backend state cleanup (safe if the row / featured slot are already absent).
+    course_burn_cleanup(token_id, caller);
+    Ok(())
+}
+
+/// Shared marketplace cleanup after a token is burned (owner-initiated via
+/// `burn_course_nft` or admin-forced via `admin_burn_course`). Safe if the row /
+/// featured slot are already absent. Favorites are left to lazy cleanup
+/// (list_my_favorite_courses skips missing tokens).
+fn course_burn_cleanup(token_id: u64, caller: Principal) {
     COURSE_LISTINGS.with(|m| {
         m.borrow_mut().remove(&token_id);
     });
     if featured_slot_get().map(|s| s.token_id) == Some(token_id) {
         featured_slot_set(None);
     }
-    // Favorites left to lazy cleanup (list_my_favorite_courses skips missing).
-
     log_dapp_event("course_burn", token_id, caller, 0);
-    Ok(())
 }
 
 #[ic_cdk::update(guard = "require_admin")]
@@ -14669,6 +14704,125 @@ fn admin_set_course_nft_canister(canister: Principal) -> Result<(), String> {
         cfg.course_nft_canister = Some(canister);
         cell.borrow_mut().set(cfg);
     });
+    Ok(())
+}
+
+// ── Course moderation (PB-3xx, admin discretion) ─────────────────────────────
+//
+// Admins can soft-hide a low-quality course (removes it from public browsing,
+// reversible) or burn it outright. This is ADMIN-DISCRETION: nothing is hidden
+// or burned automatically. The rating threshold below only SURFACES candidates
+// to the admin via `admin_list_moderation_candidates`.
+
+/// A course is eligible to be *surfaced* for moderation when its average rating
+/// is strictly below this threshold (out of 5). Surfacing only — never auto-acts.
+const MODERATION_RATING_THRESHOLD_X10: u32 = 20; // 2.0 / 5, stored ×10 (no floats)
+/// ...AND it has at least this many distinct ratings, so a course with a tiny
+/// sample (one or two sour reviews) is NOT flagged.
+const MODERATION_MIN_RATINGS: u32 = 5;
+/// Cap on rows returned by `admin_list_moderation_candidates` (mirrors other
+/// admin list queries — the caller's `limit` is min'd against this).
+const MODERATION_CANDIDATES_MAX: u32 = 200;
+
+/// Surfacing-only eligibility (PB-3xx): true iff the course has enough ratings
+/// AND its average is below the threshold. Does NOT consider `hidden` and never
+/// triggers any action — the admin decides.
+fn course_eligible_for_moderation(rating_sum: u64, rating_count: u32) -> bool {
+    if rating_count < MODERATION_MIN_RATINGS {
+        return false;
+    }
+    let avg_x10 = rating_sum * 10 / rating_count as u64;
+    avg_x10 < MODERATION_RATING_THRESHOLD_X10 as u64
+}
+
+/// One surfaced moderation candidate (admin-only view).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct ModerationCandidate {
+    pub token_id: u64,
+    pub owner: Option<Principal>,
+    pub avg_x10: u32, // average stars ×10 (no floats on the wire)
+    pub rating_count: u32,
+    pub hidden: bool,
+}
+
+#[ic_cdk::query(guard = "require_admin")]
+fn admin_list_moderation_candidates(limit: u32) -> Vec<ModerationCandidate> {
+    let limit = limit.min(MODERATION_CANDIDATES_MAX);
+    if limit == 0 {
+        return vec![];
+    }
+    let mut rows: Vec<ModerationCandidate> = COURSE_LISTINGS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|l| course_eligible_for_moderation(l.rating_sum, l.rating_count))
+            .map(|l| {
+                let avg_x10 = if l.rating_count > 0 {
+                    u32::try_from(l.rating_sum * 10 / l.rating_count as u64).unwrap_or(0)
+                } else {
+                    0
+                };
+                ModerationCandidate {
+                    token_id: l.token_id,
+                    owner: l.owner,
+                    avg_x10,
+                    rating_count: l.rating_count,
+                    hidden: l.hidden,
+                }
+            })
+            .collect()
+    });
+    // Worst-rated first (then lowest token id) so the admin triages the most
+    // egregious courses first.
+    rows.sort_by(|a, b| a.avg_x10.cmp(&b.avg_x10).then(a.token_id.cmp(&b.token_id)));
+    rows.truncate(limit as usize);
+    rows
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_hide_course(token_id: u64) -> Result<(), String> {
+    require_admin()?;
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        match map.get(&token_id) {
+            Some(mut row) => {
+                row.hidden = true;
+                map.insert(token_id, row);
+                Ok(())
+            }
+            None => Err("NO_COURSE".to_string()),
+        }
+    })
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_unhide_course(token_id: u64) -> Result<(), String> {
+    require_admin()?;
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        match map.get(&token_id) {
+            Some(mut row) => {
+                row.hidden = false;
+                map.insert(token_id, row);
+                Ok(())
+            }
+            None => Err("NO_COURSE".to_string()),
+        }
+    })
+}
+
+/// Admin-forced burn of ANY course token regardless of owner (PB-3xx). Same
+/// destructive marketplace cleanup as `burn_course_nft`, but skips the
+/// caller-is-live-owner check (the burn is on admin authority). The course_nft
+/// canister accepts a burn from the backend (the allowlisted minter), so this
+/// works for any token. Idempotent: a "token already gone" reject from the
+/// wrapper is treated as success.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_burn_course(token_id: u64) -> Result<(), String> {
+    require_admin()?;
+    course_nft_burn(token_id).await?;
+    let caller = get_caller();
+    course_burn_cleanup(token_id, caller);
     Ok(())
 }
 
@@ -15364,6 +15518,7 @@ async fn seed_system_course_inner() -> Result<u64, String> {
                 for_sale: false, // admin lists it for sale later via the normal path
                 rating_sum: 0,
                 rating_count: 0,
+                hidden: false,
             },
         );
     });
@@ -15983,6 +16138,7 @@ async fn dev_seed_courses(count: u32) -> Result<u32, String> {
                     for_sale,
                     rating_sum: 0,
                     rating_count: 0,
+                    hidden: false,
                 },
             );
         });
@@ -17205,8 +17361,8 @@ mod tests {
 
     #[test]
     fn test_pool_initiation_fee_config() {
-        // Assert default initiation fee (125 ICP = 12_500_000_000 e8s)
-        assert_eq!(default_pool_initiation_fee_e8s(), 12_500_000_000);
+        // Assert default initiation fee (10 ICP = 1_000_000_000 e8s)
+        assert_eq!(default_pool_initiation_fee_e8s(), 1_000_000_000);
 
         // Simulate an old Config structure by serializing a struct
         // without the new field.
@@ -17236,7 +17392,84 @@ mod tests {
         let decoded: Config = ciborium::from_reader(buf.as_slice()).unwrap();
 
         // Assert that the decoded Config gets the default initiation fee
-        assert_eq!(decoded.pool_initiation_fee_e8s, 12_500_000_000);
+        assert_eq!(decoded.pool_initiation_fee_e8s, 1_000_000_000);
+    }
+
+    #[test]
+    fn test_course_listing_hidden_serde_default() {
+        // Upgrade safety (PB-3xx moderation): a CourseListing serialized BEFORE
+        // the `hidden` field existed must still decode after upgrade, with
+        // `hidden == false` (i.e. nothing is auto-hidden by the schema bump).
+        // Mirror an "old" listing via a shadow struct lacking `hidden`.
+        #[derive(serde::Serialize)]
+        struct OldCourseListing {
+            token_id: u64,
+            listed: bool,
+            price_e8s: u64,
+            name: String,
+            owner: Option<Principal>,
+            creator: Option<Principal>,
+            play_count: u64,
+            tickets_distributed: u64,
+            par_total: u8,
+            theme: u8,
+            created_at: u64,
+            mint_fee_e8s: u64,
+            for_sale: bool,
+            rating_sum: u64,
+            rating_count: u32,
+        }
+
+        let old = OldCourseListing {
+            token_id: 42,
+            listed: true,
+            price_e8s: 100_000_000,
+            name: "Old Course".to_string(),
+            owner: Some(Principal::anonymous()),
+            creator: Some(Principal::anonymous()),
+            play_count: 7,
+            tickets_distributed: 3,
+            par_total: 27,
+            theme: 1,
+            created_at: 123,
+            mint_fee_e8s: 50_000_000,
+            for_sale: true,
+            rating_sum: 12,
+            rating_count: 4,
+        };
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&old, &mut buf).unwrap();
+        let decoded: CourseListing = ciborium::from_reader(buf.as_slice()).unwrap();
+
+        // The new field gets its serde default; everything else survives intact.
+        assert!(!decoded.hidden, "pre-moderation listings decode as not-hidden");
+        assert_eq!(decoded.token_id, 42);
+        assert_eq!(decoded.rating_count, 4);
+    }
+
+    #[test]
+    fn test_faucet_registration_pending_block_serde_default() {
+        // Upgrade safety (PB-400 faucet): a FaucetRegistration serialized BEFORE
+        // the `pending_block` field existed must still decode after upgrade, with
+        // `pending_block == None`.
+        #[derive(serde::Serialize)]
+        struct OldFaucetRegistration {
+            canister_id: Principal,
+            registered_at: u64,
+        }
+
+        let old = OldFaucetRegistration {
+            canister_id: Principal::anonymous(),
+            registered_at: 999,
+        };
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&old, &mut buf).unwrap();
+        let decoded: FaucetRegistration = ciborium::from_reader(buf.as_slice()).unwrap();
+
+        assert_eq!(decoded.pending_block, None, "old registrations have no pending block");
+        assert_eq!(decoded.registered_at, 999);
     }
 
     #[test]
@@ -18546,7 +18779,14 @@ mod tests {
     // ── Arcade ─────────────────────────────────────────────────────────────
 
     fn enable_arcade_flag() {
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE.to_string(), 1); });
+        // Arcade + both games now ship dark (default OFF), so tests must turn the
+        // whole surface on explicitly — same as deploy-local.sh does for local dev.
+        FEATURE_FLAGS.with(|m| {
+            let mut m = m.borrow_mut();
+            m.insert(FLAG_ARCADE.to_string(), 1);
+            m.insert(FLAG_ARCADE_MINIGOLF.to_string(), 1);
+            m.insert(FLAG_ARCADE_FIELDGOAL.to_string(), 1);
+        });
     }
 
     fn clear_arcade() {
@@ -18747,19 +18987,19 @@ mod tests {
     }
 
     #[test]
-    fn test_booster_daily_tickets_100_per_icp() {
+    fn test_booster_daily_tickets_40_per_icp() {
         clear_early_adopters();
         let user = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
         let now = current_time();
         // No booster stake → no booster tickets.
         assert_eq!(user_daily_tickets(user), 0);
-        // 3 ICP booster stake → 300 tickets/day (100 × whole ICP).
+        // 3 ICP booster stake → 120 tickets/day (40 × whole ICP).
         EARLY_ADOPTERS.with(|m| {
             m.borrow_mut().insert(user, EarlyAdopter {
                 user, staked_e8s: 3 * ICP, joined_at: now, last_stake_at: now, claimable_e8s: 0,
             });
         });
-        assert_eq!(user_daily_tickets(user), 300);
+        assert_eq!(user_daily_tickets(user), 120);
         clear_early_adopters();
     }
 
@@ -22364,6 +22604,7 @@ mod tests {
                     for_sale: false,
                     rating_sum: 0,
                     rating_count: 0,
+                    hidden: false,
                 },
             );
         });
@@ -22391,6 +22632,7 @@ mod tests {
                     for_sale: true,
                     rating_sum: 0,
                     rating_count: 0,
+                    hidden: false,
                 },
             );
         });
@@ -23379,6 +23621,186 @@ mod tests {
         // require_authenticated guard fires first; either way it must not burn.
         assert!(burn_course_nft(1).await.is_err());
         assert!(get_course(1).is_some(), "anonymous burn leaves the listing");
+    }
+
+    // ── Course moderation (admin discretion, PB-3xx) ─────────────────────────
+
+    /// Make `who` an admin so the require_admin guard / internal check passes.
+    fn make_admin(who: Principal) {
+        CONFIG.with(|cell| {
+            let mut cfg = cell.borrow().get().clone();
+            if !cfg.admins.contains(&who) {
+                cfg.admins.push(who);
+            }
+            cell.borrow_mut().set(cfg);
+        });
+    }
+
+    /// Default "show everything" browse filter.
+    fn any_filter() -> MarketplaceFilter {
+        MarketplaceFilter {
+            difficulty: DifficultyFilter::Any,
+            theme: None,
+            listed: ListedFilter::Any,
+            mine_only: false,
+        }
+    }
+
+    #[test]
+    fn test_admin_hide_removes_from_listing_then_unhide_restores() {
+        sale_test_setup();
+        make_admin(alice());
+        set_mock_caller(alice());
+        seed_listing(1, alice(), 27, 0, true);
+        seed_listing(2, alice(), 34, 0, true);
+
+        // Hide token 1 → it vanishes from public browsing.
+        admin_hide_course(1).unwrap();
+        let ids: Vec<u64> =
+            list_marketplace_courses(any_filter()).courses.iter().map(|c| c.token_id).collect();
+        assert!(!ids.contains(&1), "hidden course absent from browsing");
+        assert!(ids.contains(&2), "visible course still listed");
+        // Direct-by-token-id resolution still works (owner not locked out).
+        assert!(get_course(1).is_some(), "hidden course still resolvable by id");
+
+        // Unhide → it comes back.
+        admin_unhide_course(1).unwrap();
+        let ids: Vec<u64> =
+            list_marketplace_courses(any_filter()).courses.iter().map(|c| c.token_id).collect();
+        assert!(ids.contains(&1), "unhidden course restored to browsing");
+    }
+
+    #[test]
+    fn test_admin_hide_drops_featured_pin() {
+        sale_test_setup();
+        make_admin(alice());
+        set_mock_caller(alice());
+        seed_listing(1, alice(), 27, 0, true);
+        featured_slot_set(Some(FeaturedSlot {
+            token_id: 1,
+            bidder: alice(),
+            token: ExplorerToken::CkBTC,
+            amount: 1,
+            usd_value_e8s: 1,
+            at: 1,
+        }));
+        admin_hide_course(1).unwrap();
+        // Hidden course must not surface as the featured pin either.
+        assert_eq!(
+            list_marketplace_courses(any_filter()).featured_token_id, None,
+            "hidden course not surfaced as featured"
+        );
+    }
+
+    #[test]
+    fn test_admin_hide_unknown_token_errors() {
+        sale_test_setup();
+        make_admin(alice());
+        set_mock_caller(alice());
+        assert_eq!(admin_hide_course(999).unwrap_err(), "NO_COURSE");
+        assert_eq!(admin_unhide_course(999).unwrap_err(), "NO_COURSE");
+    }
+
+    #[tokio::test]
+    async fn test_admin_burn_removes_any_token_regardless_of_owner() {
+        sale_test_setup();
+        set_mock_burn_fail(false);
+        make_admin(alice());
+        // Course owned by BOB, but an admin (alice) can burn it.
+        seed_listing(1, bob(), 27, 0, true);
+        set_mock_caller(alice());
+
+        admin_burn_course(1).await.unwrap();
+
+        assert!(get_course(1).is_none(), "listing removed on admin burn");
+        assert_eq!(course_nft_owner_of(1).await.unwrap(), None, "token burned");
+        let ids: Vec<u64> =
+            list_marketplace_courses(any_filter()).courses.iter().map(|c| c.token_id).collect();
+        assert!(!ids.contains(&1), "burned token absent from browsing");
+    }
+
+    #[tokio::test]
+    async fn test_admin_burn_propagates_burn_failure() {
+        sale_test_setup();
+        set_mock_burn_fail(true); // force the course_nft_burn seam to reject
+        make_admin(alice());
+        seed_listing(1, bob(), 27, 0, true);
+        set_mock_caller(alice());
+        assert!(admin_burn_course(1).await.is_err(), "burn failure surfaces");
+        assert!(get_course(1).is_some(), "failed burn leaves the listing intact");
+    }
+
+    #[tokio::test]
+    async fn test_admin_moderation_methods_reject_non_admin() {
+        sale_test_setup();
+        set_mock_burn_fail(false);
+        seed_listing(1, alice(), 27, 0, true);
+        // bob is authenticated but NOT an admin.
+        set_mock_caller(bob());
+        // The methods self-guard via require_admin() (guards don't run natively).
+        assert!(admin_hide_course(1).is_err(), "non-admin cannot hide");
+        assert!(admin_unhide_course(1).is_err(), "non-admin cannot unhide");
+        assert!(admin_burn_course(1).await.is_err(), "non-admin cannot burn");
+        assert!(get_course(1).is_some(), "rejected ops leave the listing");
+        // require_admin itself rejects bob (covers the query guard, which is
+        // attribute-only and not invoked in native tests).
+        assert!(require_admin().is_err());
+    }
+
+    #[test]
+    fn test_moderation_eligibility_threshold_and_min_count() {
+        // avg 1.0 (sum 5, count 5) → below 2.0 AND >= 5 ratings → eligible.
+        assert!(course_eligible_for_moderation(5, 5));
+        // avg 1.0 but only 2 ratings → too few to flag.
+        assert!(!course_eligible_for_moderation(2, 2));
+        // avg exactly 2.0 (sum 20, count 10) → NOT strictly below threshold.
+        assert!(!course_eligible_for_moderation(20, 10));
+        // avg 1.9 (sum 19, count 10) → eligible.
+        assert!(course_eligible_for_moderation(19, 10));
+        // High avg with many ratings → never eligible.
+        assert!(!course_eligible_for_moderation(45, 10)); // avg 4.5
+        // Zero ratings → not eligible (and no divide-by-zero).
+        assert!(!course_eligible_for_moderation(0, 0));
+    }
+
+    #[test]
+    fn test_admin_list_moderation_candidates_surfaces_only_eligible() {
+        sale_test_setup();
+        make_admin(alice());
+        set_mock_caller(alice());
+        // token 1: low avg (1.0), enough ratings → eligible.
+        seed_listing(1, bob(), 27, 0, true);
+        // token 2: low avg but only 2 ratings → NOT eligible.
+        seed_listing(2, bob(), 27, 0, true);
+        // token 3: plenty of ratings, high avg → NOT eligible.
+        seed_listing(3, bob(), 27, 0, true);
+        COURSE_LISTINGS.with(|m| {
+            let mut map = m.borrow_mut();
+            let mut r1 = map.get(&1).unwrap();
+            r1.rating_sum = 5;
+            r1.rating_count = 5; // avg 1.0
+            map.insert(1, r1);
+            let mut r2 = map.get(&2).unwrap();
+            r2.rating_sum = 2;
+            r2.rating_count = 2; // avg 1.0 but too few
+            map.insert(2, r2);
+            let mut r3 = map.get(&3).unwrap();
+            r3.rating_sum = 40;
+            r3.rating_count = 10; // avg 4.0
+            map.insert(3, r3);
+        });
+
+        let rows = admin_list_moderation_candidates(50);
+        let ids: Vec<u64> = rows.iter().map(|r| r.token_id).collect();
+        assert_eq!(ids, vec![1], "only the eligible course is surfaced");
+        let row = &rows[0];
+        assert_eq!(row.owner, Some(bob()));
+        assert_eq!(row.avg_x10, 10);
+        assert_eq!(row.rating_count, 5);
+        assert!(!row.hidden);
+
+        // limit 0 returns nothing.
+        assert!(admin_list_moderation_candidates(0).is_empty());
     }
 
     // ── Happy path: ordering + split (accounting ledger) ─────────────────────

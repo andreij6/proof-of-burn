@@ -82,9 +82,11 @@ icp canister call backend dev_faucet_token '(variant { ICP })' -e local --identi
 ### Develop
 
 ```bash
-npm run dev --prefix src/frontend                       # frontend with hot reload
-cargo test -p backend --lib                             # backend unit tests
-npm test --prefix src/frontend                          # frontend tests
+npm run dev --prefix src/frontend         # frontend with hot reload
+npm run typecheck --prefix src/frontend   # regenerate candid bindings + tsc
+npm run lint --prefix src/frontend        # eslint
+npm test --prefix src/frontend            # frontend tests (vitest)
+cargo test -p backend --lib               # backend unit tests
 ```
 
 ---
@@ -95,5 +97,6 @@ npm test --prefix src/frontend                          # frontend tests
 - `src/frontend/` — React + Vite single-page app.
 - `scripts/` — local/prod deploy and helper scripts.
 - `docs/` — deployment, mainnet, operations, economics and security runbooks.
+- `ideas/`, `plans/` — design specs and implementation plans for upcoming work.
 
 > Deploying to mainnet is a separate, gated process — see `docs/DEPLOY.md`.

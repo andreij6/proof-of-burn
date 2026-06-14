@@ -3,6 +3,7 @@ type ActivePoolNeuron = record {
   registered_by : principal;
   voting_power : nat64;
   neuron_id : nat64;
+  registered_at : nat64;
 };
 type ArcadeBarDef = record {
   // Pivot cell (grid coords).
@@ -813,6 +814,15 @@ type CourseRatingSummary = record {
   avg_x10 : nat32;
   my_stars : opt nat8;
 };
+// PB-3xx course moderation: one admin-surfaced low-rating candidate. Surfacing
+// only — never auto-acts.
+type ModerationCandidate = record {
+  token_id : nat64;
+  owner : opt principal;
+  avg_x10 : nat32;
+  rating_count : nat32;
+  hidden : bool;
+};
 // PB-308 featured slot auction.
 type FeaturedSlot = record {
   token_id : nat64;
@@ -983,6 +993,13 @@ service : (InitPayload) -> {
   get_course_rating_summary : (nat64) -> (CourseRatingSummary) query;
   list_course_reviews : (nat64, nat64, nat64) -> (vec Rating) query;
   admin_remove_rating : (nat64, principal) -> (Result);
+  // Course moderation (admin discretion, PB-3xx). Hidden courses vanish from
+  // public browsing but stay resolvable by token id; nothing is hidden/burned
+  // automatically. The candidates query SURFACES low-rated courses only.
+  admin_hide_course : (nat64) -> (Result);
+  admin_unhide_course : (nat64) -> (Result);
+  admin_burn_course : (nat64) -> (Result);
+  admin_list_moderation_candidates : (nat32) -> (vec ModerationCandidate) query;
   // Featured slot auction: ckBTC/ckETH/ckUSDT/ckUSDC, USD-compared, 100% to
   // treasury, non-refundable, retained on delist/sale (PB-308).
   bid_featured_slot : (nat64, ExplorerToken, nat64) -> (Result);

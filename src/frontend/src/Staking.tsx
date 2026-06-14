@@ -12,7 +12,7 @@ import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, usePageDevControls
 // daily tickets per ICP per tier (term multiplier 1× / 2× / 4×). Staking does
 // NOT grant voting power — voting is burn-only. Unstaking splits the tier's
 // neuron and dissolves it for the tier's full term. A fourth, PERMANENT
-// "Booster" neuron (2-year dissolve, never unstakeable) earns 100 tickets/ICP/day.
+// "Booster" neuron (2-year dissolve, never unstakeable) earns 40 tickets/ICP/day.
 // Every neuron's yield is harvested into one inbox and split 50% lottery / 50%
 // treasury.
 // ==========================================
@@ -175,7 +175,7 @@ export default function Staking({
   });
 
   // Booster stake: a permanent 2-year neuron — deposit, then early_adopter_stake.
-  // No unstake exists; the reward is 100 lottery tickets/day per ICP.
+  // No unstake exists; the reward is 40 lottery tickets/day per ICP.
   const handleBoosterStake = () => run('booster', async () => {
     if (!eaInfo) return;
     const amount = parseIcp(stakeInput);
@@ -203,7 +203,7 @@ export default function Staking({
     if (res.__kind__ === "Err") { setError(`Stake failed: ${res.Err}`); return; }
     setStakeInput('');
     setBoosterAck(false);
-    setNotice(`Staked ${fmtICP(amount)} ICP into the Perm neuron — permanent, now earning 100 lottery tickets per ICP per day.`);
+    setNotice(`Staked ${fmtICP(amount)} ICP into the Perm neuron — permanent, now earning 40 lottery tickets per ICP per day.`);
     await refresh();
     onActivity();
   });
@@ -426,7 +426,7 @@ export default function Staking({
                     <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
                       Same 2-year neuron as the term tier, with two differences: it is{' '}
                       <b>permanent — never unstakeable, by anyone</b> — and it earns the highest ticket
-                      rate, <b>100 lottery tickets/day per ICP</b> (vs 5/10/20). Like every neuron here,
+                      rate, <b>40 lottery tickets/day per ICP</b> (vs 5/10/20). Like every neuron here,
                       its yield funds the lottery and the protocol — you're never paid ICP from it.
                     </span>
                   </div>
@@ -606,7 +606,7 @@ export default function Staking({
               </div>
               <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                 <Chip tone="burn" style={{ height: 18, fontSize: 10.5 }}>permanent · no unstake</Chip>
-                <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>100 tickets / ICP / day</Chip>
+                <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>40 tickets / ICP / day</Chip>
               </div>
               <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
                 <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>

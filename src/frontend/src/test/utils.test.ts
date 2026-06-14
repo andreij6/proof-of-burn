@@ -364,6 +364,18 @@ describe('pageFromHash (shareable URL routing)', () => {
     expect(pageFromHash('#staking')).toBe('staking');
     expect(pageFromHash('#/staking')).toBe('staking');
   });
+  it('resolves hub sub-screen paths back to their hub page (so Back works)', () => {
+    // useHashScreen keeps the active sub-screen in a trailing segment; the
+    // top-level router must still land on the hub page.
+    expect(pageFromHash('#/casino/crash')).toBe('casino');
+    expect(pageFromHash('#/arcade/course-editor')).toBe('arcade');
+    expect(pageFromHash('#/arcade/course-play')).toBe('arcade');
+    expect(pageFromHash('#/lottery/staking')).toBe('lottery');
+    expect(pageFromHash('#/lottery/lottery')).toBe('lottery');
+    // the bare hub path still resolves to the hub
+    expect(pageFromHash('#/arcade')).toBe('arcade');
+    expect(pageFromHash('#/lottery')).toBe('lottery');
+  });
 });
 
 describe('isValidAccountId', () => {

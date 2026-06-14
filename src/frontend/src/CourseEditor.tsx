@@ -4,7 +4,10 @@ import { Icon, Eyebrow, Chip, Btn, MoreInfo } from './ui';
 import { createActor as createLedgerActor } from './bindings/ledger';
 import { fmtICP } from './ui';
 import MiniGolf from './arcade/MiniGolf';
-import { holeFromCourseData, type HoleDef, type CharacterLook } from './arcade/engine';
+import {
+  holeFromCourseData, CELL,
+  type HoleDef, type CharacterLook, type Vec,
+} from './arcade/engine';
 import {
   type CourseDataV1, type Hole, type Element, type Theme,
   ElementKind as EK, LIMITS, encodeCourseData,
@@ -14,15 +17,15 @@ import {
   placeElement, deleteElementAt, rotateElement,
 } from './arcade/courseEditorLogic';
 import { difficultyBucket } from './arcade/courseMarket';
+import { activeRenderKit, type Renderer, type ElementView } from './arcade/renderKit';
 
 // ==========================================
 // Course NFT Editor (PB-302) — per-user 9-hole builder producing a CourseDataV1
-// blob destined to become an NFT. Four zones: top bar, hole panel, canvas,
-// palette. Drafts are LOCAL (localStorage) — the backend draft endpoints
-// (save_/get_my_/clear_course_draft) are NOT in this backend build yet, so we
-// persist drafts client-side and note it. The Mint flow encodes the course,
-// fetches the escrow deposit address, transfers 0.5 ICP, and calls
-// mint_course_nft (PB-304).
+// blob destined to become an NFT. Three rows: name + actions; horizontal hole
+// selector; a 3-pane build row (palette · editable map · live preview). There
+// is no draft persistence — leaving with in-progress work confirms first. The
+// Mint flow encodes the course, fetches the escrow deposit address, transfers
+// 0.5 ICP, and calls mint_course_nft (PB-304).
 //
 // NOTE: This is a NEW, standalone component. The legacy admin paint editor
 // (arcade/CourseEditor.tsx) is intentionally untouched (spec D4).
@@ -30,7 +33,6 @@ import { difficultyBucket } from './arcade/courseMarket';
 
 const MINT_FEE_E8S = 50_000_000n; // 0.5 ICP
 const ICP_FEE_E8S = 10_000n;
-const DRAFT_KEY = 'course-nft-draft-v1';
 
 interface CourseEditorProps {
   actor: any;
@@ -86,13 +88,6 @@ const ELEMENT_GLYPH: Record<number, string> = {
   [EK.SpeedTile]: '»', [EK.SlowTile]: '«',
 };
 
-const THEME_CHOICES: { kind: Theme['kind']; label: string }[] = [
-  { kind: 'desert', label: 'Desert' }, { kind: 'ocean', label: 'Ocean' },
-  { kind: 'space', label: 'Space' }, { kind: 'forest', label: 'Forest' },
-  { kind: 'custom', label: 'Custom' },
-];
-const CUSTOM_SWATCHES = ['#e8602c', '#2d7ff0', '#27a05c', '#e3b52e', '#9b59d0', '#22b8c4'];
-
 export default function CourseEditor({
   actor, identity, host, rootKey, ledgerCanisterId, character, onMinted, onExit,
 }: CourseEditorProps) {
@@ -102,20 +97,10 @@ export default function CourseEditor({
   const [armed, setArmed] = useState<number | null>(null); // palette kind, or null = select mode
   const [selected, setSelected] = useState<number | null>(null); // element index in active hole
   const [touched, setTouched] = useState<boolean[]>(() => Array(LIMITS.HOLES).fill(false));
-  const [savedAt, setSavedAt] = useState<number | null>(null);
-  const [showResume, setShowResume] = useState(false);
   const [playtest, setPlaytest] = useState<HoleDef | null>(null);
   const [showMint, setShowMint] = useState(false);
 
   const nextPairIdRef = useRef(0);
-
-  // ── Draft resume-or-fresh on mount (localStorage; server drafts not in this
-  //    backend build yet — see component note). ──
-  useEffect(() => {
-    try {
-      if (localStorage.getItem(DRAFT_KEY)) setShowResume(true);
-    } catch { /* localStorage unavailable — start fresh */ }
-  }, []);
 
   const hole = course.holes[activeHole];
 
@@ -124,45 +109,14 @@ export default function CourseEditor({
     setTouched((t) => t.map((v, i) => (i === idx ? true : v)));
   };
 
-  // ── Autosave every 60s while dirty, plus manual Save (both local). ──
-  const dirtyRef = useRef(false);
-  // Mark dirty whenever the course or name changes (skip the initial mount).
-  const mountedRef = useRef(false);
-  useEffect(() => {
-    if (mountedRef.current) dirtyRef.current = true;
-    else mountedRef.current = true;
-  }, [course, name]);
-  useEffect(() => {
-    const id = setInterval(() => { if (dirtyRef.current) saveDraft(); }, 60_000);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const saveDraft = () => {
-    try {
-      const blob = encodeCourseData(course);
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({
-        name, course: Array.from(blob), updated_at: Date.now(),
-      }));
-      setSavedAt(Date.now());
-      dirtyRef.current = false;
-    } catch (e) { console.error('draft save failed', e); }
-  };
-
-  const resumeDraft = () => {
-    try {
-      const raw = localStorage.getItem(DRAFT_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { name: string; course: number[]; updated_at: number };
-        // Decode the stored blob back into the editable course.
-        import('./arcade/courseData').then(({ decodeCourseData }) => {
-          setCourse(decodeCourseData(Uint8Array.from(parsed.course)));
-          setName(parsed.name ?? '');
-          setTouched(Array(LIMITS.HOLES).fill(true));
-        });
-      }
-    } catch (e) { console.error('draft resume failed', e); }
-    setShowResume(false);
+  // There is no draft persistence: confirm before leaving with in-progress,
+  // non-minted work (any hole touched / element placed, or a name typed).
+  const courseHasContent = name.trim().length > 0
+    || touched.some(Boolean)
+    || course.holes.some((h) => h.elements.length > 0);
+  const exitToMarket = () => {
+    if (courseHasContent && !window.confirm('Leave the editor? This course is not minted and will be lost.')) return;
+    onExit();
   };
 
   // ── Placement / selection on the grid ──
@@ -246,8 +200,17 @@ export default function CourseEditor({
     );
   }
 
+  const teeCupReady = inGrid(hole.tee, hole) && inGrid(hole.cup, hole);
+
   return (
     <div className="col" style={{ gap: 14 }}>
+      {/* ── Back to marketplace (standalone bar, above the header) ── */}
+      <div className="dashboard-container" style={{ paddingBottom: 0 }}>
+        <Btn variant="ghost" sm onClick={exitToMarket} style={{ alignSelf: 'flex-start' }}>
+          <Icon name="undo" size={13} /> Marketplace
+        </Btn>
+      </div>
+
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
         <Eyebrow accent>Arcade · Course NFT</Eyebrow>
@@ -258,58 +221,38 @@ export default function CourseEditor({
         <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 580, margin: 0 }}>
           Build a 9-hole course, then mint it as an NFT.{' '}
           <MoreInfo title="Create → mint → list → earn">
-            <p>Place a tee and a cup on each of the 9 holes, set each par, add obstacles, pick a
-            theme, and mint. Minting burns 0.5 ICP and auto-lists your course in the marketplace.
+            <p>Place a tee and a cup on each of the 9 holes, set each par, add obstacles, and
+            mint. Minting burns 0.5 ICP and auto-lists your course in the marketplace.
             You earn a lottery ticket each time a player reaches hole 2 on your course.</p>
-            <p>Drafts are saved in this browser only (server-side drafts aren't enabled in this
-            build yet).</p>
+          </MoreInfo>{' '}
+          <MoreInfo title="Course rules">
+            <p>Courses you mint are public NFTs. Low-rated courses may be hidden or burned by
+            moderators without warning.</p>
           </MoreInfo>
         </p>
       </div>
 
-      {/* ── Top bar ── */}
+      {/* ── Row 1 — name + actions ── */}
       <div className="card row" style={{ justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-        <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
           <input
             className="burn-input"
             placeholder="Course name"
             maxLength={60}
             value={name}
             onChange={(e) => setName(e.target.value)}
-            style={{ minWidth: 200 }}
+            style={{ minWidth: 220 }}
           />
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>{name.length}/60</span>
-          <select
-            className="burn-input"
-            value={course.theme.kind}
-            onChange={(e) => {
-              const kind = e.target.value as Theme['kind'];
-              const theme: Theme = kind === 'custom'
-                ? { kind: 'custom', primary: CUSTOM_SWATCHES[0], secondary: CUSTOM_SWATCHES[1] }
-                : { kind };
-              setCourse((c) => ({ ...c, theme }));
-            }}
-          >
-            {THEME_CHOICES.map((t) => <option key={t.kind} value={t.kind}>{t.label}</option>)}
-          </select>
-          {course.theme.kind === 'custom' && (
-            <CustomSwatches theme={course.theme} onChange={(theme) => setCourse((c) => ({ ...c, theme }))} />
-          )}
-          <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>Par {par} · {difficultyBucket(par)}</Chip>
-          <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-            {savedAt ? `saved ${Math.round((Date.now() - savedAt) / 1000)}s ago` : 'unsaved'}
-          </span>
-        </div>
-        <div className="row" style={{ gap: 8 }}>
-          <Btn variant="ghost" sm onClick={onExit}><Icon name="chevLeft" size={12} /> Marketplace</Btn>
+        </span>
+        <span className="row" style={{ gap: 8 }}>
           <Btn variant="secondary" sm onClick={launchPlaytest}>Playtest</Btn>
-          <Btn variant="secondary" sm onClick={saveDraft}>Save draft</Btn>
           <span title={gate.ok ? 'Mint as NFT' : gate.reasons.join('\n')}>
             <Btn variant="primary" sm disabled={!gate.ok} onClick={() => setShowMint(true)}>
               <Icon name="flame" size={11} stroke="var(--char-950)" /> Mint as NFT
             </Btn>
           </span>
-        </div>
+        </span>
       </div>
 
       {!gate.ok && (
@@ -322,10 +265,13 @@ export default function CourseEditor({
         </div>
       )}
 
-      {/* ── Three zones ── */}
-      <div className="row" style={{ gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        {/* Hole panel */}
-        <div className="col" style={{ gap: 6, minWidth: 200, flex: '0 0 200px' }}>
+      {/* ── Row 2 — horizontal hole selector ── */}
+      <div className="card col" style={{ gap: 8 }}>
+        <span className="row" style={{ justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: 'var(--font-mono)' }}>Holes</span>
+          <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>Par {par} · {difficultyBucket(par)}</Chip>
+        </span>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
           {course.holes.map((h, i) => {
             const st = holeStatus(h, touched[i]);
             const tone = st.kind === 'complete' ? 'ok' : st.kind === 'incomplete' ? 'danger' : 'muted';
@@ -334,6 +280,7 @@ export default function CourseEditor({
               <button key={i} onClick={() => { setActiveHole(i); setSelected(null); }}
                 className="col" style={{
                   gap: 4, textAlign: 'left', padding: 8, borderRadius: 8, cursor: 'pointer',
+                  flex: '0 0 168px',
                   background: i === activeHole ? 'var(--burn-950)' : 'transparent',
                   border: `1px solid ${i === activeHole ? 'var(--burn)' : 'var(--border)'}`,
                 }}>
@@ -366,10 +313,34 @@ export default function CourseEditor({
             );
           })}
         </div>
+      </div>
 
-        {/* Canvas (clickable grid) */}
-        <div className="col" style={{ gap: 8, flex: '1 1 480px', minWidth: 360 }}>
-          {(!inGrid(hole.tee, hole) || !inGrid(hole.cup, hole)) && (
+      {/* ── Row 3 — build panes: palette · editable map · live preview ── */}
+      <div className="row" style={{ gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        {/* Pane 1 — Items to add (palette) */}
+        <div className="col" style={{ gap: 10, flex: '0 0 180px', minWidth: 160 }}>
+          <span style={{ fontSize: 10, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: 'var(--font-mono)' }}>Items to add</span>
+          {PALETTE.map((grp) => (
+            <div key={grp.group} className="col" style={{ gap: 5 }}>
+              <span style={{ fontSize: 10, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: 'var(--font-mono)' }}>{grp.group}</span>
+              <div className="row" style={{ gap: 5, flexWrap: 'wrap' }}>
+                {grp.items.map((it) => (
+                  <button key={it.label} onClick={() => armPalette(it.kind)} title={it.label}
+                    style={{
+                      fontSize: 11, padding: '5px 8px', borderRadius: 6, cursor: 'pointer',
+                      background: armed === it.kind ? 'var(--burn)' : 'transparent',
+                      color: armed === it.kind ? 'var(--char-950)' : 'var(--fg-2)',
+                      border: `1px solid ${armed === it.kind ? 'var(--burn)' : 'var(--border)'}`,
+                    }}>{it.label}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Pane 2 — editable clickable map */}
+        <div className="col" style={{ gap: 8, flex: '1 1 420px', minWidth: 320 }}>
+          {!teeCupReady && (
             <div className="row" style={{ gap: 8, color: 'var(--ember)', fontSize: 12 }}>
               <Icon name="info" size={13} stroke="var(--ember)" />
               {!inGrid(hole.tee, hole) ? 'Arm "Tee" and click a cell.' : 'Arm "Cup" and click a cell.'}
@@ -394,39 +365,13 @@ export default function CourseEditor({
           </div>
         </div>
 
-        {/* Palette */}
-        <div className="col" style={{ gap: 10, flex: '0 0 180px', minWidth: 160 }}>
-          {PALETTE.map((grp) => (
-            <div key={grp.group} className="col" style={{ gap: 5 }}>
-              <span style={{ fontSize: 10, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: 'var(--font-mono)' }}>{grp.group}</span>
-              <div className="row" style={{ gap: 5, flexWrap: 'wrap' }}>
-                {grp.items.map((it) => (
-                  <button key={it.label} onClick={() => armPalette(it.kind)} title={it.label}
-                    style={{
-                      fontSize: 11, padding: '5px 8px', borderRadius: 6, cursor: 'pointer',
-                      background: armed === it.kind ? 'var(--burn)' : 'transparent',
-                      color: armed === it.kind ? 'var(--char-950)' : 'var(--fg-2)',
-                      border: `1px solid ${armed === it.kind ? 'var(--burn)' : 'var(--border)'}`,
-                    }}>{it.label}</button>
-                ))}
-              </div>
-            </div>
-          ))}
+        {/* Pane 3 — live in-game static render of the active hole (no ball) */}
+        <div className="col" style={{ gap: 6, flex: '0 0 280px', minWidth: 220 }}>
+          <span style={{ fontSize: 10, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: 'var(--font-mono)' }}>In-game preview</span>
+          <HolePreview hole={hole} theme={course.theme} />
+          <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>How this hole looks in play (no ball).</span>
         </div>
       </div>
-
-      {showResume && (
-        <ModalShell title="Resume your draft?" onClose={() => setShowResume(false)}>
-          <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0 }}>
-            A saved draft was found in this browser. Resume it, or start a fresh course (your
-            draft stays until you save over it).
-          </p>
-          <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
-            <Btn variant="ghost" sm onClick={() => setShowResume(false)}>Start fresh</Btn>
-            <Btn variant="primary" sm onClick={resumeDraft}>Resume draft</Btn>
-          </div>
-        </ModalShell>
-      )}
 
       {showMint && (
         <MintDialog
@@ -438,10 +383,7 @@ export default function CourseEditor({
           course={course}
           name={name.trim()}
           onClose={() => setShowMint(false)}
-          onMinted={(id) => {
-            try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
-            onMinted(id);
-          }}
+          onMinted={onMinted}
         />
       )}
     </div>
@@ -501,21 +443,96 @@ const THEME_BG: Record<string, string> = {
   desert: '#9a7b4f', ocean: '#2f6d6a', space: '#2a2a44', forest: '#2f5a2f',
 };
 
-function CustomSwatches({ theme, onChange }: { theme: Extract<Theme, { kind: 'custom' }>; onChange: (t: Theme) => void }) {
+// ── Live preview: a frozen, ball-less in-game render of the active hole ──
+// Renders through the SAME art layer the real game uses (activeRenderKit) via a
+// thin Canvas2D → Renderer adapter. We call drawTerrain + drawElement only
+// (never drawBall) at a fixed t=0 so it's a static snapshot. Re-renders whenever
+// the active hole, its elements, or the theme change.
+
+/** Adapt a real 2D context to the kit's backend-agnostic Renderer interface. */
+function canvas2dRenderer(ctx: CanvasRenderingContext2D): Renderer {
+  return {
+    save: () => ctx.save(),
+    restore: () => ctx.restore(),
+    setFill: (c) => { ctx.fillStyle = c; },
+    setStroke: (c, w) => { ctx.strokeStyle = c; ctx.lineWidth = w; },
+    fillRect: (x, y, w, h) => ctx.fillRect(x, y, w, h),
+    strokeRect: (x, y, w, h) => ctx.strokeRect(x, y, w, h),
+    fillCircle: (cx, cy, r) => { ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); },
+    strokeCircle: (cx, cy, r) => { ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke(); },
+    strokeLine: (pts) => {
+      if (pts.length === 0) return;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    },
+    fillPoly: (pts) => {
+      if (pts.length === 0) return;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.fill();
+    },
+  };
+}
+
+/** Build the per-element ElementViews the kit's drawElement consumes, derived
+ *  from the same engine geometry as play (holeFromCourseData). Terrain elements
+ *  are drawn by drawTerrain (rasterized into cells), so they yield no view. */
+function elementViews(hole: Hole): ElementView[] {
+  const views: ElementView[] = [];
+  for (const e of hole.elements) {
+    // Re-derive canonical geometry by compiling a single-element hole. This
+    // reuses the engine's exact element→geometry mapping (no duplication).
+    const def = holeFromCourseData({ ...hole, elements: [e] });
+    const center: Vec = { x: (e.x + 0.5) * CELL, y: (e.y + 0.5) * CELL };
+    const rot = e.rot;
+    if (def.walls && def.walls.length) views.push({ kind: e.kind, center, rot, walls: def.walls });
+    else if (def.statics && def.statics.length) views.push({ kind: e.kind, center, rot, static: def.statics[0] });
+    else if (def.movers && def.movers.length) views.push({ kind: e.kind, center, rot, mover: def.movers[0] });
+    else views.push({ kind: e.kind, center, rot }); // tunnels/ramps/tiles → special marker
+  }
+  return views;
+}
+
+function HolePreview({ hole, theme }: { hole: Hole; theme: Theme }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx2d = canvas.getContext('2d');
+    if (!ctx2d) return;
+
+    const def = holeFromCourseData(hole);
+    const worldW = def.w * CELL, worldH = def.h * CELL;
+    // Fit the world into the canvas, preserving aspect (letterbox).
+    const scale = Math.min(canvas.width / worldW, canvas.height / worldH);
+    const offX = (canvas.width - worldW * scale) / 2;
+    const offY = (canvas.height - worldH * scale) / 2;
+
+    ctx2d.setTransform(1, 0, 0, 1, 0, 0);
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+    ctx2d.fillStyle = '#101813';
+    ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+    ctx2d.setTransform(scale, 0, 0, scale, offX, offY);
+
+    const r = canvas2dRenderer(ctx2d);
+    const kit = activeRenderKit(theme);
+    kit.drawTerrain(r, def, theme);
+    for (const v of elementViews(hole)) kit.drawElement(r, v, theme, 0); // t=0 → frozen, no ball
+    ctx2d.setTransform(1, 0, 0, 1, 0, 0);
+  }, [hole, theme]);
+
   return (
-    <span className="row" style={{ gap: 4 }}>
-      {(['primary', 'secondary'] as const).map((slot) => (
-        <span key={slot} className="row" style={{ gap: 2 }}>
-          {CUSTOM_SWATCHES.map((c) => (
-            <button key={c} onClick={() => onChange({ ...theme, [slot]: c })} title={`${slot} ${c}`}
-              style={{
-                width: 16, height: 16, borderRadius: 4, background: c, cursor: 'pointer',
-                border: theme[slot] === c ? '2px solid var(--fg)' : '1px solid var(--border)',
-              }} />
-          ))}
-        </span>
-      ))}
-    </span>
+    <canvas
+      ref={canvasRef}
+      width={520}
+      height={340}
+      style={{ width: '100%', height: 'auto', display: 'block', borderRadius: 10, border: '1px solid var(--border-hi)', background: '#101813' }}
+    />
   );
 }
 
@@ -579,7 +596,7 @@ function MintDialog({ actor, identity, host, rootKey, ledgerCanisterId, course, 
   return (
     <ModalShell title="Mint this course as an NFT" onClose={() => !busy && onClose()}>
       <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0 }}>
-        <b>{name}</b> · {THEME_CHOICES.find((t) => t.kind === course.theme.kind)?.label} · Par {par} ({difficultyBucket(par)})
+        <b>{name}</b> · Par {par} ({difficultyBucket(par)})
       </p>
       <div style={{ maxHeight: 180, overflowY: 'auto' }}>
         <table className="mono" style={{ width: '100%', fontSize: 11.5, borderCollapse: 'collapse' }}>
