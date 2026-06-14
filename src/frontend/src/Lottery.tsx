@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
 import { DrawStatus } from "./bindings/backend";
 import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, formatPrincipal } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 
 // ==========================================
 // Lossless Lottery — stake-weighted tickets, dynamic odds (one winner a month
@@ -121,6 +121,34 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
     await refresh();
   });
 
+  const handleDevGrant = () => run('devgrant', async () => {
+    const res = await actor.dev_grant_lottery_tickets(10n);
+    if (res.__kind__ === "Err") { setError(res.Err); return; }
+    setNotice(`Granted 10 tickets — you now hold ${res.Ok}.`);
+    await refresh();
+  });
+
+  // Surface the lottery's local-dev controls in App's Dashboard & Controls panel.
+  usePageDevControls(isLocal && signedIn, () => (
+    <div className="col" style={{ gap: 8 }}>
+      <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Lottery · tickets & drawings</span>
+      <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+        <Btn variant="secondary" sm onClick={handleDevGrant} disabled={busy !== null}>
+          {busy === 'devgrant' ? <LiveDot size={7} /> : <Icon name="target" size={13} />} Grant me 10 tickets
+        </Btn>
+        <Btn variant="secondary" sm onClick={() => handleDevDraw(false)} disabled={busy !== null}>
+          {busy === 'devdraw' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} />} Draw (real odds)
+        </Btn>
+        <Btn variant="secondary" sm onClick={() => handleDevDraw(true)} disabled={busy !== null}>
+          {busy === 'devwin' ? <LiveDot size={7} /> : <Icon name="target" size={13} />} Draw (force win)
+        </Btn>
+      </div>
+      <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+        Grant adds 10 tickets to your current-round holding (no staking needed). Force-win rigs ticket #0.
+      </span>
+    </div>
+  ), [busy]);
+
   const card: React.CSSProperties = {
     border: '1px solid var(--border)', borderRadius: 10,
     background: 'var(--surface)', padding: 16,
@@ -236,7 +264,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
           </span>
           <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
             <Icon name="zap" size={12} stroke="var(--fg-3)" />
-            Fed by all three pooled neurons: 80% of every yield harvest.
+            Fed by every pooled neuron's yield harvest.
           </span>
         </div>
 
@@ -255,7 +283,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
                 <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
               </Btn>
             </div>
-          ) : info?.admin_excluded ? (
+          ) : info?.admin_excluded && (info?.my_tickets ?? 0n) === 0n ? (
             <div className="col" style={{ gap: 8, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
                 Admins sit this one out — the house never holds tickets. Every drawing belongs
@@ -263,7 +291,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
               </span>
               <Chip tone="muted"><Icon name="key" size={11} /> Admin — excluded</Chip>
             </div>
-          ) : info && !info.eligible ? (
+          ) : info && !info.eligible && (info.my_tickets ?? 0n) === 0n ? (
             <div className="col" style={{ gap: 8, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
                 Staking is the entry ticket: stake ICP to start collecting
@@ -377,26 +405,6 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         )}
       </div>
 
-      {/* ── Local-dev drawing controls ── */}
-      {isLocal && signedIn && (
-        <div className="col" style={{
-          gap: 10, border: '1px dashed var(--border-hi)', borderRadius: 10,
-          background: 'var(--surface)', padding: 14,
-        }}>
-          <Eyebrow>Local dev · hold a drawing now</Eyebrow>
-          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-            <Btn variant="secondary" sm onClick={() => handleDevDraw(false)} disabled={busy !== null}>
-              {busy === 'devdraw' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} />} Draw (real odds)
-            </Btn>
-            <Btn variant="secondary" sm onClick={() => handleDevDraw(true)} disabled={busy !== null}>
-              {busy === 'devwin' ? <LiveDot size={7} /> : <Icon name="target" size={13} />} Draw (force win)
-            </Btn>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)', alignSelf: 'center' }}>
-              Force-win rigs ticket #0 — exercises the full 80/20 payout path.
-            </span>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

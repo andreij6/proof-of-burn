@@ -1,0 +1,52 @@
+name: Integration (PocketIC)
+
+# Slower integration gate from the testing plan (nightly gate, §6 of
+# ideas/course-nft/testing/00-testing-overview.md): builds the canister wasm and
+# runs the PocketIC suite against it.
+#
+# Manual-dispatch only for now so it can't post red runs before the PocketIC
+# server version below is confirmed in a real runner. Once a manual run is green,
+# uncomment the `schedule:` block to run it nightly (still free on public repos).
+on:
+  workflow_dispatch:
+  # schedule:
+  #   - cron: "0 7 * * *"   # 07:00 UTC nightly
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pocketic:
+    name: PocketIC integration
+    runs-on: ubuntu-latest
+    env:
+      # Must match the `pocket-ic = "9"` crate dep in src/backend/Cargo.toml.
+      # Verify the tag exists at https://github.com/dfinity/pocketic/releases and
+      # bump if needed.
+      POCKET_IC_VERSION: "9.0.3"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build canister wasm
+        run: cargo build --target wasm32-unknown-unknown --release -p backend
+        # When PB-301 lands, add: -p course_nft
+
+      - name: Install PocketIC server
+        run: |
+          set -euo pipefail
+          url="https://github.com/dfinity/pocketic/releases/download/${POCKET_IC_VERSION}/pocket-ic-x86_64-linux.gz"
+          echo "Downloading $url"
+          curl -fsSL "$url" | gunzip > pocket-ic
+          chmod +x pocket-ic
+          echo "POCKET_IC_BIN=$PWD/pocket-ic" >> "$GITHUB_ENV"
+
+      - name: Integration tests
+        run: cargo test -p backend --test integration --locked
+        # When PB-301/PB-305+ land, add the two-canister suite:
+        #   - run: cargo test -p backend --test course_nft_integration --locked

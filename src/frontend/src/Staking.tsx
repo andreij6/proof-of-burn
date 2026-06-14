@@ -1,18 +1,20 @@
 import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
 import { StakeTier, StakingBootstrap, UnstakeStatus, YieldStatus } from "./bindings/backend";
-import type { StakingPoolInfo, TierPoolInfo, UserStakeInfo, PendingUnstake, YieldDistribution } from "./bindings/backend";
+import type { StakingPoolInfo, TierPoolInfo, UserStakeInfo, PendingUnstake, YieldDistribution, EarlyAdopterInfo } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, usePageDevControls } from "./ui";
 
 // ==========================================
-// Lossless Voting — pooled staking across three fixed-term NNS neurons
+// Lossless Staking — pooled staking across three fixed-term NNS neurons
 // (6 months / 1 year / 2 years), all controlled by the canister. Stakers keep
-// their principal, vote on tracked proposals for free with weight = stake ×
-// term multiplier (1× / 2× / 4×), and qualify for the lossless lottery
-// (5 / 10 / 20 daily tickets per tier). Unstaking splits the tier's neuron
-// and dissolves it for the tier's full term. All three neurons' yield is
-// harvested into one inbox and split 80% lottery prize pot / 20% treasury.
+// their principal and qualify for the lossless lottery, earning 5 / 10 / 20
+// daily tickets per ICP per tier (term multiplier 1× / 2× / 4×). Staking does
+// NOT grant voting power — voting is burn-only. Unstaking splits the tier's
+// neuron and dissolves it for the tier's full term. A fourth, PERMANENT
+// "Booster" neuron (2-year dissolve, never unstakeable) earns 100 tickets/ICP/day.
+// Every neuron's yield is harvested into one inbox and split 50% lottery / 50%
+// treasury.
 // ==========================================
 
 const E8S = 100_000_000n;
@@ -26,6 +28,8 @@ interface StakingProps {
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   isLocal: boolean;
+  /** Whether the permanent Booster neuron is enabled (adds a 4th tier tab). */
+  boostersEnabled: boolean;
   onSignIn: () => void;
   /** Called after stake/unstake so the app shell can refresh balances. */
   onActivity: () => void;
@@ -70,7 +74,7 @@ function bootstrapChip(b: StakingBootstrap) {
 }
 
 export default function Staking({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onActivity,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, onSignIn, onActivity,
 }: StakingProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
@@ -78,6 +82,10 @@ export default function Staking({
   const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
   const [unstakes, setUnstakes] = useState<PendingUnstake[]>([]);
   const [yields, setYields] = useState<YieldDistribution[]>([]);
+  // Permanent Booster neuron (the former Early Adopters program).
+  const [eaInfo, setEaInfo] = useState<EarlyAdopterInfo | null>(null);
+  const [boosterSel, setBoosterSel] = useState(false);
+  const [boosterAck, setBoosterAck] = useState(false);
 
   const [tier, setTier] = useState<StakeTier>(StakeTier.SixMonths);
   const [stakeInput, setStakeInput] = useState('');
@@ -91,16 +99,18 @@ export default function Staking({
   const refresh = async () => {
     if (!actor) return;
     try {
-      const [poolInfo, mine, pending, dists] = await Promise.all([
+      const [poolInfo, mine, pending, dists, ea] = await Promise.all([
         actor.get_staking_pool_info(),
         signedIn ? actor.get_my_stake() : Promise.resolve(null),
         signedIn ? actor.list_my_pending_unstakes() : Promise.resolve([]),
         actor.list_yield_distributions(),
+        boostersEnabled ? actor.get_early_adopter_info().catch(() => null) : Promise.resolve(null),
       ]);
       setPool(poolInfo);
       setMyStake(mine ?? null);
       setUnstakes(pending);
       setYields(dists);
+      setEaInfo(ea ?? null);
     } catch (err) {
       console.error("Failed to fetch staking state:", err);
     }
@@ -159,7 +169,41 @@ export default function Staking({
       return;
     }
     setStakeInput('');
-    setNotice(`Staked ${fmtICP(amount)} ICP for ${termLabel} — ${fmtICP(amount / 10n)} voting power (stake ÷ 10) and ${TIER_META[tier].tickets} lottery tickets per ICP per day are live.`);
+    setNotice(`Staked ${fmtICP(amount)} ICP for ${termLabel} — ${TIER_META[tier].tickets} lottery tickets per ICP per day are live.`);
+    await refresh();
+    onActivity();
+  });
+
+  // Booster stake: a permanent 2-year neuron — deposit, then early_adopter_stake.
+  // No unstake exists; the reward is 100 lottery tickets/day per ICP.
+  const handleBoosterStake = () => run('booster', async () => {
+    if (!eaInfo) return;
+    const amount = parseIcp(stakeInput);
+    if (!amount || amount < eaInfo.min_stake_e8s) {
+      setError(`Minimum Perm stake is ${fmtICP(eaInfo.min_stake_e8s)} ICP.`);
+      return;
+    }
+    if (!boosterAck) {
+      setError("Tick the box: a Perm stake is permanent and can never be unstaked.");
+      return;
+    }
+    const ledger = createLedgerActor(ledgerCanisterId, {
+      agentOptions: { host, identity, rootKey },
+    });
+    const depositAccount = await actor.get_early_adopter_deposit_address();
+    const xfer = await ledger.icrc1_transfer({
+      to: { owner: depositAccount.owner, subaccount: depositAccount.subaccount },
+      amount: amount + eaInfo.fee_e8s,
+    });
+    if (xfer.__kind__ === "Err") {
+      setError(`Deposit transfer failed: ${JSON.stringify(xfer.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
+      return;
+    }
+    const res = await actor.early_adopter_stake(amount);
+    if (res.__kind__ === "Err") { setError(`Stake failed: ${res.Err}`); return; }
+    setStakeInput('');
+    setBoosterAck(false);
+    setNotice(`Staked ${fmtICP(amount)} ICP into the Perm neuron — permanent, now earning 100 lottery tickets per ICP per day.`);
     await refresh();
     onActivity();
   });
@@ -204,7 +248,7 @@ export default function Staking({
     const res = await actor.merge_unstake(id, t);
     if (res.__kind__ === "Err") { setError(res.Err); setRestakeTarget(null); return; }
     setRestakeTarget(null);
-    setNotice(`Restaked into the ${TIER_META[t].label} pool — your stake there is earning voting power and tickets again (0.0001 ICP merge fee).`);
+    setNotice(`Restaked into the ${TIER_META[t].label} pool — your stake there is earning lottery tickets again (0.0001 ICP merge fee).`);
     await refresh();
     onActivity();
   });
@@ -227,24 +271,76 @@ export default function Staking({
     await refresh();
   });
 
+  // Surface the staking simulator in App's Dashboard & Controls panel.
+  usePageDevControls(isLocal && signedIn, () => (
+    <div className="col" style={{ gap: 8 }}>
+      <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Staking simulator</span>
+      <div className="col" style={{ gap: 8 }}>
+        <Btn variant="secondary" sm onClick={handleDevSweep} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+          {busy === 'sweep' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} />} Run sweep now
+        </Btn>
+        <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+          <input
+            type="number" min="0" step="0.5" placeholder="Mock maturity (ICP)"
+            className="burn-input" style={{ fontFamily: 'var(--font-mono)', width: 150 }}
+            value={maturityInput} onChange={(e) => setMaturityInput(e.target.value)}
+          />
+          <select
+            className="burn-input" style={{ fontFamily: 'var(--font-mono)', width: 92 }}
+            value={maturityTier} onChange={(e) => setMaturityTier(e.target.value as StakeTier)}
+          >
+            {TIER_ORDER.map(t => <option key={t} value={t}>{TIER_META[t].short}</option>)}
+          </select>
+          <Btn variant="secondary" sm onClick={handleDevMaturity} disabled={busy !== null || !maturityInput}>
+            {busy === 'maturity' ? <LiveDot size={7} /> : <Icon name="coins" size={13} />} Add maturity
+          </Btn>
+        </div>
+      </div>
+      <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+        Add mock maturity ≥ 1.05 ICP to a tier's neuron, then run the sweep twice: first
+        harvests into the shared yield inbox, second distributes it to the lottery pot + treasury.
+      </span>
+    </div>
+  ), [busy, maturityInput, maturityTier]);
+
   const card: React.CSSProperties = {
     border: '1px solid var(--border)', borderRadius: 10,
     background: 'var(--surface)', padding: 16,
   };
 
-  const tierTab = (t: StakeTier) => (
+  const tierTab = (t: StakeTier) => {
+    const active = !boosterSel && tier === t;
+    return (
     <button
       key={t}
-      onClick={() => setTier(t)}
+      onClick={() => { setTier(t); setBoosterSel(false); }}
       style={{
         flex: 1, padding: '7px 4px', borderRadius: 7, cursor: 'pointer', fontSize: 12,
-        fontWeight: tier === t ? 700 : 500, fontFamily: 'inherit',
-        border: `1px solid ${tier === t ? 'var(--burn)' : 'var(--border)'}`,
-        background: tier === t ? 'var(--burn-950)' : 'transparent',
-        color: tier === t ? 'var(--burn)' : 'var(--fg-2)',
+        fontWeight: active ? 700 : 500, fontFamily: 'inherit',
+        border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
+        background: active ? 'var(--burn-950)' : 'transparent',
+        color: active ? 'var(--burn)' : 'var(--fg-2)',
       }}
     >
       {TIER_META[t].short}
+    </button>
+    );
+  };
+
+  // The permanent Booster neuron, shown as a 4th tab (2-year, never unstakeable).
+  const boosterTab = (
+    <button
+      key="booster"
+      onClick={() => { setBoosterSel(true); setError(null); }}
+      style={{
+        flex: 1, padding: '7px 4px', borderRadius: 7, cursor: 'pointer', fontSize: 12,
+        fontWeight: boosterSel ? 700 : 500, fontFamily: 'inherit',
+        border: `1px solid ${boosterSel ? 'var(--burn)' : 'var(--border)'}`,
+        background: boosterSel ? 'var(--burn-950)' : 'transparent',
+        color: boosterSel ? 'var(--burn)' : 'var(--fg-2)',
+      }}
+    >
+      ★ Perm
     </button>
   );
 
@@ -254,29 +350,23 @@ export default function Staking({
       <div className="col" style={{ gap: 6 }}>
         <span className="row" style={{ gap: 8 }}>
           <Icon name="zap" size={16} stroke="var(--burn)" />
-          <Eyebrow accent>Lossless voting</Eyebrow>
+          <Eyebrow accent>Lossless staking</Eyebrow>
         </span>
-        <b style={{ fontSize: 17 }}>Stake ICP. Keep it. Vote for free. Win the lottery.</b>
+        <b style={{ fontSize: 17 }}>Stake ICP. Keep it. Earn daily lottery tickets.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 680 }}>
-          Your ICP stays yours — staking earns free voting power and daily lottery tickets.{' '}
+          Your ICP stays yours — staking earns daily lottery tickets.{' '}
           <MoreInfo title="How lossless staking works">
             <p style={{ margin: 0 }}>
               Pick a term — 6 months, 1 year or 2 years. Your ICP joins that term's pooled NNS
-              neuron, and your voting power is the ICP you stake ÷ 10 (10 staked ICP = 1 burned
-              ICP of weight).
+              neuron. Staking is how you qualify for the lossless lottery; it does not grant
+              voting power (voting is burn-only).
             </p>
             <p style={{ margin: 0 }}>
-              <b>Loyalty compounds:</b> every 6 months a stake stays put, the voting power it
-              grants <b>doubles</b> — ×2 at 6 months, ×4 at a year, up to ×16 after 2 years.
-              Topping up blends the clock (new ICP starts its own 6 months); unstaking part of
-              a position keeps the rest's tenure.
+              <b>Longer terms earn more tickets:</b> 5 / 10 / 20 free tickets a day per ICP for
+              6-month / 1-year / 2-year terms.
             </p>
             <p style={{ margin: 0 }}>
-              Staking qualifies you for the lossless lottery — longer terms earn more tickets
-              (5 / 10 / 20 free tickets a day for 6-month / 1-year / 2-year terms).
-            </p>
-            <p style={{ margin: 0 }}>
-              The neurons' yield funds the protocol — 80% lottery prize pool, 20% treasury — and
+              The neurons' yield funds the protocol and the lottery prize pool — and
               you can unstake any time: your ICP returns to your wallet after the term's dissolve.
             </p>
           </MoreInfo>
@@ -300,15 +390,15 @@ export default function Staking({
         <div className="col" style={{ ...card, gap: 12, flex: '1 1 320px', minWidth: 300 }}>
           <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
             <Eyebrow>Your stake</Eyebrow>
-            {myStake && myStake.total_weight_e8s > 0n && (
-              <Chip tone="ok">{fmtICP(myStake.total_weight_e8s)} voting power</Chip>
+            {myStake && myStake.total_staked_e8s > 0n && (
+              <Chip tone="ok">{fmtICP(myStake.total_staked_e8s)} ICP staked</Chip>
             )}
           </span>
 
           {!signedIn ? (
             <div className="col" style={{ gap: 10, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Sign in to stake, unlock free voting power and lottery tickets.
+                Sign in to stake and earn daily lottery tickets.
               </span>
               <Btn variant="primary" sm onClick={onSignIn}>
                 <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
@@ -318,32 +408,62 @@ export default function Staking({
             <>
               <div className="row" style={{ gap: 6 }}>
                 {TIER_ORDER.map(tierTab)}
+                {boostersEnabled && boosterTab}
               </div>
 
+              {boosterSel ? (
+                <>
+                  <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
+                    <b className="mono" style={{ fontSize: 24 }}>{fmtICP(eaInfo?.my_staked_e8s ?? 0n)}</b>
+                    <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>ICP boosting (permanent)</span>
+                  </div>
+
+                  {/* What makes the Booster neuron special */}
+                  <div className="col" style={{ gap: 6, border: '1px solid var(--burn)', borderRadius: 8, padding: '10px 12px', background: 'var(--burn-950)' }}>
+                    <span className="row" style={{ gap: 6, alignItems: 'center', fontSize: 12.5, color: 'var(--fg)' }}>
+                      <Icon name="spark" size={13} stroke="var(--burn)" /> <b>The 2-year Perm neuron</b>
+                    </span>
+                    <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                      Same 2-year neuron as the term tier, with two differences: it is{' '}
+                      <b>permanent — never unstakeable, by anyone</b> — and it earns the highest ticket
+                      rate, <b>100 lottery tickets/day per ICP</b> (vs 5/10/20). Like every neuron here,
+                      its yield funds the lottery and the protocol — you're never paid ICP from it.
+                    </span>
+                  </div>
+
+                  <div className="col" style={{ gap: 8 }}>
+                    <div className="row" style={{ gap: 8 }}>
+                      <div style={{ flex: 1, position: 'relative' }}>
+                        <input
+                          type="number" min="0" step="1" placeholder={`Stake (min ${fmtICP(eaInfo?.min_stake_e8s ?? 100_000_000n)})`}
+                          className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
+                          value={stakeInput} onChange={(e) => setStakeInput(e.target.value)}
+                        />
+                        <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
+                      </div>
+                      <Btn variant="primary" sm onClick={handleBoosterStake} disabled={busy !== null || !stakeInput || !boosterAck}>
+                        {busy === 'booster' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="spark" size={13} stroke="var(--char-950)" />}
+                        {busy === 'booster' ? " Staking…" : " Stake forever"}
+                      </Btn>
+                    </div>
+                    <label className="row" style={{ gap: 8, fontSize: 11.5, color: 'var(--fg-2)', cursor: 'pointer', alignItems: 'flex-start' }}>
+                      <input type="checkbox" checked={boosterAck} style={{ marginTop: 2 }}
+                        onChange={(e) => { setBoosterAck(e.target.checked); setError(null); }} />
+                      <span style={{ flex: 1 }}>
+                        I understand this stake is <b>permanent and irreversible</b> — it can never be
+                        unstaked, and my only return is the daily lottery-ticket boost.
+                      </span>
+                    </label>
+                  </div>
+                </>
+              ) : (
+              <>
               <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
                 <b className="mono" style={{ fontSize: 24 }}>{fmtICP(selMine?.amount_e8s ?? 0n)}</b>
                 <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-                  ICP in {termLabel} · weight {fmtICP(selMine?.weight_e8s ?? 0n)}
+                  ICP in {termLabel}
                 </span>
               </div>
-
-              {/* VP tenure: doubles every 6 months staked, capped at 16× */}
-              {selMine && selMine.amount_e8s > 0n && (
-                <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
-                  <Chip tone={selMine.tenure_multiplier > 1n ? 'ok' : 'muted'} style={{ height: 18, fontSize: 10.5 }}>
-                    Tenure ×{selMine.tenure_multiplier.toString()}
-                  </Chip>
-                  {selMine.next_double_at > 0n ? (
-                    <span>
-                      voting power doubles {new Date(Number(selMine.next_double_at / 1_000_000n))
-                        .toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                      {' '}— the longer you stay staked, the louder your vote
-                    </span>
-                  ) : (
-                    <span>max tenure reached — your stake votes at 16×</span>
-                  )}
-                </span>
-              )}
 
               <div className="col" style={{ gap: 8 }}>
                 <div className="row" style={{ gap: 8 }}>
@@ -387,49 +507,12 @@ export default function Staking({
                   then your full ICP arrives automatically — the treasury reimburses every fee.
                 </span>
               </div>
+              </>
+              )}
             </>
           )}
         </div>
 
-        {/* ── Yield ── */}
-        <div className="col" style={{ ...card, gap: 10, flex: '1 1 260px', minWidth: 250 }}>
-          <Eyebrow>Yield · 80% lottery / 20% treasury</Eyebrow>
-          <div className="col" style={{ gap: 7, fontSize: 12.5 }}>
-            <div className="row" style={{ justifyContent: 'space-between' }}>
-              <span style={{ color: 'var(--fg-3)' }}>Harvested (lifetime)</span>
-              <span className="mono">{pool ? fmtICP(pool.total_yield_e8s) : "…"} ICP</span>
-            </div>
-            {TIER_ORDER.map(t => {
-              const tp = tierPool(t);
-              if (!tp || tp.total_yield_e8s === 0n) return null;
-              return (
-                <div key={t} className="row" style={{ justifyContent: 'space-between' }}>
-                  <span style={{ color: 'var(--fg-3)' }}>· from {TIER_META[t].label}</span>
-                  <span className="mono">{fmtICP(tp.total_yield_e8s)} ICP</span>
-                </div>
-              );
-            })}
-          </div>
-          {pool && pool.pools.some(tp => tp.pending_maturity.length > 0) && (
-            <>
-              <div style={{ borderTop: '1px solid var(--border)' }} />
-              <div className="col" style={{ gap: 5 }}>
-                <Eyebrow>Incoming maturity</Eyebrow>
-                {pool.pools.flatMap(tp => tp.pending_maturity.map((m, i) => (
-                  <div key={`${tp.tier}-${i}`} className="row" style={{ justifyContent: 'space-between', fontSize: 12 }}>
-                    <span className="mono">{fmtICP(m.amount_e8s)} ICP</span>
-                    <span style={{ color: 'var(--fg-3)' }}>{TIER_META[tp.tier].short} · mints {etaLabel(m.expected_at)}</span>
-                  </div>
-                )))}
-              </div>
-            </>
-          )}
-          <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-            <Icon name="coins" size={12} stroke="var(--fg-3)" />
-            All three neurons feed one yield inbox: half grows the single lottery prize pot, half
-            funds the treasury. Maturity harvests at ~1.05 ICP; the NNS mints it ~7 days later.
-          </span>
-        </div>
       </div>
 
       {/* ── Term pools — one public NNS neuron per term ── */}
@@ -500,6 +583,64 @@ export default function Staking({
               </div>
             );
           })}
+
+          {/* The permanent Booster neuron — same layout, special terms. */}
+          {boostersEnabled && (
+            <div
+              role="button" tabIndex={0}
+              onClick={() => { setBoosterSel(true); setError(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { setBoosterSel(true); setError(null); } }}
+              className="col" style={{
+                gap: 10, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
+                flex: '1 1 240px', minWidth: 0,
+                border: `1px solid ${boosterSel ? 'var(--burn)' : 'var(--border-hi)'}`,
+                background: boosterSel ? 'color-mix(in srgb, var(--burn-950) 40%, transparent)' : 'transparent',
+              }}>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>★ Perm · 2 years</b>
+                {eaInfo?.follows_primary_neuron
+                  ? <Chip tone="ok"><Icon name="checkCircle" size={11} /> Neuron ready</Chip>
+                  : eaInfo?.neuron_id != null
+                    ? <Chip tone="pending"><LiveDot size={6} /> Configuring…</Chip>
+                    : <Chip tone="muted">No neuron yet</Chip>}
+              </div>
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                <Chip tone="burn" style={{ height: 18, fontSize: 10.5 }}>permanent · no unstake</Chip>
+                <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>100 tickets / ICP / day</Chip>
+              </div>
+              <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ color: 'var(--fg-3)' }}>Staked</span>
+                  <span className="mono">{eaInfo ? fmtICP(eaInfo.total_staked_e8s) : '…'} ICP</span>
+                </div>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ color: 'var(--fg-3)' }}>Stakers</span>
+                  <span className="mono">{eaInfo ? eaInfo.early_adopter_count.toString() : '…'}</span>
+                </div>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
+                  <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
+                  {eaInfo?.neuron_id != null ? (
+                    isLocal ? (
+                      <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>#{eaInfo.neuron_id.toString()}</span>
+                    ) : (
+                      <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${eaInfo.neuron_id.toString()}`}
+                        target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+                        style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                        title="View this neuron on the NNS dashboard">
+                        #{eaInfo.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                      </a>
+                    )
+                  ) : (
+                    <span style={{ color: 'var(--fg-3)' }}>created on first stake</span>
+                  )}
+                </div>
+              </div>
+              <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--burn)' }}>
+                <Icon name="spark" size={12} stroke="var(--burn)" />
+                Permanent — never unstakeable. Tap to stake.
+              </span>
+            </div>
+          )}
         </div>
         <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
           <Icon name="info" size={12} stroke="var(--fg-3)" />
@@ -577,7 +718,7 @@ export default function Staking({
               </p>
               <p style={{ margin: 0 }}>
                 Changed your mind? Restake the dissolving neuron into any term pool and it starts
-                earning voting power and tickets again immediately. After a restake the emptied
+                earning lottery tickets again immediately. After a restake the emptied
                 neuron still exists on the NNS (merges never delete the source), and NNS explorers
                 can show stale balances for a few hours while their indexers catch up — the live
                 stake is already in the pool neuron.
@@ -609,7 +750,7 @@ export default function Staking({
               </div>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
                 The dissolve stops and neuron <b className="mono">#{u.split_neuron_id.toString()}</b> merges
-                into the term pool you pick — your stake there earns voting power and lottery tickets
+                into the term pool you pick — your stake there earns lottery tickets
                 again immediately. A 0.0001 ICP merge fee applies.
               </span>
               <div className="col" style={{ gap: 8 }}>
@@ -645,52 +786,12 @@ export default function Staking({
                     ? <Chip tone="ok">settled</Chip>
                     : <Chip tone="pending"><LiveDot size={6} /> in progress</Chip>}
                 </span>
-                <span className="mono" style={{ color: 'var(--fg-3)', fontSize: 11.5 }}>
-                  {fmtICP(d.lottery_amount_e8s)} lottery pot · {fmtICP(d.treasury_amount_e8s)} treasury
-                </span>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* ── Local dev tools ── */}
-      {isLocal && signedIn && (
-        <div className="col" style={{
-          gap: 10, border: '1px dashed var(--burn)', borderRadius: 10,
-          background: 'var(--burn-950)', padding: 14,
-        }}>
-          <span className="row" style={{ gap: 8 }}>
-            <Icon name="zap" size={13} stroke="var(--burn)" />
-            <Eyebrow>Local dev · staking simulator</Eyebrow>
-          </span>
-          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-            <Btn variant="secondary" sm onClick={handleDevSweep} disabled={busy !== null}>
-              {busy === 'sweep' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} />} Run sweep now
-            </Btn>
-            <div className="row" style={{ gap: 8 }}>
-              <input
-                type="number" min="0" step="0.5" placeholder="Mock maturity (ICP)"
-                className="burn-input" style={{ fontFamily: 'var(--font-mono)', width: 170 }}
-                value={maturityInput} onChange={(e) => setMaturityInput(e.target.value)}
-              />
-              <select
-                className="burn-input" style={{ fontFamily: 'var(--font-mono)', width: 100 }}
-                value={maturityTier} onChange={(e) => setMaturityTier(e.target.value as StakeTier)}
-              >
-                {TIER_ORDER.map(t => <option key={t} value={t}>{TIER_META[t].short}</option>)}
-              </select>
-              <Btn variant="secondary" sm onClick={handleDevMaturity} disabled={busy !== null || !maturityInput}>
-                {busy === 'maturity' ? <LiveDot size={7} /> : <Icon name="coins" size={13} />} Add maturity
-              </Btn>
-            </div>
-          </div>
-          <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-            Add mock maturity ≥ 1.05 ICP to a tier's neuron, then run the sweep twice: first
-            harvests into the shared yield inbox, second splits it 80% lottery pot / 20% treasury.
-          </span>
-        </div>
-      )}
     </div>
   );
 }

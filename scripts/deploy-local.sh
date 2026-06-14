@@ -93,14 +93,15 @@ icp canister call backend admin_set_explorer_ledger "(variant { CkUSDC }, princi
 icp canister call backend admin_set_explorer_ledger "(variant { CkUSDT }, principal \"$CKUSDT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 ok "Token ledgers wired (ckBTC=$CKBTC_ID, ckETH=$CKETH_ID, ckUSDC=$CKUSDC_ID, ckUSDT=$CKUSDT_ID)"
 
-# The arcade + early adopters + casino ship dark (flags default OFF) — on for local testing.
+# The arcade + early adopters ship dark (flags default OFF) — on for local testing.
 icp canister call backend admin_set_feature_flag '("arcade", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 icp canister call backend admin_set_feature_flag '("early_adopters", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-icp canister call backend admin_set_feature_flag '("crash", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-# Crash needs a one-time genesis (hash chain + builtin strategies + start the loop).
-icp canister call backend admin_init_crash '()' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-icp canister call backend admin_set_feature_flag '("poker", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-ok "Arcade + Early Adopters + Casino (Crash + Poker) flags enabled (local)"
+ok "Arcade + Early Adopters flags enabled (local)"
+# Casino (Crash) is DISABLED pending the SVPP/points redesign. Force the flag
+# OFF (earlier deploys may have turned it on; flags persist across upgrades) and
+# skip casino seeding. Re-enable here once the new point system lands.
+icp canister call backend admin_set_feature_flag '("crash", false)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+ok "Casino (Crash) disabled (local)"
 
 # ── 6. Mock data (only seeds what is missing) ────────────────────────────────
 # 6a. Proposals + sample ideas auto-seed in init/post_upgrade when empty.
@@ -112,13 +113,14 @@ if icp canister call backend list_projects '()' --query -e "$ENV" | grep -q 'id 
   ok "Projects already present — skipping project seed"
 else
   note "Seeding 2 sample projects…"
+  # admin_add_project(title, description, detail, goal_usd_e8s). $1 = 100_000_000.
   icp canister call backend admin_add_project \
-    '("Burn Dashboard v1", "A public dashboard ranking dapps by cycles burned, updated daily on-chain.", "Pull cycle-consumption metrics per canister, normalise by subnet, surface a verifiable burn ranking.", 50_000_000_000 : nat64, 5_000_000 : nat64, 1_000_000_000_000_000_000 : nat64, true, true, true)' \
+    '("Burn Dashboard v1", "A public dashboard ranking dapps by cycles burned, updated daily on-chain.", "Pull cycle-consumption metrics per canister, normalise by subnet, surface a verifiable burn ranking.", 5_000_000_000_000 : nat64)' \
     -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
   icp canister call backend admin_add_project \
-    '("ckBTC Tipping Widget", "An embeddable tip button for ICP dapps that routes a fee share to the treasury.", "ICRC-1 tips with a 2% protocol fee converted to cycles via the CMC — every tip burns ICP.", 25_000_000_000 : nat64, 2_500_000 : nat64, 0 : nat64, true, true, false)' \
+    '("ckBTC Tipping Widget", "An embeddable tip button for ICP dapps that routes a fee share to the treasury.", "ICRC-1 tips with a 2% protocol fee converted to cycles via the CMC — every tip burns ICP.", 2_500_000_000_000 : nat64)' \
     -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-  ok "Seeded 2 sample projects"
+  ok "Seeded 2 sample projects ($50,000 and $25,000 USD goals)"
 fi
 
 # 6c. Sample active pool neurons (so the pool sidebar isn't empty).

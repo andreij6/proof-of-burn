@@ -4,13 +4,14 @@ import { UnstakeStatus } from "./bindings/backend";
 import { FlagState } from "./bindings/backend";
 import type { Config, FeatureFlag, GlobalStats, LotteryInfo, EarlyAdopterInfo, StakingPoolInfo, PoolInfo, NeuronFollowStatus, AuditLogEntry, StakeTier, PendingUnstake } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import { Icon, Eyebrow, Btn, Chip, LiveDot, fmtICP, formatPrincipal } from "./ui";
+import { Icon, Eyebrow, Btn, Chip, LiveDot, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 import CourseEditor from "./arcade/CourseEditor";
 
 // ==========================================
 // Admin console — sectioned: Overview (health), Treasury Management
 // (multi-token, 15-ICP floor guard, neuron allocations), Governance,
-// Staking & Lottery, Features & Content, and the How-it-works Reference.
+// Staking & Lottery, Features (flag table), Content (course editor +
+// casino seed), and the How-it-works Reference.
 // ==========================================
 
 interface AdminProps {
@@ -26,7 +27,7 @@ interface AdminProps {
   openTreasury: () => void;
 }
 
-type AdminSection = 'overview' | 'treasury' | 'neurons' | 'governance' | 'staking' | 'features' | 'reference';
+type AdminSection = 'overview' | 'treasury' | 'neurons' | 'governance' | 'staking' | 'features' | 'content' | 'reference';
 
 const SECTIONS: { key: AdminSection; label: string; icon: string }[] = [
   { key: 'overview', label: 'Overview', icon: 'eye' },
@@ -34,7 +35,8 @@ const SECTIONS: { key: AdminSection; label: string; icon: string }[] = [
   { key: 'neurons', label: 'Neurons', icon: 'target' },
   { key: 'governance', label: 'Governance', icon: 'flame' },
   { key: 'staking', label: 'Staking & Lottery', icon: 'zap' },
-  { key: 'features', label: 'Features & Content', icon: 'gamepad' },
+  { key: 'features', label: 'Features', icon: 'zap' },
+  { key: 'content', label: 'Content', icon: 'gamepad' },
   { key: 'reference', label: 'Reference', icon: 'info' },
 ];
 
@@ -129,9 +131,12 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
   // ── treasury management ──
   const [balances, setBalances] = useState<Record<string, bigint | null>>({});
+  // Withdraw card state (txToken/txAmount/txDest) + Deposit card state (dep*).
   const [txToken, setTxToken] = useState<ExplorerToken>(ExplorerToken.ICP);
   const [txAmount, setTxAmount] = useState('');
   const [txDest, setTxDest] = useState('');
+  const [depToken, setDepToken] = useState<ExplorerToken>(ExplorerToken.ICP);
+  const [depAmount, setDepAmount] = useState('');
   const [overrideFloor, setOverrideFloor] = useState(false);
   const [allocTarget, setAllocTarget] = useState<string>('TwoYears'); // tier name or 'EarlyAdopters'
   const [allocAmount, setAllocAmount] = useState('');
@@ -231,21 +236,23 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
   // ── treasury actions ──────────────────────────────────────────────────────
   const meta = TOKEN_META.find(t => t.token === txToken)!;
+  const depMeta = TOKEN_META.find(t => t.token === depToken)!;
 
   const depositToken = () => run('t-deposit', async () => {
-    const amount = parseUnits(txAmount, meta.decimals);
-    if (!amount || amount <= 0n) { setError(`Enter a valid ${meta.label} amount.`); return null; }
+    const amount = parseUnits(depAmount, depMeta.decimals);
+    if (!amount || amount <= 0n) { setError(`Enter a valid ${depMeta.label} amount.`); return null; }
     const dest = await actor.get_treasury_deposit_address();
     const ledgers = await tokenLedgerIds();
-    const ledger = createLedgerActor(ledgers[txToken], { agentOptions: { host, identity, rootKey } });
+    const ledger = createLedgerActor(ledgers[depToken], { agentOptions: { host, identity, rootKey } });
     const xfer = await ledger.icrc1_transfer({ to: { owner: dest.owner, subaccount: dest.subaccount }, amount });
     if (xfer.__kind__ === 'Err') {
       setError(`Deposit failed: ${JSON.stringify(xfer.Err, (_k, v) => typeof v === 'bigint' ? v.toString() : v)}`);
       return null;
     }
-    setTxAmount('');
+    const sent = depAmount;
+    setDepAmount('');
     await refreshBalances();
-    return `${txAmount} ${meta.label} deposited to the treasury from your wallet.`;
+    return `${sent} ${depMeta.label} deposited to the treasury from your wallet.`;
   });
 
   const withdrawToken = () => run('t-withdraw', async () => {
@@ -282,7 +289,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     setAllocAmount('');
     setOverrideFloor(false);
     await Promise.all([refreshBalances(), refreshHealth()]);
-    return `${fmtUnits(amount, 8)} ICP allocated to the ${allocTarget === 'EarlyAdopters' ? 'Early Adopters' : allocTarget} neuron.`;
+    return `${fmtUnits(amount, 8)} ICP allocated to the ${allocTarget === 'EarlyAdopters' ? 'Perm' : allocTarget} neuron.`;
   });
 
   // ── dial actions (unchanged mechanics, new homes) ─────────────────────────
@@ -362,6 +369,20 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     return (res.Ok as string) + ' — open Play → Casino.';
   });
 
+  // Surface the casino local-playtest control in App's Dashboard & Controls panel.
+  usePageDevControls(!!config?.is_local, () => (
+    <div className="col" style={{ gap: 8 }}>
+      <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Casino — local playtest</span>
+      <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+        Grants you 5,000 ICP of dev stake (so you have SVPP) and seeds 6 auto-pilot bots
+        that bet &amp; chat every round. Needs the <span className="mono">crash</span> flag on.
+      </span>
+      <Btn variant="secondary" sm onClick={seedCasino} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+        <Icon name="gamepad" size={12} /> Seed bots &amp; grant me SVPP
+      </Btn>
+    </div>
+  ), [busy, config?.is_local]);
+
   const refreshSplitNeurons = async () => {
     if (!actor) return;
     try {
@@ -402,7 +423,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       {/* ── Section nav ── */}
       <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
         {SECTIONS.map(s => (
-          <Btn key={s.key} variant={section === s.key ? 'primary' : 'ghost'} sm onClick={() => { setSection(s.key); setError(null); setNotice(null); if (s.key === 'governance') refreshAudit(); if (s.key === 'neurons') refreshSplitNeurons(); }}>
+          <Btn key={s.key} variant={section === s.key ? 'primary' : 'ghost'} sm onClick={() => { setSection(s.key); setError(null); setNotice(null); if (s.key === 'governance' || s.key === 'treasury') refreshAudit(); if (s.key === 'neurons') refreshSplitNeurons(); }}>
             <Icon name={s.icon} size={13} stroke={section === s.key ? 'var(--char-950)' : 'currentColor'} />
             {s.label}
           </Btn>
@@ -443,7 +464,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <StatCard label="Lottery pot" value={lottery ? fmtICP(lottery.pot_e8s) : '…'}
               tone={lottery && lottery.pot_e8s < lottery.min_pot_e8s ? 'warn' : undefined}
               sub={lottery ? (lottery.pot_e8s < lottery.min_pot_e8s ? `below ${fmtICP(lottery.min_pot_e8s)} minimum — draws roll over` : `${lottery.total_tickets.toString()} tickets in round`) : undefined} />
-            <StatCard label="Early Adopters" value={ea ? fmtICP(ea.total_staked_e8s) : '…'}
+            <StatCard label="Perm neuron" value={ea ? fmtICP(ea.total_staked_e8s) : '…'}
               sub={ea ? `${ea.early_adopter_count.toString()} members · ${ea.membership_closed ? 'CLOSED' : 'open'}` : undefined} />
             <StatCard label="Pool neurons" value={pool ? pool.active_count.toString() : '…'} sub="active in the top-25 race" />
           </div>
@@ -488,45 +509,66 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             </span>
           </div>
 
-          {/* Move funds */}
-          <div className="col" style={{ ...card, gap: 10 }}>
-            <Eyebrow>Deposit / withdraw</Eyebrow>
-            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-              {TOKEN_META.map(({ token, label }) => (
-                <Btn key={token} variant={txToken === token ? 'primary' : 'ghost'} sm onClick={() => setTxToken(token)}>{label}</Btn>
-              ))}
-            </div>
-            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-              <input type="text" placeholder={`Amount (${meta.label})`} className="burn-input" style={{ ...inputStyle, maxWidth: 200 }}
-                value={txAmount} onChange={e => setTxAmount(e.target.value)} />
-              <input type="text" placeholder="Destination principal (empty = your wallet)" className="burn-input" style={{ ...inputStyle, minWidth: 260 }}
-                value={txDest} onChange={e => setTxDest(e.target.value)} />
-            </div>
-            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-              <Btn variant="secondary" sm onClick={depositToken} disabled={busy !== null || !txAmount}>
+          {/* Deposit + withdraw — two separate cards. */}
+          <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
+            {/* Deposit */}
+            <div className="col" style={{ ...card, gap: 10, flex: '1 1 300px', minWidth: 280 }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="arrowUp" size={14} stroke="var(--sprout)" />
+                <Eyebrow>Deposit to treasury</Eyebrow>
+              </span>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                {TOKEN_META.map(({ token, label }) => (
+                  <Btn key={token} variant={depToken === token ? 'primary' : 'ghost'} sm onClick={() => setDepToken(token)}>{label}</Btn>
+                ))}
+              </div>
+              <input type="text" placeholder={`Amount (${depMeta.label})`} className="burn-input" style={{ ...inputStyle, maxWidth: 220 }}
+                value={depAmount} onChange={e => setDepAmount(e.target.value)} />
+              <Btn variant="secondary" sm onClick={depositToken} disabled={busy !== null || !depAmount} style={{ alignSelf: 'flex-start' }}>
                 {busy === 't-deposit' ? <LiveDot size={7} /> : <Icon name="arrowUp" size={13} stroke="var(--burn)" />} Deposit from my wallet
               </Btn>
-              <Btn variant="primary" sm onClick={withdrawToken} disabled={busy !== null || !txAmount}>
-                {busy === 't-withdraw' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="wallet" size={13} stroke="var(--char-950)" />} Withdraw from treasury
-              </Btn>
-              <label className="row" style={{ gap: 6, fontSize: 12, color: overrideFloor ? 'var(--ember)' : 'var(--fg-3)', cursor: 'pointer' }}>
-                <input type="checkbox" checked={overrideFloor} onChange={e => setOverrideFloor(e.target.checked)} />
-                Override 15 ICP floor
-              </label>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                Comes straight from your signed-in wallet on the selected token's ledger.
+              </span>
             </div>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Withdrawals that would leave the ICP treasury under 15 ICP are refused unless you
-              explicitly override — below ~10 ICP the cycle top-up silently stops and the canisters
-              eventually go dark. Deposits come straight from your signed-in wallet on the selected
-              token's ledger. <a onClick={openTreasury} style={{ cursor: 'pointer', textDecoration: 'underline' }}>Legacy ICP dialog…</a>
-            </span>
+
+            {/* Withdraw */}
+            <div className="col" style={{ ...card, gap: 10, flex: '1 1 300px', minWidth: 280 }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="wallet" size={14} stroke="var(--burn)" />
+                <Eyebrow>Withdraw from treasury</Eyebrow>
+              </span>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                {TOKEN_META.map(({ token, label }) => (
+                  <Btn key={token} variant={txToken === token ? 'primary' : 'ghost'} sm onClick={() => setTxToken(token)}>{label}</Btn>
+                ))}
+              </div>
+              <input type="text" placeholder={`Amount (${meta.label})`} className="burn-input" style={{ ...inputStyle, maxWidth: 220 }}
+                value={txAmount} onChange={e => setTxAmount(e.target.value)} />
+              <input type="text" placeholder="Destination principal (empty = your wallet)" className="burn-input" style={{ ...inputStyle, minWidth: 240 }}
+                value={txDest} onChange={e => setTxDest(e.target.value)} />
+              <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+                <Btn variant="primary" sm onClick={withdrawToken} disabled={busy !== null || !txAmount} style={{ alignSelf: 'flex-start' }}>
+                  {busy === 't-withdraw' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="wallet" size={13} stroke="var(--char-950)" />} Withdraw
+                </Btn>
+                <label className="row" style={{ gap: 6, fontSize: 12, color: overrideFloor ? 'var(--ember)' : 'var(--fg-3)', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={overrideFloor} onChange={e => setOverrideFloor(e.target.checked)} />
+                  Override 15 ICP floor
+                </label>
+              </div>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                Withdrawals that would leave the ICP treasury under 15 ICP are refused unless you
+                override — below ~10 ICP the cycle top-up silently stops and the canisters eventually
+                go dark. <a onClick={openTreasury} style={{ cursor: 'pointer', textDecoration: 'underline' }}>Legacy ICP dialog…</a>
+              </span>
+            </div>
           </div>
 
           {/* Allocate to neurons */}
           <div className="col" style={{ ...card, gap: 10 }}>
             <Eyebrow>Allocate ICP to a platform neuron</Eyebrow>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-              {[['SixMonths', '6-month pool'], ['OneYear', '1-year pool'], ['TwoYears', '2-year pool'], ['EarlyAdopters', 'Early Adopters']].map(([key, label]) => (
+              {[['SixMonths', '6-month pool'], ['OneYear', '1-year pool'], ['TwoYears', '2-year pool'], ['EarlyAdopters', 'Perm neuron']].map(([key, label]) => (
                 <Btn key={key} variant={allocTarget === key ? 'primary' : 'ghost'} sm onClick={() => setAllocTarget(key)}>{label}</Btn>
               ))}
             </div>
@@ -540,9 +582,34 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Moves treasury ICP into the neuron's stake (transfer + refresh). Tier allocations boost
               that neuron's yield — and therefore the lottery pot — without belonging to any staker;
-              Early Adopter allocations compound the program's monthly yield. The 15 ICP floor and
+              Perm-tier allocations compound the Perm neuron's yield (split 50/50 treasury/lottery). The 15 ICP floor and
               override apply here too. Allocations are one-way: getting ICP back out means a neuron
               dissolve, so treat them as permanent.
+            </span>
+          </div>
+
+          {/* ── Transactions — the protocol's money-movement log ── */}
+          <div className="col" style={{ ...card, gap: 10 }}>
+            <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+              <Eyebrow>Transactions — money in &amp; out</Eyebrow>
+              <Btn variant="ghost" sm onClick={refreshAudit} disabled={busy !== null}><Icon name="undo" size={12} /> Refresh</Btn>
+            </span>
+            <div className="col" style={{ gap: 4, maxHeight: 360, overflowY: 'auto' }}>
+              {auditTail.length === 0 && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No transactions yet (or still loading).</span>}
+              {auditTail.map((e, i) => (
+                <div key={i} className="row" style={{ gap: 10, fontSize: 11.5, padding: '5px 8px', borderRadius: 6, background: i % 2 ? 'transparent' : 'var(--surface)', flexWrap: 'wrap' }}>
+                  <span className="mono" style={{ color: 'var(--fg-3)', minWidth: 118 }}>
+                    {new Date(Number(e.timestamp / 1_000_000n)).toISOString().slice(0, 16).replace('T', ' ')}
+                  </span>
+                  <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>{e.event_type}</Chip>
+                  <span className="mono">{fmtICP(e.amount_e8s)} ICP</span>
+                  <span className="mono" style={{ color: 'var(--fg-3)' }}>{formatPrincipal(e.user)}</span>
+                  <span className="mono" style={{ color: 'var(--fg-3)' }}>ref #{e.proposal_id.toString()}</span>
+                </div>
+              ))}
+            </div>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              Append-only on-chain record of every money-moving event — burns, refunds, payouts, fees and staking. Newest first.
             </span>
           </div>
         </>
@@ -582,7 +649,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               dashboard cache). Every platform neuron should follow the primary on topics 0
               (catch-all), 4 (Governance) and 14 (SNS). Tier-neuron yield harvests automatically once
               it crosses {config ? fmtICP(config.maturity_threshold_e8s) : '1.05'} ICP (then splits
-              80/20 lottery/treasury); the Early Adopters neuron settles its yield monthly. "Run
+              50/50 lottery/treasury); the Perm neuron settles its yield on the same cadence. "Run
               sweep now" on the Overview forces a harvest check immediately.
             </span>
           </div>
@@ -787,26 +854,37 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               <Icon name="zap" size={13} stroke="var(--burn)" />
               <Eyebrow>Feature kill switches</Eyebrow>
             </span>
-            <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-              {featureFlags.map(f => {
+            <div className="col" style={{ gap: 0 }}>
+              {/* Header row */}
+              <div className="row" style={{ gap: 10, padding: '6px 8px', borderBottom: '1px solid var(--border-hi)', color: 'var(--fg-3)', fontSize: 11 }}>
+                <span style={{ flex: '1 1 0' }}>Feature</span>
+                <span style={{ flex: '0 0 70px' }}>State</span>
+                <span style={{ flex: '0 0 96px', textAlign: 'right' }}>Toggle</span>
+              </div>
+              {featureFlags.map((f, i) => {
                 const label = f.state === FlagState.On ? 'On' : f.state === FlagState.AdminOn ? 'Admin' : 'Off';
                 const variant = f.state === FlagState.On ? 'primary' : f.state === FlagState.AdminOn ? 'secondary' : 'ghost';
+                const tone = f.state === FlagState.On ? 'ok' : f.state === FlagState.AdminOn ? 'pending' : 'muted';
                 return (
                   <div key={f.key} className="row" style={{
-                    gap: 10, padding: '8px 12px', border: '1px solid var(--border)',
-                    borderRadius: 8, background: 'var(--surface)',
+                    gap: 10, padding: '6px 8px', alignItems: 'center',
+                    borderBottom: '1px solid var(--border)',
+                    background: i % 2 ? 'transparent' : 'var(--surface)',
                   }}>
-                    <span className="mono" style={{ fontSize: 12.5 }}>{f.key}</span>
-                    <Btn
-                      variant={variant} sm
-                      onClick={() => cycleFlag(f.key, f.state)}
-                      disabled={busy === `flag-${f.key}`}
-                    >
-                      {busy === `flag-${f.key}`
-                        ? <LiveDot size={7} color="var(--fg)" />
-                        : <Icon name={f.state === FlagState.On ? 'check' : f.state === FlagState.AdminOn ? 'key' : 'x'} size={12} stroke={f.state === FlagState.On ? 'var(--char-950)' : 'currentColor'} />}
-                      {' '}{label}
-                    </Btn>
+                    <span className="mono" style={{ flex: '1 1 0', fontSize: 12.5 }}>{f.key}</span>
+                    <span style={{ flex: '0 0 70px' }}><Chip tone={tone} style={{ height: 18, fontSize: 10.5 }}>{label}</Chip></span>
+                    <span style={{ flex: '0 0 96px', display: 'flex', justifyContent: 'flex-end' }}>
+                      <Btn
+                        variant={variant} sm
+                        onClick={() => cycleFlag(f.key, f.state)}
+                        disabled={busy === `flag-${f.key}`}
+                      >
+                        {busy === `flag-${f.key}`
+                          ? <LiveDot size={7} color="var(--fg)" />
+                          : <Icon name={f.state === FlagState.On ? 'check' : f.state === FlagState.AdminOn ? 'key' : 'x'} size={12} stroke={f.state === FlagState.On ? 'var(--char-950)' : 'currentColor'} />}
+                        {' '}{label}
+                      </Btn>
+                    </span>
                   </div>
                 );
               })}
@@ -815,7 +893,11 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               Click to cycle <b>Off</b> → <b>On</b> (everyone) → <b>Admin</b> (admins only — live preview/playtest). Instant, reversible.
             </span>
           </div>
+        </>
+      )}
 
+      {section === 'content' && (
+        <>
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8 }}>
               <Icon name="gamepad" size={13} stroke="var(--burn)" />
@@ -828,21 +910,6 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <CourseEditor actor={actor} />
           </div>
 
-          {config?.is_local && (
-            <div className="col" style={{ ...card, gap: 10 }}>
-              <span className="row" style={{ gap: 8 }}>
-                <Icon name="zap" size={13} stroke="var(--burn)" />
-                <Eyebrow>Casino — local playtest</Eyebrow>
-              </span>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Grants you 5,000 ICP of dev stake (so you have chips) and seeds 6 auto-pilot
-                bots that bet &amp; chat every round. Local only — needs the <span className="mono">crash</span> flag on.
-              </span>
-              <Btn variant="secondary" sm onClick={seedCasino} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-                <Icon name="gamepad" size={12} /> Seed bots &amp; grant me chips
-              </Btn>
-            </div>
-          )}
         </>
       )}
 
@@ -859,23 +926,23 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           <Section icon="flame" title="Burn voting — conviction with skin in the game">
             <Li>Users register a neuron, follow the community leader, then commit ICP to a tracked NNS proposal with an adopt or reject stance. Minimum 1 ICP; one commitment per proposal (top-ups allowed); no fees — the treasury fronts all ledger fees so refunds are exact.</Li>
             <Li>Committed ICP sits in a per-user escrow subaccount until the proposal's deadline (commits close 1 hour before).</Li>
-            <Li>At cutoff, if total commitments meet the threshold, the side with more committed ICP decides the NNS vote (ties go to the first stance cast). Staked voting power joins this balance of power but never counts toward the threshold.</Li>
+            <Li>At cutoff, if total committed (burned) ICP meets the threshold, the side with more committed ICP decides the NNS vote (ties go to the first stance cast). Voting is burn-only — staking grants no voting power.</Li>
             <Li><b>Vote succeeds → the escrow burns:</b> 50% to the treasury, 25% to backend cycles, 25% to frontend cycles. Burns are recorded per user and power the leaderboard stats.</Li>
             <Li><b>Threshold unmet or the NNS vote fails → full refund.</b> A failed NNS call can never burn funds (F-102 invariant).</Li>
             <Li>Every transfer is journaled with per-leg block indices; the 5-minute sweep retries any failed leg without ever double-spending.</Li>
           </Section>
 
-          <Section icon="target" title="Neuron pool — earn 25% of every burn">
-            <Li>Neuron owners pay a one-time initiation fee (current: {config ? fmtICP(config.pool_initiation_fee_e8s) : '…'} ICP, split 50% treasury / 25% backend cycles / 25% frontend cycles) to register their neuron in the pool.</Li>
-            <Li>When a proposal settles as burned, 25% of the burned total is split equally among the owners of the top 25 pool neurons by voting power, paid from the treasury.</Li>
+          <Section icon="target" title="Verified Followers — earn 25% of every burn">
+            <Li>Neuron owners pay a one-time initiation fee (current: {config ? fmtICP(config.pool_initiation_fee_e8s) : '…'} ICP, split 50% treasury / 25% backend cycles / 25% frontend cycles) to register their neuron as a Verified Follower.</Li>
+            <Li>When a proposal settles as burned, 25% of the burned total is split equally among the owners of the top 100 verified-follower neurons by voting power (ties for the last slot go to the higher voting power), paid from the treasury.</Li>
             <Li>Each payout lands in the recipient's wallet and their payout history. Deactivating keeps the registration — reactivating never re-charges the fee.</Li>
           </Section>
 
           <Section icon="zap" title="Lossless staking — three terms, one principal, zero loss">
             <Li>Three pooled NNS neurons, one per term: 6 months, 1 year, 2 years. Your ICP joins the term's neuron; your principal is never spent. Every neuron is made PUBLIC on the NNS the moment it's configured — anyone can audit it on the dashboard.</Li>
-            <Li>Platform voting power = the ICP you stake ÷ 10 (10 staked ICP = 1 burned ICP of weight; staking risks nothing, so it's discounted vs. an irreversible burn). The term length scales lottery tickets, not voting power. Staked weight sways the adopt/reject decision on every tracked proposal — free — and combined staked weight can still carry a proposal past its threshold with zero burning.</Li>
+            <Li>Staking grants <b>no voting power</b> — voting is burn-only. Staking's sole reward is lottery eligibility: the term length scales the daily ticket grant (6mo / 1y / 2y → 5 / 10 / 20 tickets per ICP per day).</Li>
             <Li>Whole-ICP amounts only. Unstake any time: the tier's neuron splits, the split dissolves for the full term, then the FULL amount lands back in your wallet automatically — the treasury fronts every neuron fee. Zero-loss means zero: commit X, get X back. A dissolving unstake can also be RESTAKED into any tier (merge; treasury fronts that fee too).</Li>
-            <Li>Neuron maturity harvests once it crosses ~1.05 ICP and is split <b>80% lottery prize pot / 20% treasury</b> — all three neurons feed the same pot.</Li>
+            <Li>Neuron maturity harvests once it crosses ~1.05 ICP and is split <b>50% lottery prize pot / 50% treasury</b> — all three neurons feed the same pot.</Li>
             <Li>Staking is also the lottery's eligibility gate (below).</Li>
           </Section>
 
@@ -889,23 +956,23 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
           <Section icon="bulb" title="Community R&D — ideas and projects">
             <Li>Posting an idea costs 1 ICP (anti-spam, 100% to treasury). Ideas die after 30 days without an upvote.</Li>
-            <Li>Upvotes carry value in ICP, ckBTC or ckETH (~$1 minimums, admin-tunable): 75% to the treasury, 25% straight to the idea's poster.</Li>
-            <Li>Projects are admin-curated funding goals; contributions go 100% to the treasury, which pays for execution.</Li>
+            <Li>Upvoting is <b>free</b> — no token is collected — and each user may upvote a given idea once. Every upvote resets that idea's 30-day expiry clock.</Li>
+            <Li>Projects are admin-curated with a single <b>USD funding goal</b> and accept any supported token (ICP, ckBTC, ckETH); contributions go 100% to the treasury, which pays for execution.</Li>
           </Section>
 
-          <Section icon="spark" title="Early Adopters — the platform annuity">
-            <Li>Permanent (no unstake, by design) stake into a platform-controlled 2-year neuron that follows the primary on every topic.</Li>
-            <Li>Monthly settlement bands: months under 50 ICP yield restake into the neuron; the treasury's cut is capped at the first 150 ICP; everything above flows to members proportional to stake. Membership closes permanently the first month yield reaches 600 ICP.</Li>
-            <Li>Unclaimed member shares forfeit to the treasury at the next settlement.</Li>
+          <Section icon="spark" title="Perm tier — the platform's permanent stake">
+            <Li>Permanent (no unstake, by design) stake into a platform-controlled 2-year neuron that follows the primary on every topic. Open to everyone, forever — no membership cap or close.</Li>
+            <Li>Perm stakes earn <b>lottery tickets only</b>: a flat 100 tickets/day per whole ICP staked. No ICP yield is ever paid to Perm stakers.</Li>
+            <Li>The Perm neuron's harvested yield is split <b>50% treasury / 50% lottery prize pot</b> — never distributed to users.</Li>
           </Section>
 
           <Section icon="coins" title="Payout history — every satoshi accounted for">
-            <Li>Every transfer the canister makes to a user is recorded: lottery jackpots, unstake disbursements, idea upvote shares, commitment refunds, pool rewards, early-adopter yield.</Li>
+            <Li>Every transfer the canister makes to a user is recorded: lottery jackpots, unstake disbursements, commitment refunds, and verified-follower rewards.</Li>
             <Li>Each record carries the token, amount, timestamp and source id — the user-facing mirror of the append-only audit log.</Li>
           </Section>
 
           <Section icon="wallet" title="Treasury & cycles — how the lights stay on">
-            <Li>Treasury inflows: 50% of burns, 20% of staking yield, the Early Adopter monthly cut (≤150 ICP), idea fees and 75% upvote shares, project funding, pool initiation fees, explorer and arcade payments.</Li>
+            <Li>Treasury inflows: 50% of burns, 50% of staking yield, 50% of Perm-neuron yield, idea post fees, project funding, verified-follower initiation fees, explorer and arcade payments.</Li>
             <Li>Cycles: 25% of each burn tops up each canister via the CMC. If the backend dips below 5T cycles, the sweep auto-converts treasury ICP into cycles (two-phase, idempotent).</Li>
             <Li>Withdrawals and neuron allocations are guarded by the 15 ICP floor (override available) — below ~10 ICP the cycle top-up silently stops.</Li>
           </Section>

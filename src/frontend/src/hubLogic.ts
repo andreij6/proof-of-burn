@@ -2,7 +2,6 @@
 // components so it is unit-testable and the page file stays fast-refreshable.
 import type { Proposal } from "./bindings/backend";
 import type { AppPage } from "./App";
-import { fmtICP } from "./ui";
 
 const DAY_NS = 86_400_000_000_000n;
 
@@ -22,7 +21,7 @@ export function countdownShort(atNs: bigint, nowMs: number): string | null {
 }
 
 export interface AttentionItem {
-  kind: 'claim_yield' | 'draw_soon' | 'closing_votes';
+  kind: 'draw_soon' | 'closing_votes';
   page: AppPage;
   title: string;
   detail: string;
@@ -31,20 +30,11 @@ export interface AttentionItem {
 /** Action-needed cards, most valuable first. Pure so the ranking is testable. */
 export function attentionItems(args: {
   nowNs: bigint;
-  claimableE8s: bigint;
   lottery: { nextDrawAt: bigint; myTickets: bigint } | null;
   proposals: Proposal[];
   actedProposalIds: Set<string>;
 }): AttentionItem[] {
   const items: AttentionItem[] = [];
-  if (args.claimableE8s > 0n) {
-    items.push({
-      kind: 'claim_yield',
-      page: 'early_adopters',
-      title: `${fmtICP(args.claimableE8s)} ICP ready to claim`,
-      detail: 'Your Early Adopter yield share is allocated — unclaimed shares forfeit to the treasury at the next settlement.',
-    });
-  }
   const closing = args.proposals.filter(p =>
     p.status === 'open' &&
     p.deadline > args.nowNs &&

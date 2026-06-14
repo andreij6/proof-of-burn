@@ -66,15 +66,15 @@ const TX_META: Record<string, { label: string; icon: string; blurb: string }> = 
   // In — payouts the site made to you.
   LotteryWin: { label: 'Lottery jackpot', icon: 'target', blurb: '80% of the prize pool' },
   UnstakeDisbursement: { label: 'Unstake disbursement', icon: 'zap', blurb: 'Dissolved stake returned to your wallet' },
-  IdeaUpvoteShare: { label: 'Idea upvote share', icon: 'bulb', blurb: '25% poster share of an upvote' },
+  IdeaUpvoteShare: { label: 'Idea upvote share', icon: 'bulb', blurb: 'Legacy — upvoting is now free, no poster share' },
   CommitmentRefund: { label: 'Commitment refund', icon: 'undo', blurb: 'Escrow returned — threshold unmet' },
-  PoolReward: { label: 'Pool reward', icon: 'arrowUp', blurb: '25% of a settled burn, shared by top pool neurons' },
-  EarlyAdopterYield: { label: 'Early Adopter yield', icon: 'spark', blurb: 'Your stake-proportional share of the monthly neuron yield' },
+  PoolReward: { label: 'Verified follower reward', icon: 'arrowUp', blurb: '25% of a settled burn, split equally among the top 100 verified-follower neurons' },
+  EarlyAdopterYield: { label: 'Early Adopter yield', icon: 'spark', blurb: 'Legacy — Perm-tier stakes earn lottery tickets only, no ICP yield' },
   // Out — what you put in.
   deposit: { label: 'Burn commitment', icon: 'flame', blurb: 'Escrowed behind a proposal stance' },
   add_commitment: { label: 'Commitment top-up', icon: 'flame', blurb: 'Added to an open commitment' },
   idea_post: { label: 'Idea post fee', icon: 'bulb', blurb: '1 ICP anti-spam fee to the treasury' },
-  idea_upvote: { label: 'Idea upvote', icon: 'bulb', blurb: '75% treasury · 25% to the poster' },
+  idea_upvote: { label: 'Idea upvote', icon: 'bulb', blurb: 'Legacy — upvoting is now free' },
   project_fund: { label: 'Project funding', icon: 'coins', blurb: '100% to the treasury build fund' },
   pool_register: { label: 'Pool initiation fee', icon: 'target', blurb: 'One-time neuron pool entry' },
   stake: { label: 'Stake lockup', icon: 'zap', blurb: 'Locked, not spent — returns in full on unstake' },
@@ -101,9 +101,8 @@ function payoutDate(atNs: bigint): string {
 const AGENT_ENDPOINTS: { method: string; kind: 'query' | 'update'; note: string }[] = [
   { method: 'list_active_proposals()', kind: 'query', note: 'Open NNS proposals with pots, thresholds and deadlines' },
   { method: 'get_global_stats()', kind: 'query', note: 'Burned total, TVL, votes cast — the public scoreboard' },
-  { method: 'cast_lossless_vote(proposal_id, stance)', kind: 'update', note: 'Free staked vote — needs an active stake' },
   { method: 'get_stake_deposit_address()', kind: 'query', note: 'Fund this, then stake(amount, tier) — whole ICP only' },
-  { method: 'stake(amount_e8s, tier)', kind: 'update', note: 'Join a term pool: voting power + daily lottery tickets' },
+  { method: 'stake(amount_e8s, tier)', kind: 'update', note: 'Join a term pool: earns daily lottery tickets' },
   { method: 'claim_daily_tickets()', kind: 'update', note: 'Once per UTC day — ideal cron target for agents' },
   { method: 'get_lottery_info()', kind: 'update', note: 'Pot, next drawing, your tickets, live odds' },
   { method: 'list_ideas() / upvote_idea(…)', kind: 'update', note: 'Read and back Community R&D ideas (ICP/ckBTC/ckETH)' },
@@ -176,10 +175,10 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
     },
     {
       key: 'early_adopters',
-      name: 'Early Adopters validation',
+      name: 'Perm neuron validation',
       file: 'llms-early_adopters-validate.txt',
-      blurb: 'Independently audit the Early Adopters program against its source code and tests.',
-      instruction: 'independently verify, from source code and tests, that the Caldera Early Adopters program works exactly as advertised',
+      blurb: 'Independently audit the Perm neuron (permanent stake) program against its source code and tests.',
+      instruction: 'independently verify, from source code and tests, that the Caldera Perm neuron program works exactly as advertised',
     },
   ];
   const copySkill = (s: typeof SKILLS[number]) => {
@@ -195,7 +194,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
     `You are connecting to Caldera, an ICP governance dapp.`,
     `Backend canister: ${backendCanisterId} (${isLocal ? 'local replica' : 'IC mainnet'}). Candid: ${window?.location?.origin ?? ''}/llms-${env}.txt lists the flows.`,
     `Authentication: any self-generated principal works (no Internet Identity needed). Generate a key, sign your calls; queries are free and anonymous.`,
-    `House rules: staking and unstaking are whole-ICP only; staked votes are free once you hold a stake; burn votes need an NNS neuron following the community leader; lottery tickets are claimable once per UTC day (claim_daily_tickets).`,
+    `House rules: staking and unstaking are whole-ICP only; voting is burn-only and needs an NNS neuron following the community leader; staking earns daily lottery tickets (claimable once per UTC day via claim_daily_tickets).`,
     `Start by fetching the skill files on this origin (llms-${env}.txt, llms-rd-${env}.txt, llms-lottery-${env}.txt) and follow their instructions.`,
   ].join('\n');
   const copyQuickstart = () => {
