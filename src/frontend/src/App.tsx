@@ -1746,8 +1746,14 @@ export default function App() {
           <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
           Verified Followers
         </Btn>
+        {faucetEnabled && (
+          <Btn variant={page === 'faucet' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('faucet')}>
+            <Icon name="zap" size={14} stroke={page === 'faucet' ? 'var(--char-950)' : 'currentColor'} />
+            Cycles Faucet
+          </Btn>
+        )}
 
-        {(arcadeEnabled || lotteryEnabled || casinoEnabled || faucetEnabled) && (
+        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Play</Eyebrow>
         )}
         {arcadeEnabled && (
@@ -1764,12 +1770,6 @@ export default function App() {
           }}>
             <Icon name="zap" size={14} stroke={page === 'casino' ? 'var(--char-950)' : 'currentColor'} />
             Casino
-          </Btn>
-        )}
-        {faucetEnabled && (
-          <Btn variant={page === 'faucet' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('faucet')}>
-            <Icon name="coins" size={14} stroke={page === 'faucet' ? 'var(--char-950)' : 'currentColor'} />
-            Cycles Faucet
           </Btn>
         )}
         {lotteryEnabled && (

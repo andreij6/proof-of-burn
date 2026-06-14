@@ -87,6 +87,20 @@ Style with the CSS variables and utility classes in `index.css`, not literals:
 - Spacing/shape: `--sp-*`, `--r-md`, `--elev-*`, `--dur-*`/`--ease-*`.
 - Layout classes: `.row`, `.col`, `.card`, `.mono`, `.dashboard-container`.
 
+> **NEVER use raw palette tokens (`--char-0` … `--char-950`) for surfaces,
+> borders, or default text.** They are **theme-invariant** — `--char-50` is always
+> near-white. So `background: var(--char-50)` is a white card in *both* themes, and
+> any text on it without an explicit color inherits `--fg` (white in dark mode) →
+> **white-on-white** (this exact bug shipped in `Faucet.tsx`). Always use the
+> theme-aware semantic tokens: surfaces `--surface`/`--bg`/`--bg-alt`; text
+> `--fg`/`--fg-2`/`--fg-3`; borders `--border`/`--border-hi`; status
+> `--sprout`/`--ember`; accent `--burn`. The *only* legit raw-palette use is
+> fixed-contrast text on a fixed accent fill (e.g. `--char-950` label on a `--burn`
+> button). And **never rely on inherited text color on a colored/`--surface` card** —
+> set `color` explicitly so it's correct in both themes. After adding/altering any
+> theme token, run `npx vitest run` — `src/frontend/src/test/contrast.test.ts`
+> asserts the WCAG ratios and must stay green.
+
 Note: the per-card `card` style object is currently re-declared at the top of
 each page (e.g. `Lottery.tsx:124`, `Poker.tsx:22`). Match that — copy the same
 const or use the `.card` class — rather than inventing new card padding/border.

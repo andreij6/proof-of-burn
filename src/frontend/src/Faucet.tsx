@@ -123,8 +123,8 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
   };
 
   const card: React.CSSProperties = {
-    border: '1px solid var(--char-200)', borderRadius: 14, padding: 18,
-    background: 'var(--char-50)',
+    border: '1px solid var(--border)', borderRadius: 14, padding: 18,
+    background: 'var(--surface)',
   };
   const eligible = gateKind(status?.gate) === 'Eligible';
 
@@ -133,16 +133,16 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
       <div>
         <Eyebrow accent>Cycles Faucet</Eyebrow>
         <h1 style={{ margin: '6px 0 4px', fontSize: 26 }}>Top up a canister you're building</h1>
-        <p style={{ color: 'var(--char-600)', margin: 0 }}>
+        <p style={{ color: 'var(--fg-2)', margin: 0 }}>
           Engaged pool members can claim a small weekly cycles grant for a
           canister they control — paid from the protocol treasury.
         </p>
       </div>
 
       {!status?.enabled && (
-        <div style={{ ...card, borderColor: 'var(--char-300)' }}>
+        <div style={{ ...card, borderColor: 'var(--border-hi)' }}>
           <strong>The faucet is currently closed.</strong>
-          <p style={{ color: 'var(--char-600)', margin: '6px 0 0' }}>
+          <p style={{ color: 'var(--fg-2)', margin: '6px 0 0' }}>
             This feature ships dark and is enabled by the protocol owner.
           </p>
         </div>
@@ -154,11 +154,11 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
             <Eyebrow>Grant</Eyebrow>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 4 }}>
               <span style={{ fontSize: 28, fontWeight: 700 }}>{fmtUsd(status.grant_usd_e8s)}</span>
-              <span style={{ color: 'var(--char-600)' }}>
+              <span style={{ color: 'var(--fg-2)' }}>
                 ≈ {fmtIcp(status.est_grant_icp_e8s)} of cycles, per claim
               </span>
             </div>
-            <p style={{ color: 'var(--char-600)', margin: '8px 0 0', fontSize: 13 }}>
+            <p style={{ color: 'var(--fg-2)', margin: '8px 0 0', fontSize: 13 }}>
               One claim per {Math.round(Number(status.claim_window_ns) / 86_400 / 1e9)} days, per developer and
               per canister. A canister can claim at most {status.lifetime_cap} times, ever.
             </p>
@@ -172,7 +172,7 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
 
           <div style={card}>
             <Eyebrow>Your canister</Eyebrow>
-            <p style={{ color: 'var(--char-600)', margin: '4px 0 10px', fontSize: 13 }}>
+            <p style={{ color: 'var(--fg-2)', margin: '4px 0 10px', fontSize: 13 }}>
               Registration is proof-of-control: your canister must call
               <code> register_faucet_canister()</code> on itself once. Then enter
               its id below to check eligibility and claim.
@@ -185,7 +185,7 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
               spellCheck={false}
               style={{
                 width: '100%', padding: '10px 12px', borderRadius: 10,
-                border: '1px solid var(--char-300)', fontFamily: 'monospace', fontSize: 14,
+                border: '1px solid var(--border-hi)', fontFamily: 'monospace', fontSize: 14,
               }}
             />
 
@@ -228,12 +228,12 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
             </div>
 
             {!eligible && (
-              <p style={{ marginTop: 10, color: 'var(--char-600)', fontSize: 13 }}>
+              <p style={{ marginTop: 10, color: 'var(--fg-2)', fontSize: 13 }}>
                 {gateLabel(status.gate, status.claim_window_ns, status.vote_window_ns)}
               </p>
             )}
             {error && <p style={{ marginTop: 10, color: 'var(--burn)', fontSize: 13 }}>{error}</p>}
-            {notice && <p style={{ marginTop: 10, color: 'var(--char-700)', fontSize: 13 }}>{notice}</p>}
+            {notice && <p style={{ marginTop: 10, color: 'var(--fg-2)', fontSize: 13 }}>{notice}</p>}
           </div>
 
           {stats && (
@@ -244,7 +244,7 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
           )}
 
           {isLocal && (
-            <p style={{ color: 'var(--char-500)', fontSize: 12 }}>
+            <p style={{ color: 'var(--fg-3)', fontSize: 12 }}>
               Local replica note (PB-148): end-to-end claims may not complete
               locally even with correct code — this is a known local-only ledger
               quirk and does not affect mainnet.
@@ -253,7 +253,7 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
         </>
       )}
 
-      <p style={{ color: 'var(--char-500)', fontSize: 12 }}>
+      <p style={{ color: 'var(--fg-3)', fontSize: 12 }}>
         Signed in as {signedIn ? formatPrincipal(principal) : 'anonymous'}.
       </p>
     </div>
@@ -263,8 +263,8 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
 function GateRow({ ok, label }: { ok: boolean; label: string }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14 }}>
-      <Icon name={ok ? 'check' : 'x'} size={15} stroke={ok ? 'var(--ok, #2e7d32)' : 'var(--char-400)'} />
-      <span style={{ color: ok ? 'var(--char-900)' : 'var(--char-500)' }}>{label}</span>
+      <Icon name={ok ? 'check' : 'x'} size={15} stroke={ok ? 'var(--sprout)' : 'var(--fg-3)'} />
+      <span style={{ color: ok ? 'var(--fg)' : 'var(--fg-3)' }}>{label}</span>
     </div>
   );
 }
@@ -273,7 +273,7 @@ function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <div style={{ fontSize: 20, fontWeight: 700 }}>{value}</div>
-      <div style={{ color: 'var(--char-600)', fontSize: 12 }}>{label}</div>
+      <div style={{ color: 'var(--fg-2)', fontSize: 12 }}>{label}</div>
     </div>
   );
 }
