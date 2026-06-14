@@ -317,7 +317,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>Play with SVPP</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
-            <Icon name="zap" size={22} stroke="var(--burn)" />
+            <Icon name="zap" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Casino</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
@@ -360,7 +360,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>Casino · provably fair</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
-            <Icon name="zap" size={22} stroke="var(--burn)" />
+            <Icon name="zap" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Crash</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
@@ -381,13 +381,13 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
         <div className="casino-graph col" style={{ gap: 16, minWidth: 0 }}>
           <div style={{ ...card, position: 'relative' }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <div style={{ fontSize: 40, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: phase === 'crashed' ? 'var(--ember)' : 'var(--sprout)' }}>
+              <div style={{ fontSize: 40, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: phase === 'crashed' ? 'var(--ember)' : 'var(--sprout-ink)' }}>
                 {phase === 'crashed' && round ? `${fmtX(Number(round.crash_x100))}×` : `${fmtX(liveX100)}×`}
               </div>
               <div style={{ color: 'var(--fg-3)', fontSize: 12 }}>
                 {phase === 'betting' && round && `betting closes in ${Math.max(0, Math.ceil((Number(BigInt(round.phase_deadline) / 1_000_000n) - Date.now()) / 1000))}s`}
-                {phase === 'running' && <span><LiveDot color="var(--sprout)" /> live</span>}
-                {phase === 'crashed' && round && Number(round.crash_x100) >= 5000 && <span style={{ color: 'var(--haze)' }}>🌙 MOON</span>}
+                {phase === 'running' && <span><LiveDot color="var(--sprout-ink)" /> live</span>}
+                {phase === 'crashed' && round && Number(round.crash_x100) >= 5000 && <span style={{ color: 'var(--haze-ink)' }}>🌙 MOON</span>}
                 {phase === 'crashed' && round && <span style={{ color: 'var(--ember)' }}> BUSTED @ {fmtX(Number(round.crash_x100))}×</span>}
                 {phase === 'intermission' && 'next round starting…'}
               </div>
@@ -491,13 +491,13 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
                   Your bet: {Number(myBet.wager_chips).toLocaleString()} SVPP @ {fmtX(Number(myBet.target_x100))}×
                   {myBet.auto_pilot && <Chip tone="muted" style={{ marginLeft: 6 }}>auto-pilot</Chip>}
                 </span>
-                <span style={{ fontWeight: 700, color: myBet.outcome === 'won' ? 'var(--sprout)' : myBet.outcome === 'lost' ? 'var(--ember)' : 'var(--fg)' }}>
+                <span style={{ fontWeight: 700, color: myBet.outcome === 'won' ? 'var(--sprout-ink)' : myBet.outcome === 'lost' ? 'var(--ember)' : 'var(--fg)' }}>
                   {myBet.outcome === 'won' ? `WON @ ${fmtX(Number(myBet.payout_x100))}×` : myBet.outcome === 'lost' ? 'BUSTED' : 'riding…'}
                 </span>
               </div>
               {myBet.outcome === 'lost' && (
                 <p style={{ color: 'var(--fg-3)', fontSize: 12, marginTop: 6 }}>
-                  Your staked ICP is exactly where you left it. <button onClick={onGoStaking} style={{ background: 'none', border: 'none', color: 'var(--burn)', cursor: 'pointer', padding: 0 }}>Stake more to mint SVPP →</button>
+                  Your staked ICP is exactly where you left it. <button onClick={onGoStaking} style={{ background: 'none', border: 'none', color: 'var(--burn-ink)', cursor: 'pointer', padding: 0 }}>Stake more to mint SVPP →</button>
                 </p>
               )}
             </div>
@@ -638,7 +638,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
             ) : (
               <div className="col" style={{ gap: 6, marginTop: 10 }}>
                 {autopilot?.stop_reason && opt<string>(autopilot.stop_reason) && (
-                  <span style={{ fontSize: 11, color: 'var(--haze)' }}>stopped: {opt<string>(autopilot.stop_reason)}</span>
+                  <span style={{ fontSize: 11, color: 'var(--haze-ink)' }}>stopped: {opt<string>(autopilot.stop_reason)}</span>
                 )}
                 {strategies.map((s) => (
                   <div key={String(s.id)} className="row" style={{ justifyContent: 'space-between', fontSize: 13, alignItems: 'center' }}>
@@ -670,10 +670,10 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
               <div>Chain index: {String(verify.item.chain_index)}</div>
               <div style={{ wordBreak: 'break-all' }}>Seed: <span style={{ color: 'var(--fg-3)' }}>{verify.item.seed_hex || '(unrevealed)'}</span></div>
               {verify.client !== undefined && (
-                <div>Recomputed client-side: <b style={{ color: verify.client === Number(verify.item.crash_x100) ? 'var(--sprout)' : 'var(--ember)' }}>{fmtX(verify.client)}× {verify.client === Number(verify.item.crash_x100) ? '✓' : '✗'}</b></div>
+                <div>Recomputed client-side: <b style={{ color: verify.client === Number(verify.item.crash_x100) ? 'var(--sprout-ink)' : 'var(--ember)' }}>{fmtX(verify.client)}× {verify.client === Number(verify.item.crash_x100) ? '✓' : '✗'}</b></div>
               )}
               {verify.data && (
-                <div>Chain link to genesis: <b style={{ color: verify.data.chain_verified ? 'var(--sprout)' : 'var(--ember)' }}>{verify.data.chain_verified ? 'verified ✓' : 'FAILED ✗'}</b></div>
+                <div>Chain link to genesis: <b style={{ color: verify.data.chain_verified ? 'var(--sprout-ink)' : 'var(--ember)' }}>{verify.data.chain_verified ? 'verified ✓' : 'FAILED ✗'}</b></div>
               )}
             </div>
           </div>

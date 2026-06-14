@@ -164,7 +164,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
         <span className="row" style={{ gap: 8 }}>
-          <Icon name="target" size={16} stroke="var(--burn)" />
+          <Icon name="target" size={16} stroke="var(--burn-ink)" />
           <Eyebrow accent>Lossless lottery</Eyebrow>
         </span>
         <b style={{ fontSize: 17 }}>Stake to play. A winner about once a month. Nobody loses.</b>
@@ -194,7 +194,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
           color: 'var(--fg-3)', cursor: 'pointer', padding: '4px 10px', fontSize: 11.5,
           display: 'flex', alignItems: 'center', gap: 6, width: 'fit-content',
         }}>
-          <Icon name={skillCopied ? 'check' : 'copy'} size={11} stroke={skillCopied ? 'var(--sprout)' : 'var(--fg-3)'} />
+          <Icon name={skillCopied ? 'check' : 'copy'} size={11} stroke={skillCopied ? 'var(--sprout-ink)' : 'var(--fg-3)'} />
           {skillCopied ? 'Copied' : 'Copy agent skill — claim tickets on autopilot'}
         </button>
       </div>
@@ -203,7 +203,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         <div className="row" style={{
           gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
           border: `1px solid ${error ? 'var(--ember)' : 'var(--sprout)'}`,
-          color: error ? 'var(--ember)' : 'var(--sprout)',
+          color: error ? 'var(--ember)' : 'var(--sprout-ink)',
           background: 'var(--surface)',
         }}>
           <Icon name={error ? "x" : "checkCircle"} size={13} stroke="currentColor" />
@@ -216,7 +216,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
           gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
           border: '1px solid var(--burn)', background: 'var(--burn-950)',
         }}>
-          <Icon name="spark" size={13} stroke="var(--burn)" />
+          <Icon name="spark" size={13} stroke="var(--burn-ink)" />
           <span>
             Last jackpot: <b className="mono">{formatPrincipal(info.last_winner)}</b> won
             — lifetime paid out <b className="mono">{fmtICP(info.total_paid_e8s)} ICP</b>. Round {Number(info.round)} is live.
@@ -244,8 +244,8 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
             Drawings: Mon, Wed &amp; Sat nights (US Eastern).
           </span>
           {info && info.pot_e8s < info.min_pot_e8s && (
-            <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--haze)' }}>
-              <Icon name="info" size={12} stroke="var(--haze)" />
+            <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--haze-ink)' }}>
+              <Icon name="info" size={12} stroke="var(--haze-ink)" />
               Drawings only run once the pot holds {fmtICP(info.min_pot_e8s)} ICP — below that,
               the countdown rolls over to the next slot and the pot keeps growing.
             </span>
@@ -394,7 +394,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
                 borderTop: '1px solid var(--border)', justifyContent: 'space-between',
               }}>
                 <span className="row" style={{ gap: 8 }}>
-                  <Icon name="spark" size={13} stroke="var(--burn)" />
+                  <Icon name="spark" size={13} stroke="var(--burn-ink)" />
                   <b className="mono">{d.winner != null ? formatPrincipal(d.winner) : '—'}</b>
                   <span style={{ color: 'var(--fg-3)' }}>{drawDate(d.drawn_at)} · round {Number(d.round)}</span>
                 </span>

@@ -1,0 +1,120 @@
+// Standard ICRC account. This collection only ever uses the default subaccount.
+type Account = record { owner : principal; subaccount : opt blob };
+// Standard candid HTTP gateway records (`blob` body == `Vec<u8>`).
+type HttpRequest = record {
+  url : text;
+  method : text;
+  body : blob;
+  headers : vec record { text; text };
+};
+type HttpResponse = record {
+  body : blob;
+  headers : vec record { text; text };
+  status_code : nat16;
+};
+type InitArgs = record {
+  supply_cap : opt nat64;
+  admin : principal;
+  name : opt text;
+  minter : principal;
+  symbol : opt text;
+};
+type MintArgs = record {
+  to : principal;
+  // Backend passes the original minting user (immutable royalty anchor).
+  creator : principal;
+  course_data : blob;
+  name : text;
+  par_total : nat16;
+  mint_fee_e8s : nat64;
+};
+// Collection metadata + allowlisted minter / admin principals.
+type NftConfig = record {
+  // None = uncapped.
+  supply_cap : opt nat64;
+  // Deploy controller; may rotate `minter` (not a back door to move tokens).
+  admin : principal;
+  name : text;
+  // The backend canister principal — the only non-owner that can move a token.
+  minter : principal;
+  description : text;
+  symbol : text;
+};
+type Result = variant { Ok : nat64; Err : text };
+type Result_1 = variant { Ok; Err : text };
+type Result_2 = variant { Ok : nat; Err : TransferError };
+type TransferArg = record {
+  to : Account;
+  token_id : nat;
+  memo : opt blob;
+  from_subaccount : opt blob;
+  created_at_time : opt nat64;
+};
+type TransferError = variant {
+  GenericError : record { message : text; error_code : nat };
+  Duplicate : record { duplicate_of : nat };
+  NonExistingTokenId;
+  Unauthorized;
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+};
+// ICRC-7 generic metadata value.
+type Value = variant {
+  Int : int;
+  Map : Vec;
+  Nat : nat;
+  Blob : blob;
+  Text : text;
+  Array : vec Value;
+};
+type Vec = vec record {
+  text;
+  variant {
+    Int : int;
+    Map : Vec;
+    Nat : nat;
+    Blob : blob;
+    Text : text;
+    Array : vec Value;
+  };
+};
+service : (InitArgs) -> {
+  add_tickets_distributed : (nat64, nat64) -> (Result);
+  bump_play_count : (nat64, nat64) -> (Result);
+  // Permanently destroy a token. Callable by the token's **current owner** OR the
+  // **minter** (mirrors `icrc7_transfer`'s owner check plus the minter allowlist).
+  // 
+  // Burning:
+  // - removes the token from `TOKENS`,
+  // - removes its `OWNER_TOKENS` index entry,
+  // - decrements supply (implicitly, via the `TOKENS` length),
+  // - **permanently retires the id**. `NEXT_TOKEN_ID` only ever increases, so a
+  // burned id is never re-minted. After burn, `icrc7_owner_of` /
+  // `icrc7_token_metadata` / `http_request` for that id return None / 404.
+  // 
+  // Anonymous callers are rejected (also enforced by `inspect_message`). Burning a
+  // nonexistent / already-burned id returns `NON_EXISTING_TOKEN`.
+  burn : (nat) -> (Result_1);
+  custodial_transfer : (nat64, principal) -> (Result_1);
+  get_nft_config : () -> (NftConfig) query;
+  http_request : (HttpRequest) -> (HttpResponse) query;
+  icrc7_balance_of : (vec Account) -> (vec nat) query;
+  icrc7_collection_metadata : () -> (vec record { text; Value }) query;
+  icrc7_description : () -> (opt text) query;
+  icrc7_name : () -> (text) query;
+  icrc7_owner_of : (vec nat) -> (vec opt Account) query;
+  // Alias of `icrc7_total_supply`.
+  icrc7_supply : () -> (nat) query;
+  icrc7_supply_cap : () -> (opt nat) query;
+  icrc7_symbol : () -> (text) query;
+  icrc7_token_metadata : (vec nat) -> (
+      vec opt vec record { text; Value },
+    ) query;
+  icrc7_tokens : (opt nat, opt nat) -> (vec nat) query;
+  icrc7_tokens_of : (Account, opt nat, opt nat) -> (vec nat) query;
+  icrc7_total_supply : () -> (nat) query;
+  icrc7_transfer : (vec TransferArg) -> (vec opt Result_2);
+  mint : (MintArgs) -> (Result);
+  set_admin : (principal) -> (Result_1);
+  set_minter : (principal) -> (Result_1);
+}

@@ -5,8 +5,10 @@ import {
   initHole, stepHole, strike, dragToShot, speed, cellAt, cellAtWorld, barEndpoints,
   parseAscii, holeToBackend, holeFromBackend, mergeCourse,
   scoreLabel, fmtMillis,
+  holeFromCourseData, courseFromData, moverGeometry, TUNNEL_R,
   type HoleDef, type HoleState,
 } from '../arcade/engine';
+import { ElementKind, Speed, type CourseDataV1, type Hole as CourseHole, type Element } from '../arcade/courseData';
 
 // Tiny test hole built from ASCII: a walled 22×14 field with optional
 // hazard rows spliced in by the caller.
@@ -315,5 +317,249 @@ describe('scoring helpers', () => {
 
   it('stop threshold and capture speed are coherent', () => {
     expect(STOP_SPEED).toBeLessThan(CUP_CAPTURE_SPEED);
+  });
+});
+
+// =====================================================================
+// PB-303 — CourseDataV1 loader + new element physics
+// =====================================================================
+
+function cdEl(kind: number, x: number, y: number, rot: 0 | 1 | 2 | 3, params: Element['params']): Element {
+  return { kind: kind as Element['kind'], x, y, rot, params };
+}
+
+/** A roomy 16×16 open hole with tee/cup placed; caller adds elements. */
+function cdHole(elements: Element[], opts: { tee?: { x: number; y: number }; cup?: { x: number; y: number } } = {}): CourseHole {
+  return {
+    name: 'T', par: 3, gridW: 16, gridH: 16,
+    tee: opts.tee ?? { x: 1, y: 8 },
+    cup: opts.cup ?? { x: 14, y: 8 },
+    elements,
+  };
+}
+
+/** Run until the ball settles/sinks, advancing the shared hole clock. */
+function settleCd(state: HoleState, def: HoleDef): number {
+  let t = 0;
+  while (state.phase === 'rolling' && t < 30) {
+    t += STEP;
+    stepHole(state, def, t);
+  }
+  return t;
+}
+
+describe('CourseDataV1 loader', () => {
+  it('rasterizes terrain to the right CellType and fills the rest with grass', () => {
+    const def = holeFromCourseData(cdHole([
+      cdEl(ElementKind.Rough, 3, 3, 0, { tag: 'none' }),
+      cdEl(ElementKind.Sand, 4, 3, 0, { tag: 'none' }),
+      cdEl(ElementKind.Water, 5, 3, 0, { tag: 'none' }),
+      cdEl(ElementKind.OutOfBounds, 6, 3, 0, { tag: 'none' }),
+    ]));
+    expect(cellAt(def, 3, 3)).toBe(CellType.Rough);
+    expect(cellAt(def, 4, 3)).toBe(CellType.Sand);
+    expect(cellAt(def, 5, 3)).toBe(CellType.Water);
+    expect(cellAt(def, 6, 3)).toBe(CellType.Void);
+    expect(cellAt(def, 0, 0)).toBe(CellType.Grass);
+  });
+
+  it('populates walls/statics/movers/tunnels/ramps/tiles arrays', () => {
+    const def = holeFromCourseData(cdHole([
+      cdEl(ElementKind.WallStraight, 2, 2, 1, { tag: 'none' }),
+      cdEl(ElementKind.Pillar, 3, 3, 0, { tag: 'none' }),
+      cdEl(ElementKind.Windmill, 5, 5, 0, { tag: 'moving', speed: Speed.Med, phase: 0 }),
+      cdEl(ElementKind.TunnelEntrance, 1, 1, 0, { tag: 'pair', pairId: 0 }),
+      cdEl(ElementKind.TunnelExit, 10, 10, 1, { tag: 'pair', pairId: 0 }),
+      cdEl(ElementKind.RampUp, 6, 6, 1, { tag: 'pair', pairId: 1 }),
+      cdEl(ElementKind.RampDown, 7, 7, 3, { tag: 'pair', pairId: 1 }),
+      cdEl(ElementKind.SpeedTile, 8, 8, 1, { tag: 'tile', strength: Speed.Fast }),
+    ]));
+    expect(def.walls!.length).toBe(1);
+    expect(def.statics!.length).toBe(1);
+    expect(def.movers!.length).toBe(1);
+    expect(def.tunnels!.length).toBe(1);
+    expect(def.ramps!.length).toBe(1);
+    expect(def.tiles!.length).toBe(1);
+    expect(def.tunnels![0].rotDelta).toBe(1); // exit rot 1 − entrance rot 0
+  });
+
+  it('courseFromData compiles all 9 holes', () => {
+    const holes: CourseHole[] = Array.from({ length: 9 }, () => cdHole([]));
+    const data: CourseDataV1 = { version: 1, theme: { kind: 'forest' }, holes };
+    expect(courseFromData(data).length).toBe(9);
+  });
+});
+
+describe('new element physics', () => {
+  // Helper: straight horizontal putt across an open lane; returns distance travelled.
+  function travelOn(elements: Element[], power = 300): number {
+    const def = holeFromCourseData(cdHole(elements, { cup: { x: 99, y: 99 } }));
+    const state = initHole(def);
+    strike(state, { x: power, y: 0 });
+    settleCd(state, def);
+    return state.pos.x - def.tee.x;
+  }
+
+  it('rough slows more than green and less than sand', () => {
+    const greenRow: Element[] = [];
+    const roughRow: Element[] = Array.from({ length: 14 }, (_, i) => cdEl(ElementKind.Rough, i + 1, 8, 0, { tag: 'none' }));
+    const sandRow: Element[] = Array.from({ length: 14 }, (_, i) => cdEl(ElementKind.Sand, i + 1, 8, 0, { tag: 'none' }));
+    const g = travelOn(greenRow);
+    const r = travelOn(roughRow);
+    const s = travelOn(sandRow);
+    expect(g).toBeGreaterThan(r);
+    expect(r).toBeGreaterThan(s);
+  });
+
+  it('bumper increases outbound speed vs a plain wall control', () => {
+    // Fire at a bumper head-on; capture the max speed right after contact.
+    function maxSpeedAfterContact(kind: number): number {
+      const def = holeFromCourseData(cdHole([cdEl(kind, 6, 8, 0, { tag: 'none' })], { cup: { x: 99, y: 99 } }));
+      const state = initHole(def);
+      strike(state, { x: 300, y: 0 });
+      let bounced = false;
+      let peak = 0;
+      let t = 0;
+      while (state.phase === 'rolling' && t < 6) {
+        t += STEP;
+        const vbefore = state.vel.x;
+        stepHole(state, def, t);
+        if (!bounced && state.vel.x < 0 && vbefore >= 0) bounced = true;
+        if (bounced) peak = Math.max(peak, speed(state.vel));
+      }
+      return peak;
+    }
+    const bumper = maxSpeedAfterContact(ElementKind.Bumper);
+    const pillar = maxSpeedAfterContact(ElementKind.Pillar);
+    expect(bumper).toBeGreaterThan(pillar);
+  });
+
+  it('pillar / rock keep the ball out (it reflects, never overlaps)', () => {
+    const def = holeFromCourseData(cdHole([cdEl(ElementKind.Rock, 6, 8, 0, { tag: 'rock', size: 1 })], { cup: { x: 99, y: 99 } }));
+    const state = initHole(def);
+    strike(state, { x: 300, y: 0 });
+    settleCd(state, def);
+    // It bounced back west of the rock (rock left edge at 6*CELL).
+    expect(state.pos.x).toBeLessThan(6 * CELL);
+  });
+
+  it('windmill/pendulum/paddle deflect a crossing ball vs a no-obstacle control', () => {
+    for (const kind of [ElementKind.Windmill, ElementKind.Pendulum, ElementKind.RotatingPaddle]) {
+      const withDef = holeFromCourseData(cdHole([cdEl(kind, 7, 8, 0, { tag: 'moving', speed: Speed.Med, phase: 0 })], { cup: { x: 99, y: 99 } }));
+      const ctrlDef = holeFromCourseData(cdHole([], { cup: { x: 99, y: 99 } }));
+      const a = initHole(withDef); strike(a, { x: 500, y: 0 }); settleCd(a, withDef);
+      const b = initHole(ctrlDef); strike(b, { x: 500, y: 0 }); settleCd(b, ctrlDef);
+      const dyDiff = Math.abs(a.pos.y - b.pos.y) + Math.abs(a.pos.x - b.pos.x);
+      expect(dyDiff, `kind ${kind} deflected`).toBeGreaterThan(1);
+    }
+  });
+
+  it('moverGeometry is a pure, periodic function of tSec', () => {
+    const m = { kind: 'windmill' as const, pivot: { x: 100, y: 100 }, len: 120, baseSpeed: Math.PI, phase0: 0 };
+    const g0 = moverGeometry(m, 0);
+    const g0b = moverGeometry(m, 0);
+    expect(g0).toEqual(g0b); // pure
+    const g2 = moverGeometry(m, 2); // full turn at PI rad/s → 2s = 2*PI
+    expect(g2.seg.x1).toBeCloseTo(g0.seg.x1, 5);
+    expect(g2.seg.y2).toBeCloseTo(g0.seg.y2, 5);
+  });
+
+  it('sliding block blocks the lane at one phase and clears it at another', () => {
+    // Block centred mid-lane, sliding along y (axis 1) so its x stays put but it
+    // moves vertically in/out of the putt line.
+    function blockedAtPhase(phase: number): boolean {
+      const def = holeFromCourseData(cdHole([cdEl(ElementKind.SlidingBlock, 7, 8, 0, { tag: 'sliding', speed: Speed.Slow, phase, len: 4, axis: 1 })], { cup: { x: 99, y: 99 } }));
+      // Freeze the obstacle by stepping with a constant clock so its phase is fixed.
+      const state = initHole(def);
+      strike(state, { x: 300, y: 0 });
+      let t = 0;
+      while (state.phase === 'rolling' && t < 8) {
+        t += STEP;
+        stepHole(state, def, 0); // constant clock → block frozen at phase0
+      }
+      return state.pos.x < 7 * CELL; // didn't pass the block column
+    }
+    // phase 0 → sin(0)=0 → block centred on the lane (blocks);
+    // phase 25 → sin(pi/2)=1 → block translated fully off the lane (clears).
+    expect(blockedAtPhase(0)).toBe(true);
+    expect(blockedAtPhase(25)).toBe(false);
+  });
+
+  it('speed tile boosts speed along its facing; slow tile reduces it', () => {
+    function speedThroughTile(kind: number, rot: 0 | 1 | 2 | 3): { entry: number; exit: number } {
+      // Single tile cell at (6,8); fire east through it and sample speed before/after.
+      const def = holeFromCourseData(cdHole([cdEl(kind, 6, 8, rot, { tag: 'tile', strength: Speed.Fast })], { cup: { x: 99, y: 99 } }));
+      const state = initHole(def);
+      strike(state, { x: 300, y: 0 });
+      let entry = 0, exit = 0;
+      let t = 0;
+      const tileX = 6 * CELL;
+      while (state.phase === 'rolling' && t < 8) {
+        t += STEP;
+        if (state.pos.x < tileX) entry = speed(state.vel);
+        stepHole(state, def, t);
+        if (state.pos.x >= tileX + CELL && exit === 0) exit = speed(state.vel);
+      }
+      return { entry, exit };
+    }
+    const fast = speedThroughTile(ElementKind.SpeedTile, 1); // facing east, same as motion
+    expect(fast.exit).toBeGreaterThan(fast.entry);
+    const slow = speedThroughTile(ElementKind.SlowTile, 1);
+    expect(slow.exit).toBeLessThan(slow.entry);
+  });
+
+  it('ramp redirects the ball along its facing rot', () => {
+    // Ball fired east hits a ramp facing north (rot 0) at (6,8) → should head north.
+    const def = holeFromCourseData(cdHole([
+      cdEl(ElementKind.RampUp, 6, 8, 0, { tag: 'pair', pairId: 0 }),
+      cdEl(ElementKind.RampDown, 6, 2, 0, { tag: 'pair', pairId: 0 }),
+    ], { cup: { x: 99, y: 99 } }));
+    const state = initHole(def);
+    strike(state, { x: 300, y: 0 });
+    settleCd(state, def);
+    // Ended up north of the tee row (y decreased).
+    expect(state.pos.y).toBeLessThan(def.tee.y - 5);
+  });
+
+  it('tunnel teleports the ball to the paired exit with preserved speed', () => {
+    const def = holeFromCourseData(cdHole([
+      cdEl(ElementKind.TunnelEntrance, 5, 8, 1, { tag: 'pair', pairId: 0 }),
+      cdEl(ElementKind.TunnelExit, 12, 3, 1, { tag: 'pair', pairId: 0 }),
+    ], { cup: { x: 99, y: 99 } }));
+    const state = initHole(def);
+    strike(state, { x: 300, y: 0 });
+    let teleported = false;
+    let speedAtExit = 0;
+    let t = 0;
+    const exit = def.tunnels![0].exit;
+    while (state.phase === 'rolling' && t < 8 && !teleported) {
+      t += STEP;
+      stepHole(state, def, t);
+      if (state.event === 'tunnel') {
+        teleported = true;
+        const d = Math.hypot(state.pos.x - exit.x, state.pos.y - exit.y);
+        expect(d).toBeLessThan(TUNNEL_R + 1); // emerged at the exit
+        speedAtExit = speed(state.vel);
+      }
+    }
+    expect(teleported).toBe(true);
+    expect(speedAtExit).toBeGreaterThan(STOP_SPEED); // momentum preserved (rotDelta 0)
+  });
+
+  it('is deterministic: same strikes → identical final state', () => {
+    function run(): HoleState {
+      const def = holeFromCourseData(cdHole([
+        cdEl(ElementKind.Windmill, 7, 8, 0, { tag: 'moving', speed: Speed.Med, phase: 10 }),
+        cdEl(ElementKind.Bumper, 10, 8, 0, { tag: 'none' }),
+      ], { cup: { x: 99, y: 99 } }));
+      const state = initHole(def);
+      strike(state, { x: 520, y: 30 });
+      settleCd(state, def);
+      return state;
+    }
+    const a = run(), b = run();
+    expect(a.pos).toEqual(b.pos);
+    expect(a.vel).toEqual(b.vel);
+    expect(a.strokes).toBe(b.strokes);
   });
 });

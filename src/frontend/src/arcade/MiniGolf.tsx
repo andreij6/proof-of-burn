@@ -56,6 +56,8 @@ interface MiniGolfProps {
   course: HoleDef[];
   character: CharacterLook | null;
   fullAccess: boolean;
+  /** Fired once per hole as it's sunk (1-based hole number 1..9). PB-306. */
+  onHoleSunk?: (hole: number) => void;
   /** Fired once when the final hole is sunk. */
   onRoundComplete: (perHole: number[], millis: number) => void;
   onExit: () => void;
@@ -64,7 +66,7 @@ interface MiniGolfProps {
   submitNote?: string;
 }
 
-export default function MiniGolf({ course, character, fullAccess, onRoundComplete, onExit, onGoParticipate, submitNote }: MiniGolfProps) {
+export default function MiniGolf({ course, character, fullAccess, onHoleSunk, onRoundComplete, onExit, onGoParticipate, submitNote }: MiniGolfProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [phase, setPhase] = useState<Phase>('intro');
   const [holeIdx, setHoleIdx] = useState(0);
@@ -76,6 +78,10 @@ export default function MiniGolf({ course, character, fullAccess, onRoundComplet
 
   const look = character ?? DEFAULT_CHARACTER;
   const parTotal = course.reduce((s, h) => s + h.par, 0);
+
+  // Latest onHoleSunk in a ref so the rAF loop never fires a stale callback.
+  const onHoleSunkRef = useRef(onHoleSunk);
+  onHoleSunkRef.current = onHoleSunk;
 
   const ref = useRef<GameRef>({
     def: course[0],
@@ -200,6 +206,9 @@ export default function MiniGolf({ course, character, fullAccess, onRoundComplet
               g.perHole = nextPerHole;
               setPerHole(nextPerHole);
               setSunkLabel(g.state.event === 'capped' ? 'Picked up (12-stroke cap)' : scoreLabel(strokes, g.def.par));
+              // PB-306: report the hole (1-based) as it's sunk, so the play
+              // wrapper can call record_hole_event in order.
+              onHoleSunkRef.current?.(g.holeIdx + 1);
               if (g.holeIdx === HOLES_PER_ROUND - 1) {
                 g.finalMs = g.roundStartedAt ? performance.now() - g.roundStartedAt : 0;
                 setClockMs(g.finalMs);
@@ -272,7 +281,7 @@ export default function MiniGolf({ course, character, fullAccess, onRoundComplet
         {/* Hole intro card */}
         {phase === 'intro' && (
           <Overlay>
-            <span className="mono" style={{ fontSize: 11, color: 'var(--burn)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Hole {holeIdx + 1} of 9</span>
+            <span className="mono" style={{ fontSize: 11, color: 'var(--burn-ink)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>Hole {holeIdx + 1} of 9</span>
             <h3 style={{ margin: 0 }}>{def.name}</h3>
             <span style={{ color: 'var(--fg-2)', fontSize: 13 }}>Par {def.par} · drag back from the ball and release to putt</span>
             <Btn variant="primary" onClick={beginHole}><Icon name="flame" size={13} stroke="var(--char-950)" /> Putt</Btn>
@@ -293,7 +302,7 @@ export default function MiniGolf({ course, character, fullAccess, onRoundComplet
         {/* Participation gate after hole 1 */}
         {phase === 'gate' && (
           <Overlay>
-            <Icon name="lock" size={26} stroke="var(--haze)" />
+            <Icon name="lock" size={26} stroke="var(--haze-ink)" />
             <h3 style={{ margin: 0 }}>That's the free preview</h3>
             <span style={{ color: 'var(--fg-2)', fontSize: 13, maxWidth: 380, textAlign: 'center' }}>
               Holes 2–9 (and the leaderboard) unlock for protocol participants: stake any
@@ -327,13 +336,13 @@ export default function MiniGolf({ course, character, fullAccess, onRoundComplet
                   <tr>
                     <td style={SC_TD}>You</td>
                     {perHole.map((s, i) => (
-                      <td key={i} style={{ ...SC_TD, color: s < course[i].par ? 'var(--sprout)' : s > course[i].par ? 'var(--haze)' : 'var(--fg)' }}>{s}</td>
+                      <td key={i} style={{ ...SC_TD, color: s < course[i].par ? 'var(--sprout-ink)' : s > course[i].par ? 'var(--haze-ink)' : 'var(--fg)' }}>{s}</td>
                     ))}
                   </tr>
                 </tbody>
               </table>
             </div>
-            {submitNote && <span style={{ fontSize: 12.5, color: 'var(--burn)' }}>{submitNote}</span>}
+            {submitNote && <span style={{ fontSize: 12.5, color: 'var(--burn-ink)' }}>{submitNote}</span>}
             <Btn variant="primary" onClick={onExit}>Back to Arcade</Btn>
           </Overlay>
         )}

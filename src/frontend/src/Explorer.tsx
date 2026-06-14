@@ -330,7 +330,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
               <Icon name="clock" size={10} /> Pending
             </Chip>
           ) : daysLeft !== null && (
-            <span className="mono row" style={{ gap: 4, fontSize: 10.5, color: daysLeft <= 5 ? 'var(--haze)' : 'var(--fg-3)' }}
+            <span className="mono row" style={{ gap: 4, fontSize: 10.5, color: daysLeft <= 5 ? 'var(--haze-ink)' : 'var(--fg-3)' }}
               title="Paid visibility window remaining">
               <Icon name="clock" size={11} /> {daysLeft}d left
             </span>
@@ -390,7 +390,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>ICP ecosystem</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
-            <Icon name="compass" size={22} stroke="var(--burn)" />
+            <Icon name="compass" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Explorer</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
@@ -410,7 +410,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
               setAdmName(''); setAdmUrl(''); setAdmDesc(''); setAdmError(null);
               setIsAdminFormOpen(true);
             }}>
-              <Icon name="key" size={13} stroke="var(--burn)" /> Add curated
+              <Icon name="key" size={13} stroke="var(--burn-ink)" /> Add curated
             </Btn>
           )}
           <Btn variant="primary" onClick={openSubmit}>
@@ -424,7 +424,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
       {isAdmin && pendingDapps.length > 0 && (
         <div className="col" style={{ gap: 10 }}>
           <span className="row" style={{ gap: 8 }}>
-            <Icon name="key" size={14} stroke="var(--haze)" />
+            <Icon name="key" size={14} stroke="var(--haze-ink)" />
             <b style={{ fontSize: 14, color: 'var(--fg)' }}>Awaiting approval</b>
             <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {pendingDapps.length} submission{pendingDapps.length === 1 ? '' : 's'}</span>
           </span>
@@ -438,7 +438,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
       {signedIn && myDapps.some(d => d.status === DappStatus.Pending) && (
         <div className="col" style={{ gap: 8, border: '1px solid var(--haze)', borderRadius: 10, padding: '12px 14px', background: 'var(--haze-dim)' }}>
           <span className="row" style={{ gap: 8 }}>
-            <Icon name="clock" size={13} stroke="var(--haze)" />
+            <Icon name="clock" size={13} stroke="var(--haze-ink)" />
             <b style={{ fontSize: 13, color: 'var(--fg)' }}>Your pending listings</b>
           </span>
           {myDapps.filter(d => d.status === DappStatus.Pending).map(d => (
@@ -453,7 +453,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
       {/* ── Directory grid ── */}
       {isLoading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
-          <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
+          <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
           Loading dapps...
         </div>
       ) : pageDapps.length === 0 ? (
@@ -485,7 +485,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
           <div className="card col" style={MODAL_CARD} onClick={e => e.stopPropagation()}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="compass" size={16} stroke="var(--burn)" />
+                <Icon name="compass" size={16} stroke="var(--burn-ink)" />
                 <b>List your dapp</b>
               </span>
               <Btn variant="ghost" sm onClick={() => !subBusy && setIsSubmitOpen(false)}><Icon name="x" size={14} /></Btn>
@@ -493,7 +493,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
 
             {subSuccess ? (
               <div className="col" style={{ gap: 12, alignItems: 'center', padding: '16px 0' }}>
-                <Icon name="checkCircle" size={32} stroke="var(--sprout)" />
+                <Icon name="checkCircle" size={32} stroke="var(--sprout-ink)" />
                 <p style={{ fontSize: 13, color: 'var(--fg-2)', textAlign: 'center', margin: 0 }}>{subStep}</p>
                 <Btn variant="secondary" onClick={() => setIsSubmitOpen(false)}>Close</Btn>
               </div>
@@ -501,7 +501,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
               <>
                 <div className="col" style={{ gap: 6, border: '1px solid var(--haze)', borderRadius: 8, padding: '10px 12px', background: 'var(--haze-dim)' }}>
                   <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-2)' }}>
-                    <Icon name="info" size={13} stroke="var(--haze)" />
+                    <Icon name="info" size={13} stroke="var(--haze-ink)" />
                     Community listings are <b>&nbsp;not public immediately&nbsp;</b> — an admin reviews
                     every submission first. If yours is rejected, the payment is refunded
                     (minus one ledger fee). Your paid days start counting at approval.
@@ -545,7 +545,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
                           style={{
                             background: subToken === t ? 'var(--burn-950)' : 'transparent',
                             border: `1px solid ${subToken === t ? 'var(--burn)' : 'var(--border)'}`,
-                            color: subToken === t ? 'var(--burn)' : 'var(--fg-3)',
+                            color: subToken === t ? 'var(--burn-ink)' : 'var(--fg-3)',
                             borderRadius: 999, padding: '5px 10px', fontSize: 11.5, fontWeight: 500,
                             cursor: 'pointer', transition: 'all var(--dur-fast) var(--ease-out)',
                           }}>
@@ -596,7 +596,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
           <div className="card col" style={MODAL_CARD} onClick={e => e.stopPropagation()}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="key" size={15} stroke="var(--burn)" />
+                <Icon name="key" size={15} stroke="var(--burn-ink)" />
                 <b>Add curated listing</b>
               </span>
               <Btn variant="ghost" sm onClick={() => !admBusy && setIsAdminFormOpen(false)}><Icon name="x" size={14} /></Btn>

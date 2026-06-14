@@ -48,7 +48,16 @@
   --fg-2:       var(--char-300);    /* secondary */
   --fg-3:       var(--char-500);    /* tertiary / muted */
   --fg-dim:     var(--char-700);    /* disabled */
-  --fg-accent:  var(--burn);
+  --fg-accent:  var(--burn-ink);
+
+  /* ---------- Accent "ink" — accents used as foreground text/icon ----------
+     Theme-aware: identical to the bright accent in dark mode (provably
+     unchanged), darkened in [data-theme=light] to clear WCAG AA on the
+     near-white surfaces. Use these for text/icon; keep the bright accents
+     (--burn / --sprout / --haze) for fills. */
+  --burn-ink:   var(--burn);
+  --sprout-ink: var(--sprout);
+  --haze-ink:   var(--haze);
 
   /* ---------- Type ---------- */
   --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
@@ -122,13 +131,18 @@
   --surface:    var(--char-0);
   --surface-hi: var(--char-100);
   --border:     var(--char-200);
-  --border-hi:  var(--char-300);
+  --border-hi:  #7A736C;   /* meaningful dividers — 4.25:1 on light bg (was char-300 @ 2.40) */
 
   --fg:         var(--char-950);
   --fg-1:       var(--char-900);
   --fg-2:       var(--char-700);
-  --fg-3:       var(--char-500);
+  --fg-3:       #645C55;   /* muted text — 5.96:1 on light bg (was char-500 @ 4.36) */
   --fg-dim:     var(--char-300);
+
+  /* accent ink — darkened for AA on the light surface (bright accents collapse here) */
+  --burn-ink:   #AD3F0F;   /* 5.47:1 */
+  --sprout-ink: #15663A;   /* 6.38:1 */
+  --haze-ink:   #8A5A00;   /* 5.39:1 */
 }
 
 /* =============================================================

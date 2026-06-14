@@ -87,6 +87,20 @@ Style with the CSS variables and utility classes in `index.css`, not literals:
 - Spacing/shape: `--sp-*`, `--r-md`, `--elev-*`, `--dur-*`/`--ease-*`.
 - Layout classes: `.row`, `.col`, `.card`, `.mono`, `.dashboard-container`.
 
+> **NEVER use raw palette tokens (`--char-0` … `--char-950`) for surfaces,
+> borders, or default text.** They are **theme-invariant** — `--char-50` is always
+> near-white. So `background: var(--char-50)` is a white card in *both* themes, and
+> any text on it without an explicit color inherits `--fg` (white in dark mode) →
+> **white-on-white** (this exact bug shipped in `Faucet.tsx`). Always use the
+> theme-aware semantic tokens: surfaces `--surface`/`--bg`/`--bg-alt`; text
+> `--fg`/`--fg-2`/`--fg-3`; borders `--border`/`--border-hi`; status
+> `--sprout`/`--ember`; accent `--burn`. The *only* legit raw-palette use is
+> fixed-contrast text on a fixed accent fill (e.g. `--char-950` label on a `--burn`
+> button). And **never rely on inherited text color on a colored/`--surface` card** —
+> set `color` explicitly so it's correct in both themes. After adding/altering any
+> theme token, run `npx vitest run` — `src/frontend/src/test/contrast.test.ts`
+> asserts the WCAG ratios and must stay green.
+
 Note: the per-card `card` style object is currently re-declared at the top of
 each page (e.g. `Lottery.tsx:124`, `Poker.tsx:22`). Match that — copy the same
 const or use the `.card` class — rather than inventing new card padding/border.
@@ -127,6 +141,14 @@ handling first. At the raw declarations layer `opt` comes back as `[]` or
 the Staking step-3 dead-button bug in `fetchMyPoolNeuron`). With the wrapper
 layer, check `__kind__ === "Some"` before reading `.value`. Match whichever
 layer the surrounding file already uses.
+
+**It applies to opt INPUT args too.** The wrapper actor takes an `opt T` argument
+as **`T | null`** (e.g. the generated `get_faucet_status(arg0: Principal | null)`),
+NOT the raw-declarations `[]` / `[x]` array. Passing `cid ? [cid] : []` throws on
+the call → the await rejects → your state stays `null` and the page renders a false
+empty/closed state. This shipped as the faucet "faucet is currently closed" bug.
+Pass `cid` (a `Principal | null`) directly. Check the generated signature in
+`bindings/backend.ts` when in doubt.
 
 Other decoding notes: candid `nat64`/`nat` arrive as **`bigint`**, not
 `number` — convert explicitly for display math (e8s: divide by `100_000_000n`).

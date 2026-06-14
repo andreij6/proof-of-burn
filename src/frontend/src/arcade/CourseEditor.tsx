@@ -190,7 +190,7 @@ export default function CourseEditor({ actor }: { actor: any }) {
             width: 30, height: 28, borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600,
             border: `1px solid ${i === holeIdx ? 'var(--burn)' : 'var(--border)'}`,
             background: i === holeIdx ? 'var(--burn-950)' : 'transparent',
-            color: i === holeIdx ? 'var(--burn)' : 'var(--fg-3)',
+            color: i === holeIdx ? 'var(--burn-ink)' : 'var(--fg-3)',
           }}>
             {i + 1}
           </button>
@@ -217,7 +217,7 @@ export default function CourseEditor({ actor }: { actor: any }) {
             cursor: 'pointer', fontSize: 11.5,
             border: `1px solid ${tool === t.key ? 'var(--burn)' : 'var(--border)'}`,
             background: tool === t.key ? 'var(--burn-950)' : 'transparent',
-            color: tool === t.key ? 'var(--burn)' : 'var(--fg-2)',
+            color: tool === t.key ? 'var(--burn-ink)' : 'var(--fg-2)',
           }}>
             <span style={{ width: 12, height: 12, borderRadius: 3, background: t.color, border: '1px solid rgba(255,255,255,0.25)' }} />
             {t.label}
@@ -265,7 +265,7 @@ export default function CourseEditor({ actor }: { actor: any }) {
         each cell is one voxel ({CELL}px of green)
       </span>
 
-      {status && <span style={{ fontSize: 12, color: 'var(--sprout)' }}>{status}</span>}
+      {status && <span style={{ fontSize: 12, color: 'var(--sprout-ink)' }}>{status}</span>}
       {error && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{error}</span>}
 
       <span className="row" style={{ gap: 8 }}>

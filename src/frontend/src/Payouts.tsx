@@ -242,7 +242,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
         <span className="row" style={{ gap: 8 }}>
-          <Icon name="wallet" size={16} stroke="var(--burn)" />
+          <Icon name="wallet" size={16} stroke="var(--burn-ink)" />
           <Eyebrow accent>Profile</Eyebrow>
         </span>
         <b style={{ fontSize: 17 }}>Your account — and your agents'.</b>
@@ -298,7 +298,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
             <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'stretch' }}>
               <div className="col" style={{ ...card, gap: 4, flex: '1 1 160px' }}>
                 <span style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--fg-3)' }}>Received (ICP)</span>
-                <b className="mono" style={{ fontSize: 17, color: 'var(--sprout)' }}>{loaded ? fmtICP(icpIn) : '…'}</b>
+                <b className="mono" style={{ fontSize: 17, color: 'var(--sprout-ink)' }}>{loaded ? fmtICP(icpIn) : '…'}</b>
               </div>
               <div className="col" style={{ ...card, gap: 4, flex: '1 1 160px' }}>
                 <span style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--fg-3)' }}>Put in (ICP)</span>
@@ -341,12 +341,12 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
               </div>
               {savedHandle && !handleNote && (
                 <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-3)' }}>
-                  <Icon name="checkCircle" size={12} stroke="var(--sprout)" />
-                  Linked as <a href={`https://x.com/${savedHandle}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--burn)' }}>@{savedHandle}</a>
+                  <Icon name="checkCircle" size={12} stroke="var(--sprout-ink)" />
+                  Linked as <a href={`https://x.com/${savedHandle}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--burn-ink)' }}>@{savedHandle}</a>
                 </span>
               )}
               {handleNote && (
-                <span style={{ fontSize: 12, color: handleNote.startsWith('Saved') || handleNote === 'Handle removed.' ? 'var(--sprout)' : 'var(--ember)' }}>
+                <span style={{ fontSize: 12, color: handleNote.startsWith('Saved') || handleNote === 'Handle removed.' ? 'var(--sprout-ink)' : 'var(--ember)' }}>
                   {handleNote}
                 </span>
               )}
@@ -412,7 +412,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
                     borderTop: '1px solid var(--border)', justifyContent: 'space-between',
                   }}>
                     <span className="row" style={{ gap: 10 }}>
-                      <Icon name={meta.icon} size={14} stroke={incoming ? 'var(--sprout)' : 'var(--burn)'} />
+                      <Icon name={meta.icon} size={14} stroke={incoming ? 'var(--sprout-ink)' : 'var(--burn-ink)'} />
                       <span className="col" style={{ gap: 2 }}>
                         <b>{meta.label}</b>
                         <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
@@ -449,7 +449,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
               <Eyebrow>Agent quickstart — one paste connects an agent</Eyebrow>
               <Btn variant="secondary" sm onClick={copyQuickstart}>
                 <Icon name={quickstartCopied ? 'check' : 'copy'} size={12}
-                  stroke={quickstartCopied ? 'var(--sprout)' : 'currentColor'} />
+                  stroke={quickstartCopied ? 'var(--sprout-ink)' : 'currentColor'} />
                 {quickstartCopied ? 'Copied' : 'Copy'}
               </Btn>
             </span>
@@ -479,7 +479,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
                   </div>
                   <Btn variant="secondary" sm onClick={() => copySkill(s)} style={{ flexShrink: 0 }}>
                     <Icon name={copiedSkill === s.key ? 'check' : 'copy'} size={12}
-                      stroke={copiedSkill === s.key ? 'var(--sprout)' : 'currentColor'} />
+                      stroke={copiedSkill === s.key ? 'var(--sprout-ink)' : 'currentColor'} />
                     {copiedSkill === s.key ? 'Copied' : 'Copy'}
                   </Btn>
                 </div>
@@ -691,7 +691,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
         <div className="row" style={{
           gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
           border: `1px solid ${error ? 'var(--ember)' : 'var(--sprout)'}`,
-          color: error ? 'var(--ember)' : 'var(--sprout)', background: 'var(--surface)',
+          color: error ? 'var(--ember)' : 'var(--sprout-ink)', background: 'var(--surface)',
         }}>
           <Icon name={error ? 'x' : 'checkCircle'} size={13} stroke="currentColor" />
           <span style={{ overflowWrap: 'anywhere' }}>{error || notice}</span>
@@ -728,7 +728,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
               {accountId ?? '…'}
             </span>
             <button onClick={() => accountId && copyText('aid', accountId)}
-              style={{ background: 'transparent', border: 'none', color: copied === 'aid' ? 'var(--sprout)' : 'var(--fg-3)', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', gap: 4, fontSize: 11.5 }}>
+              style={{ background: 'transparent', border: 'none', color: copied === 'aid' ? 'var(--sprout-ink)' : 'var(--fg-3)', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', gap: 4, fontSize: 11.5 }}>
               <Icon name={copied === 'aid' ? 'check' : 'copy'} size={11} stroke="currentColor" /> {copied === 'aid' ? 'copied' : 'copy'}
             </button>
           </div>
@@ -742,7 +742,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
               {principal.toString()}
             </span>
             <button onClick={() => copyText('pid', principal.toString())}
-              style={{ background: 'transparent', border: 'none', color: copied === 'pid' ? 'var(--sprout)' : 'var(--fg-3)', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', gap: 4, fontSize: 11.5 }}>
+              style={{ background: 'transparent', border: 'none', color: copied === 'pid' ? 'var(--sprout-ink)' : 'var(--fg-3)', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', gap: 4, fontSize: 11.5 }}>
               <Icon name={copied === 'pid' ? 'check' : 'copy'} size={11} stroke="currentColor" /> {copied === 'pid' ? 'copied' : 'copy'}
             </button>
           </div>

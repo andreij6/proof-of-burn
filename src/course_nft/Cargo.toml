@@ -1,0 +1,21 @@
+[package]
+name = "course_nft"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candid = "0.10"
+ic-cdk = "0.19"
+ic-stable-structures = "0.7"
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"
+# IC HTTP Response Verification v2 certification (official DFINITY crate). Used to
+# certify the per-token / collection HTTP responses so they verify on the normal
+# (non-`.raw.`) gateway domain. See §11 of lib.rs for the cert wiring.
+ic-http-certification = "3.2"
+
+[dev-dependencies]
+candid = "0.10"

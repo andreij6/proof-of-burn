@@ -32,6 +32,7 @@ import LotteryHub from "./LotteryHub";
 import Explorer from "./Explorer";
 import Arcade from "./Arcade";
 import Casino from "./Casino";
+import Faucet from "./Faucet";
 import Payouts from "./Payouts";
 import Admin from "./Admin";
 import Landing from "./Landing";
@@ -45,7 +46,7 @@ import { WALLET_TOKEN_META, parseTokenUnits, fmtUsd, thresholdProgress } from ".
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'casino' | 'early_adopters' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -56,7 +57,11 @@ export const PAGE_PATH: Record<AppPage, string> = {
   lottery: '/lottery',
   explorer: '/explorer',
   arcade: '/arcade',
+  // The Course Marketplace is the arcade's mini-golf surface (PB-309); kept as
+  // a deep-linkable alias that redirects to the arcade page (same flag gate).
+  course_market: '/courses',
   casino: '/casino',
+  faucet: '/faucet',
   early_adopters: '/early_adopters',
   payouts: '/profile',
   admin: '/admin',
@@ -132,7 +137,7 @@ function BalanceOfPowerBar({ adopt, reject }: { adopt: bigint; reject: bigint })
   return (
     <div className="col" style={{ gap: 5 }}>
       <div className="row" style={{ justifyContent: 'space-between', fontSize: 11, fontFamily: 'var(--font-mono)' }}>
-        <span style={{ color: 'var(--sprout)' }}>ADOPT {empty ? "—" : `${adoptPct.toFixed(0)}%`}</span>
+        <span style={{ color: 'var(--sprout-ink)' }}>ADOPT {empty ? "—" : `${adoptPct.toFixed(0)}%`}</span>
         <span style={{ color: 'var(--fg-3)' }}>balance of power</span>
         <span style={{ color: 'var(--ember)' }}>{empty ? "—" : `${rejectPct.toFixed(0)}%`} REJECT</span>
       </div>
@@ -177,7 +182,7 @@ function HeatBar({ pct = 0, committed, req, met }: { pct?: number; committed?: s
       {(committed || req) && (
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
           <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg-1)', whiteSpace: 'nowrap' }}>{committed}</span>
-          <span className="mono" style={{ fontSize: 12, color: met ? 'var(--sprout)' : 'var(--burn)', fontWeight: 500, whiteSpace: 'nowrap' }}>
+          <span className="mono" style={{ fontSize: 12, color: met ? 'var(--sprout-ink)' : 'var(--burn-ink)', fontWeight: 500, whiteSpace: 'nowrap' }}>
             {req}
           </span>
         </div>
@@ -310,8 +315,8 @@ function AIPanel({ open, onToggle, score, text }: { open: boolean; onToggle: () 
         width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         gap: 10, padding: '9px 12px', background: 'transparent', border: 'none', cursor: 'pointer'
       }}>
-        <span className="row" style={{ gap: 7, color: 'var(--burn)', fontSize: 13 }}>
-          <Icon name="spark" size={14} stroke="var(--burn)" /> AI review
+        <span className="row" style={{ gap: 7, color: 'var(--burn-ink)', fontSize: 13 }}>
+          <Icon name="spark" size={14} stroke="var(--burn-ink)" /> AI review
         </span>
         <span className="row" style={{ gap: 9 }}>
           <Chip tone="burn" style={{ height: 20, fontSize: 11 }}>Impact {score}</Chip>
@@ -513,6 +518,7 @@ export default function App() {
   const arcadeEnabled = featureFlags.find(f => f.key === 'arcade')?.enabled ?? false;
   const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
   const casinoEnabled = crashEnabled;
+  const faucetEnabled = featureFlags.find(f => f.key === 'cycles_faucet')?.enabled ?? false;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (earns lottery tickets only).
@@ -1101,10 +1107,17 @@ export default function App() {
     if (page === 'explorer' && featureFlags.length > 0 && !explorerEnabled) {
       setPage('dashboard');
     }
+    // The Course Marketplace lives inside the arcade — redirect its alias.
+    if (page === 'course_market') {
+      setPage('arcade');
+    }
     if (page === 'arcade' && featureFlags.length > 0 && !arcadeEnabled) {
       setPage('dashboard');
     }
     if (page === 'casino' && featureFlags.length > 0 && !casinoEnabled) {
+      setPage('dashboard');
+    }
+    if (page === 'faucet' && featureFlags.length > 0 && !faucetEnabled) {
       setPage('dashboard');
     }
     // Boosters (formerly Early Adopters) moved onto the lottery page —
@@ -1119,7 +1132,7 @@ export default function App() {
     if (page === 'payouts' && principal && principal.isAnonymous()) {
       setPage('dashboard');
     }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1733,6 +1746,12 @@ export default function App() {
           <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
           Verified Followers
         </Btn>
+        {faucetEnabled && (
+          <Btn variant={page === 'faucet' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('faucet')}>
+            <Icon name="zap" size={14} stroke={page === 'faucet' ? 'var(--char-950)' : 'currentColor'} />
+            Cycles Faucet
+          </Btn>
+        )}
 
         {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Play</Eyebrow>
@@ -1922,7 +1941,7 @@ export default function App() {
             width: 32, height: 32, flexShrink: 0, display: 'grid', placeItems: 'center',
             border: '1px solid var(--burn)', borderRadius: 8, background: 'var(--burn-950)'
           }}>
-            <Icon name="flame" size={17} stroke="var(--burn)" />
+            <Icon name="flame" size={17} stroke="var(--burn-ink)" />
           </span>
           <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             Caldera
@@ -2010,7 +2029,7 @@ export default function App() {
                       </p>
                       <p style={{ margin: 0 }}>
                         New to hotkeys? See{' '}
-                        <a href={NNS_HOTKEY_DOCS} target="_blank" rel="noreferrer" style={{ color: 'var(--burn)' }}>
+                        <a href={NNS_HOTKEY_DOCS} target="_blank" rel="noreferrer" style={{ color: 'var(--burn-ink)' }}>
                           how NNS neuron hotkeys work ↗
                         </a>.
                       </p>
@@ -2057,7 +2076,7 @@ export default function App() {
                           {poolIs(myPoolNeuron.status, 'Active') && (
                             <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                               <span style={{ color: 'var(--fg-3)' }}>Voting power</span>
-                              <span className="mono" style={{ color: 'var(--sprout)' }}>{fmtVP(myPoolNeuron.voting_power)} VP</span>
+                              <span className="mono" style={{ color: 'var(--sprout-ink)' }}>{fmtVP(myPoolNeuron.voting_power)} VP</span>
                             </div>
                           )}
                           <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
@@ -2071,10 +2090,10 @@ export default function App() {
                                 className="mono"
                                 href={`https://dashboard.internetcomputer.org/neuron/${myPoolNeuron.neuron_id.toString()}`}
                                 target="_blank" rel="noreferrer"
-                                style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                                style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
                                 title="View this neuron on the NNS dashboard"
                               >
-                                #{myPoolNeuron.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                                #{myPoolNeuron.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
                               </a>
                             )}
                           </div>
@@ -2116,7 +2135,7 @@ export default function App() {
                           <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
                             <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                               <span style={{ color: 'var(--fg-3)' }}>Voting power</span>
-                              <span className="mono" style={{ color: 'var(--sprout)' }}>{fmtVP(n.voting_power)} VP</span>
+                              <span className="mono" style={{ color: 'var(--sprout-ink)' }}>{fmtVP(n.voting_power)} VP</span>
                             </div>
                             <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
                               <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
@@ -2129,16 +2148,16 @@ export default function App() {
                                   className="mono"
                                   href={`https://dashboard.internetcomputer.org/neuron/${n.neuron_id.toString()}`}
                                   target="_blank" rel="noreferrer"
-                                  style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                                  style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
                                   title="View this neuron on the NNS dashboard"
                                 >
-                                  #{n.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                                  #{n.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
                                 </a>
                               )}
                             </div>
                           </div>
-                          <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout)' }}>
-                            <Icon name="eye" size={12} stroke="var(--sprout)" />
+                          <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout-ink)' }}>
+                            <Icon name="eye" size={12} stroke="var(--sprout-ink)" />
                             Public on the NNS — audit it any time.
                           </span>
                         </div>
@@ -2184,6 +2203,9 @@ export default function App() {
               principal={principal}
               host={host}
               rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
+              backendCanisterId={backendCanisterId}
+              isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
             />
@@ -2195,6 +2217,14 @@ export default function App() {
               onSignIn={handleLogin}
               onGoStaking={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
               crashEnabled={crashEnabled}
+            />
+          ) : page === 'faucet' ? (
+            <Faucet
+              actor={actor}
+              principal={principal}
+              isLocal={config?.is_local ?? false}
+              onSignIn={handleLogin}
+              onGoVote={() => setPage('voting')}
             />
           ) : page === 'payouts' ? (
             <Payouts
@@ -2254,7 +2284,7 @@ export default function App() {
               <Reveal delay={30} motion={motion}>
                 <div className="col" style={{ gap: 8 }}>
                   <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-                    <Icon name="wallet" size={13} stroke="var(--burn)" />
+                    <Icon name="wallet" size={13} stroke="var(--burn-ink)" />
                     <Eyebrow>Your activity</Eyebrow>
                   </div>
                   <div className="row" data-testid="user-stats-strip" style={{
@@ -2263,15 +2293,15 @@ export default function App() {
                   }}>
                     <div className="col" style={{ gap: 4, flex: 1, alignItems: 'center', textAlign: 'center' }}>
                       <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-                        <Icon name="coins" size={16} stroke="var(--burn)" />
+                        <Icon name="coins" size={16} stroke="var(--burn-ink)" />
                         <span className="mono" style={{ fontSize: 22, fontWeight: 600, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
                           {fmtICP(totalCommitted)} ICP
                         </span>
                       </span>
                       <Eyrow>Committed</Eyrow>
                       {userPendingBurn > 0n && (
-                        <span className="mono" style={{ fontSize: 11, color: 'var(--haze)', marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 4 }} title="ICP committed to proposals that reached their threshold and will burn on deadline">
-                          <Icon name="clock" size={11} stroke="var(--haze)" /> {fmtICP(userPendingBurn)} pending
+                        <span className="mono" style={{ fontSize: 11, color: 'var(--haze-ink)', marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 4 }} title="ICP committed to proposals that reached their threshold and will burn on deadline">
+                          <Icon name="clock" size={11} stroke="var(--haze-ink)" /> {fmtICP(userPendingBurn)} pending
                         </span>
                       )}
                     </div>
@@ -2280,7 +2310,7 @@ export default function App() {
                       borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
                     }}>
                       <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-                        <Icon name="flame" size={16} stroke="var(--burn)" />
+                        <Icon name="flame" size={16} stroke="var(--burn-ink)" />
                         <span className="mono" style={{ fontSize: 22, fontWeight: 600, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
                           {fmtICP(totalBurned)} ICP
                         </span>
@@ -2292,7 +2322,7 @@ export default function App() {
                       borderLeft: '1px solid color-mix(in srgb, var(--burn) 28%, transparent)'
                     }}>
                       <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-                        <Icon name="checkCircle" size={16} stroke="var(--burn)" />
+                        <Icon name="checkCircle" size={16} stroke="var(--burn-ink)" />
                         <span className="mono" style={{ fontSize: 22, fontWeight: 600, color: 'var(--fg)', letterSpacing: '-0.01em' }}>
                           {proposalsJoined}
                         </span>
@@ -2334,7 +2364,7 @@ export default function App() {
                         <span style={{ color: 'var(--border-hi)' }}>·</span>
                         <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
                           <span>Pending burn</span>
-                          <span className="mono" style={{ fontSize: 14, color: 'var(--haze)' }} title="ICP committed to proposals that reached their threshold and will burn on deadline">
+                          <span className="mono" style={{ fontSize: 14, color: 'var(--haze-ink)' }} title="ICP committed to proposals that reached their threshold and will burn on deadline">
                             {`${fmtICP(globalStats.pending_burn_e8s)} ICP`}
                           </span>
                         </span>
@@ -2359,7 +2389,7 @@ export default function App() {
                 <div className="col" style={{ gap: 6 }}>
                   <Eyebrow accent>NNS governance</Eyebrow>
                   <span className="row" style={{ gap: 10, alignItems: 'center' }}>
-                    <Icon name="flame" size={22} stroke="var(--burn)" />
+                    <Icon name="flame" size={22} stroke="var(--burn-ink)" />
                     <h4 style={{ margin: 0 }}>Use our voting power</h4>
                   </span>
                   <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
@@ -2417,7 +2447,7 @@ export default function App() {
                   <button
                     onClick={() => setIsDetailsOpen(true)}
                     style={{
-                      background: 'transparent', border: 'none', color: 'var(--burn)',
+                      background: 'transparent', border: 'none', color: 'var(--burn-ink)',
                       cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
                       padding: 0, fontSize: 13.5, fontWeight: 500, width: 'fit-content',
                       transition: 'opacity 0.2s',
@@ -2425,7 +2455,7 @@ export default function App() {
                     onMouseEnter={(e) => e.currentTarget.style.opacity = '0.8'}
                     onMouseLeave={(e) => e.currentTarget.style.opacity = '1'}
                   >
-                    <Icon name="info" size={13} stroke="var(--burn)" />
+                    <Icon name="info" size={13} stroke="var(--burn-ink)" />
                     More details
                   </button>
                 </div>
@@ -2457,23 +2487,23 @@ export default function App() {
                           className="mono"
                           href={`https://dashboard.internetcomputer.org/neuron/${config?.primary_neuron_id.toString() ?? ''}`}
                           target="_blank" rel="noreferrer"
-                          style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                          style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
                           title="View the leader neuron on the NNS dashboard"
                         >
-                          #{config?.primary_neuron_id.toString() ?? '…'} <Icon name="external" size={11} stroke="var(--sprout)" />
+                          #{config?.primary_neuron_id.toString() ?? '…'} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
                         </a>
                       )}
                       <button onClick={handleCopy} title="Copy neuron ID" style={{
                         display: 'grid', placeItems: 'center', width: 22, height: 22, flexShrink: 0,
                         borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', color: 'var(--fg-3)', cursor: 'pointer'
                       }}>
-                        <Icon name={copied ? "check" : "copy"} size={11} stroke={copied ? "var(--sprout)" : "var(--fg-3)"} />
+                        <Icon name={copied ? "check" : "copy"} size={11} stroke={copied ? "var(--sprout-ink)" : "var(--fg-3)"} />
                       </button>
                     </span>
                   </div>
                   <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                     <span style={{ color: 'var(--fg-3)' }}>Combined voting power</span>
-                    <span className="mono" style={{ color: 'var(--sprout)' }}>
+                    <span className="mono" style={{ color: 'var(--sprout-ink)' }}>
                       {leaderInfo && totalSyndicateVP > 0n ? `${fmtVP(totalSyndicateVP)} VP` : '…'}
                     </span>
                   </div>
@@ -2491,8 +2521,8 @@ export default function App() {
                 }}>
                   {!isFollowing ? (
                     !principal || principal.isAnonymous() ? (
-                      <span className="row" style={{ gap: 6, color: 'var(--burn)', fontSize: 12.5, whiteSpace: 'nowrap' }}>
-                        <Icon name="arrowUp" size={13} stroke="var(--burn)" /> Sign in to follow
+                      <span className="row" style={{ gap: 6, color: 'var(--burn-ink)', fontSize: 12.5, whiteSpace: 'nowrap' }}>
+                        <Icon name="arrowUp" size={13} stroke="var(--burn-ink)" /> Sign in to follow
                       </span>
                     ) : (
                       <Btn variant="primary" sm onClick={() => { setNnsOpened(false); setIsFollowModalOpen(true); }}>
@@ -2500,8 +2530,8 @@ export default function App() {
                       </Btn>
                     )
                   ) : (
-                    <span className="row" style={{ gap: 6, color: 'var(--sprout)', fontSize: 12.5 }}>
-                      <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> Following
+                    <span className="row" style={{ gap: 6, color: 'var(--sprout-ink)', fontSize: 12.5 }}>
+                      <Icon name="checkCircle" size={13} stroke="var(--sprout-ink)" /> Following
                     </span>
                   )}
                 </div>
@@ -2511,7 +2541,7 @@ export default function App() {
             {/* ── Three-section proposal list ── */}
             {isLoading ? (
               <div style={{ textAlign: 'center', padding: 32, color: 'var(--fg-3)' }}>
-                <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
+                <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
                 Fetching active NNS proposals...
               </div>
             ) : (
@@ -2530,7 +2560,7 @@ export default function App() {
                       onClick={() => setActiveTab('open')}
                       style={{
                         background: 'transparent', border: 'none',
-                        color: activeTab === 'open' ? 'var(--burn)' : 'var(--fg-3)',
+                        color: activeTab === 'open' ? 'var(--burn-ink)' : 'var(--fg-3)',
                         fontSize: 14, fontWeight: activeTab === 'open' ? 600 : 500,
                         cursor: 'pointer', padding: '6px 4px', position: 'relative',
                         transition: 'color var(--dur-fast) var(--ease-out)',
@@ -2550,7 +2580,7 @@ export default function App() {
                         onClick={() => setActiveTab('committed')}
                         style={{
                           background: 'transparent', border: 'none',
-                          color: activeTab === 'committed' ? 'var(--burn)' : 'var(--fg-3)',
+                          color: activeTab === 'committed' ? 'var(--burn-ink)' : 'var(--fg-3)',
                           fontSize: 14, fontWeight: activeTab === 'committed' ? 600 : 500,
                           cursor: 'pointer', padding: '6px 4px', position: 'relative',
                           transition: 'color var(--dur-fast) var(--ease-out)',
@@ -2570,7 +2600,7 @@ export default function App() {
                       onClick={() => setActiveTab('history')}
                       style={{
                         background: 'transparent', border: 'none',
-                        color: activeTab === 'history' ? 'var(--burn)' : 'var(--fg-3)',
+                        color: activeTab === 'history' ? 'var(--burn-ink)' : 'var(--fg-3)',
                         fontSize: 14, fontWeight: activeTab === 'history' ? 600 : 500,
                         cursor: 'pointer', padding: '6px 4px', position: 'relative',
                         transition: 'color var(--dur-fast) var(--ease-out)',
@@ -2593,7 +2623,7 @@ export default function App() {
                     <Reveal delay={100} motion={motion}>
                       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
                         <span className="row" style={{ gap: 8 }}>
-                          <LiveDot on={motion !== 'off'} color="var(--sprout)" size={7} />
+                          <LiveDot on={motion !== 'off'} color="var(--sprout-ink)" size={7} />
                           <b style={{ fontSize: 14, color: 'var(--fg)' }}>Open</b>
                           <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {openProposals.length}</span>
                         </span>
@@ -2635,7 +2665,7 @@ export default function App() {
                         </span>
                       ) : (
                         <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          To flip to <strong style={{ color: flipInfo.toStance === 'Adopt' ? 'var(--sprout)' : 'var(--ember)', fontWeight: 600 }}>{flipInfo.toStance.toUpperCase()}</strong>: <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtFlipAmount(flipInfo.amountE8s)} ICP</span>
+                          To flip to <strong style={{ color: flipInfo.toStance === 'Adopt' ? 'var(--sprout-ink)' : 'var(--ember)', fontWeight: 600 }}>{flipInfo.toStance.toUpperCase()}</strong>: <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtFlipAmount(flipInfo.amountE8s)} ICP</span>
                         </span>
                       );
 
@@ -2657,13 +2687,13 @@ export default function App() {
                       const mineBadge = myCommitment && (
                         <Chip tone={mineBadgeTone}>
                           {myCommitment.status === CommitmentStatus.Burned ? (
-                            <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Spent</>
+                            <><Icon name="flame" size={11} stroke="var(--burn-ink)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Spent</>
                           ) : myCommitment.status === CommitmentStatus.Returned ? (
-                            <><Icon name="checkCircle" size={11} stroke="var(--sprout)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Returned</>
+                            <><Icon name="checkCircle" size={11} stroke="var(--sprout-ink)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP Returned</>
                           ) : (myCommitment.status === CommitmentStatus.FailedBurn || myCommitment.status === CommitmentStatus.FailedRefund) ? (
                             <><Icon name="x" size={11} /> Settlement error — retrying</>
                           ) : met ? (
-                            <><Icon name="flame" size={11} stroke="var(--burn)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP burning soon</>
+                            <><Icon name="flame" size={11} stroke="var(--burn-ink)" /> You · {fmtICP(myCommitment.amount_e8s)} ICP burning soon</>
                           ) : (
                             <>You · {fmtICP(myCommitment.amount_e8s)} ICP pending ({myCommitment.stance === Stance.Adopt ? "ADOPT" : "REJECT"})</>
                           )}
@@ -2683,7 +2713,7 @@ export default function App() {
                                 <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                                   <Chip tone="muted" style={{ height: 20, fontSize: 11 }}>{p.category}</Chip>
                                   <a href={nnsProposalLink(p)} target="_blank" rel="noreferrer" className="mono" style={{
-                                    fontSize: 11, color: 'var(--burn)', whiteSpace: 'nowrap', textDecoration: 'underline'
+                                    fontSize: 11, color: 'var(--burn-ink)', whiteSpace: 'nowrap', textDecoration: 'underline'
                                   }} title="View full proposal on the NNS">
                                     #{proposalIdStr}
                                   </a>
@@ -2745,10 +2775,10 @@ export default function App() {
                                   <Btn
                                     variant="primary"
                                     sm
-                                    style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout)', border: '1px solid var(--sprout)' }}
+                                    style={{ flex: 1, background: 'var(--sprout-dim)', color: 'var(--sprout-ink)', border: '1px solid var(--sprout)' }}
                                     onClick={() => handleCommitClick(p.id, Stance.Adopt)}
                                   >
-                                    <Icon name="checkCircle" size={13} stroke="var(--sprout)" /> ADOPT
+                                    <Icon name="checkCircle" size={13} stroke="var(--sprout-ink)" /> ADOPT
                                   </Btn>
                                   <Btn
                                     variant="danger"
@@ -2798,7 +2828,7 @@ export default function App() {
                     <Reveal delay={120} motion={motion}>
                       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
                         <span className="row" style={{ gap: 8 }}>
-                          <Icon name="flame" size={13} stroke="var(--burn)" />
+                          <Icon name="flame" size={13} stroke="var(--burn-ink)" />
                           <b style={{ fontSize: 14, color: 'var(--fg)' }}>Committed</b>
                           <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {committedProposals.length}</span>
                         </span>
@@ -2828,7 +2858,7 @@ export default function App() {
                         </span>
                       ) : (
                         <span style={{ fontSize: 11, color: 'var(--fg-3)', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          To flip to <strong style={{ color: flipInfo.toStance === 'Adopt' ? 'var(--sprout)' : 'var(--ember)', fontWeight: 600 }}>{flipInfo.toStance.toUpperCase()}</strong>: <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtFlipAmount(flipInfo.amountE8s)} ICP</span>
+                          To flip to <strong style={{ color: flipInfo.toStance === 'Adopt' ? 'var(--sprout-ink)' : 'var(--ember)', fontWeight: 600 }}>{flipInfo.toStance.toUpperCase()}</strong>: <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>{fmtFlipAmount(flipInfo.amountE8s)} ICP</span>
                         </span>
                       );
                       return (
@@ -2847,7 +2877,7 @@ export default function App() {
                                 <div className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                                   <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{p.category}</Chip>
                                   <a href={nnsProposalLink(p)} target="_blank" rel="noreferrer" className="mono" style={{
-                                    fontSize: 11, color: 'var(--burn)', whiteSpace: 'nowrap', textDecoration: 'underline'
+                                    fontSize: 11, color: 'var(--burn-ink)', whiteSpace: 'nowrap', textDecoration: 'underline'
                                   }} title="View full proposal on the NNS">
                                     #{p.id.toString()}
                                   </a>
@@ -2870,7 +2900,7 @@ export default function App() {
                               <div className="col" style={{ alignItems: 'flex-end', gap: 6, flexShrink: 0 }}>
                                 <Chip tone="muted" style={{ height: 20 }}><Icon name="clock" size={11} /> {deadlineStr}</Chip>
                                 {met
-                                  ? <Chip tone="burn"><Icon name="flame" size={11} stroke="var(--burn)" /> Threshold met</Chip>
+                                  ? <Chip tone="burn"><Icon name="flame" size={11} stroke="var(--burn-ink)" /> Threshold met</Chip>
                                   : <Chip tone="muted"><LiveDot on={motion !== 'off'} /> Open</Chip>}
                                 {flipLabel}
                               </div>
@@ -2903,7 +2933,7 @@ export default function App() {
                                   onClick={() => handleAddMoreClick(p.id)}
                                   style={{
                                     background: 'none', border: 'none', cursor: 'pointer',
-                                    color: 'var(--burn)', fontSize: 11.5, padding: 0,
+                                    color: 'var(--burn-ink)', fontSize: 11.5, padding: 0,
                                     display: 'flex', alignItems: 'center', gap: 4,
                                     textDecoration: 'underline', whiteSpace: 'nowrap'
                                   }}
@@ -2979,7 +3009,7 @@ export default function App() {
                                     <Chip tone={myCommitment.stance === Stance.Adopt ? 'ok' : 'danger'} style={{ height: 17, fontSize: 10 }}>
                                       {myCommitment.stance === Stance.Adopt ? 'ADOPT' : 'REJECT'}
                                     </Chip>
-                                    <span className="mono" style={{ color: isBurned ? 'var(--burn)' : 'var(--sprout)' }}>
+                                    <span className="mono" style={{ color: isBurned ? 'var(--burn-ink)' : 'var(--sprout-ink)' }}>
                                       {fmtICP(myCommitment.amount_e8s)} ICP {isBurned ? 'spent' : 'returned'}
                                     </span>
                                   </div>
@@ -3006,7 +3036,7 @@ export default function App() {
                                   )}
                                   <Chip tone={record.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>{voteStr}</Chip>
                                   {record.icp_burned_e8s > 0n && (
-                                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn)' }}>{fmtICP(record.icp_burned_e8s)} spent</span>
+                                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn-ink)' }}>{fmtICP(record.icp_burned_e8s)} spent</span>
                                   )}
                                 </div>
                               </div>
@@ -3034,7 +3064,7 @@ export default function App() {
           {/* Tweak Panel Header */}
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
             <div className="col" style={{ gap: 4 }}>
-              <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: 'var(--burn)', letterSpacing: '0.1em' }}>
+              <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: 'var(--burn-ink)', letterSpacing: '0.1em' }}>
                 Local dev
               </span>
               <h4 style={{ margin: 0, fontFamily: 'var(--font-display)', color: 'var(--fg)' }}>Dashboard &amp; Controls</h4>
@@ -3106,8 +3136,8 @@ export default function App() {
               </div>
               <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
                 <span style={{ color: 'var(--fg-2)', fontSize: 12.5 }}>Status</span>
-                <span className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--sprout)' }}>
-                  <LiveDot color="var(--sprout)" size={6} /> Active / Healthy
+                <span className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--sprout-ink)' }}>
+                  <LiveDot color="var(--sprout-ink)" size={6} /> Active / Healthy
                 </span>
               </div>
             </div>
@@ -3120,13 +3150,13 @@ export default function App() {
               <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>Send test tokens to your wallet from the canister.</span>
               <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                 <Btn variant="secondary" sm onClick={() => handleFaucet(IdeaToken.ICP)}>
-                  <Icon name="zap" size={12} stroke="var(--burn)" /> 100 ICP
+                  <Icon name="zap" size={12} stroke="var(--burn-ink)" /> 100 ICP
                 </Btn>
                 <Btn variant="secondary" sm onClick={() => handleFaucet(IdeaToken.CkBTC)}>
-                  <Icon name="zap" size={12} stroke="var(--burn)" /> 0.1 ckBTC
+                  <Icon name="zap" size={12} stroke="var(--burn-ink)" /> 0.1 ckBTC
                 </Btn>
                 <Btn variant="secondary" sm onClick={() => handleFaucet(IdeaToken.CkETH)}>
-                  <Icon name="zap" size={12} stroke="var(--burn)" /> 1 ckETH
+                  <Icon name="zap" size={12} stroke="var(--burn-ink)" /> 1 ckETH
                 </Btn>
               </div>
             </div>
@@ -3147,7 +3177,7 @@ export default function App() {
                 setHotkeyCopied(true);
                 setTimeout(() => setHotkeyCopied(false), 2000);
               }}>
-                <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--burn)"} /> Copy my principal
+                <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout-ink)" : "var(--burn-ink)"} /> Copy my principal
               </Btn>
             </div>
           )}
@@ -3159,10 +3189,10 @@ export default function App() {
             style={{
               position: 'fixed', top: 84, right: 0, zIndex: 50,
               background: 'var(--bg-alt)', border: '1px solid var(--border)', borderRight: 'none',
-              borderRadius: '6px 0 0 6px', padding: '8px 10px', cursor: 'pointer', color: 'var(--burn)',
+              borderRadius: '6px 0 0 6px', padding: '8px 10px', cursor: 'pointer', color: 'var(--burn-ink)',
               display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600,
             }}>
-            <Icon name="zap" size={14} stroke="var(--burn)" /> Controls
+            <Icon name="zap" size={14} stroke="var(--burn-ink)" /> Controls
           </button>
         )}
 
@@ -3181,7 +3211,7 @@ export default function App() {
           }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="checkCircle" size={18} stroke="var(--sprout)" />
+                <Icon name="checkCircle" size={18} stroke="var(--sprout-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Follow the leader neuron</h4>
               </span>
               {!isVerifying && (
@@ -3205,12 +3235,12 @@ export default function App() {
                 <span className="mono" style={{ fontSize: 12, color: 'var(--fg)', overflowWrap: 'anywhere' }}>{formatNeuronId(config?.primary_neuron_id)}</span>
                 <button onClick={() => { if (config) { navigator.clipboard.writeText(config.primary_neuron_id.toString()); setHotkeyCopied(true); setTimeout(() => setHotkeyCopied(false), 2000); } }}
                   title="Copy neuron id" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0, borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer' }}>
-                  <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout)" : "var(--fg-3)"} />
+                  <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout-ink)" : "var(--fg-3)"} />
                 </button>
               </div>
               <a href="https://nns.ic0.app" target="_blank" rel="noreferrer" onClick={() => setNnsOpened(true)}
-                style={{ fontSize: 12, color: 'var(--burn)', textDecoration: 'none' }}>
-                <Icon name={nnsOpened ? "check" : "external"} size={11} stroke={nnsOpened ? "var(--sprout)" : "var(--burn)"} /> Open the NNS dapp
+                style={{ fontSize: 12, color: 'var(--burn-ink)', textDecoration: 'none' }}>
+                <Icon name={nnsOpened ? "check" : "external"} size={11} stroke={nnsOpened ? "var(--sprout-ink)" : "var(--burn-ink)"} /> Open the NNS dapp
               </a>
             </div>
 
@@ -3245,7 +3275,7 @@ export default function App() {
           }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="wallet" size={18} stroke="var(--burn)" />
+                <Icon name="wallet" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Treasury Wallet</h4>
               </span>
               <button onClick={() => setIsTreasuryOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
@@ -3265,7 +3295,7 @@ export default function App() {
             </p>
 
             {treasurySuccess && (
-              <div style={{ padding: 10, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout)', fontSize: 12.5 }}>Withdrawal sent.</div>
+              <div style={{ padding: 10, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout-ink)', fontSize: 12.5 }}>Withdrawal sent.</div>
             )}
             {treasuryError && (
               <div style={{ padding: 10, borderRadius: 6, background: 'var(--ember-dim)', border: '1px solid var(--ember)', color: 'var(--ember)', fontSize: 12.5, lineHeight: 1.4 }}>{treasuryError}</div>
@@ -3301,7 +3331,7 @@ export default function App() {
           }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="wallet" size={18} stroke="var(--burn)" />
+                <Icon name="wallet" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Your app wallet</h4>
               </span>
               <button onClick={() => setIsWalletOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
@@ -3352,7 +3382,7 @@ export default function App() {
                 <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg)', overflowWrap: 'anywhere', flex: 1 }}>{accountId || "…"}</span>
                 <button onClick={() => { navigator.clipboard.writeText(accountId); setAddrCopied("aid"); setTimeout(() => setAddrCopied(""), 2000); }}
                   title="Copy account identifier" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0, borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer' }}>
-                  <Icon name={addrCopied === "aid" ? "check" : "copy"} size={12} stroke={addrCopied === "aid" ? "var(--sprout)" : "var(--fg-3)"} />
+                  <Icon name={addrCopied === "aid" ? "check" : "copy"} size={12} stroke={addrCopied === "aid" ? "var(--sprout-ink)" : "var(--fg-3)"} />
                 </button>
               </div>
               <label style={{ fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Principal (for ICP / ckBTC / ckETH / ckUSDC from ICRC-1 wallets)</label>
@@ -3360,7 +3390,7 @@ export default function App() {
                 <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg)', overflowWrap: 'anywhere', flex: 1 }}>{principal.toString()}</span>
                 <button onClick={() => { navigator.clipboard.writeText(principal.toString()); setAddrCopied("principal"); setTimeout(() => setAddrCopied(""), 2000); }}
                   title="Copy principal" style={{ display: 'grid', placeItems: 'center', width: 24, height: 24, flexShrink: 0, borderRadius: 4, border: '1px solid var(--border)', background: 'transparent', cursor: 'pointer' }}>
-                  <Icon name={addrCopied === "principal" ? "check" : "copy"} size={12} stroke={addrCopied === "principal" ? "var(--sprout)" : "var(--fg-3)"} />
+                  <Icon name={addrCopied === "principal" ? "check" : "copy"} size={12} stroke={addrCopied === "principal" ? "var(--sprout-ink)" : "var(--fg-3)"} />
                 </button>
               </div>
             </div>
@@ -3382,7 +3412,7 @@ export default function App() {
                 })}
               </div>
               {withdrawSuccess && (
-                <div style={{ padding: 10, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout)', fontSize: 12.5 }}>
+                <div style={{ padding: 10, borderRadius: 6, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', color: 'var(--sprout-ink)', fontSize: 12.5 }}>
                   Withdrawal sent.
                 </div>
               )}
@@ -3436,7 +3466,7 @@ export default function App() {
           }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="info" size={18} stroke="var(--burn)" />
+                <Icon name="info" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>About the Neuron Pool</h4>
               </span>
               <button onClick={() => setPoolDetailsOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
@@ -3533,7 +3563,7 @@ export default function App() {
             {/* Header */}
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="spark" size={18} stroke="var(--burn)" />
+                <Icon name="spark" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Join the Neuron Pool</h4>
               </span>
               {!isPoolVerifying && !isPoolFinalizing && !isCancellingDraft && (
@@ -3629,8 +3659,8 @@ export default function App() {
                     </button>
                   </div>
                   <a href="https://nns.ic0.app" target="_blank" rel="noreferrer"
-                    style={{ fontSize: 12, color: 'var(--burn)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
-                    <Icon name="external" size={11} stroke="var(--burn)" /> Open NNS dapp
+                    style={{ fontSize: 12, color: 'var(--burn-ink)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <Icon name="external" size={11} stroke="var(--burn-ink)" /> Open NNS dapp
                   </a>
                 </div>
 
@@ -3675,7 +3705,7 @@ export default function App() {
                 {poolFinalizeSuccess ? (
                   <div className="col" style={{ alignItems: 'center', gap: 14, padding: '12px 0', textAlign: 'center' }}>
                     <div style={{ width: 48, height: 48, borderRadius: 999, background: 'var(--sprout-dim)', border: '1px solid var(--sprout)', display: 'grid', placeItems: 'center' }}>
-                      <Icon name="checkCircle" size={24} stroke="var(--sprout)" />
+                      <Icon name="checkCircle" size={24} stroke="var(--sprout-ink)" />
                     </div>
                     <div className="col" style={{ gap: 4 }}>
                       <h5 style={{ margin: 0, color: 'var(--fg)' }}>You're a Verified Follower!</h5>
@@ -3707,7 +3737,7 @@ export default function App() {
                         <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
                         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
                           <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg)' }}>Total (from app wallet)</span>
-                          <span className="mono" style={{ fontSize: 16, fontWeight: 700, color: 'var(--burn)' }}>
+                          <span className="mono" style={{ fontSize: 16, fontWeight: 700, color: 'var(--burn-ink)' }}>
                             {config ? fmtICP(config.pool_initiation_fee_e8s + 40_000n) : '…'} ICP
                           </span>
                         </div>
@@ -3767,7 +3797,7 @@ export default function App() {
           }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="flame" size={18} stroke="var(--burn)" />
+                <Icon name="flame" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>
                   Confirm Conviction Burn
                 </h4>
@@ -3796,9 +3826,9 @@ export default function App() {
                 <div style={{
                   width: 48, height: 48, borderRadius: 999, background: 'var(--sprout-dim)',
                   border: '1px solid var(--sprout)', display: 'grid', placeItems: 'center',
-                  color: 'var(--sprout)'
+                  color: 'var(--sprout-ink)'
                 }}>
-                  <Icon name="checkCircle" size={24} stroke="var(--sprout)" />
+                  <Icon name="checkCircle" size={24} stroke="var(--sprout-ink)" />
                 </div>
                 <div className="col" style={{ gap: 4 }}>
                   <h5 style={{ margin: 0, color: 'var(--fg)' }}>Commitment Registered!</h5>
@@ -3822,7 +3852,7 @@ export default function App() {
                     <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>YOUR STANCE</span>
                     <Chip tone={confirmStance === Stance.Adopt ? "ok" : "danger"} style={{ height: 20, fontSize: 11 }}>
                       {confirmStance === Stance.Adopt
-                        ? <><Icon name="checkCircle" size={11} stroke="var(--sprout)" /> ADOPT</>
+                        ? <><Icon name="checkCircle" size={11} stroke="var(--sprout-ink)" /> ADOPT</>
                         : <><Icon name="x" size={11} /> REJECT</>}
                     </Chip>
                   </div>
@@ -3905,7 +3935,7 @@ export default function App() {
                       style={{
                         background: 'none',
                         border: 'none',
-                        color: 'var(--burn)',
+                        color: 'var(--burn-ink)',
                         fontSize: 11.5,
                         cursor: 'pointer',
                         padding: 0,
@@ -3915,7 +3945,7 @@ export default function App() {
                         textDecoration: 'underline'
                       }}
                     >
-                      <Icon name="info" size={11} stroke="var(--burn)" /> What is this?
+                      <Icon name="info" size={11} stroke="var(--burn-ink)" /> What is this?
                     </button>
                   </div>
                 </div>
@@ -3924,7 +3954,7 @@ export default function App() {
                 <div className="col" style={{ gap: 8, fontSize: 13, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
                   <div className="row" style={{ justifyContent: 'space-between', fontWeight: 600 }}>
                     <span style={{ color: 'var(--fg)' }}>Committed weight</span>
-                    <span className="mono" style={{ color: confirmAmount ? 'var(--burn)' : 'var(--fg-3)' }}>
+                    <span className="mono" style={{ color: confirmAmount ? 'var(--burn-ink)' : 'var(--fg-3)' }}>
                       {confirmAmount ? parseFloat(confirmAmount).toFixed(4) : "—"} {voteToken}
                     </span>
                   </div>
@@ -3939,13 +3969,13 @@ export default function App() {
 
                 {isTransacting ? (
                   <div className="col" style={{ alignItems: 'center', gap: 10, padding: '8px 0' }}>
-                    <LiveDot size={8} color="var(--burn)" />
+                    <LiveDot size={8} color="var(--burn-ink)" />
                     <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>{txStep}</span>
                   </div>
                 ) : (
                   <div className="col" style={{ gap: 8 }}>
                     {tier < 2 && (
-                      <span style={{ fontSize: 11.5, color: 'var(--haze)' }}>
+                      <span style={{ fontSize: 11.5, color: 'var(--haze-ink)' }}>
                         Burning needs a followed leader neuron — hit "Confirm follow" on the dashboard first.
                       </span>
                     )}
@@ -3986,7 +4016,7 @@ export default function App() {
           }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="flame" size={18} stroke="var(--burn)" />
+                <Icon name="flame" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Add to Commitment</h4>
               </span>
               {!isAddMoreTransacting && (
@@ -4013,9 +4043,9 @@ export default function App() {
                 <div style={{
                   width: 48, height: 48, borderRadius: 999, background: 'var(--sprout-dim)',
                   border: '1px solid var(--sprout)', display: 'grid', placeItems: 'center',
-                  color: 'var(--sprout)'
+                  color: 'var(--sprout-ink)'
                 }}>
-                  <Icon name="checkCircle" size={24} stroke="var(--sprout)" />
+                  <Icon name="checkCircle" size={24} stroke="var(--sprout-ink)" />
                 </div>
                 <div className="col" style={{ gap: 4 }}>
                   <h5 style={{ margin: 0, color: 'var(--fg)' }}>Commitment Updated!</h5>
@@ -4082,7 +4112,7 @@ export default function App() {
                 <div className="col" style={{ gap: 8, fontSize: 13, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)' }}>
                   <div className="row" style={{ justifyContent: 'space-between', fontWeight: 600 }}>
                     <span style={{ color: 'var(--fg)' }}>Additional weight</span>
-                    <span className="mono" style={{ color: addMoreAmount ? 'var(--burn)' : 'var(--fg-3)' }}>
+                    <span className="mono" style={{ color: addMoreAmount ? 'var(--burn-ink)' : 'var(--fg-3)' }}>
                       {addMoreAmount ? parseFloat(addMoreAmount).toFixed(4) : "—"} ICP
                     </span>
                   </div>
@@ -4097,7 +4127,7 @@ export default function App() {
 
                 {isAddMoreTransacting ? (
                   <div className="col" style={{ alignItems: 'center', gap: 10, padding: '8px 0' }}>
-                    <LiveDot size={8} color="var(--burn)" />
+                    <LiveDot size={8} color="var(--burn-ink)" />
                     <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>{addMoreTxStep}</span>
                   </div>
                 ) : (
@@ -4135,7 +4165,7 @@ export default function App() {
           }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="info" size={18} stroke="var(--burn)" />
+                <Icon name="info" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>DAO Mechanics & Benefits</h4>
               </span>
               <button onClick={() => setIsDetailsOpen(false)} style={{
@@ -4218,7 +4248,7 @@ export default function App() {
           }}>
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="info" size={18} stroke="var(--burn)" />
+                <Icon name="info" size={18} stroke="var(--burn-ink)" />
                 <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>Understanding Burn Values</h4>
               </span>
               <button onClick={() => setIsHelpOpen(false)} style={{
@@ -4285,7 +4315,7 @@ export default function App() {
               width: 28, height: 28, display: 'grid', placeItems: 'center',
               border: '1px solid var(--burn)', borderRadius: 6, background: 'var(--burn-950)'
             }}>
-              <Icon name="flame" size={15} stroke="var(--burn)" />
+              <Icon name="flame" size={15} stroke="var(--burn-ink)" />
             </span>
             <b style={{ fontSize: 16, color: 'var(--fg)', fontFamily: 'var(--font-display)', letterSpacing: '-0.01em' }}>
               Caldera

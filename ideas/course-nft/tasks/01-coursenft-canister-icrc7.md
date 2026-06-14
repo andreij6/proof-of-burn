@@ -97,8 +97,110 @@ colliding with any future standard method): `mint`, `custodial_transfer`,
 `bump_play_count`, `add_tickets_distributed`, plus admin `set_minter` / `set_admin`
 and a `get_nft_config` query.
 
+Owner/minter lifecycle: `burn` (see A.6). HTTP read gateway: `http_request` (see A.7).
+
 **Out** (D2): `icrc37_*` (approvals), `icrc3_*` (tx log), batch-mint, royalty
 standard (royalty is enforced by the backend off the immutable `creator` field).
+
+### A.6 Burn (owner-or-minter)
+
+`burn(token_id: nat) -> variant { Ok; Err: text }` permanently destroys a token.
+
+- **Authorization:** callable by the token's **current owner** OR the **minter**
+  (mirrors `icrc7_transfer`'s owner-equality check plus the minter allowlist).
+  Anonymous callers are rejected (`require_authenticated` + `inspect_message`).
+- **Effect:** removes the token from `TOKENS`, removes its `OWNER_TOKENS` index
+  entry, and decrements supply (implicitly, via the `TOKENS` length). After burn,
+  `icrc7_owner_of` / `icrc7_token_metadata` / `http_request` for that id return
+  `null` / 404, and `icrc7_transfer` / `custodial_transfer` of it error.
+- **Id retirement:** `NEXT_TOKEN_ID` is **never** decremented, so a burned id is
+  **never re-minted** — the id is retired forever (ids only ever increase).
+- **Rejections:** burning a nonexistent / already-burned id (and any out-of-`u64`
+  id) returns `NON_EXISTING_TOKEN`; a non-owner non-minter caller returns
+  `UNAUTHORIZED`. The method never traps on bad input.
+
+### A.7 HTTP read gateway (`http_request`)
+
+A query-only `http_request(HttpRequest) -> HttpResponse` (standard candid records)
+gives each token an openable URL serving **JSON** (`Content-Type: application/json`):
+
+| Route | Returns |
+|---|---|
+| `GET /` | collection metadata: `name`, `symbol`, `description`, `total_supply`, `supply_cap` |
+| `GET /token/<id>` | token metadata: `token_id`, `name`, `creator`, `owner`, `created_at`, `par_total`, `play_count`, `tickets_distributed`, `mint_fee_e8s`, `course_data_len`, `course_data_url` |
+| `GET /token/<id>/course_data` | the raw blob as `course_data_base64` (standard base64) |
+
+- The per-token JSON does **not** inline the raw `course_data` (it exposes its byte
+  length + a separate `/token/<id>/course_data` route); both responses stay well
+  under the 2 MiB message cap (the raw blob is capped at 64 KiB by `mint`, A.5).
+- **Safety:** query-only (no state mutation); never panics on malformed paths
+  (unknown route / non-numeric / out-of-`u64` / extra segments → **404**,
+  non-`GET`/`HEAD` → 405); the id is parsed robustly; unknown/burned id → **404**.
+  All string fields are emitted as escaped JSON (no HTML is produced) so no field
+  can break the document or inject. `X-Content-Type-Options: nosniff` is set.
+- **Certified (IC Response Verification v2).** Every response is certified so it
+  verifies on the **normal** gateway domain (`https://<canister-id>.icp0.io/...`,
+  locally `http://<canister-id>.localhost:8000/...`) — the `.raw.` domain is no
+  longer required, and tampering by a malicious boundary/replica is rejected by the
+  gateway. Implemented with the official DFINITY **`ic-http-certification`** crate
+  (response-only certification). See A.9 below for the mechanics.
+
+### A.9 HTTP certification (Response Verification v2)
+
+`http_request` responses are certified with **IC Response Verification v2** using the
+official **`ic-http-certification`** crate (added to `src/course_nft/Cargo.toml`).
+This is what lets the routes verify on the normal (non-`.raw.`) gateway domain.
+
+**Mechanics**
+
+- A single **`HttpCertificationTree`** (heap state) holds one entry per servable
+  route, keyed by request path:
+  - exact entries for `/`, `/token/<id>`, `/token/<id>/course_data`;
+  - one **wildcard** entry at the root path that backs a **certified 404** for any
+    unknown / burned id / malformed path.
+- Each entry uses a **response-only** CEL expression that certifies, per response:
+  the **status code**, the **body**, and the `Content-Type` + `X-Content-Type-Options`
+  headers (the only non-certificate headers we emit). The CEL string is exposed on
+  every response as the `IC-CertificateExpression` header.
+- The tree's **root hash** is published as the canister's certified variable via
+  `certified_data_set` (`ic_cdk::api`). `http_request` (a query) reads
+  `data_certificate()` and attaches the v2 **`IC-Certificate`** header
+  (`certificate=…, tree=…, expr_path=…, version=2`) built from a witness of the
+  matched path. If `data_certificate()` is `None` (e.g. a replicated/non-query
+  context) the body is still served, just without the certificate header.
+
+**Dynamic content (single source of truth).** The exact bytes that are certified
+must equal the exact bytes served, or the gateway rejects the response. One function
+(`build_route_response`) produces the canonical body/headers for a path and is used
+both to certify (at mutation time) and to serve (in the query), so the two can never
+drift. Because content changes, the tree is patched on every mutation and the root
+hash re-published:
+
+| Mutation | Cert tree update |
+|---|---|
+| `mint` | add `/token/<id>` + `/token/<id>/course_data`; refresh `/` (total_supply) |
+| `burn` | drop the token's two entries (routes now 404 → wildcard); refresh `/` |
+| `custodial_transfer`, `icrc7_transfer` | refresh `/token/<id>` (owner changed) |
+| `bump_play_count`, `add_tickets_distributed` | refresh `/token/<id>` (counter changed) |
+
+Refreshes **delete the exact-path subtree then re-insert** the new entry (the prior
+entry was hashed against the now-unreconstructable old body). Token count is bounded,
+so per-mutation patching is cheap.
+
+**Upgrade safety.** The certification tree is **heap** state and is lost on upgrade,
+so it is **rebuilt from stable storage in both `init` and `post_upgrade`**
+(`rebuild_cert_tree`) and the root hash re-published — otherwise every HTTP response
+would fail verification after an upgrade. Rebuilding is deterministic: a freshly
+rebuilt tree has the same root hash as the incrementally-patched one (unit-tested).
+
+**Verification note.** Unit tests assert the canister-side wiring (root hash changes
+on mint/burn/transfer/counter bumps; the `IC-Certificate` header is present for `/`,
+`/token/<id>`, the `course_data` route, and certified 404s; certified body == served
+body). **Full end-to-end gateway verification cannot run in unit tests** — after
+deploy, verify with `curl` on the **normal** domain (not `.raw.`), e.g.
+`curl -sv https://<canister-id>.icp0.io/token/1` (locally
+`http://<canister-id>.localhost:8000/token/1`) and confirm a `200` with an
+`IC-Certificate` header and no gateway "Certification values not found" error.
 
 ### A.5 Hard limits
 
@@ -118,6 +220,43 @@ standard (royalty is enforced by the backend off the immutable `creator` field).
   a time (PB-305 `get_course_data`) or in ≤ 25-id metadata batches. Over-cap calls
   return `Err`/trap with a clear `BATCH_TOO_LARGE` message.
 - `name` (the `icrc7:name`): 1–60 chars (matches the editor's course-name rule).
+
+### A.8 Security (guarantees)
+
+This canister holds value-bearing ownership records; the following invariants are
+enforced and covered by unit tests:
+
+- **Guards match the trust model.** Minter-only: `mint`, `custodial_transfer`,
+  `bump_play_count`, `add_tickets_distributed` (`guard = require_minter`).
+  Owner-or-minter: `icrc7_transfer` (per-token owner-equality check), `burn`
+  (owner-equality OR minter). Admin-or-controller: `set_minter`, `set_admin`.
+- **No anonymous updates.** `#[inspect_message]` rejects anonymous callers on every
+  update at ingress; update bodies also call `require_authenticated` defensively.
+- **No ownership forgery / hijack.** No method lets a caller mint without being the
+  minter, move or burn a token they don't own, or set themselves as minter/admin
+  without being admin/controller. `creator` is set once at mint and never written
+  again (immutable royalty anchor) — verified across custodial + owner transfers.
+- **No reuse of burned ids.** `NEXT_TOKEN_ID` is monotonic and only ever increases;
+  a burned id is permanently retired and can never be re-minted, re-owned, or
+  transferred.
+- **No untrusted input can trap the canister (DoS).** ICRC-7 `nat → u64`
+  conversions return `None`/errors instead of panicking; batch args are capped
+  (100 light / 25 metadata) with a clear `BATCH_TOO_LARGE`; `http_request` handles
+  every malformed path gracefully (404/405, never traps) and is query-only;
+  responses are bounded under 2 MiB.
+- **No integer overflow/underflow.** Id allocation uses `checked_add`
+  (`ID_SPACE_EXHAUSTED` on the unreachable wraparound); the monotonic counters use
+  `saturating_add`.
+- **Upgrade safety.** All stable structures keep their MemoryIds (0–3, no reuse);
+  later-added fields carry `#[serde(default)]`. The only heap state is the HTTP
+  certification tree, which is **rebuilt from stable storage in `init` /
+  `post_upgrade`** and its root hash re-published (A.9).
+- **Certified HTTP responses (Response Verification v2).** `http_request` responses
+  verify on the normal (non-`.raw.`) gateway domain and are tamper-evident: the
+  body, status, and content-type headers are certified and the tree root hash is the
+  canister's certified variable. Unknown / burned ids return a **certified 404**
+  (A.9). Live gateway verification is via `curl` on the normal domain post-deploy.
+- **Out of scope (documented):** no ICRC-37 approvals / ICRC-3 tx log (D2).
 
 ---
 

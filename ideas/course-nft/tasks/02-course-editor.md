@@ -82,9 +82,11 @@ by the admin editor's hole buttons. Holes can be edited in any order.
 #### Hole Canvas (centre)
 Fixed-logical-size top-down grid for the active hole (grid dims from the
 `CourseDataV1` hole; PB-303 owns the exact `grid_w`/`grid_h` — mirror the
-existing engine's 22×14 unless PB-303 widens it). Rendered with the **PB-303
-play renderer in "editor mode"** so what you build looks like what you play
-(theme tint included). Interactions:
+existing engine's 22×14 unless PB-303 widens it). Rendered through the **same
+`RenderKit` as the play view** (PB-303 A.6) in an "editor mode" so what you build
+looks like what you play (theme tint included) — and so a future art upgrade lifts
+the editor and the game together with no editor-specific art. The palette icons
+likewise come from the active `RenderKit`, not bespoke editor drawings. Interactions:
 
 | Interaction | Input | Behaviour |
 |---|---|---|

@@ -5,16 +5,19 @@ import type { ArcadeInfo, ArcadeLeaderboardRow, ExplorerInfo, ExplorerQuote } fr
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, formatPrincipal } from "./ui";
 import { fmtTokenAmount } from "./IdeaBoard";
-import MiniGolf from "./arcade/MiniGolf";
 import FieldGoal from "./arcade/FieldGoal";
+import CourseMarketplace from "./CourseMarketplace";
+import CourseEditor from "./CourseEditor";
+import CoursePlay from "./CoursePlay";
+import type { CourseCard } from "./bindings/backend";
 import {
   ROUNDS_PER_GAME as FG_ROUNDS, MIN_DISTANCE_YDS, MAX_DISTANCE_YDS,
   DEFAULT_KICKER, HELMET_COLORS, JERSEY_COLORS, type KickerLook,
 } from "./arcade/fieldgoalEngine";
 import {
-  COURSE, HOLES_PER_ROUND, fmtMillis, mergeCourse,
+  fmtMillis,
   HAIR_COLORS, HAIR_NAMES, SKIN_COLORS, SKIN_NAMES, OUTFIT_COLORS, OUTFIT_NAMES,
-  DEFAULT_CHARACTER, type CharacterLook, type HoleDef,
+  DEFAULT_CHARACTER, type CharacterLook,
 } from "./arcade/engine";
 
 // ==========================================
@@ -24,7 +27,8 @@ import {
 // per-game flags pull one title at a time).
 // ==========================================
 
-const GAME_MINIGOLF = 'minigolf';
+// Mini-golf scores are retired (PB-309); only Field Goal still writes to the
+// shared arcade leaderboard.
 const GAME_FIELDGOAL = 'fieldgoal';
 
 // The outfit palette doubles as helmet/jersey colors — team-ish names.
@@ -48,6 +52,9 @@ interface ArcadeProps {
   principal: Principal | null;
   host: string;
   rootKey?: Uint8Array;
+  ledgerCanisterId: string;
+  backendCanisterId: string;
+  isLocal: boolean;
   onSignIn: () => void;
   onGoParticipate: () => void;
 }
@@ -157,16 +164,17 @@ function payTokenFee(token: ExplorerToken, exp: ExplorerInfo | null): bigint {
   }
 }
 
-export default function Arcade({ actor, identity, principal, host, rootKey, onSignIn, onGoParticipate }: ArcadeProps) {
+export default function Arcade({ actor, identity, principal, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal, onSignIn, onGoParticipate }: ArcadeProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [info, setInfo] = useState<ArcadeInfo | null>(null);
   const [expInfo, setExpInfo] = useState<ExplorerInfo | null>(null);
-  const [board, setBoard] = useState<ArcadeLeaderboardRow[]>([]);
   const [boardFG, setBoardFG] = useState<ArcadeLeaderboardRow[]>([]);
-  const [course, setCourse] = useState<HoleDef[]>(COURSE);
   const [isLoading, setIsLoading] = useState(true);
-  const [view, setView] = useState<'lobby' | 'golf' | 'fieldgoal'>('lobby');
+  // Mini Golf is now the Course Marketplace (PB-309): the tab shows the
+  // marketplace; "create" opens the editor; "play" opens a course in the engine.
+  const [view, setView] = useState<'lobby' | 'fieldgoal' | 'course-editor' | 'course-play'>('lobby');
+  const [playCard, setPlayCard] = useState<CourseCard | null>(null);
   // Lobby sub-page — one per game (its card, persona and leaderboard).
   const [tab, setTab] = useState<'minigolf' | 'fieldgoal'>('minigolf');
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
@@ -202,19 +210,16 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
   const refreshAll = async (currentActor = actor) => {
     if (!currentActor) return;
     try {
-      const [arcadeInfo, rows, rowsFG, overrides, explorerInfo] = await Promise.all([
+      // Mini-golf leaderboard + built-in course are retired (PB-309); only the
+      // Field Goal board + arcade/explorer info are fetched here now.
+      const [arcadeInfo, rowsFG, explorerInfo] = await Promise.all([
         currentActor.get_arcade_info(),
-        currentActor.get_arcade_leaderboard(GAME_MINIGOLF),
         currentActor.get_arcade_leaderboard(GAME_FIELDGOAL),
-        currentActor.get_arcade_course(),
         currentActor.get_explorer_info(),
       ]);
       setInfo(arcadeInfo);
       setExpInfo(explorerInfo);
-      setBoard(rows);
       setBoardFG(rowsFG);
-      // Admin-edited hole layouts (on-chain) override the built-in course.
-      setCourse(mergeCourse(overrides));
     } catch (err) {
       console.error("Failed to fetch Arcade:", err);
     } finally {
@@ -235,7 +240,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
     ? { helmet: info.my_kicker.hair, skin: info.my_kicker.skin, jersey: info.my_kicker.outfit }
     : DEFAULT_KICKER;
   const fullAccess = info?.full_access ?? false;
-  const myRow = signedIn ? board.find(r => r.player.toString() === principal!.toString()) : undefined;
   const myRowFG = signedIn ? boardFG.find(r => r.player.toString() === principal!.toString()) : undefined;
 
   // Per-game kill switches: hide a disabled game's tab entirely; if the
@@ -265,8 +269,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
       setSubmitNote(`Score submit failed: ${err.message || err}`);
     }
   };
-  const handleRoundComplete = (perHole: number[], millis: number) =>
-    submitScore(GAME_MINIGOLF, perHole, millis, 'round');
   const handleKicksComplete = (perKick: number[], millis: number) =>
     submitScore(GAME_FIELDGOAL, perKick, millis, 'game');
 
@@ -337,17 +339,32 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
     }
   };
 
-  if (view === 'golf') {
+  if (view === 'course-editor') {
     return (
       <div className="idea-board-container">
-        <MiniGolf
-          course={course}
+        <CourseEditor
+          actor={actor}
+          identity={identity}
+          host={host}
+          rootKey={rootKey}
+          ledgerCanisterId={ledgerCanisterId}
           character={myLook}
-          fullAccess={fullAccess}
-          onRoundComplete={handleRoundComplete}
-          onExit={() => { setTab('minigolf'); setView('lobby'); setSubmitNote(undefined); refreshAll(); }}
+          onMinted={() => { setTab('minigolf'); setView('lobby'); }}
+          onExit={() => { setTab('minigolf'); setView('lobby'); }}
+        />
+      </div>
+    );
+  }
+
+  if (view === 'course-play' && playCard) {
+    return (
+      <div className="idea-board-container">
+        <CoursePlay
+          actor={actor}
+          card={playCard}
+          character={myLook}
+          onExit={() => { setPlayCard(null); setTab('minigolf'); setView('lobby'); }}
           onGoParticipate={onGoParticipate}
-          submitNote={submitNote}
         />
       </div>
     );
@@ -375,7 +392,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>Play &amp; compete</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
-            <Icon name="gamepad" size={22} stroke="var(--burn)" />
+            <Icon name="gamepad" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Arcade</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
@@ -407,68 +424,41 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
 
       {isLoading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
-          <LiveDot size={10} color="var(--burn)" style={{ margin: '0 auto 12px' }} />
+          <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
           Loading arcade...
         </div>
       ) : activeTab === 'minigolf' ? (
         <>
-          {/* ── Mini Golf: game + golfer cards ── */}
-          <div className="idea-grid">
-            {/* Mini Golf */}
-            <div className="card col" style={{ gap: 10 }}>
-              <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                <Chip tone="burn" style={{ height: 19, fontSize: 10 }}>
-                  <LiveDot color="var(--burn)" size={5} /> Game 1
-                </Chip>
-                <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>{HOLES_PER_ROUND} holes · Par {course.reduce((s, h) => s + h.par, 0)}</span>
-              </div>
-              <h6 style={{ margin: 0, fontSize: 16 }}>Mini Golf</h6>
-              <p style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0, flex: 1 }}>
-                Classic table-top mini golf: drag back from the ball, release to putt. Banks,
-                bunkers, water, slopes and a windmill stand between you and the cup. One
-                player, nine holes, every stroke and second counts.
-              </p>
-              {myRow && (
-                <Chip tone="ok" style={{ alignSelf: 'flex-start' }}>
-                  <Icon name="target" size={11} /> Your best: {myRow.strokes} strokes · {fmtMillis(Number(myRow.millis))} · rank #{myRow.rank}
-                </Chip>
-              )}
-              <div className="row" style={{ justifyContent: 'space-between', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
-                <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-                  {fullAccess ? 'Full round unlocked' : 'Hole 1 free preview'}
-                </span>
-                <Btn variant="primary" sm onClick={() => {
-                  if (!signedIn) { onSignIn(); return; }
-                  setSubmitNote(undefined);
-                  setView('golf');
-                }}>
-                  <Icon name="flame" size={11} stroke="var(--char-950)" /> {signedIn ? 'Play' : 'Sign in to play'}
-                </Btn>
-              </div>
-            </div>
-
-            {/* Golfer persona card */}
-            <div className="card col" style={{ gap: 10, alignItems: 'center' }}>
+          {/* Mini Golf is now the Course Marketplace (PB-309). The golfer
+              persona card sits above it; play any community course for
+              tickets. The old built-in course + leaderboard are retired. */}
+          <div className="card row" style={{ gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            <GolferPreview look={myLook} size={72} />
+            <div className="col" style={{ gap: 4 }}>
               <span style={LABEL_STYLE}>Your golfer</span>
-              <GolferPreview look={myLook} size={104} />
-              <span className="row" style={{ gap: 6, flexWrap: 'wrap', justifyContent: 'center' }}>
+              <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                 <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{HAIR_NAMES[myLook.hair]}</Chip>
                 <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{SKIN_NAMES[myLook.skin]}</Chip>
                 <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{OUTFIT_NAMES[myLook.outfit]}</Chip>
               </span>
-              <Btn variant="secondary" sm onClick={() => openEditor('golfer')}>
-                <Icon name="edit" size={12} /> Customize · $1 in any token
-              </Btn>
             </div>
+            <Btn variant="secondary" sm style={{ marginLeft: 'auto' }} onClick={() => openEditor('golfer')}>
+              <Icon name="edit" size={12} /> Customize · $1 in any token
+            </Btn>
           </div>
 
-          <LeaderboardSection
-            title="Mini Golf — leaderboard"
-            sub="· best round per player · top 100"
-            scoreHeader="Strokes"
-            rows={board}
-            empty="No rounds on the board yet. Set the first time."
-            principal={signedIn ? principal : null}
+          <CourseMarketplace
+            actor={actor}
+            principal={principal}
+            identity={identity}
+            host={host}
+            rootKey={rootKey}
+            ledgerCanisterId={ledgerCanisterId}
+            backendCanisterId={backendCanisterId}
+            isLocal={isLocal}
+            onCreateCourse={() => setView('course-editor')}
+            onPlay={(card) => { setPlayCard(card); setView('course-play'); }}
+            onSignIn={onSignIn}
           />
         </>
       ) : (
@@ -478,7 +468,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
             <div className="card col" style={{ gap: 10 }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                 <Chip tone="burn" style={{ height: 19, fontSize: 10 }}>
-                  <LiveDot color="var(--burn)" size={5} /> Game 2
+                  <LiveDot color="var(--burn-ink)" size={5} /> Game 2
                 </Chip>
                 <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
                   {FG_ROUNDS} kicks · {MIN_DISTANCE_YDS}–{MAX_DISTANCE_YDS} yds
@@ -544,7 +534,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
           }} onClick={e => e.stopPropagation()}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="edit" size={15} stroke="var(--burn)" />
+                <Icon name="edit" size={15} stroke="var(--burn-ink)" />
                 <b>Customize your {editorTarget}</b>
               </span>
               <Btn variant="ghost" sm onClick={() => !editorBusy && setIsEditorOpen(false)}><Icon name="x" size={14} /></Btn>
@@ -584,7 +574,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, onSi
                     style={{
                       background: payToken === t.token ? 'var(--burn-950)' : 'transparent',
                       border: `1px solid ${payToken === t.token ? 'var(--burn)' : 'var(--border)'}`,
-                      color: payToken === t.token ? 'var(--burn)' : 'var(--fg-3)',
+                      color: payToken === t.token ? 'var(--burn-ink)' : 'var(--fg-3)',
                       borderRadius: 999, padding: '5px 10px', fontSize: 11.5, fontWeight: 500,
                       cursor: 'pointer', transition: 'all var(--dur-fast) var(--ease-out)',
                     }}>
@@ -626,7 +616,7 @@ function LeaderboardSection({ title, sub, scoreHeader, rows, empty, principal }:
   return (
     <div className="col" style={{ gap: 10 }}>
       <span className="row" style={{ gap: 8 }}>
-        <Icon name="target" size={14} stroke="var(--burn)" />
+        <Icon name="target" size={14} stroke="var(--burn-ink)" />
         <b style={{ fontSize: 14, color: 'var(--fg)' }}>{title}</b>
         <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>{sub}</span>
       </span>
@@ -655,7 +645,7 @@ function LeaderboardSection({ title, sub, scoreHeader, rows, empty, principal }:
                     borderTop: '1px solid var(--border)',
                     background: mine ? 'var(--burn-950)' : 'transparent',
                   }}>
-                    <td style={{ ...LB_TD, color: r.rank <= 3 ? 'var(--burn)' : 'var(--fg-3)', fontWeight: r.rank <= 3 ? 700 : 400 }}>{r.rank}</td>
+                    <td style={{ ...LB_TD, color: r.rank <= 3 ? 'var(--burn-ink)' : 'var(--fg-3)', fontWeight: r.rank <= 3 ? 700 : 400 }}>{r.rank}</td>
                     <td style={{ ...LB_TD, textAlign: 'left' }} className="mono">
                       {formatPrincipal(r.player)}{mine ? ' · you' : ''}
                     </td>

@@ -319,7 +319,7 @@ export default function Staking({
         fontWeight: active ? 700 : 500, fontFamily: 'inherit',
         border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
         background: active ? 'var(--burn-950)' : 'transparent',
-        color: active ? 'var(--burn)' : 'var(--fg-2)',
+        color: active ? 'var(--burn-ink)' : 'var(--fg-2)',
       }}
     >
       {TIER_META[t].short}
@@ -337,7 +337,7 @@ export default function Staking({
         fontWeight: boosterSel ? 700 : 500, fontFamily: 'inherit',
         border: `1px solid ${boosterSel ? 'var(--burn)' : 'var(--border)'}`,
         background: boosterSel ? 'var(--burn-950)' : 'transparent',
-        color: boosterSel ? 'var(--burn)' : 'var(--fg-2)',
+        color: boosterSel ? 'var(--burn-ink)' : 'var(--fg-2)',
       }}
     >
       ★ Perm
@@ -349,7 +349,7 @@ export default function Staking({
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
         <span className="row" style={{ gap: 8 }}>
-          <Icon name="zap" size={16} stroke="var(--burn)" />
+          <Icon name="zap" size={16} stroke="var(--burn-ink)" />
           <Eyebrow accent>Lossless staking</Eyebrow>
         </span>
         <b style={{ fontSize: 17 }}>Stake ICP. Keep it. Earn daily lottery tickets.</b>
@@ -377,7 +377,7 @@ export default function Staking({
         <div className="row" style={{
           gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
           border: `1px solid ${error ? 'var(--ember)' : 'var(--sprout)'}`,
-          color: error ? 'var(--ember)' : 'var(--sprout)',
+          color: error ? 'var(--ember)' : 'var(--sprout-ink)',
           background: 'var(--surface)',
         }}>
           <Icon name={error ? "x" : "checkCircle"} size={13} stroke="currentColor" />
@@ -421,7 +421,7 @@ export default function Staking({
                   {/* What makes the Booster neuron special */}
                   <div className="col" style={{ gap: 6, border: '1px solid var(--burn)', borderRadius: 8, padding: '10px 12px', background: 'var(--burn-950)' }}>
                     <span className="row" style={{ gap: 6, alignItems: 'center', fontSize: 12.5, color: 'var(--fg)' }}>
-                      <Icon name="spark" size={13} stroke="var(--burn)" /> <b>The 2-year Perm neuron</b>
+                      <Icon name="spark" size={13} stroke="var(--burn-ink)" /> <b>The 2-year Perm neuron</b>
                     </span>
                     <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
                       Same 2-year neuron as the term tier, with two differences: it is{' '}
@@ -563,10 +563,10 @@ export default function Staking({
                           className="mono"
                           href={`https://dashboard.internetcomputer.org/neuron/${tp.neuron_id.toString()}`}
                           target="_blank" rel="noreferrer"
-                          style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                          style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
                           title="View this neuron on the NNS dashboard"
                         >
-                          #{tp.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                          #{tp.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
                         </a>
                       )
                     ) : (
@@ -575,8 +575,8 @@ export default function Staking({
                   </div>
                 </div>
                 {ready && (
-                  <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout)' }}>
-                    <Icon name="eye" size={12} stroke="var(--sprout)" />
+                  <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout-ink)' }}>
+                    <Icon name="eye" size={12} stroke="var(--sprout-ink)" />
                     Public on the NNS — audit it any time.
                   </span>
                 )}
@@ -625,9 +625,9 @@ export default function Staking({
                     ) : (
                       <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${eaInfo.neuron_id.toString()}`}
                         target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
-                        style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                        style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
                         title="View this neuron on the NNS dashboard">
-                        #{eaInfo.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                        #{eaInfo.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
                       </a>
                     )
                   ) : (
@@ -635,8 +635,8 @@ export default function Staking({
                   )}
                 </div>
               </div>
-              <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--burn)' }}>
-                <Icon name="spark" size={12} stroke="var(--burn)" />
+              <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--burn-ink)' }}>
+                <Icon name="spark" size={12} stroke="var(--burn-ink)" />
                 Permanent — never unstakeable. Tap to stake.
               </span>
             </div>
@@ -684,17 +684,17 @@ export default function Staking({
                       className="mono"
                       href={`https://dashboard.internetcomputer.org/neuron/${u.split_neuron_id.toString()}`}
                       target="_blank" rel="noreferrer"
-                      style={{ color: 'var(--sprout)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                      style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
                       title="View the dissolving neuron on the NNS dashboard"
                     >
-                      #{u.split_neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout)" />
+                      #{u.split_neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
                     </a>
                   )}
                 </div>
                 {(u.status === UnstakeStatus.Dissolving || u.status === UnstakeStatus.SplitDone) && (
                   <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
                     <Btn variant="secondary" sm onClick={() => setRestakeTarget(u.id)} disabled={busy !== null}>
-                      <Icon name="undo" size={12} stroke="var(--burn)" /> Restake
+                      <Icon name="undo" size={12} stroke="var(--burn-ink)" /> Restake
                     </Btn>
                     {isLocal && (
                       <Btn variant="ghost" sm onClick={() => handleDevFastForward(u.id)} disabled={busy !== null}>
@@ -759,7 +759,7 @@ export default function Staking({
                     disabled={busy !== null}
                     style={{ justifyContent: 'space-between', width: '100%', height: 44 }}>
                     <span className="row" style={{ gap: 8 }}>
-                      {busy === `merge-${u.id}` ? <LiveDot size={8} /> : <Icon name="zap" size={13} stroke="var(--burn)" />}
+                      {busy === `merge-${u.id}` ? <LiveDot size={8} /> : <Icon name="zap" size={13} stroke="var(--burn-ink)" />}
                       <b>{TIER_META[t].label}</b>
                     </span>
                     <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
