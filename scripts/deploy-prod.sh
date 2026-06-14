@@ -11,12 +11,17 @@
 #   1. Pre-flight: identity check (refuses known local dev identities),
 #      clean-ish git check, full test suites, production build.
 #   2. Interactive confirmation (type the exact phrase).
-#   3. `icp deploy backend frontend -e production`
+#   3. Pre-upgrade snapshot of the BACKEND — rollback insurance against a
+#      trapping post_upgrade / bad stable-memory migration. The restore command
+#      is printed; the snapshot is retained until you verify health + delete it.
+#   4. `icp deploy backend frontend -e production`
 #      - NO ledgers (mainnet uses the real ICP/ckBTC/ckETH ledgers,
 #        which are hard-pinned in the backend).
 #      - NO --yes: the candid compatibility check stays ON. If it flags a
 #        breaking change, stop and think before bypassing manually.
-#   4. Post-deploy smoke checks + operator reminders.
+#      - On failure, prints the exact snapshot-restore rollback steps.
+#   5. Core-launch feature-flag policy: set the 10 flags + verify on-chain.
+#   6. Post-deploy smoke checks + operator reminders.
 #
 # Prerequisites (see docs/DEPLOY.md):
 #   - Funded deploy identity selected: `icp identity use <name>`
@@ -81,8 +86,39 @@ echo -e "${RED}═════════════════════�
 read -r -p "Type exactly 'DEPLOY TO MAINNET' to continue: " CONFIRM
 [[ "$CONFIRM" == "DEPLOY TO MAINNET" ]] || die "Confirmation phrase mismatch — aborted."
 
-# ── 3. Deploy (candid compatibility check stays ON — no --yes) ──────────────
-icp deploy backend frontend -e "$ENV"
+# ── 3. Pre-upgrade snapshot (rollback insurance) ────────────────────────────
+# Snapshot the BACKEND's full state BEFORE the upgrade so a trapping post_upgrade
+# or a bad stable-memory migration is reversible. The frontend is an asset
+# canister with no critical stable state, so we snapshot the backend only.
+# Reuse (--replace) the previous pre-upgrade snapshot if one exists so repeated
+# deploys don't pile up snapshots (and hit the per-canister limit).
+note "Taking a pre-upgrade snapshot of the backend (rollback insurance)…"
+PREV_SNAP=$(icp canister snapshot list backend -e "$ENV" -q 2>/dev/null | head -1 || true)
+if [[ -n "${PREV_SNAP// /}" ]]; then
+  SNAP_ID=$(icp canister snapshot create backend -e "$ENV" --replace "$PREV_SNAP" -q) \
+    || die "Snapshot failed — refusing to upgrade without rollback insurance."
+else
+  SNAP_ID=$(icp canister snapshot create backend -e "$ENV" -q) \
+    || die "Snapshot failed — refusing to upgrade without rollback insurance."
+fi
+ok "Backend snapshot created: $SNAP_ID"
+ROLLBACK_CMDS="     icp canister stop backend -e $ENV
+     icp canister snapshot restore backend $SNAP_ID -e $ENV
+     icp canister start backend -e $ENV"
+echo -e "${YELLOW}   Rollback (if this upgrade goes wrong):${NC}"
+echo "$ROLLBACK_CMDS"
+
+# ── 4. Deploy (candid compatibility check stays ON — no --yes) ──────────────
+note "Upgrading backend + frontend…"
+if ! icp deploy backend frontend -e "$ENV"; then
+  echo
+  echo -e "${RED}════════════════════════════════════════════════════════════${NC}"
+  echo -e "${RED}  UPGRADE FAILED — the backend may be in a bad state.${NC}"
+  echo -e "${RED}  Roll back to the pre-upgrade snapshot NOW:${NC}"
+  echo "$ROLLBACK_CMDS"
+  echo -e "${RED}════════════════════════════════════════════════════════════${NC}"
+  die "Deploy failed — roll back using snapshot $SNAP_ID (commands above)."
+fi
 ok "Deploy command completed"
 
 # ── Core-launch feature-flag policy ──────────────────────────────────────────
@@ -155,4 +191,13 @@ echo "   [ ] Anonymous eligibility is tier 0 (smoke per runbook)"
 echo "   [ ] Cycle balances healthy on both canisters"
 echo "   [ ] Feature flags as intended (new features ship dark — enable"
 echo "       deliberately via admin_set_feature_flag from an admin identity)"
+echo "   [ ] Verify core flows read/write correctly (vote/stake/lottery)"
+echo
+echo "   Rollback insurance — pre-upgrade snapshot retained: $SNAP_ID"
+echo "     If state looks wrong, restore it:"
+echo "       icp canister stop backend -e $ENV"
+echo "       icp canister snapshot restore backend $SNAP_ID -e $ENV"
+echo "       icp canister start backend -e $ENV"
+echo "     Once verified healthy, free the cycles it holds:"
+echo "       icp canister snapshot delete backend $SNAP_ID -e $ENV"
 echo "──────────────────────────────────────────────────────────"
