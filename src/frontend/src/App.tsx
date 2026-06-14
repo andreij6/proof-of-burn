@@ -45,7 +45,7 @@ import { WALLET_TOKEN_META, parseTokenUnits, fmtUsd, thresholdProgress } from ".
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'casino' | 'early_adopters' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'early_adopters' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -56,6 +56,9 @@ export const PAGE_PATH: Record<AppPage, string> = {
   lottery: '/lottery',
   explorer: '/explorer',
   arcade: '/arcade',
+  // The Course Marketplace is the arcade's mini-golf surface (PB-309); kept as
+  // a deep-linkable alias that redirects to the arcade page (same flag gate).
+  course_market: '/courses',
   casino: '/casino',
   early_adopters: '/early_adopters',
   payouts: '/profile',
@@ -1100,6 +1103,10 @@ export default function App() {
     }
     if (page === 'explorer' && featureFlags.length > 0 && !explorerEnabled) {
       setPage('dashboard');
+    }
+    // The Course Marketplace lives inside the arcade — redirect its alias.
+    if (page === 'course_market') {
+      setPage('arcade');
     }
     if (page === 'arcade' && featureFlags.length > 0 && !arcadeEnabled) {
       setPage('dashboard');
@@ -2184,6 +2191,7 @@ export default function App() {
               principal={principal}
               host={host}
               rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
             />

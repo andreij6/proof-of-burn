@@ -56,6 +56,8 @@ interface MiniGolfProps {
   course: HoleDef[];
   character: CharacterLook | null;
   fullAccess: boolean;
+  /** Fired once per hole as it's sunk (1-based hole number 1..9). PB-306. */
+  onHoleSunk?: (hole: number) => void;
   /** Fired once when the final hole is sunk. */
   onRoundComplete: (perHole: number[], millis: number) => void;
   onExit: () => void;
@@ -64,7 +66,7 @@ interface MiniGolfProps {
   submitNote?: string;
 }
 
-export default function MiniGolf({ course, character, fullAccess, onRoundComplete, onExit, onGoParticipate, submitNote }: MiniGolfProps) {
+export default function MiniGolf({ course, character, fullAccess, onHoleSunk, onRoundComplete, onExit, onGoParticipate, submitNote }: MiniGolfProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [phase, setPhase] = useState<Phase>('intro');
   const [holeIdx, setHoleIdx] = useState(0);
@@ -76,6 +78,10 @@ export default function MiniGolf({ course, character, fullAccess, onRoundComplet
 
   const look = character ?? DEFAULT_CHARACTER;
   const parTotal = course.reduce((s, h) => s + h.par, 0);
+
+  // Latest onHoleSunk in a ref so the rAF loop never fires a stale callback.
+  const onHoleSunkRef = useRef(onHoleSunk);
+  onHoleSunkRef.current = onHoleSunk;
 
   const ref = useRef<GameRef>({
     def: course[0],
@@ -200,6 +206,9 @@ export default function MiniGolf({ course, character, fullAccess, onRoundComplet
               g.perHole = nextPerHole;
               setPerHole(nextPerHole);
               setSunkLabel(g.state.event === 'capped' ? 'Picked up (12-stroke cap)' : scoreLabel(strokes, g.def.par));
+              // PB-306: report the hole (1-based) as it's sunk, so the play
+              // wrapper can call record_hole_event in order.
+              onHoleSunkRef.current?.(g.holeIdx + 1);
               if (g.holeIdx === HOLES_PER_ROUND - 1) {
                 g.finalMs = g.roundStartedAt ? performance.now() - g.roundStartedAt : 0;
                 setClockMs(g.finalMs);
