@@ -2192,6 +2192,8 @@ export default function App() {
               host={host}
               rootKey={env?.IC_ROOT_KEY}
               ledgerCanisterId={ledgerCanisterId}
+              backendCanisterId={backendCanisterId}
+              isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
             />

@@ -61,6 +61,8 @@ export const iconPaths: Record<string, React.ReactNode> = {
   soundOff: <><path d="M11 5L6 9H2v6h4l5 4z" /><path d="M22 9l-6 6M16 9l6 6" /></>,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></>,
   moon: <path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z" />,
+  heart: <path d="M20.8 4.6a5.5 5.5 0 00-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 00-7.8 7.8l1 1.1L12 21l7.8-7.6 1-1.1a5.5 5.5 0 000-7.7z" />,
+  star: <path d="M12 2l2.9 6.3 6.6.6-5 4.5 1.5 6.6L12 17l-6 3.5L7.5 14l-5-4.5 6.6-.6z" />,
 };
 
 export interface IconProps {
@@ -68,12 +70,14 @@ export interface IconProps {
   size?: number;
   stroke?: string;
   sw?: number;
+  /** Fill the glyph (e.g. a filled heart/star). Defaults to no fill. */
+  fill?: string;
   style?: React.CSSProperties;
 }
 
-export function Icon({ name, size = 16, stroke = 'currentColor', sw = 1.5, style }: IconProps) {
+export function Icon({ name, size = 16, stroke = 'currentColor', sw = 1.5, fill = 'none', style }: IconProps) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={stroke}
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={stroke}
       strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round"
       style={{ flexShrink: 0, display: 'block', ...style }}>
       {iconPaths[name]}
@@ -129,13 +133,14 @@ export function Chip({ tone = 'muted', children, style }: { tone?: keyof typeof 
   );
 }
 
-export function Btn({ variant = 'secondary', sm, children, disabled, style, onClick }: {
+export function Btn({ variant = 'secondary', sm, children, disabled, style, onClick, title }: {
   variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
   sm?: boolean;
   children: React.ReactNode;
   disabled?: boolean;
   style?: React.CSSProperties;
   onClick?: () => void;
+  title?: string;
 }) {
   const base = {
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
@@ -156,6 +161,7 @@ export function Btn({ variant = 'secondary', sm, children, disabled, style, onCl
       onClick={disabled ? undefined : onClick}
       style={{ ...base, ...skins[variant] }}
       disabled={disabled}
+      title={title}
     >
       {children}
     </button>

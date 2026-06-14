@@ -53,6 +53,8 @@ interface ArcadeProps {
   host: string;
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
+  backendCanisterId: string;
+  isLocal: boolean;
   onSignIn: () => void;
   onGoParticipate: () => void;
 }
@@ -162,7 +164,7 @@ function payTokenFee(token: ExplorerToken, exp: ExplorerInfo | null): bigint {
   }
 }
 
-export default function Arcade({ actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, onGoParticipate }: ArcadeProps) {
+export default function Arcade({ actor, identity, principal, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal, onSignIn, onGoParticipate }: ArcadeProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [info, setInfo] = useState<ArcadeInfo | null>(null);
@@ -448,6 +450,12 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
           <CourseMarketplace
             actor={actor}
             principal={principal}
+            identity={identity}
+            host={host}
+            rootKey={rootKey}
+            ledgerCanisterId={ledgerCanisterId}
+            backendCanisterId={backendCanisterId}
+            isLocal={isLocal}
             onCreateCourse={() => setView('course-editor')}
             onPlay={(card) => { setPlayCard(card); setView('course-play'); }}
             onSignIn={onSignIn}

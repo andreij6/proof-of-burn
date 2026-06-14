@@ -106,3 +106,56 @@ export const THEME_OPTIONS: { value: number | undefined; label: string }[] = [
 export function freshSeed(): number {
   return (Math.random() * 0xffffffff) >>> 0;
 }
+
+// ── Favorites (PB-311) — pure helpers. The page reads my_favorite_ids() into a
+//    Set<bigint> once and derives heart state + the Favorites filter from it. ──
+
+/** True when this card is in the caller's favorites set (bigint membership). */
+export function isFavorite(tokenId: bigint, favoriteIds: ReadonlySet<bigint>): boolean {
+  return favoriteIds.has(tokenId);
+}
+
+/**
+ * Apply the "Only favorites" filter. When `onlyFavs` is false, returns the input
+ * unchanged; otherwise narrows to cards whose token_id is in `favoriteIds`.
+ */
+export function applyFavoritesFilter(
+  cards: readonly CourseCard[],
+  favoriteIds: ReadonlySet<bigint>,
+  onlyFavs: boolean,
+): CourseCard[] {
+  if (!onlyFavs) return cards.slice();
+  return cards.filter((c) => favoriteIds.has(c.token_id));
+}
+
+/** Optimistically flip a token in a favorites set, returning a NEW set. */
+export function toggleFavoriteId(tokenId: bigint, favoriteIds: ReadonlySet<bigint>): Set<bigint> {
+  const next = new Set(favoriteIds);
+  if (next.has(tokenId)) next.delete(tokenId); else next.add(tokenId);
+  return next;
+}
+
+// ── Ratings (PB-310) — pure formatting. The card aggregate is "★ 4.3 (27)" or
+//    "No ratings yet"; avg comes from avg_x10 (avg×10, integer). ──
+
+/** Format a rating aggregate for a card/detail header. */
+export function formatRating(avgX10: number, count: number): string {
+  if (count <= 0) return 'No ratings yet';
+  return `★ ${(avgX10 / 10).toFixed(1)} (${count})`;
+}
+
+// ── Featured slot (PB-308) — pure USD compare. A bid wins iff its USD value
+//    strictly exceeds the current holder's. amount→USD uses an e8s rate per
+//    whole token and the token's decimals (mirrors the backend valuation). ──
+
+/** USD value (e8s) of `amount` smallest-units at `rateUsdE8s` per whole token. */
+export function tokenAmountUsdE8s(amount: bigint, rateUsdE8s: bigint, decimals: number): bigint {
+  if (amount <= 0n || rateUsdE8s <= 0n) return 0n;
+  const scale = 10n ** BigInt(decimals);
+  return (amount * rateUsdE8s) / scale;
+}
+
+/** True iff a fresh bid's USD value strictly beats the current "to beat" USD. */
+export function bidBeats(bidUsdE8s: bigint, toBeatUsdE8s: bigint): boolean {
+  return bidUsdE8s > toBeatUsdE8s;
+}

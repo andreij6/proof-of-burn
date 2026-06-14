@@ -3,6 +3,8 @@ import type { CourseCard } from '../bindings/backend';
 import {
   difficultyBucket, themeLabel, mulberry32, shuffleSeeded, poolOrder,
   pageSlice, pageCount, GRID_PAGE_SIZE,
+  isFavorite, applyFavoritesFilter, toggleFavoriteId,
+  formatRating, tokenAmountUsdE8s, bidBeats,
 } from '../arcade/courseMarket';
 
 function card(id: number, overrides: Partial<CourseCard> = {}): CourseCard {
@@ -18,6 +20,7 @@ function card(id: number, overrides: Partial<CourseCard> = {}): CourseCard {
     tickets_distributed: 0n,
     price_e8s: 0n,
     listed: false,
+    for_sale: false,
     created_at: 0n,
     ...overrides,
   };
@@ -100,5 +103,79 @@ describe('paging', () => {
     expect(pageCount(10)).toBe(2);
     expect(pageCount(18)).toBe(2);
     expect(pageCount(19)).toBe(3);
+  });
+});
+
+describe('favorites (PB-311)', () => {
+  it('isFavorite matches bigint set membership by value', () => {
+    const set = new Set<bigint>([1n, 5n, 9n]);
+    expect(isFavorite(5n, set)).toBe(true);
+    expect(isFavorite(BigInt(5), set)).toBe(true); // same value, different literal
+    expect(isFavorite(2n, set)).toBe(false);
+  });
+
+  it('applyFavoritesFilter returns the full set when off, subset when on', () => {
+    const cards = [card(1), card(2), card(3), card(4)];
+    const favs = new Set<bigint>([2n, 4n]);
+    expect(applyFavoritesFilter(cards, favs, false)).toHaveLength(4);
+    const only = applyFavoritesFilter(cards, favs, true);
+    expect(only.map((c) => Number(c.token_id)).sort()).toEqual([2, 4]);
+  });
+
+  it('applyFavoritesFilter never duplicates and returns a copy', () => {
+    const cards = [card(1), card(2)];
+    const out = applyFavoritesFilter(cards, new Set(), false);
+    expect(out).not.toBe(cards);
+    expect(out).toEqual(cards);
+  });
+
+  it('toggleFavoriteId flips membership and returns a new set', () => {
+    const set = new Set<bigint>([1n]);
+    const added = toggleFavoriteId(2n, set);
+    expect(added.has(2n)).toBe(true);
+    expect(set.has(2n)).toBe(false); // original untouched
+    const removed = toggleFavoriteId(1n, set);
+    expect(removed.has(1n)).toBe(false);
+  });
+});
+
+describe('formatRating (PB-310)', () => {
+  it('shows "No ratings yet" with zero count', () => {
+    expect(formatRating(0, 0)).toBe('No ratings yet');
+    expect(formatRating(50, 0)).toBe('No ratings yet');
+  });
+
+  it('formats avg_x10 to one decimal with count', () => {
+    expect(formatRating(43, 27)).toBe('★ 4.3 (27)');
+    expect(formatRating(50, 1)).toBe('★ 5.0 (1)');
+    expect(formatRating(38, 12)).toBe('★ 3.8 (12)');
+  });
+});
+
+describe('featured bid USD compare (PB-308)', () => {
+  it('values amounts in USD across decimals', () => {
+    // 0.001 ckBTC (8 dec) at $60,000/BTC = $60
+    const btc = tokenAmountUsdE8s(100_000n, 60_000n * 100_000_000n, 8);
+    expect(btc).toBe(60n * 100_000_000n);
+    // 50 ckUSDC (6 dec) at $1 = $50
+    const usdc = tokenAmountUsdE8s(50_000_000n, 1n * 100_000_000n, 6);
+    expect(usdc).toBe(50n * 100_000_000n);
+  });
+
+  it('returns 0 for non-positive amount/rate', () => {
+    expect(tokenAmountUsdE8s(0n, 100n, 8)).toBe(0n);
+    expect(tokenAmountUsdE8s(100n, 0n, 8)).toBe(0n);
+  });
+
+  it('bidBeats is strict-exceed', () => {
+    expect(bidBeats(60n * 100_000_000n, 50n * 100_000_000n)).toBe(true);
+    expect(bidBeats(50n * 100_000_000n, 50n * 100_000_000n)).toBe(false); // equal loses
+    expect(bidBeats(40n * 100_000_000n, 50n * 100_000_000n)).toBe(false);
+  });
+
+  it('a small ckBTC bid beats a larger ckUSDC bid in USD terms', () => {
+    const btcUsd = tokenAmountUsdE8s(100_000n, 60_000n * 100_000_000n, 8); // 0.001 BTC = $60
+    const usdcUsd = tokenAmountUsdE8s(50_000_000n, 1n * 100_000_000n, 6);  // 50 USDC = $50
+    expect(bidBeats(btcUsd, usdcUsd)).toBe(true);
   });
 });
