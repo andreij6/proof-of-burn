@@ -32,6 +32,7 @@ import LotteryHub from "./LotteryHub";
 import Explorer from "./Explorer";
 import Arcade from "./Arcade";
 import Casino from "./Casino";
+import Faucet from "./Faucet";
 import Payouts from "./Payouts";
 import Admin from "./Admin";
 import Landing from "./Landing";
@@ -45,7 +46,7 @@ import { WALLET_TOKEN_META, parseTokenUnits, fmtUsd, thresholdProgress } from ".
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'early_adopters' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -60,6 +61,7 @@ export const PAGE_PATH: Record<AppPage, string> = {
   // a deep-linkable alias that redirects to the arcade page (same flag gate).
   course_market: '/courses',
   casino: '/casino',
+  faucet: '/faucet',
   early_adopters: '/early_adopters',
   payouts: '/profile',
   admin: '/admin',
@@ -516,6 +518,7 @@ export default function App() {
   const arcadeEnabled = featureFlags.find(f => f.key === 'arcade')?.enabled ?? false;
   const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
   const casinoEnabled = crashEnabled;
+  const faucetEnabled = featureFlags.find(f => f.key === 'cycles_faucet')?.enabled ?? false;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (earns lottery tickets only).
@@ -1114,6 +1117,9 @@ export default function App() {
     if (page === 'casino' && featureFlags.length > 0 && !casinoEnabled) {
       setPage('dashboard');
     }
+    if (page === 'faucet' && featureFlags.length > 0 && !faucetEnabled) {
+      setPage('dashboard');
+    }
     // Boosters (formerly Early Adopters) moved onto the lottery page —
     // redirect the legacy route alias.
     if (page === 'early_adopters') {
@@ -1126,7 +1132,7 @@ export default function App() {
     if (page === 'payouts' && principal && principal.isAnonymous()) {
       setPage('dashboard');
     }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1741,7 +1747,7 @@ export default function App() {
           Verified Followers
         </Btn>
 
-        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
+        {(arcadeEnabled || lotteryEnabled || casinoEnabled || faucetEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Play</Eyebrow>
         )}
         {arcadeEnabled && (
@@ -1758,6 +1764,12 @@ export default function App() {
           }}>
             <Icon name="zap" size={14} stroke={page === 'casino' ? 'var(--char-950)' : 'currentColor'} />
             Casino
+          </Btn>
+        )}
+        {faucetEnabled && (
+          <Btn variant={page === 'faucet' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('faucet')}>
+            <Icon name="coins" size={14} stroke={page === 'faucet' ? 'var(--char-950)' : 'currentColor'} />
+            Cycles Faucet
           </Btn>
         )}
         {lotteryEnabled && (
@@ -2205,6 +2217,14 @@ export default function App() {
               onSignIn={handleLogin}
               onGoStaking={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
               crashEnabled={crashEnabled}
+            />
+          ) : page === 'faucet' ? (
+            <Faucet
+              actor={actor}
+              principal={principal}
+              isLocal={config?.is_local ?? false}
+              onSignIn={handleLogin}
+              onGoVote={() => setPage('voting')}
             />
           ) : page === 'payouts' ? (
             <Payouts

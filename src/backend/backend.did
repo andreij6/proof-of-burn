@@ -178,6 +178,12 @@ type Config = record {
   // NFT marketplace (PB-300). Exposed so the frontend can build per-token URLs.
   // None until wired via `admin_set_course_nft_canister` / deploy-local.sh.
   course_nft_canister : opt principal;
+  // ── Cycles Faucet (PB-400) — all admin-settable, defaulted on decode ──
+  faucet_grant_usd_e8s : nat64;
+  faucet_canister_lifetime_cap : nat32;
+  faucet_claim_window_ns : nat64;
+  faucet_vote_window_ns : nat64;
+  faucet_treasury_floor_e8s : nat64;
 };
 type CrashBetView = record {
   payout_x100 : nat64;
@@ -380,6 +386,39 @@ type ExplorerQuote = record {
   expires_at : nat64;
 };
 type ExplorerToken = variant { ICP; CkUSDC; CkUSDT; CkBTC; CkETH };
+// Cycles Faucet (PB-400): structured eligibility gate — the first failing gate.
+type FaucetGate = variant {
+  Eligible;
+  FaucetDisabled;
+  CanisterNotRegistered;
+  NoPoolNeuron;
+  NotVotedInWindow;
+  ClaimedThisWeek : record { next_at : nat64 };
+  CanisterLifetimeReached : record { count : nat32 };
+  TreasuryLow;
+};
+// All-time faucet stats (public transparency).
+type FaucetStats = record {
+  total_claims : nat64;
+  total_granted_icp_e8s : nat64;
+  last_grant_at : nat64;
+};
+// Everything the faucet UI / a CLI needs in one query.
+type FaucetStatus = record {
+  enabled : bool;
+  gate : FaucetGate;
+  registered : bool;
+  has_pool_neuron : bool;
+  voted_in_window : bool;
+  canister_claims_used : nat32;
+  next_eligible_at : nat64;
+  grant_usd_e8s : nat64;
+  lifetime_cap : nat32;
+  claim_window_ns : nat64;
+  vote_window_ns : nat64;
+  treasury_floor_e8s : nat64;
+  est_grant_icp_e8s : nat64;
+};
 type FeatureFlag = record {
   key : text;
   // Effective for the CALLER (On for everyone, or AdminOn and the caller is an
@@ -1025,6 +1064,12 @@ service : (InitPayload) -> {
   // ledgers. Local-only — mainnet ledgers are hard-pinned.
   admin_set_explorer_ledger : (ExplorerToken, principal) -> (Result);
   admin_set_exposure_cap : (nat64) -> (Result);
+  // ── Cycles Faucet (PB-400) admin param setters ──
+  admin_set_faucet_grant_usd : (nat64) -> (Result);
+  admin_set_faucet_lifetime_cap : (nat32) -> (Result);
+  admin_set_faucet_claim_window_days : (nat64) -> (Result);
+  admin_set_faucet_vote_window_days : (nat64) -> (Result);
+  admin_set_faucet_treasury_floor : (nat64) -> (Result);
   // Admin: enable/disable a feature completely. Unknown keys are allowed (a
   // kill-switch can be staged before the feature ships) but validated and
   // capped so the map can't be spammed.
@@ -1082,6 +1127,9 @@ service : (InitPayload) -> {
   // Claim the caller's current monthly share. Shares not claimed before the
   // next settlement are forfeited to the treasury.
   claim_early_adopter_yield : () -> (Result_1);
+  // Cycles Faucet (PB-400): claim a $2-USD cycles grant for a registered
+  // canister. Enforces G1–G6 then tops it up via the CMC pipeline.
+  claim_faucet_cycles : (principal) -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
   // Commit a vote in ANY supported token. The token is ESCROWED — it only
   // converts to ICP if the proposal passes its threshold and the vote is cast
@@ -1231,6 +1279,10 @@ service : (InitPayload) -> {
   // price for the caller for 15 minutes. An update (not a query) because the
   // mainnet path may refresh the rate via the XRC.
   get_explorer_quote : (IdeaToken, nat64) -> (Result_3);
+  // Cycles Faucet (PB-400): all-time stats, and per-caller status for an
+  // optional canister id (gate / cooldown / params).
+  get_faucet_stats : () -> (FaucetStats) query;
+  get_faucet_status : (opt principal) -> (FaucetStatus) query;
   // App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
   // cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
   // the count of distinct NNS proposals this app has cast a vote on.
@@ -1351,6 +1403,9 @@ service : (InitPayload) -> {
   // already rejected by inspect_message). Drives "most viewed" sorting.
   record_idea_view : (nat64) -> (Result);
   refund_registration : () -> (Result);
+  // Cycles Faucet (PB-400): proof-of-control registration — the TARGET canister
+  // calls this on itself (`msg_caller == canister_id` proves control).
+  register_faucet_canister : () -> (Result);
   remove_admin : (principal) -> (Result);
   // Set (or clear, with an empty string) the caller's X handle. A leading @
   // is stripped; X's own rules apply (1–15 chars, [A-Za-z0-9_]).

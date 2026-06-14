@@ -373,6 +373,30 @@ fn default_lottery_tickets_per_day() -> u64 {
     5
 }
 
+// ── Cycles Faucet (PB-400) defaults ──
+/// Per-claim grant, FIXED in USD e8s ($1 = 100_000_000). Priced to ICP at claim
+/// time via the cached XRC oracle. $2.00.
+fn default_faucet_grant_usd_e8s() -> u64 {
+    200_000_000
+}
+/// Max claims per canister, EVER (25 × $2 = $50 lifetime ceiling per canister).
+fn default_faucet_canister_lifetime_cap() -> u32 {
+    25
+}
+/// Rolling weekly cooldown (per-dev AND per-canister), in nanoseconds.
+fn default_faucet_claim_window_ns() -> u64 {
+    7 * DAY_NANOS
+}
+/// "Recent burn-vote" window (G3), in nanoseconds. Matches arcade's 30 days.
+fn default_faucet_vote_window_ns() -> u64 {
+    30 * DAY_NANOS
+}
+/// Hard treasury floor (ICP e8s) below which the faucet is closed. Mirrors the
+/// 15-ICP global floor by default; admin-tunable.
+fn default_faucet_treasury_floor_e8s() -> u64 {
+    1_500_000_000
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     pub primary_neuron_id: u64,
@@ -434,6 +458,17 @@ pub struct Config {
     /// allowlisted minter/custodian on that canister.
     #[serde(default)]
     pub course_nft_canister: Option<Principal>,
+    /// ── Cycles Faucet (PB-400) — all admin-settable, defaulted on decode ──
+    #[serde(default = "default_faucet_grant_usd_e8s")]
+    pub faucet_grant_usd_e8s: u64,
+    #[serde(default = "default_faucet_canister_lifetime_cap")]
+    pub faucet_canister_lifetime_cap: u32,
+    #[serde(default = "default_faucet_claim_window_ns")]
+    pub faucet_claim_window_ns: u64,
+    #[serde(default = "default_faucet_vote_window_ns")]
+    pub faucet_vote_window_ns: u64,
+    #[serde(default = "default_faucet_treasury_floor_e8s")]
+    pub faucet_treasury_floor_e8s: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -633,6 +668,11 @@ thread_local! {
             lottery_tickets_per_day: default_lottery_tickets_per_day(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
+            faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
+            faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
+            faucet_claim_window_ns: default_faucet_claim_window_ns(),
+            faucet_vote_window_ns: default_faucet_vote_window_ns(),
+            faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -808,6 +848,11 @@ fn init(payload: InitPayload) {
         lottery_tickets_per_day: default_lottery_tickets_per_day(),
         default_threshold_usd_e8s: None,
         course_nft_canister: None,
+        faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
+        faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
+        faucet_claim_window_ns: default_faucet_claim_window_ns(),
+        faucet_vote_window_ns: default_faucet_vote_window_ns(),
+        faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
@@ -4675,11 +4720,14 @@ pub const FLAG_ARCADE_FIELDGOAL: &str = "arcade_fieldgoal";
 /// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
 /// until the owner enables it after a playtest.
 pub const FLAG_CRASH: &str = "crash";
-const KNOWN_FEATURE_FLAGS: [&str; 9] = [
+/// Cycles Faucet (PB-400): recycles a slice of treasury ICP into cycles grants
+/// for eligible pool members. Ships dark (default OFF) — owner kill switch.
+pub const FLAG_CYCLES_FAUCET: &str = "cycles_faucet";
+const KNOWN_FEATURE_FLAGS: [&str; 10] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL,
-    FLAG_CRASH,
+    FLAG_CRASH, FLAG_CYCLES_FAUCET,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -4937,8 +4985,10 @@ thread_local! {
 
 fn feature_default(key: &str) -> bool {
     match key {
-        // Default OFF: Crash (casino, pending the points redesign).
+        // Default OFF: Crash (casino, pending the points redesign) and the
+        // Cycles Faucet (PB-400, moves treasury value — ships dark).
         FLAG_CRASH => false,
+        FLAG_CYCLES_FAUCET => false,
         // Every other SHIPPED feature defaults ON; unknown keys stay OFF.
         k => KNOWN_FEATURE_FLAGS.contains(&k),
     }
@@ -16116,6 +16166,467 @@ async fn dev_clear_courses() -> Result<u64, String> {
     Ok(removed)
 }
 
+// ==========================================
+// 21. Cycles Faucet (PB-400)
+// ==========================================
+//
+// Recycles a slice of treasury ICP into cycles grants for engaged pool members.
+// A claim is a narrower cousin of `settle_burn_split`: price a fixed $2 USD grant
+// to ICP via the cached XRC oracle, then top up the developer's REGISTERED
+// canister with cycles through the existing CMC pipeline
+// (`call_cmc_topup_transfer` → `notify_cmc_topup`, idempotent on block index).
+//
+// The new surface is eligibility + rate-limit + circuit-breaker:
+//   G1 registered canister   G2 active pool neuron   G3 burn-vote in last 30d
+//   G4 weekly cooldown (per-dev AND per-canister)   G5 canister 25× lifetime cap
+//   G6 treasury floor circuit-breaker (incl. this grant's ICP)
+//
+// Ships behind the `cycles_faucet` flag (default OFF — owner kill switch).
+// Mainnet-only behaviour: PB-148 makes end-to-end local claims unreliable; the
+// host tests below exercise every gate + the saga via the existing mock seams.
+
+/// Proof-of-control registration record. A target canister calls
+/// `register_faucet_canister` ON ITSELF — `msg_caller == canister_id` is
+/// cryptographic proof of control (the IC authenticates every message's caller),
+/// which blocks the "register a popular canister to burn its weekly slot"
+/// griefing vector (review C1). `pending_block` journals an in-flight CMC
+/// transfer's block index so a retried claim re-notifies the same block (never
+/// double-mints); dropped on a `Refunded` leg.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FaucetRegistration {
+    pub canister_id: Principal,
+    pub registered_at: u64,
+    #[serde(default)]
+    pub pending_block: Option<u64>,
+}
+
+/// Per-canister usage: last claim time (weekly cooldown G4) + lifetime count
+/// (25× cap G5). Two O(1) checks — no history (that lives in the audit log).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FaucetCanisterUsage {
+    pub last_claim_ns: u64,
+    pub count: u32,
+}
+
+/// All-time faucet stats (public transparency).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FaucetStats {
+    /// All-time count of successful grants.
+    pub total_claims: u64,
+    /// All-time ICP spent on grants (e8s; the treasury outflow, fees excluded).
+    pub total_granted_icp_e8s: u64,
+    pub last_grant_at: u64,
+}
+
+impl_storable!(FaucetRegistration);
+impl_storable!(FaucetCanisterUsage);
+impl_storable!(FaucetStats);
+
+thread_local! {
+    static FAUCET_REGISTRATIONS: RefCell<StableBTreeMap<Principal, FaucetRegistration, Memory>> =
+        MEMORY_MANAGER.with(|mm| {
+            RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(90))))
+        });
+
+    static FAUCET_DEV_LAST_CLAIM: RefCell<StableBTreeMap<Principal, u64, Memory>> =
+        MEMORY_MANAGER.with(|mm| {
+            RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(91))))
+        });
+
+    static FAUCET_CANISTER_USAGE: RefCell<StableBTreeMap<Principal, FaucetCanisterUsage, Memory>> =
+        MEMORY_MANAGER.with(|mm| {
+            RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(92))))
+        });
+
+    // 93 reserved (Phase 2 cached-balance / weekly-budget cell); stats live here.
+    static FAUCET_STATS: RefCell<StableCell<FaucetStats, Memory>> =
+        MEMORY_MANAGER.with(|mm| {
+            RefCell::new(StableCell::init(
+                mm.borrow().get(MemoryId::new(93)),
+                FaucetStats::default(),
+            ))
+        });
+}
+
+/// Structured eligibility result — a developer's CLI/agent can render exactly
+/// which gate is blocking and when they're next eligible (review optimization).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum FaucetGate {
+    Eligible,
+    FaucetDisabled,
+    CanisterNotRegistered,
+    NoPoolNeuron,
+    NotVotedInWindow,
+    ClaimedThisWeek { next_at: u64 },
+    CanisterLifetimeReached { count: u32 },
+    TreasuryLow,
+}
+
+/// Everything the faucet UI / a CLI needs in one query.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FaucetStatus {
+    /// Effective flag for the caller (On for all, AdminOn → admins only).
+    pub enabled: bool,
+    /// The blocking gate for `(caller, canister_id)`, or `Eligible`.
+    pub gate: FaucetGate,
+    pub registered: bool,
+    /// Caller has an active pool neuron (G2).
+    pub has_pool_neuron: bool,
+    /// Caller burn-voted within the window (G3).
+    pub voted_in_window: bool,
+    /// Lifetime claims used by the registered canister (of `lifetime_cap`).
+    pub canister_claims_used: u32,
+    /// Next time this dev OR canister may claim again (max of the two), 0 if now.
+    pub next_eligible_at: u64,
+    // ── params (admin-tunable; echoed for the UI) ──
+    pub grant_usd_e8s: u64,
+    pub lifetime_cap: u32,
+    pub claim_window_ns: u64,
+    pub vote_window_ns: u64,
+    pub treasury_floor_e8s: u64,
+    /// Estimated grant ICP at the current cached rate (e8s). 0 if rate unknown.
+    pub est_grant_icp_e8s: u64,
+}
+
+/// $2-of-USD (e8s) → ICP (e8s) at the cached XRC rate. Mirrors
+/// `expected_icp_for_token`'s maths. Returns 0 if no rate is cached.
+fn usd_e8s_to_icp_e8s(usd_e8s: u64) -> u64 {
+    let icp_rate = cached_usd_rate_e8s(ExplorerToken::ICP); // USD e8s per 1 ICP
+    if icp_rate == 0 {
+        return 0;
+    }
+    u64::try_from(usd_e8s as u128 * 100_000_000u128 / icp_rate as u128).unwrap_or(u64::MAX)
+}
+
+/// True when the caller has an ACTIVE pool neuron (G2). Admins bypass (same
+/// posture as `arcade_access`).
+fn faucet_has_pool_access(caller: Principal) -> bool {
+    if is_admin_principal(caller) {
+        return true;
+    }
+    matches!(get_my_pool_neuron(), Some(pn) if pn.status == PoolStatus::Active)
+}
+
+/// True when the caller burn-voted within `window_ns` (G3). Same scan as
+/// `arcade_access`: any COMMITMENT created in-window, or any LOSSLESS_VOTE cast
+/// in-window. Admins bypass.
+fn faucet_voted_in_window(caller: Principal, window_ns: u64) -> bool {
+    if is_admin_principal(caller) {
+        return true;
+    }
+    let cutoff = current_time().saturating_sub(window_ns);
+    COMMITMENTS.with(|m| {
+        m.borrow().iter().any(|e| {
+            let c = e.value();
+            c.principal == caller && c.created_at >= cutoff
+        })
+    }) || LOSSLESS_VOTES.with(|m| {
+        m.borrow().iter().any(|e| {
+            let v = e.value();
+            v.principal == caller && v.cast_at >= cutoff
+        })
+    })
+}
+
+/// Pure eligibility evaluation for `(caller, canister_id)`. Order matches the
+/// gate numbering; the FIRST failing gate is returned. The treasury floor (G6)
+/// is checked separately at claim time (it needs an async balance read).
+fn faucet_eligibility_sync(caller: Principal, canister_id: Principal, config: &Config) -> FaucetGate {
+    if !feature_visible(FLAG_CYCLES_FAUCET, caller) {
+        return FaucetGate::FaucetDisabled;
+    }
+    // G1: registered canister.
+    let registration = FAUCET_REGISTRATIONS.with(|m| m.borrow().get(&canister_id));
+    if registration.is_none() {
+        return FaucetGate::CanisterNotRegistered;
+    }
+    // G2: active pool neuron.
+    if !faucet_has_pool_access(caller) {
+        return FaucetGate::NoPoolNeuron;
+    }
+    // G3: burn-vote within the window.
+    if !faucet_voted_in_window(caller, config.faucet_vote_window_ns) {
+        return FaucetGate::NotVotedInWindow;
+    }
+    let now = current_time();
+    // G4: weekly cooldown — per-dev AND per-canister.
+    let dev_last = FAUCET_DEV_LAST_CLAIM.with(|m| m.borrow().get(&caller).unwrap_or(0));
+    let usage = FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&canister_id).unwrap_or_default());
+    let dev_next = dev_last.saturating_add(config.faucet_claim_window_ns);
+    let can_next = usage.last_claim_ns.saturating_add(config.faucet_claim_window_ns);
+    let next_at = dev_next.max(can_next);
+    if (dev_last != 0 && now < dev_next) || (usage.last_claim_ns != 0 && now < can_next) {
+        return FaucetGate::ClaimedThisWeek { next_at };
+    }
+    // G5: canister lifetime cap.
+    if usage.count >= config.faucet_canister_lifetime_cap {
+        return FaucetGate::CanisterLifetimeReached { count: usage.count };
+    }
+    FaucetGate::Eligible
+}
+
+/// Proof-of-control registration. The TARGET canister calls this on itself, so
+/// `get_caller()` (the message's authenticated caller) IS the canister to
+/// register. Cheap, network-free rejects for obviously-bad principals.
+#[ic_cdk::update]
+fn register_faucet_canister() -> Result<(), String> {
+    let caller = get_caller();
+    if caller == Principal::anonymous() {
+        return Err("ANONYMOUS_NOT_ALLOWED".to_string());
+    }
+    // Must be an opaque (canister) principal — a user/self-authenticating
+    // principal can't be a cycles destination. Opaque principals end in the
+    // 0x01 type byte; the management canister (empty) is not a real target.
+    let bytes = caller.as_slice();
+    if bytes.is_empty() || *bytes.last().unwrap() != 0x01 {
+        return Err("NOT_A_CANISTER".to_string());
+    }
+    if caller == get_canister_id() {
+        return Err("CANNOT_REGISTER_SELF".to_string());
+    }
+    let now = current_time();
+    FAUCET_REGISTRATIONS.with(|m| {
+        let mut m = m.borrow_mut();
+        // Re-registration refreshes the timestamp but preserves any pending block.
+        let pending = m.get(&caller).and_then(|r| r.pending_block);
+        m.insert(
+            caller,
+            FaucetRegistration { canister_id: caller, registered_at: now, pending_block: pending },
+        );
+    });
+    Ok(())
+}
+
+/// Claim a $2-USD cycles grant for a previously-registered canister. Enforces
+/// G1–G6, then tops up the target via the existing CMC pipeline. Idempotent
+/// saga: the in-flight block index is journaled on the registration so a retry
+/// re-notifies the same block (never double-mints); a CMC refund drops it so the
+/// retry re-transfers. Records the claim only AFTER the cycles are minted.
+#[ic_cdk::update]
+async fn claim_faucet_cycles(canister_id: Principal) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+
+    // Gates G1–G5 (sync).
+    match faucet_eligibility_sync(caller, canister_id, &config) {
+        FaucetGate::Eligible => {}
+        FaucetGate::FaucetDisabled => return Err("FAUCET_DISABLED".to_string()),
+        FaucetGate::CanisterNotRegistered => return Err("CANISTER_NOT_REGISTERED".to_string()),
+        FaucetGate::NoPoolNeuron => return Err("NO_POOL_NEURON".to_string()),
+        FaucetGate::NotVotedInWindow => return Err("NOT_VOTED_IN_WINDOW".to_string()),
+        FaucetGate::ClaimedThisWeek { .. } => return Err("CLAIMED_THIS_WEEK".to_string()),
+        FaucetGate::CanisterLifetimeReached { .. } => return Err("CANISTER_LIFETIME_REACHED".to_string()),
+        FaucetGate::TreasuryLow => return Err("TREASURY_LOW".to_string()),
+    }
+
+    // Price the $2 grant into ICP (warm the cache on mainnet first).
+    refresh_icp_rate(&config).await;
+    let grant_icp_e8s = usd_e8s_to_icp_e8s(config.faucet_grant_usd_e8s);
+    if grant_icp_e8s == 0 {
+        return Err("RATE_UNAVAILABLE".to_string());
+    }
+
+    // G6: treasury floor circuit-breaker — fail CLOSED. The outflow includes the
+    // grant ICP plus the ledger fee the treasury fronts.
+    let outflow = grant_icp_e8s.saturating_add(ICP_FEE_E8S);
+    {
+        let treasury = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(TREASURY_SUBACCOUNT),
+        };
+        let balance = call_ledger_balance(config.ledger_canister_id, treasury)
+            .await
+            .map_err(|e| format!("TREASURY_BALANCE: {}", e))?;
+        if balance.saturating_sub(outflow) < config.faucet_treasury_floor_e8s {
+            return Err("TREASURY_LOW".to_string());
+        }
+    }
+
+    // ── Saga: move ICP → CMC for the dev's canister, then notify (mint). ──
+    let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+    let mut registration = FAUCET_REGISTRATIONS.with(|m| m.borrow().get(&canister_id))
+        .ok_or_else(|| "CANISTER_NOT_REGISTERED".to_string())?;
+
+    // Reserve the slot's transfer leg: only transfer if no block is journaled.
+    if registration.pending_block.is_none() {
+        let block = call_cmc_topup_transfer(
+            config.ledger_canister_id,
+            Some(TREASURY_SUBACCOUNT),
+            canister_id,
+            grant_icp_e8s,
+            ICP_FEE_E8S,
+        )
+        .await
+        .map_err(|e| format!("FAUCET_CMC_XFER: {}", e))?;
+        registration.pending_block = Some(block);
+        FAUCET_REGISTRATIONS.with(|m| { m.borrow_mut().insert(canister_id, registration.clone()); });
+    }
+
+    let block = registration.pending_block.unwrap();
+    // is_local non-existent CMC tolerated like the burn flow (proposal != 138388
+    // there; here we just always require notify success off the local no-op path).
+    if let Err(e) = notify_cmc_topup(cmc, canister_id, block, !config.is_local).await {
+        if e.starts_with("CMC_REFUNDED") {
+            // The CMC sent the ICP back to the backend — drop the block so a
+            // retry re-transfers. (Nothing lost beyond the ledger fee.)
+            registration.pending_block = None;
+            FAUCET_REGISTRATIONS.with(|m| { m.borrow_mut().insert(canister_id, registration.clone()); });
+        }
+        return Err(format!("FAUCET_CMC_NOTIFY: {}", e));
+    }
+
+    // ── Success: cycles minted. Finalize the slot + record the claim. ──
+    let now = current_time();
+    registration.pending_block = None;
+    FAUCET_REGISTRATIONS.with(|m| { m.borrow_mut().insert(canister_id, registration); });
+    FAUCET_DEV_LAST_CLAIM.with(|m| { m.borrow_mut().insert(caller, now); });
+    FAUCET_CANISTER_USAGE.with(|m| {
+        let mut m = m.borrow_mut();
+        let mut usage = m.get(&canister_id).unwrap_or_default();
+        usage.last_claim_ns = now;
+        usage.count = usage.count.saturating_add(1);
+        m.insert(canister_id, usage);
+    });
+    FAUCET_STATS.with(|c| {
+        let mut s = c.borrow().get().clone();
+        s.total_claims = s.total_claims.saturating_add(1);
+        s.total_granted_icp_e8s = s.total_granted_icp_e8s.saturating_add(grant_icp_e8s);
+        s.last_grant_at = now;
+        let _ = c.borrow_mut().set(s);
+    });
+    AUDIT_LOG.with(|log| {
+        let _ = log.borrow_mut().append(&AuditLogEntry {
+            timestamp: now,
+            event_type: "cycles_faucet_grant".to_string(),
+            proposal_id: 0,
+            user: caller,
+            amount_e8s: grant_icp_e8s,
+        });
+    });
+    Ok(())
+}
+
+/// Public faucet status for `(caller, canister_id)`. `canister_id == None` gives
+/// flag + params + the caller's G2/G3 standing (no canister-specific gate).
+#[ic_cdk::query]
+fn get_faucet_status(canister_id: Option<Principal>) -> FaucetStatus {
+    let caller = get_caller();
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let enabled = feature_visible(FLAG_CYCLES_FAUCET, caller);
+
+    let has_pool_neuron = faucet_has_pool_access(caller);
+    let voted_in_window = faucet_voted_in_window(caller, config.faucet_vote_window_ns);
+
+    let (gate, registered, canister_claims_used, next_eligible_at) = match canister_id {
+        Some(cid) => {
+            let registered = FAUCET_REGISTRATIONS.with(|m| m.borrow().contains_key(&cid));
+            let usage = FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&cid).unwrap_or_default());
+            let dev_last = FAUCET_DEV_LAST_CLAIM.with(|m| m.borrow().get(&caller).unwrap_or(0));
+            let next = dev_last
+                .saturating_add(config.faucet_claim_window_ns)
+                .max(usage.last_claim_ns.saturating_add(config.faucet_claim_window_ns));
+            let next_at = if next > current_time() { next } else { 0 };
+            (faucet_eligibility_sync(caller, cid, &config), registered, usage.count, next_at)
+        }
+        None => {
+            let gate = if !enabled {
+                FaucetGate::FaucetDisabled
+            } else {
+                FaucetGate::CanisterNotRegistered
+            };
+            (gate, false, 0, 0)
+        }
+    };
+
+    FaucetStatus {
+        enabled,
+        gate,
+        registered,
+        has_pool_neuron,
+        voted_in_window,
+        canister_claims_used,
+        next_eligible_at,
+        grant_usd_e8s: config.faucet_grant_usd_e8s,
+        lifetime_cap: config.faucet_canister_lifetime_cap,
+        claim_window_ns: config.faucet_claim_window_ns,
+        vote_window_ns: config.faucet_vote_window_ns,
+        treasury_floor_e8s: config.faucet_treasury_floor_e8s,
+        est_grant_icp_e8s: usd_e8s_to_icp_e8s(config.faucet_grant_usd_e8s),
+    }
+}
+
+#[ic_cdk::query]
+fn get_faucet_stats() -> FaucetStats {
+    FAUCET_STATS.with(|c| c.borrow().get().clone())
+}
+
+// ── Admin param setters (all admin-settable, sanity-railed) ──
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_faucet_grant_usd(usd_e8s: u64) -> Result<(), String> {
+    // $0.10 .. $100 rails.
+    if !(10_000_000..=10_000_000_000).contains(&usd_e8s) {
+        return Err("OUT_OF_RANGE".to_string());
+    }
+    CONFIG.with(|c| {
+        let mut cfg = c.borrow().get().clone();
+        cfg.faucet_grant_usd_e8s = usd_e8s;
+        let _ = c.borrow_mut().set(cfg);
+    });
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_faucet_lifetime_cap(cap: u32) -> Result<(), String> {
+    if cap == 0 || cap > 10_000 {
+        return Err("OUT_OF_RANGE".to_string());
+    }
+    CONFIG.with(|c| {
+        let mut cfg = c.borrow().get().clone();
+        cfg.faucet_canister_lifetime_cap = cap;
+        let _ = c.borrow_mut().set(cfg);
+    });
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_faucet_claim_window_days(days: u64) -> Result<(), String> {
+    if days == 0 || days > 365 {
+        return Err("OUT_OF_RANGE".to_string());
+    }
+    CONFIG.with(|c| {
+        let mut cfg = c.borrow().get().clone();
+        cfg.faucet_claim_window_ns = days.saturating_mul(DAY_NANOS);
+        let _ = c.borrow_mut().set(cfg);
+    });
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_faucet_vote_window_days(days: u64) -> Result<(), String> {
+    if days == 0 || days > 365 {
+        return Err("OUT_OF_RANGE".to_string());
+    }
+    CONFIG.with(|c| {
+        let mut cfg = c.borrow().get().clone();
+        cfg.faucet_vote_window_ns = days.saturating_mul(DAY_NANOS);
+        let _ = c.borrow_mut().set(cfg);
+    });
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_faucet_treasury_floor(floor_e8s: u64) -> Result<(), String> {
+    CONFIG.with(|c| {
+        let mut cfg = c.borrow().get().clone();
+        cfg.faucet_treasury_floor_e8s = floor_e8s;
+        let _ = c.borrow_mut().set(cfg);
+    });
+    Ok(())
+}
+
 ic_cdk::export_candid!();
 
 #[cfg(test)]
@@ -16339,6 +16850,11 @@ mod tests {
             lottery_tickets_per_day: default_lottery_tickets_per_day(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
+            faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
+            faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
+            faucet_claim_window_ns: default_faucet_claim_window_ns(),
+            faucet_vote_window_ns: default_faucet_vote_window_ns(),
+            faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -16582,6 +17098,11 @@ mod tests {
                 lottery_tickets_per_day: default_lottery_tickets_per_day(),
                 default_threshold_usd_e8s: None,
                 course_nft_canister: None,
+                faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
+                faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
+                faucet_claim_window_ns: default_faucet_claim_window_ns(),
+                faucet_vote_window_ns: default_faucet_vote_window_ns(),
+                faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
             }
         };
         let mainnet = Config {
@@ -18454,6 +18975,11 @@ mod tests {
             lottery_tickets_per_day: default_lottery_tickets_per_day(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
+            faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
+            faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
+            faucet_claim_window_ns: default_faucet_claim_window_ns(),
+            faucet_vote_window_ns: default_faucet_vote_window_ns(),
+            faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
         }
     }
 
@@ -23736,5 +24262,272 @@ mod tests {
         assert_ne!(mock_principal(5), mock_principal(6));
         assert_ne!(mock_principal(5), alice()); // never the caller/admin
         assert_ne!(mock_principal(5), Principal::anonymous());
+    }
+
+    // ── 21. Cycles Faucet (PB-400) ───────────────────────────────────────────
+
+    /// A developer principal (not a canister; passes G2/G3 setup).
+    fn faucet_dev() -> Principal { mock_principal(42) }
+    /// The target canister to top up (opaque principal, ends in 0x01).
+    fn faucet_canister() -> Principal { p("ryjl3-tyaaa-aaaaa-aaaba-cai") }
+
+    fn faucet_set_flag(state: FlagState) {
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().insert(FLAG_CYCLES_FAUCET.to_string(), flag_state_code(state));
+        });
+    }
+
+    /// Wipe all faucet state + the gating maps so each test is independent.
+    fn faucet_reset() {
+        set_mock_time(None);
+        set_admins(vec![]);
+        CONFIG.with(|c| { let mut cfg = c.borrow().get().clone(); cfg.is_local = true; let _ = c.borrow_mut().set(cfg); });
+        faucet_set_flag(FlagState::On);
+        // High treasury so the floor passes unless a test lowers it.
+        set_mock_ledger_balance(1_000_000_000_000);
+        set_mock_ledger_transfer(Ok(7));
+        for cid in [faucet_canister(), bob(), alice()] {
+            FAUCET_REGISTRATIONS.with(|m| { m.borrow_mut().remove(&cid); });
+            FAUCET_CANISTER_USAGE.with(|m| { m.borrow_mut().remove(&cid); });
+        }
+        FAUCET_DEV_LAST_CLAIM.with(|m| {
+            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        POOL_NEURONS.with(|m| {
+            let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        COMMITMENTS.with(|m| {
+            let keys: Vec<CommitmentKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+    }
+
+    /// Give `dev` an ACTIVE pool neuron (G2) and a recent burn commitment (G3).
+    fn faucet_make_eligible(dev: Principal) {
+        let now = current_time();
+        POOL_NEURONS.with(|m| {
+            m.borrow_mut().insert(7777, PoolNeuron {
+                neuron_id: 7777,
+                registered_by: dev,
+                voting_power: 10_000_000_000,
+                status: PoolStatus::Active,
+                created_at: now,
+                activated_at: Some(now),
+                treasury_block: None,
+                backend_cmc_block: None,
+                frontend_cmc_block: None,
+            });
+        });
+        let mut commit = sample_commitment(1, dev, 100_000_000, CommitmentStatus::Burned);
+        commit.created_at = now; // in-window for G3 regardless of mocked clock
+        COMMITMENTS.with(|m| {
+            m.borrow_mut().insert(CommitmentKey { proposal_id: 1, principal: dev }, commit);
+        });
+    }
+
+    /// Register the target canister via proof-of-control (caller == canister).
+    fn faucet_register(canister: Principal) {
+        set_mock_caller(canister);
+        register_faucet_canister().unwrap();
+    }
+
+    #[test]
+    fn test_faucet_register_proof_of_control() {
+        faucet_reset();
+        // A non-canister (self-authenticating) principal is rejected.
+        set_mock_caller(faucet_dev());
+        assert!(register_faucet_canister().is_err());
+        // The canister registering itself succeeds.
+        set_mock_caller(faucet_canister());
+        assert!(register_faucet_canister().is_ok());
+        assert!(FAUCET_REGISTRATIONS.with(|m| m.borrow().contains_key(&faucet_canister())));
+        // Anonymous rejected.
+        set_mock_caller(anon());
+        assert!(register_faucet_canister().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_faucet_claim_happy_path() {
+        faucet_reset();
+        faucet_register(faucet_canister());
+        faucet_make_eligible(faucet_dev());
+        set_mock_caller(faucet_dev());
+
+        assert_eq!(
+            faucet_eligibility_sync(faucet_dev(), faucet_canister(), &CONFIG.with(|c| c.borrow().get().clone())),
+            FaucetGate::Eligible
+        );
+        claim_faucet_cycles(faucet_canister()).await.expect("claim should succeed");
+
+        let usage = FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).unwrap());
+        assert_eq!(usage.count, 1);
+        assert!(usage.last_claim_ns > 0);
+        assert!(FAUCET_DEV_LAST_CLAIM.with(|m| m.borrow().get(&faucet_dev()).unwrap()) > 0);
+        let stats = get_faucet_stats();
+        assert_eq!(stats.total_claims, 1);
+        assert!(stats.total_granted_icp_e8s > 0);
+        // No leftover in-flight block (saga finalized).
+        let reg = FAUCET_REGISTRATIONS.with(|m| m.borrow().get(&faucet_canister()).unwrap());
+        assert!(reg.pending_block.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_faucet_reject_non_member() {
+        faucet_reset();
+        faucet_register(faucet_canister());
+        // No pool neuron for the dev → G2 fails.
+        COMMITMENTS.with(|m| {
+            m.borrow_mut().insert(
+                CommitmentKey { proposal_id: 1, principal: faucet_dev() },
+                sample_commitment(1, faucet_dev(), 100_000_000, CommitmentStatus::Burned),
+            );
+        });
+        set_mock_caller(faucet_dev());
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::NoPoolNeuron);
+        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "NO_POOL_NEURON");
+    }
+
+    #[tokio::test]
+    async fn test_faucet_reject_no_recent_burn() {
+        faucet_reset();
+        faucet_register(faucet_canister());
+        // Active pool neuron but NO recent commitment → G3 fails.
+        let now = current_time();
+        POOL_NEURONS.with(|m| {
+            m.borrow_mut().insert(7777, PoolNeuron {
+                neuron_id: 7777, registered_by: faucet_dev(), voting_power: 1, status: PoolStatus::Active,
+                created_at: now, activated_at: Some(now), treasury_block: None, backend_cmc_block: None, frontend_cmc_block: None,
+            });
+        });
+        set_mock_caller(faucet_dev());
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::NotVotedInWindow);
+        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "NOT_VOTED_IN_WINDOW");
+    }
+
+    #[tokio::test]
+    async fn test_faucet_weekly_cooldown_dev_and_canister() {
+        faucet_reset();
+        faucet_register(faucet_canister());
+        faucet_make_eligible(faucet_dev());
+        set_mock_caller(faucet_dev());
+        let base = 2_000_000_000_000_000_000u64;
+        set_mock_time(Some(base));
+        // make_eligible used current_time(); refresh the commitment to be in-window.
+        faucet_make_eligible(faucet_dev());
+        claim_faucet_cycles(faucet_canister()).await.unwrap();
+
+        // Same dev, immediately again → cooldown.
+        set_mock_time(Some(base + DAY_NANOS));
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        assert!(matches!(
+            faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg),
+            FaucetGate::ClaimedThisWeek { .. }
+        ));
+        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "CLAIMED_THIS_WEEK");
+
+        // A DIFFERENT eligible dev, SAME canister, still inside the week → blocked
+        // by the per-canister cooldown (the "many devs, one canister" guard).
+        let dev2 = mock_principal(43);
+        faucet_make_eligible(dev2); // also adds a recent commitment for dev2
+        set_mock_caller(dev2);
+        assert!(matches!(
+            faucet_eligibility_sync(dev2, faucet_canister(), &cfg),
+            FaucetGate::ClaimedThisWeek { .. }
+        ));
+
+        // After the window elapses, the same dev can claim again.
+        set_mock_time(Some(base + 8 * DAY_NANOS));
+        faucet_make_eligible(faucet_dev()); // refresh recent burn
+        set_mock_caller(faucet_dev());
+        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::Eligible);
+        claim_faucet_cycles(faucet_canister()).await.unwrap();
+        assert_eq!(FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).unwrap().count), 2);
+    }
+
+    #[tokio::test]
+    async fn test_faucet_lifetime_cap() {
+        faucet_reset();
+        faucet_register(faucet_canister());
+        // Pre-seed usage at the cap; last claim long ago so cooldown passes.
+        FAUCET_CANISTER_USAGE.with(|m| {
+            m.borrow_mut().insert(faucet_canister(), FaucetCanisterUsage { last_claim_ns: 1, count: 25 });
+        });
+        faucet_make_eligible(faucet_dev());
+        set_mock_caller(faucet_dev());
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        assert!(matches!(
+            faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg),
+            FaucetGate::CanisterLifetimeReached { count: 25 }
+        ));
+        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "CANISTER_LIFETIME_REACHED");
+    }
+
+    #[tokio::test]
+    async fn test_faucet_treasury_floor_circuit_breaker() {
+        faucet_reset();
+        faucet_register(faucet_canister());
+        faucet_make_eligible(faucet_dev());
+        set_mock_caller(faucet_dev());
+        // Treasury barely above the floor — not enough to cover a grant.
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        set_mock_ledger_balance(cfg.faucet_treasury_floor_e8s + 1);
+        // Sync gates pass; the floor (async) is what blocks the claim.
+        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::Eligible);
+        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "TREASURY_LOW");
+        // Nothing was recorded — the breaker fired before any state change.
+        assert!(FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).is_none()));
+        assert_eq!(get_faucet_stats().total_claims, 0);
+    }
+
+    #[tokio::test]
+    async fn test_faucet_idempotent_cmc_topup() {
+        faucet_reset();
+        faucet_register(faucet_canister());
+        faucet_make_eligible(faucet_dev());
+        set_mock_caller(faucet_dev());
+
+        // First claim succeeds and stamps usage once.
+        claim_faucet_cycles(faucet_canister()).await.unwrap();
+        assert_eq!(FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).unwrap().count), 1);
+
+        // Simulate a partial failure that left a journaled block index, then a
+        // retry: the cooldown would normally block, so advance past it AND inject
+        // a pending block to prove the retry re-notifies the SAME block (no second
+        // transfer) and finalizes to exactly one increment, not two.
+        set_mock_time(Some(current_time() + 8 * DAY_NANOS));
+        faucet_make_eligible(faucet_dev());
+        FAUCET_REGISTRATIONS.with(|m| {
+            let mut reg = m.borrow().get(&faucet_canister()).unwrap();
+            reg.pending_block = Some(999); // pretend a transfer already happened
+            m.borrow_mut().insert(faucet_canister(), reg);
+        });
+        // Force any NEW transfer to fail — so if the saga (incorrectly) re-transfers
+        // it would error; success proves it reused the journaled block.
+        set_mock_ledger_transfer(Err("SHOULD_NOT_TRANSFER".to_string()));
+        claim_faucet_cycles(faucet_canister()).await.unwrap();
+        assert_eq!(FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).unwrap().count), 2);
+        assert!(FAUCET_REGISTRATIONS.with(|m| m.borrow().get(&faucet_canister()).unwrap().pending_block.is_none()));
+    }
+
+    #[tokio::test]
+    async fn test_faucet_flag_gating() {
+        faucet_reset();
+        faucet_register(faucet_canister());
+        faucet_make_eligible(faucet_dev());
+        set_mock_caller(faucet_dev());
+        // Flag OFF → claim rejected even when otherwise fully eligible.
+        faucet_set_flag(FlagState::Off);
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::FaucetDisabled);
+        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "FAUCET_DISABLED");
+        // get_faucet_status reflects the disabled flag.
+        assert!(!get_faucet_status(Some(faucet_canister())).enabled);
     }
 }
