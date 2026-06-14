@@ -89,9 +89,11 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
     setLoading(true);
     try {
       const cid = parseCanister();
-      const arg = cid ? [cid] : [];
+      // Wrapper-layer binding: an `opt principal` ARG is `Principal | null`,
+      // NOT the raw-declarations `[]`/`[x]` array. Passing an array throws and
+      // leaves `status` null → the page falsely renders "faucet is closed".
       const [st, ss] = await Promise.all([
-        actor.get_faucet_status(arg),
+        actor.get_faucet_status(cid),
         actor.get_faucet_stats().catch(() => null),
       ]);
       setStatus(st as FaucetStatus);

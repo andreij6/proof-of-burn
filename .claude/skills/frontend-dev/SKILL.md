@@ -142,6 +142,14 @@ the Staking step-3 dead-button bug in `fetchMyPoolNeuron`). With the wrapper
 layer, check `__kind__ === "Some"` before reading `.value`. Match whichever
 layer the surrounding file already uses.
 
+**It applies to opt INPUT args too.** The wrapper actor takes an `opt T` argument
+as **`T | null`** (e.g. the generated `get_faucet_status(arg0: Principal | null)`),
+NOT the raw-declarations `[]` / `[x]` array. Passing `cid ? [cid] : []` throws on
+the call → the await rejects → your state stays `null` and the page renders a false
+empty/closed state. This shipped as the faucet "faucet is currently closed" bug.
+Pass `cid` (a `Principal | null`) directly. Check the generated signature in
+`bindings/backend.ts` when in doubt.
+
 Other decoding notes: candid `nat64`/`nat` arrive as **`bigint`**, not
 `number` — convert explicitly for display math (e8s: divide by `100_000_000n`).
 
