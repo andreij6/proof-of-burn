@@ -162,7 +162,8 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   // Creators can't upvote their own idea — hide the button for them.
   const isMyIdea = (idea: Idea) => signedIn && !!principal && idea.poster.toText() === principal.toText();
 
-  const [tab, setTab] = useState<'board' | 'projects' | 'about'>('board');
+  const [tab, setTab] = useState<'board' | 'projects'>('board');
+  const [aboutOpen, setAboutOpen] = useState(false);
   const [ideas, setIdeas] = useState<Idea[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [info, setInfo] = useState<IdeaBoardInfo | null>(null);
@@ -637,7 +638,6 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
         {([
           ['board', `Ideas (${ideas.length})`],
           ['projects', `Projects (${projects.length})`],
-          ['about', 'What we’re looking for'],
         ] as [typeof tab, string][]).map(([key, label]) => (
           <button
             key={key}
@@ -666,6 +666,10 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
               <LiveDot color="var(--sprout-ink)" size={7} />
               <b style={{ fontSize: 14, color: 'var(--fg)' }}>Ideas</b>
               <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {ideas.length} active</span>
+              <button type="button" onClick={() => setAboutOpen(true)}
+                style={{ background: 'none', border: 'none', color: 'var(--burn-ink)', fontSize: 11.5, cursor: 'pointer', padding: 0, display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'underline' }}>
+                <Icon name="info" size={11} stroke="var(--burn-ink)" /> What we’re looking for
+              </button>
             </span>
             {/* Sort selector */}
             <span className="row" style={{ gap: 4 }}>
@@ -860,8 +864,18 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
       )}
 
       {/* ── About tab ── */}
-      {tab === 'about' && (
-        <div className="col" style={{ gap: 18, maxWidth: 720 }}>
+      {aboutOpen && (
+        <div style={MODAL_OVERLAY} onClick={() => setAboutOpen(false)}>
+          <div className="card col" style={{ ...MODAL_CARD, maxWidth: 640 }} onClick={e => e.stopPropagation()}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="bulb" size={18} stroke="var(--burn-ink)" />
+                <h4 style={{ margin: 0, fontSize: 16, color: 'var(--fg)' }}>What we’re looking for</h4>
+              </span>
+              <button onClick={() => setAboutOpen(false)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)' }}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
           <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
             <Eyebrow accent>The brief</Eyebrow>
             <p style={{ fontSize: 13.5, lineHeight: 1.6 }}>
@@ -900,14 +914,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             </ul>
           </div>
 
-          <Btn variant="primary" style={{ alignSelf: 'flex-start' }} onClick={() => {
-            if (!signedIn) { onSignIn(); return; }
-            setPostError(null);
-            setIsPostOpen(true);
-          }}>
-            <Icon name="bulb" size={14} stroke="var(--char-950)" />
-            {signedIn ? 'Pitch your idea' : 'Sign in to pitch'}
-          </Btn>
+          </div>
         </div>
       )}
 

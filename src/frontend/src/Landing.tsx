@@ -261,7 +261,7 @@ export default function Landing({ onEnter, flags }: LandingProps) {
   };
 
   return (
-    <div ref={containerRef} style={{
+    <div ref={containerRef} data-force-theme="dark" style={{
       position: 'relative', background: 'var(--char-950)', color: 'var(--fg)',
       overflowX: 'clip', minHeight: '100vh',
     }}>
