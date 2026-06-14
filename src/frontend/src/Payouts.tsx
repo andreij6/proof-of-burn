@@ -8,6 +8,7 @@ import { createActor as createLedgerActor } from "./bindings/ledger";
 import type { Identity } from "@icp-sdk/core/agent";
 import { ExplorerToken, type Backend } from "./bindings/backend";
 import { Icon, Eyebrow, Chip, Btn, fmtICP, formatPrincipal } from "./ui";
+import { useErrorImpression } from "./analytics";
 import { makeCkbtcMinter, makeApprover, CKBTC_MINTER_ID } from "./minters";
 
 // ==========================================
@@ -543,6 +544,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  useErrorImpression(error, 'payouts');
   const [balances, setBalances] = useState<Record<string, bigint | null>>({});
   const [ledgers, setLedgers] = useState<Record<string, string>>({});
   const [copied, setCopied] = useState<string | null>(null);

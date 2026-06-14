@@ -6,6 +6,7 @@ import type { Config, FeatureFlag, GlobalStats, LotteryInfo, EarlyAdopterInfo, S
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import type { ModerationCandidate } from "./bindings/backend";
 import { Icon, Eyebrow, Btn, Chip, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
+import { useErrorImpression } from "./analytics";
 import CourseEditor from "./arcade/CourseEditor";
 
 // ==========================================
@@ -122,6 +123,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  useErrorImpression(error, 'admin');
 
   // ── dial inputs ──
   const [thresholdInput, setThresholdInput] = useState('');

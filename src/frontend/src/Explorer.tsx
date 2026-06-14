@@ -5,6 +5,7 @@ import type { DappListing, ExplorerInfo, ExplorerQuote } from "./bindings/backen
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal } from "./ui";
 import { fmtTokenAmount } from "./IdeaBoard";
+import { useErrorImpression } from "./analytics";
 
 // ==========================================
 // Dapp Explorer — a paid directory of ICP-ecosystem dapps.
@@ -124,6 +125,9 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
   const [admDesc, setAdmDesc] = useState('');
   const [admError, setAdmError] = useState<string | null>(null);
   const [admBusy, setAdmBusy] = useState(false);
+
+  useErrorImpression(subError, 'explorer_submit');
+  useErrorImpression(admError, 'explorer_admin');
 
   // Admin per-listing action in flight (approve/reject/remove)
   const [actionBusyId, setActionBusyId] = useState<bigint | null>(null);

@@ -40,6 +40,7 @@ import Dashboard from "./Dashboard";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext } from "./ui";
 import { WALLET_TOKEN_META, parseTokenUnits, fmtUsd, thresholdProgress } from "./tokens";
+import { useErrorImpression } from "./analytics";
 
 // ── Shareable URL routing (hash-based; this is a static asset canister) ──
 // Each in-app page maps to a stable hash path so links are copy-pasteable.
@@ -461,6 +462,14 @@ export default function App() {
   const [isTreasuryWithdrawing, setIsTreasuryWithdrawing] = useState(false);
   const [treasuryError, setTreasuryError] = useState<string | null>(null);
   const [treasurySuccess, setTreasurySuccess] = useState(false);
+
+  // Analytics: fire an error_shown impression whenever a user-facing error renders.
+  useErrorImpression(txError, 'vote_commit');
+  useErrorImpression(withdrawError, 'withdraw');
+  useErrorImpression(treasuryError, 'treasury_withdraw');
+  useErrorImpression(poolVerifyError, 'pool_verify');
+  useErrorImpression(poolFinalizeError, 'pool_finalize');
+  useErrorImpression(addMoreTxError, 'add_more');
 
   // Tweak / simulator options
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');

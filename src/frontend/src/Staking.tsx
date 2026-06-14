@@ -4,6 +4,7 @@ import { StakeTier, StakingBootstrap, UnstakeStatus, YieldStatus } from "./bindi
 import type { StakingPoolInfo, TierPoolInfo, UserStakeInfo, PendingUnstake, YieldDistribution, EarlyAdopterInfo } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, usePageDevControls } from "./ui";
+import { useErrorImpression } from "./analytics";
 
 // ==========================================
 // Lossless Staking — pooled staking across three fixed-term NNS neurons
@@ -95,6 +96,7 @@ export default function Staking({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  useErrorImpression(error, 'staking');
 
   const refresh = async () => {
     if (!actor) return;

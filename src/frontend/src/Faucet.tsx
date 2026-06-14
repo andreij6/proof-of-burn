@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
 import { Icon, Eyebrow, Chip, Btn, MoreInfo, formatPrincipal } from './ui';
+import { useErrorImpression } from './analytics';
 
 interface FaucetProps {
   actor: any;
@@ -78,6 +79,7 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
   const [busy, setBusy] = useState<'' | 'claim' | 'register' | 'devfund' | 'devgrants'>('');
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  useErrorImpression(error, 'faucet');
 
   const parseCanister = useCallback((): Principal | null => {
     const t = canisterInput.trim();

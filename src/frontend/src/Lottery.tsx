@@ -3,6 +3,7 @@ import { Principal } from "@icp-sdk/core/principal";
 import { DrawStatus } from "./bindings/backend";
 import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
+import { useErrorImpression } from "./analytics";
 
 // ==========================================
 // Lossless Lottery — stake-weighted tickets, dynamic odds (one winner a month
@@ -51,6 +52,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  useErrorImpression(error, 'lottery');
   // 1-second tick so the countdown re-renders.
   const [, setTick] = useState(0);
 

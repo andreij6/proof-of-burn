@@ -3,6 +3,7 @@ import { Principal } from '@icp-sdk/core/principal';
 import type { CourseCard, MarketplaceFilter, FeaturedSlot, Rating, CourseRatingSummary } from './bindings/backend';
 import { DifficultyFilter, ListedFilter, ExplorerToken } from './bindings/backend';
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal, fmtICP, usePageDevControls } from './ui';
+import { useErrorImpression } from './analytics';
 import { parseTokenAmount } from './IdeaBoard';
 import { parseTokenUnits, fmtUsd } from './tokens';
 import { makeApprover } from './minters';
@@ -70,6 +71,7 @@ export default function CourseMarketplace({
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  useErrorImpression(error, 'course_market');
 
   // course_nft canister id (for "View NFT ↗" per-token links). `opt principal`:
   // decoded to `Config.course_nft_canister?: Principal` — undefined ⇒ None ⇒

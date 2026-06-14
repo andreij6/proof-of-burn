@@ -6,6 +6,7 @@ import { fmtUsd } from "./tokens";
 import type { Idea, IdeaBoardInfo, Project } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal } from "./ui";
+import { useErrorImpression } from "./analytics";
 
 // ==========================================
 // Community R&D — ideas + admin-curated projects
@@ -202,6 +203,10 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   const [payStep, setPayStep] = useState('');
   const [payError, setPayError] = useState<string | null>(null);
   const [payBusy, setPayBusy] = useState(false);
+
+  useErrorImpression(postError, 'idea_post');
+  useErrorImpression(projError, 'idea_project');
+  useErrorImpression(payError, 'idea_pay');
   const [paySuccess, setPaySuccess] = useState(false);
 
   // Free upvote (no payment): id of the idea currently being upvoted.

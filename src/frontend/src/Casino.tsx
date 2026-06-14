@@ -5,6 +5,7 @@ import type {
   MyCasinoView, ChatMsgView, CrashStrategy, AutopilotState,
 } from './bindings/backend';
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal } from './ui';
+import { useErrorImpression } from './analytics';
 import {
   multiplierX100, fmtX, historyChipTone, betButton, recomputeCrashX100,
   effectiveTargetX100, type BetPhase,
@@ -75,6 +76,7 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
   const [chatText, setChatText] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  useErrorImpression(error, 'casino');
   const [tick, setTick] = useState(0); // drives the live curve at ~10fps
   const [verify, setVerify] = useState<{ item: CrashHistoryItem; data?: CrashVerifyView; client?: number } | null>(null);
   const [muted, setMuted] = useState(false);

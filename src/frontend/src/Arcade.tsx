@@ -6,6 +6,7 @@ import type { ArcadeInfo, ArcadeLeaderboardRow, ExplorerInfo, ExplorerQuote } fr
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, formatPrincipal } from "./ui";
 import { fmtTokenAmount } from "./IdeaBoard";
+import { useErrorImpression } from "./analytics";
 import FieldGoal from "./arcade/FieldGoal";
 import CourseMarketplace from "./CourseMarketplace";
 import CourseEditor from "./CourseEditor";
@@ -191,6 +192,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   const [isQuoting, setIsQuoting] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [editorStep, setEditorStep] = useState('');
+  useErrorImpression(editorError, 'course_editor');
   const [editorBusy, setEditorBusy] = useState(false);
 
   // Live $1 quote in the chosen token while the editor is open.

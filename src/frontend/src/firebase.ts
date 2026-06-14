@@ -1,5 +1,4 @@
 import { initializeApp } from "firebase/app";
-import { getAnalytics, isSupported, type Analytics } from "firebase/analytics";
 
 // Firebase web config (Project settings → General → Your apps).
 // These values are not secret — they are shipped to the client.
@@ -14,12 +13,3 @@ const firebaseConfig = {
 };
 
 export const app = initializeApp(firebaseConfig);
-
-// Analytics only works in supported environments (browser, https/localhost).
-// isSupported() guards against errors during SSR/tests/unsupported browsers.
-export let analytics: Analytics | null = null;
-isSupported().then((supported) => {
-  if (supported) {
-    analytics = getAnalytics(app);
-  }
-});

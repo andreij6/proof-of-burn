@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Btn, Chip, Icon } from '../ui';
+import { useErrorImpression } from '../analytics';
 import {
   COURSE, GRID_W, GRID_H, CELL, CellType, WALKABLE, HOLES_PER_ROUND,
   holeToBackend, type BackendHole,
@@ -89,6 +90,7 @@ export default function CourseEditor({ actor }: { actor: any }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  useErrorImpression(error, 'course_editor_page');
 
   const loadOverrides = async () => {
     if (!actor) return;
