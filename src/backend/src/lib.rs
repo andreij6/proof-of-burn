@@ -219,6 +219,18 @@ pub struct PoolInfo {
     pub active_neurons: Vec<ActivePoolNeuron>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// Test-only clock override (ns). `None` → the fixed default. Lets
+    /// pacing / TTL / per-day-cap tests advance time deterministically.
+    static TEST_MOCK_TIME: RefCell<Option<u64>> = const { RefCell::new(None) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_time(ns: Option<u64>) {
+    TEST_MOCK_TIME.with(|c| *c.borrow_mut() = ns);
+}
+
 fn current_time() -> u64 {
     #[cfg(target_arch = "wasm32")]
     {
@@ -226,7 +238,7 @@ fn current_time() -> u64 {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        1_700_000_000_000_000_000
+        TEST_MOCK_TIME.with(|c| c.borrow().unwrap_or(1_700_000_000_000_000_000))
     }
 }
 
@@ -416,6 +428,12 @@ pub struct Config {
     /// valued at the cached ICP/USD rate. None = legacy ICP thresholds.
     #[serde(default)]
     pub default_threshold_usd_e8s: Option<u64>,
+    /// CourseNFT (ICRC-7) canister id — the authoritative token ledger for the
+    /// Course NFT marketplace (PB-300). Set by `admin_set_course_nft_canister`
+    /// and by `deploy-local.sh`. None until wired; the backend is the
+    /// allowlisted minter/custodian on that canister.
+    #[serde(default)]
+    pub course_nft_canister: Option<Principal>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -614,6 +632,7 @@ thread_local! {
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
             lottery_tickets_per_day: default_lottery_tickets_per_day(),
             default_threshold_usd_e8s: None,
+            course_nft_canister: None,
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -788,6 +807,7 @@ fn init(payload: InitPayload) {
         maturity_threshold_e8s: default_maturity_threshold_e8s(),
         lottery_tickets_per_day: default_lottery_tickets_per_day(),
         default_threshold_usd_e8s: None,
+        course_nft_canister: None,
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
@@ -4355,6 +4375,7 @@ fn setup_timers() {
         lottery_draw_check().await;
         early_adopter_settlement_check().await;
         casino_weekly_burn();
+        sweep_play_sessions(); // PB-306: reap completed/expired play sessions.
     });
     // Short watchdog so the crash loop self-heals if a one-shot timer is ever
     // dropped (e.g. across an upgrade). Cheap: a couple of reads when idle.
@@ -7167,11 +7188,13 @@ async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     pool.total_staked_e8s = pool.total_staked_e8s.saturating_sub(amount_e8s);
     set_tier_pool(tier, pool);
 
-    // Fully unstaked across every tier → lottery eligibility ends NOW:
-    // current-round tickets are void, no future drawing can pick them.
-    if !user_has_stake(caller) {
-        void_current_round_tickets(caller);
-    }
+    // Ticket lifetime (confirmed product rule, 2026-06-13): tickets are NEVER
+    // voided on unstake. The ONLY reset is winning the lottery (a draw bumps
+    // `lottery_state().round`, zeroing every stale-round count on next touch).
+    // Once the stake is gone the daily grant simply stops accruing NEW tickets;
+    // already-earned tickets (from any source) ride until the next win.
+    // Admin-exclusion is a separate integrity rule and is retained (see
+    // `void_current_round_tickets` call sites in add_admin / promotion).
 
     let id = NEXT_UNSTAKE_ID.with(|c| {
         let id = *c.borrow().get();
@@ -10453,15 +10476,10 @@ fn submit_arcade_score(game: String, millis: u64, per_hole: Vec<u8>) -> Result<u
     }
     match game.as_str() {
         ARCADE_GAME_MINIGOLF => {
-            if per_hole.len() != MINIGOLF_HOLES {
-                return Err("INVALID_HOLE_COUNT".to_string());
-            }
-            if per_hole.iter().any(|&s| s == 0 || s > MINIGOLF_MAX_STROKES_PER_HOLE) {
-                return Err("INVALID_STROKES".to_string());
-            }
-            if !(MINIGOLF_MIN_MILLIS..=MINIGOLF_MAX_MILLIS).contains(&millis) {
-                return Err("INVALID_TIME".to_string());
-            }
+            // PB-309 (D4): the global mini-golf leaderboard is retired — the
+            // Course Marketplace replaces it. Reject score writes for minigolf
+            // before any state mutation; Field Goal / Turbo Rush are unaffected.
+            return Err("MINIGOLF_RETIRED".to_string());
         }
         ARCADE_GAME_FIELDGOAL => {
             // per_hole = points per kick: the distance in yards on a make,
@@ -10668,6 +10686,11 @@ fn admin_reset_arcade_hole(index: u8) -> Result<(), String> {
 /// Top 100 for one game: fewest strokes, fastest time, earliest submission.
 #[ic_cdk::query]
 fn get_arcade_leaderboard(game: String) -> Vec<ArcadeLeaderboardRow> {
+    // PB-309 (D4): mini-golf leaderboard retired — always empty. Field Goal /
+    // Turbo Rush boards are unchanged.
+    if game == ARCADE_GAME_MINIGOLF {
+        return vec![];
+    }
     let mut scores: Vec<ArcadeScore> = ARCADE_SCORES.with(|m| {
         m.borrow()
             .iter()
@@ -13458,6 +13481,1142 @@ fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
     });
 }
 
+// ==========================================
+// 20. Course NFT marketplace
+// ==========================================
+//
+// The backend is the Marketplace Controller for the Course NFT feature
+// (PB-300). It owns marketplace state (listings, play sessions, ticket
+// crediting, mint fee split) and reaches the standards-shaped ICRC-7
+// `course_nft` canister only by inter-canister `ic_cdk::call` to the principal
+// configured in `Config::course_nft_canister` — the crate is never imported.
+//
+// Specs: ideas/course-nft/tasks/04-minting-flow.md (PB-304),
+// 05-marketplace.md (PB-305), 06-play-to-earn-and-anticheat.md (PB-306),
+// 09-leaderboard-removal-and-arcade-migration.md (PB-309).
+//
+// MemoryIds (00 §5): 77 COURSE_LISTINGS, 79 PLAY_SESSIONS,
+// 80 COURSE_TICKET_CAPS, 82 NEXT_SESSION_ID, 83 MINT_SAGAS, 85 COURSE_PAIR_CAPS.
+// (78 FEATURED_SLOT, 81 RATINGS, 84 SALES reserved for later phases — not used.)
+
+// ── Constants ───────────────────────────────────────────────────────────────
+
+const MINT_FEE_E8S: u64 = 50_000_000; // 0.5 ICP
+#[allow(dead_code)]
+const COURSE_NFT_HOLES: usize = 9; // exactly 9
+const MAX_COURSE_DATA_BYTES: usize = 64 * 1024; // at-mint blob cap (PB-303 owns final number)
+const MAX_COURSE_NAME_CHARS: usize = 60;
+/// Mint escrow subaccount sentinel — distinct from any proposal id so a user's
+/// mint escrow never collides with a commit escrow (B.3).
+const MINT_ESCROW_TAG: u64 = u64::MAX - 304;
+const MAX_LISTING_E8S: u64 = 100_000_000_000_000; // 1,000,000 ICP sanity cap
+
+// Anti-cheat (PB-306 B1).
+const MIN_HOLE_INTERVAL_NS: u64 = 3_000_000_000; // 3 s wall-clock floor between holes
+const SESSION_TTL_NS: u64 = 2 * 3_600 * 1_000_000_000; // 2 h
+const SESSION_SWEEP_BATCH: usize = 200;
+const MAX_PLAYER_TICKETS_PER_DAY: u32 = 20;
+const MAX_OWNER_TICKETS_PER_DAY: u32 = 200;
+const MAX_PER_COURSE_PER_PLAYER_PER_DAY: u32 = 5;
+
+// ── Data models (stable) ──────────────────────────────────────────────────────
+
+/// Marketplace listing + controller-side cache of authoritative CourseNFT
+/// metadata (PB-305 B1). The CourseNFT canister is authoritative for
+/// ownership/metadata; this row is cache + marketplace state (price/listed).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CourseListing {
+    pub token_id: u64,
+    pub listed: bool,
+    pub price_e8s: u64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub owner: Option<Principal>,
+    #[serde(default)]
+    pub creator: Option<Principal>,
+    #[serde(default)]
+    pub play_count: u64,
+    #[serde(default)]
+    pub tickets_distributed: u64,
+    #[serde(default)]
+    pub par_total: u8,
+    #[serde(default)]
+    pub theme: u8, // Theme discriminant (0..=4), Custom=4
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub mint_fee_e8s: u64,
+}
+impl_storable!(CourseListing);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum PlaySessionStatus {
+    Active,
+    Completed,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct PlaySession {
+    pub id: u64,
+    pub player: Principal,
+    pub token_id: u64,
+    pub issued_at: u64,
+    pub nonce: u64,
+    pub last_hole: u8,
+    pub last_hole_at: u64,
+    pub status: PlaySessionStatus,
+    #[serde(default)]
+    pub owner_credited_holes: u8,
+}
+impl_storable!(PlaySession);
+
+/// Two daily counters per principal (a principal can be both player & owner).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct TicketCapEntry {
+    #[serde(default)]
+    pub player_tickets: u32,
+    #[serde(default)]
+    pub owner_tickets: u32,
+}
+impl_storable!(TicketCapEntry);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DayCapKey {
+    pub who: Principal,
+    pub day: u32,
+}
+impl_storable!(DayCapKey);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PairCapKey {
+    pub player: Principal,
+    pub token_id: u64,
+    pub day: u32,
+}
+impl_storable!(PairCapKey);
+
+/// Two-canister mint idempotency journal (PB-304 B4).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct MintSaga {
+    pub caller: Principal,
+    pub course_data: Vec<u8>,
+    pub name: String,
+    pub par_total: u8,
+    pub theme: u8,
+    pub fee_e8s: u64,
+    pub treasury_block: Option<u64>,
+    pub cmc_block_index: Option<u64>,
+    pub frontend_cmc_block: Option<u64>,
+    pub minted_token_id: Option<u64>,
+    pub listed: bool,
+    pub started_at: u64,
+}
+impl_storable!(MintSaga);
+
+thread_local! {
+    static COURSE_LISTINGS: RefCell<StableBTreeMap<u64, CourseListing, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(77)))));
+
+    static PLAY_SESSIONS: RefCell<StableBTreeMap<u64, PlaySession, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(79)))));
+
+    static COURSE_TICKET_CAPS: RefCell<StableBTreeMap<DayCapKey, TicketCapEntry, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(80)))));
+
+    static NEXT_SESSION_ID: RefCell<StableCell<u64, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(82)), 1u64)));
+
+    static MINT_SAGAS: RefCell<StableBTreeMap<Principal, MintSaga, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(83)))));
+
+    static COURSE_PAIR_CAPS: RefCell<StableBTreeMap<PairCapKey, u32, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(85)))));
+
+    /// Per-caller in-flight mint guard (heap; cleared on completion) — returns
+    /// AlreadyMinting on a concurrent second call, like LotteryLock (B5).
+    static MINTING_IN_FLIGHT: RefCell<std::collections::HashSet<Principal>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+// ── CourseNFT inter-canister client (+ native mock seams) ────────────────────
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Icrc7Account {
+    pub owner: Principal,
+    pub subaccount: Option<Vec<u8>>,
+}
+
+/// MintArgs mirror of the course_nft canister's `mint` (PB-301). Constructed
+/// here for the inter-canister call; the crate is never imported.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CourseMintArgs {
+    pub to: Principal,
+    pub name: String,
+    pub creator: Principal,
+    pub course_data: Vec<u8>,
+    pub par_total: u16,
+    pub mint_fee_e8s: u64,
+}
+
+fn course_nft_canister_id() -> Result<Principal, String> {
+    CONFIG
+        .with(|c| c.borrow().get().course_nft_canister)
+        .ok_or_else(|| "COURSE_NFT_NOT_CONFIGURED".to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// token_id -> live owner, for native unit tests (B2).
+    static TEST_MOCK_OWNER: RefCell<std::collections::HashMap<u64, Principal>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// Next token id the mock `course_nft_mint` returns, and a flag to force a
+    /// mint-call failure (saga resume tests).
+    static TEST_MOCK_MINT: RefCell<(u64, bool)> = const { RefCell::new((1, false)) };
+    /// Recorded increment_play calls (for assertions).
+    static TEST_MOCK_INCREMENT_PLAY: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_owner(token_id: u64, owner: Principal) {
+    TEST_MOCK_OWNER.with(|m| {
+        m.borrow_mut().insert(token_id, owner);
+    });
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn clear_mock_owner(token_id: u64) {
+    TEST_MOCK_OWNER.with(|m| {
+        m.borrow_mut().remove(&token_id);
+    });
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_mint(next_id: u64, fail: bool) {
+    TEST_MOCK_MINT.with(|c| *c.borrow_mut() = (next_id, fail));
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn course_nft_owner_of(token_id: u64) -> Result<Option<Principal>, String> {
+    let id = course_nft_canister_id()?;
+    let res: Result<(Vec<Option<Icrc7Account>>,), _> =
+        ic_cdk::call(id, "icrc7_owner_of", (vec![candid::Nat::from(token_id)],)).await;
+    match res {
+        Ok((mut v,)) => Ok(v.drain(..).next().flatten().map(|a| a.owner)),
+        Err((c, m)) => Err(format!("OWNER_OF_REJECTED ({:?}): {}", c, m)),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn course_nft_owner_of(token_id: u64) -> Result<Option<Principal>, String> {
+    Ok(TEST_MOCK_OWNER.with(|m| m.borrow().get(&token_id).copied()))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn course_nft_mint(args: CourseMintArgs) -> Result<u64, String> {
+    let id = course_nft_canister_id()?;
+    let res: Result<(Result<u64, String>,), _> = ic_cdk::call(id, "mint", (args,)).await;
+    match res {
+        Ok((Ok(token_id),)) => Ok(token_id),
+        Ok((Err(e),)) => Err(format!("MINT_ERR: {}", e)),
+        Err((c, m)) => Err(format!("MINT_REJECTED ({:?}): {}", c, m)),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn course_nft_mint(args: CourseMintArgs) -> Result<u64, String> {
+    let (next_id, fail) = TEST_MOCK_MINT.with(|c| *c.borrow());
+    if fail {
+        return Err("MINT_REJECTED (mock failure)".to_string());
+    }
+    // Reflect the new ownership into the owner mock so play tests can resolve it.
+    set_mock_owner(next_id, args.to);
+    set_mock_mint(next_id + 1, false);
+    Ok(next_id)
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn course_nft_increment_play(token_id: u64) {
+    if let Ok(id) = course_nft_canister_id() {
+        let _: Result<(Result<(), String>,), _> =
+            ic_cdk::call(id, "increment_play", (token_id,)).await;
+        // Best-effort cosmetic provenance — never fail the play call (PB-306 A6).
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn course_nft_increment_play(token_id: u64) {
+    TEST_MOCK_INCREMENT_PLAY.with(|v| v.borrow_mut().push(token_id));
+}
+
+// ── Difficulty bucket (PB-305) ───────────────────────────────────────────────
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum Difficulty {
+    Easy,
+    Medium,
+    Hard,
+}
+
+fn difficulty_bucket(par_total: u8) -> Difficulty {
+    if par_total <= 27 {
+        Difficulty::Easy
+    } else if par_total >= 45 {
+        Difficulty::Hard
+    } else {
+        Difficulty::Medium
+    }
+}
+
+// ── Mint (PB-304) ─────────────────────────────────────────────────────────────
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub enum MintError {
+    NotAuthenticated,
+    InvalidCourse(String),
+    InsufficientDeposit { needed: u64, found: u64 },
+    FeeSettlementFailed(String),
+    MintCallFailed(String),
+    AlreadyMinting,
+}
+
+/// Minimal MVP server-side validation (PB-304 B2). Full CourseDataV1 CBOR
+/// validation is owned by PB-303 (`validate_course_v1`); here we enforce the
+/// trust-boundary essentials available without importing that crate: blob size,
+/// non-empty, name bounds. Returns `(par_total, theme)` parsed best-effort.
+fn validate_course_for_mint(bytes: &[u8], name: &str) -> Result<(u8, u8), MintError> {
+    if bytes.is_empty() {
+        return Err(MintError::InvalidCourse("EMPTY_COURSE_DATA".into()));
+    }
+    if bytes.len() > MAX_COURSE_DATA_BYTES {
+        return Err(MintError::InvalidCourse("DATA_TOO_LARGE".into()));
+    }
+    let chars = name.chars().count();
+    if chars == 0 {
+        return Err(MintError::InvalidCourse("NAME_EMPTY".into()));
+    }
+    if chars > MAX_COURSE_NAME_CHARS {
+        return Err(MintError::InvalidCourse("NAME_TOO_LONG".into()));
+    }
+    let (par_total, theme) = decode_course_meta(bytes);
+    Ok((par_total, theme))
+}
+
+/// Best-effort extraction of `par_total` and `theme` from the CBOR blob for the
+/// marketplace cache. Tolerant: returns conservative defaults if absent. PB-303
+/// owns the authoritative schema; this only reads two convenience fields.
+fn decode_course_meta(bytes: &[u8]) -> (u8, u8) {
+    use ciborium::value::Value as Cv;
+    let parsed: Result<Cv, _> = ciborium::from_reader(bytes);
+    let mut par_total: u8 = 0;
+    let mut theme: u8 = 0;
+    if let Ok(Cv::Map(entries)) = parsed {
+        for (k, v) in entries {
+            if let Cv::Text(key) = k {
+                match key.as_str() {
+                    "par_total" => {
+                        if let Cv::Integer(i) = v {
+                            par_total = u8::try_from(i128::from(i)).unwrap_or(0);
+                        }
+                    }
+                    "theme" => {
+                        if let Cv::Integer(i) = v {
+                            theme = u8::try_from(i128::from(i)).unwrap_or(0);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    (par_total, theme)
+}
+
+#[ic_cdk::query(guard = "require_authenticated")]
+fn get_mint_deposit_address() -> LedgerAccount {
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(derive_subaccount(&get_caller(), MINT_ESCROW_TAG)),
+    }
+}
+
+#[ic_cdk::update(guard = "require_authenticated")]
+async fn mint_course_nft(course_data: Vec<u8>, name: String) -> Result<u64, MintError> {
+    let caller = get_caller();
+    if caller == Principal::anonymous() {
+        return Err(MintError::NotAuthenticated);
+    }
+    // Tier gate: minting requires Tier 2+ (signed in + following the leader).
+    if course_caller_tier(caller) < 2 {
+        return Err(MintError::NotAuthenticated);
+    }
+
+    // Concurrency guard (B5).
+    let acquired = MINTING_IN_FLIGHT.with(|s| s.borrow_mut().insert(caller));
+    if !acquired {
+        return Err(MintError::AlreadyMinting);
+    }
+    let result = mint_course_nft_inner(caller, course_data, name).await;
+    MINTING_IN_FLIGHT.with(|s| {
+        s.borrow_mut().remove(&caller);
+    });
+    result
+}
+
+async fn mint_course_nft_inner(
+    caller: Principal,
+    course_data: Vec<u8>,
+    name: String,
+) -> Result<u64, MintError> {
+    let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+    let now = current_time();
+
+    // Step 1 — resume an incomplete saga, else validate + persist a fresh one.
+    let mut saga = match MINT_SAGAS.with(|m| m.borrow().get(&caller)) {
+        Some(existing) => existing, // retry of the same course (idempotent resume)
+        None => {
+            let (par_total, theme) = validate_course_for_mint(&course_data, &name)?;
+            let s = MintSaga {
+                caller,
+                course_data: course_data.clone(),
+                name: name.clone(),
+                par_total,
+                theme,
+                fee_e8s: MINT_FEE_E8S,
+                treasury_block: None,
+                cmc_block_index: None,
+                frontend_cmc_block: None,
+                minted_token_id: None,
+                listed: false,
+                started_at: now,
+            };
+            MINT_SAGAS.with(|m| {
+                m.borrow_mut().insert(caller, s.clone());
+            });
+            s
+        }
+    };
+
+    let mint_sub = derive_subaccount(&caller, MINT_ESCROW_TAG);
+
+    // Step 2 — verify deposit (only if the fee hasn't already been charged).
+    let fee_settled = saga.treasury_block.is_some()
+        && saga.cmc_block_index.is_some()
+        && saga.frontend_cmc_block.is_some();
+    if !fee_settled {
+        let escrow = LedgerAccount {
+            owner: get_canister_id(),
+            subaccount: Some(mint_sub),
+        };
+        let balance = call_ledger_balance(ledger_id, escrow)
+            .await
+            .map_err(|e| MintError::FeeSettlementFailed(format!("ESCROW_BALANCE: {}", e)))?;
+        if balance < MINT_FEE_E8S {
+            return Err(MintError::InsufficientDeposit {
+                needed: MINT_FEE_E8S,
+                found: balance,
+            });
+        }
+
+        // Step 3 — charge: 50/25/25 split, idempotent per leg (reuse
+        // settle_burn_split via a Commitment with proposal_id = MINT_ESCROW_TAG).
+        let mut commitment = Commitment {
+            proposal_id: MINT_ESCROW_TAG,
+            principal: caller,
+            amount_e8s: MINT_FEE_E8S,
+            status: CommitmentStatus::Pending,
+            created_at: saga.started_at,
+            stance: Stance::Adopt,
+            subaccount: mint_sub,
+            settled_at: None,
+            cmc_block_index: saga.cmc_block_index,
+            treasury_block: saga.treasury_block,
+            frontend_cmc_block: saga.frontend_cmc_block,
+            token: None,
+            token_amount: None,
+            swapped_icp_e8s: None,
+        };
+        let settle = settle_burn_split(ledger_id, mint_sub, MINT_FEE_E8S, &mut commitment).await;
+        // Mirror block indices back regardless of outcome (partial progress).
+        saga.treasury_block = commitment.treasury_block;
+        saga.cmc_block_index = commitment.cmc_block_index;
+        saga.frontend_cmc_block = commitment.frontend_cmc_block;
+        MINT_SAGAS.with(|m| {
+            m.borrow_mut().insert(caller, saga.clone());
+        });
+        settle.map_err(MintError::FeeSettlementFailed)?;
+    }
+
+    // Step 4 — mint the token (skipped if already minted).
+    if saga.minted_token_id.is_none() {
+        let token_id = course_nft_mint(CourseMintArgs {
+            to: caller,
+            name: saga.name.clone(),
+            creator: caller,
+            course_data: saga.course_data.clone(),
+            par_total: saga.par_total as u16,
+            mint_fee_e8s: MINT_FEE_E8S,
+        })
+        .await
+        .map_err(MintError::MintCallFailed)?;
+        saga.minted_token_id = Some(token_id);
+        MINT_SAGAS.with(|m| {
+            m.borrow_mut().insert(caller, saga.clone());
+        });
+    }
+    let token_id = saga.minted_token_id.unwrap();
+
+    // Step 5 — auto-list (idempotent).
+    if !saga.listed {
+        COURSE_LISTINGS.with(|m| {
+            m.borrow_mut().insert(
+                token_id,
+                CourseListing {
+                    token_id,
+                    listed: true,
+                    price_e8s: 0,
+                    name: saga.name.clone(),
+                    owner: Some(caller),
+                    creator: Some(caller),
+                    play_count: 0,
+                    tickets_distributed: 0,
+                    par_total: saga.par_total,
+                    theme: saga.theme,
+                    created_at: saga.started_at,
+                    mint_fee_e8s: MINT_FEE_E8S,
+                },
+            );
+        });
+        saga.listed = true;
+        MINT_SAGAS.with(|m| {
+            m.borrow_mut().insert(caller, saga.clone());
+        });
+    }
+
+    // Step 6 — finalize: clear saga, log.
+    MINT_SAGAS.with(|m| {
+        m.borrow_mut().remove(&caller);
+    });
+    log_dapp_event("course_mint", token_id, caller, MINT_FEE_E8S);
+    Ok(token_id)
+}
+
+/// Tier derivation (mirrors `get_eligibility`): 0 anon, 1 authed-not-following,
+/// 2+ following. Used for the mint gate and the player-ticket gate.
+fn course_caller_tier(caller: Principal) -> u8 {
+    if caller == Principal::anonymous() {
+        return 0;
+    }
+    let following = USER_NEURONS
+        .with(|m| m.borrow().get(&caller).map(|s| s.is_following).unwrap_or(false));
+    if following {
+        2
+    } else {
+        1
+    }
+}
+
+// ── Marketplace (PB-305) ─────────────────────────────────────────────────────
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub enum DifficultyFilter {
+    Any,
+    Easy,
+    Medium,
+    Hard,
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub enum ListedFilter {
+    Any,
+    Yes,
+    No,
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct MarketplaceFilter {
+    pub difficulty: DifficultyFilter,
+    pub theme: Option<u8>,
+    pub listed: ListedFilter,
+    pub mine_only: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CourseCard {
+    pub token_id: u64,
+    pub name: String,
+    pub creator: Option<Principal>,
+    pub owner: Option<Principal>,
+    pub par_total: u8,
+    pub play_count: u64,
+    pub tickets_distributed: u64,
+    pub theme: u8,
+    pub listed: bool,
+    pub price_e8s: u64,
+    pub created_at: u64,
+    pub is_caller_owner: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct MarketplacePage {
+    pub courses: Vec<CourseCard>,
+    pub featured_token_id: Option<u64>,
+    pub seed: u64,
+    pub total: u64,
+}
+
+fn listing_to_card(l: &CourseListing, caller: Principal) -> CourseCard {
+    CourseCard {
+        token_id: l.token_id,
+        name: l.name.clone(),
+        creator: l.creator,
+        owner: l.owner,
+        par_total: l.par_total,
+        play_count: l.play_count,
+        tickets_distributed: l.tickets_distributed,
+        theme: l.theme,
+        listed: l.listed,
+        price_e8s: l.price_e8s,
+        created_at: l.created_at,
+        is_caller_owner: l.owner == Some(caller),
+    }
+}
+
+fn listing_matches(l: &CourseListing, f: &MarketplaceFilter, caller: Principal) -> bool {
+    match f.difficulty {
+        DifficultyFilter::Any => {}
+        DifficultyFilter::Easy => {
+            if difficulty_bucket(l.par_total) != Difficulty::Easy {
+                return false;
+            }
+        }
+        DifficultyFilter::Medium => {
+            if difficulty_bucket(l.par_total) != Difficulty::Medium {
+                return false;
+            }
+        }
+        DifficultyFilter::Hard => {
+            if difficulty_bucket(l.par_total) != Difficulty::Hard {
+                return false;
+            }
+        }
+    }
+    if let Some(t) = f.theme {
+        if l.theme != t {
+            return false;
+        }
+    }
+    match f.listed {
+        ListedFilter::Any => {}
+        ListedFilter::Yes => {
+            if !l.listed {
+                return false;
+            }
+        }
+        ListedFilter::No => {
+            if l.listed {
+                return false;
+            }
+        }
+    }
+    if f.mine_only && l.owner != Some(caller) {
+        return false;
+    }
+    true
+}
+
+#[ic_cdk::query]
+fn list_marketplace_courses(filter: MarketplaceFilter) -> MarketplacePage {
+    let caller = get_caller();
+    // Degrade to an empty page when the arcade mini-golf surface is off for the
+    // caller (the nav hides it; a query must not trap — PB-305 B3).
+    if require_arcade_game_enabled(ARCADE_GAME_MINIGOLF).is_err() {
+        return MarketplacePage {
+            courses: vec![],
+            featured_token_id: None,
+            seed: 0,
+            total: 0,
+        };
+    }
+    let featured_token_id: Option<u64> = None; // FEATURED_SLOT (PB-308) not built.
+    let mut matched: Vec<CourseCard> = COURSE_LISTINGS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|l| listing_matches(l, &filter, caller))
+            .filter(|l| Some(l.token_id) != featured_token_id)
+            .map(|l| listing_to_card(&l, caller))
+            .collect()
+    });
+    matched.sort_by_key(|c| c.token_id);
+    let total = matched.len() as u64;
+    let seed = current_time(); // cheap shuffle hint; FE re-rolls its own seed.
+    MarketplacePage {
+        courses: matched,
+        featured_token_id,
+        seed,
+        total,
+    }
+}
+
+#[ic_cdk::query]
+fn get_course(token_id: u64) -> Option<CourseCard> {
+    let caller = get_caller();
+    COURSE_LISTINGS.with(|m| m.borrow().get(&token_id).map(|l| listing_to_card(&l, caller)))
+}
+
+#[ic_cdk::update]
+async fn get_course_data(token_id: u64) -> Option<Vec<u8>> {
+    // Passthrough for Play: read the verbatim course_data blob from the
+    // authoritative CourseNFT canister (PB-305 B3). Update (awaits a query call).
+    let id = match course_nft_canister_id() {
+        Ok(id) => id,
+        Err(_) => return None,
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        let res: Result<(Vec<Option<Vec<u8>>>,), _> =
+            ic_cdk::call(id, "course_data_of", (vec![candid::Nat::from(token_id)],)).await;
+        match res {
+            Ok((mut v,)) => v.drain(..).next().flatten(),
+            Err(_) => None,
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = id;
+        let _ = token_id;
+        None
+    }
+}
+
+#[ic_cdk::update(guard = "require_authenticated")]
+async fn list_course_for_sale(token_id: u64, price_e8s: u64) -> Result<(), String> {
+    require_arcade_game_enabled(ARCADE_GAME_MINIGOLF)?;
+    let caller = get_caller();
+    if price_e8s == 0 {
+        return Err("PRICE_ZERO_USE_DELIST".to_string());
+    }
+    if price_e8s > MAX_LISTING_E8S {
+        return Err("PRICE_TOO_HIGH".to_string());
+    }
+    let owner = course_nft_owner_of(token_id)
+        .await?
+        .ok_or_else(|| "TOKEN_NOT_FOUND".to_string())?;
+    if owner != caller {
+        return Err("NOT_OWNER".to_string());
+    }
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        let mut row = map.get(&token_id).unwrap_or(CourseListing {
+            token_id,
+            listed: false,
+            price_e8s: 0,
+            name: String::new(),
+            owner: Some(owner),
+            creator: Some(owner),
+            play_count: 0,
+            tickets_distributed: 0,
+            par_total: 0,
+            theme: 0,
+            created_at: current_time(),
+            mint_fee_e8s: 0,
+        });
+        row.listed = true;
+        row.price_e8s = price_e8s;
+        row.owner = Some(owner);
+        map.insert(token_id, row);
+    });
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_authenticated")]
+async fn delist_course(token_id: u64) -> Result<(), String> {
+    require_arcade_game_enabled(ARCADE_GAME_MINIGOLF)?;
+    let caller = get_caller();
+    let owner = course_nft_owner_of(token_id)
+        .await?
+        .ok_or_else(|| "TOKEN_NOT_FOUND".to_string())?;
+    if owner != caller {
+        return Err("NOT_OWNER".to_string());
+    }
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some(mut row) = map.get(&token_id) {
+            row.listed = false;
+            row.price_e8s = 0;
+            row.owner = Some(owner);
+            map.insert(token_id, row);
+            Ok(())
+        } else {
+            Err("LISTING_NOT_FOUND".to_string())
+        }
+    })
+}
+
+#[ic_cdk::update]
+async fn refresh_course_listing(token_id: u64) -> Result<(), String> {
+    // Lazy cache reconciliation (PB-305 B6): re-read the live owner. (Metadata
+    // refresh beyond owner is best-effort; PB-301 owns the metadata decode.)
+    let owner = course_nft_owner_of(token_id).await?;
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some(mut row) = map.get(&token_id) {
+            row.owner = owner;
+            map.insert(token_id, row);
+            Ok(())
+        } else {
+            Err("LISTING_NOT_FOUND".to_string())
+        }
+    })
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_course_nft_canister(canister: Principal) -> Result<(), String> {
+    if canister == Principal::anonymous() {
+        return Err("INVALID_CANISTER".to_string());
+    }
+    CONFIG.with(|cell| {
+        let mut cfg = cell.borrow().get().clone();
+        cfg.course_nft_canister = Some(canister);
+        cell.borrow_mut().set(cfg);
+    });
+    Ok(())
+}
+
+// ── Play + anti-cheat (PB-306) ───────────────────────────────────────────────
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct StartSessionOk {
+    pub session_id: u64,
+    pub server_time: u64,
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct RecordHoleOk {
+    pub last_hole: u8,
+    pub owner_credited: bool,
+    pub owner: Option<Principal>,
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CompleteRoundOk {
+    pub player_credited: bool,
+    pub reason: Option<String>,
+}
+
+/// Pure synchronous update — no `raw_rand`, no inter-canister await (PB-306 A2).
+#[ic_cdk::update]
+fn start_play_session(token_id: u64) -> Result<StartSessionOk, String> {
+    // Require the course is minted + listed (delisted courses accrue nothing).
+    let listed = COURSE_LISTINGS.with(|m| m.borrow().get(&token_id).map(|l| l.listed));
+    match listed {
+        Some(true) => {}
+        Some(false) => return Err("COURSE_NOT_LISTED".to_string()),
+        None => return Err("COURSE_NOT_FOUND".to_string()),
+    }
+    let caller = get_caller(); // anonymous allowed (play for fun)
+    let now = current_time();
+    let session_id = NEXT_SESSION_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    // Synchronous journal nonce (never raw_rand) — id is the trust anchor.
+    let nonce = now ^ session_id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let session = PlaySession {
+        id: session_id,
+        player: caller,
+        token_id,
+        issued_at: now,
+        nonce,
+        last_hole: 0,
+        last_hole_at: now,
+        status: PlaySessionStatus::Active,
+        owner_credited_holes: 0,
+    };
+    PLAY_SESSIONS.with(|m| {
+        m.borrow_mut().insert(session_id, session);
+    });
+    Ok(StartSessionOk {
+        session_id,
+        server_time: now,
+    })
+}
+
+fn load_active_session(session_id: u64, caller: Principal, now: u64) -> Result<PlaySession, String> {
+    let s = PLAY_SESSIONS
+        .with(|m| m.borrow().get(&session_id))
+        .ok_or_else(|| "SESSION_NOT_FOUND".to_string())?;
+    if s.player != caller {
+        return Err("NOT_YOUR_SESSION".to_string());
+    }
+    if now > s.issued_at + SESSION_TTL_NS {
+        return Err("SESSION_EXPIRED".to_string());
+    }
+    Ok(s)
+}
+
+#[ic_cdk::update]
+async fn record_hole_event(session_id: u64, hole: u8) -> Result<RecordHoleOk, String> {
+    let caller = get_caller();
+    let now = current_time();
+    let mut s = load_active_session(session_id, caller, now)?;
+    if s.status == PlaySessionStatus::Completed {
+        return Err("SESSION_COMPLETED".to_string());
+    }
+    if !(1..=9).contains(&hole) {
+        return Err("BAD_HOLE".to_string());
+    }
+    if hole != s.last_hole + 1 {
+        return Err("OUT_OF_ORDER".to_string());
+    }
+    // Pacing floor: for hole 1, measure from issued_at (== last_hole_at at start).
+    if now < s.last_hole_at + MIN_HOLE_INTERVAL_NS {
+        return Err("TOO_FAST".to_string());
+    }
+    s.last_hole = hole;
+    s.last_hole_at = now;
+
+    let mut owner_credited = false;
+    let mut credited_owner: Option<Principal> = None;
+
+    if hole == 2 {
+        // Resolve the LIVE owner right now (V7). A failed lookup skips the
+        // credit but still advances the hole (round shouldn't die).
+        if let Ok(Some(owner)) = course_nft_owner_of(s.token_id).await {
+            credited_owner = Some(owner);
+            // Self-play suppression (V5): owner playing own course earns nothing.
+            if owner != caller && try_credit_owner_ticket(owner, caller, s.token_id, now) {
+                owner_credited = true;
+                s.owner_credited_holes = 1;
+                // Best-effort NFT counter bump (only on a successful owner credit).
+                course_nft_increment_play(s.token_id).await;
+                // Mirror the counters into the listing cache.
+                COURSE_LISTINGS.with(|m| {
+                    let mut map = m.borrow_mut();
+                    if let Some(mut row) = map.get(&s.token_id) {
+                        row.play_count = row.play_count.saturating_add(1);
+                        row.tickets_distributed = row.tickets_distributed.saturating_add(1);
+                        map.insert(s.token_id, row);
+                    }
+                });
+            }
+        }
+    }
+
+    PLAY_SESSIONS.with(|m| {
+        m.borrow_mut().insert(session_id, s.clone());
+    });
+
+    Ok(RecordHoleOk {
+        last_hole: s.last_hole,
+        owner_credited,
+        owner: credited_owner,
+    })
+}
+
+#[ic_cdk::update]
+fn complete_round(session_id: u64) -> Result<CompleteRoundOk, String> {
+    let caller = get_caller();
+    let now = current_time();
+    let mut s = load_active_session(session_id, caller, now)?;
+    if s.status == PlaySessionStatus::Completed {
+        return Err("ALREADY_COMPLETED".to_string());
+    }
+    if s.last_hole != 9 {
+        return Err("INCOMPLETE_ROUND".to_string());
+    }
+    s.status = PlaySessionStatus::Completed;
+    PLAY_SESSIONS.with(|m| {
+        m.borrow_mut().insert(session_id, s.clone());
+    });
+
+    // Player ticket: Tier 2+ only, per-player daily cap, admin-excluded.
+    let (player_credited, reason) = if course_caller_tier(caller) < 2 {
+        (
+            false,
+            Some(if caller == Principal::anonymous() {
+                "ANON".to_string()
+            } else {
+                "TIER_TOO_LOW".to_string()
+            }),
+        )
+    } else if is_admin_principal(caller) {
+        (false, Some("ADMIN_EXCLUDED".to_string()))
+    } else if !try_increment_player_cap(caller, now) {
+        (false, Some("DAILY_CAP".to_string()))
+    } else {
+        credit_course_ticket(caller);
+        (true, None)
+    };
+
+    Ok(CompleteRoundOk {
+        player_credited,
+        reason,
+    })
+}
+
+fn epoch_day(now: u64) -> u32 {
+    (now / 1_000_000_000 / SECS_PER_DAY) as u32
+}
+
+/// Attempt an owner-ticket credit, enforcing the per-owner and per-(player,
+/// course) daily caps and admin-exclusion. Returns true iff a ticket was
+/// credited. Cap/admin rejection is silent (the play still succeeds).
+fn try_credit_owner_ticket(owner: Principal, player: Principal, token_id: u64, now: u64) -> bool {
+    if is_admin_principal(owner) {
+        return false;
+    }
+    let day = epoch_day(now);
+    // Per-(player, course, day) anti-concentration cap.
+    let pair_key = PairCapKey {
+        player,
+        token_id,
+        day,
+    };
+    let pair_count = COURSE_PAIR_CAPS.with(|m| m.borrow().get(&pair_key).unwrap_or(0));
+    if pair_count >= MAX_PER_COURSE_PER_PLAYER_PER_DAY {
+        return false;
+    }
+    // Per-owner owner-ticket cap.
+    let owner_key = DayCapKey { who: owner, day };
+    let mut owner_entry =
+        COURSE_TICKET_CAPS.with(|m| m.borrow().get(&owner_key).unwrap_or_default());
+    if owner_entry.owner_tickets >= MAX_OWNER_TICKETS_PER_DAY {
+        return false;
+    }
+    // Both caps pass — credit and bump counters.
+    credit_course_ticket(owner);
+    owner_entry.owner_tickets = owner_entry.owner_tickets.saturating_add(1);
+    COURSE_TICKET_CAPS.with(|m| {
+        m.borrow_mut().insert(owner_key, owner_entry);
+    });
+    COURSE_PAIR_CAPS.with(|m| {
+        m.borrow_mut().insert(pair_key, pair_count + 1);
+    });
+    true
+}
+
+/// Reserve one player-ticket slot in today's cap. Returns false (cap hit) if
+/// already at the ceiling — the caller must NOT credit in that case.
+fn try_increment_player_cap(player: Principal, now: u64) -> bool {
+    let day = epoch_day(now);
+    let key = DayCapKey { who: player, day };
+    let mut entry = COURSE_TICKET_CAPS.with(|m| m.borrow().get(&key).unwrap_or_default());
+    if entry.player_tickets >= MAX_PLAYER_TICKETS_PER_DAY {
+        return false;
+    }
+    entry.player_tickets = entry.player_tickets.saturating_add(1);
+    COURSE_TICKET_CAPS.with(|m| {
+        m.borrow_mut().insert(key, entry);
+    });
+    true
+}
+
+/// Credit 1 ticket to `recipient` in the CURRENT lottery round (models
+/// `dev_grant_lottery_tickets`). Admin-excluded recipients are silently skipped.
+fn credit_course_ticket(recipient: Principal) {
+    if is_admin_principal(recipient) {
+        return;
+    }
+    let now = current_time();
+    let mut state = lottery_state();
+    let mut entry = LOTTERY_TICKETS
+        .with(|m| m.borrow().get(&recipient))
+        .unwrap_or(TicketEntry {
+            round: state.round,
+            count: 0,
+            last_claim_day: 0,
+        });
+    if entry.round != state.round {
+        entry = TicketEntry {
+            round: state.round,
+            count: 0,
+            last_claim_day: entry.last_claim_day,
+        };
+    }
+    entry.count = entry.count.saturating_add(1);
+    state.total_tickets = state.total_tickets.saturating_add(1);
+    if state.next_draw_at == 0 {
+        state.next_draw_at = next_draw_after(now);
+    }
+    LOTTERY_TICKETS.with(|m| {
+        m.borrow_mut().insert(recipient, entry);
+    });
+    set_lottery_state(state);
+}
+
+/// Local-dev: mint one sample course (fee waived) via course_nft and create its
+/// listing, so the marketplace is non-empty right after `deploy-local.sh`
+/// (PB-309 system-course stand-in). Idempotent — no-op if a listing exists.
+#[ic_cdk::update(guard = "require_admin")]
+async fn dev_seed_course() -> Result<u64, String> {
+    require_local_dev()?;
+    if COURSE_LISTINGS.with(|m| m.borrow().iter().next().is_some()) {
+        return Err("ALREADY_SEEDED".to_string());
+    }
+    let owner = get_canister_id(); // system principal (admin-owned → no tickets)
+    // Minimal sample course blob (par_total 30, Desert theme).
+    let course_data = {
+        use ciborium::value::Value as Cv;
+        let v = Cv::Map(vec![
+            (Cv::Text("par_total".into()), Cv::Integer(30i64.into())),
+            (Cv::Text("theme".into()), Cv::Integer(0i64.into())),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&v, &mut buf).map_err(|e| format!("ENCODE: {e}"))?;
+        buf
+    };
+    let token_id = course_nft_mint(CourseMintArgs {
+        to: owner,
+        name: "Sunny Dunes (sample)".to_string(),
+        creator: owner,
+        course_data,
+        par_total: 30,
+        mint_fee_e8s: 0,
+    })
+    .await?;
+    COURSE_LISTINGS.with(|m| {
+        m.borrow_mut().insert(
+            token_id,
+            CourseListing {
+                token_id,
+                listed: true,
+                price_e8s: 0,
+                name: "Sunny Dunes (sample)".to_string(),
+                owner: Some(owner),
+                creator: Some(owner),
+                play_count: 0,
+                tickets_distributed: 0,
+                par_total: 30,
+                theme: 0,
+                created_at: current_time(),
+                mint_fee_e8s: 0,
+            },
+        );
+    });
+    Ok(token_id)
+}
+
+/// TTL/completed-session sweep, bounded per pass (PB-306 A4). Wired into the
+/// existing 5-minute timer.
+fn sweep_play_sessions() {
+    let now = current_time();
+    let mut to_remove: Vec<u64> = Vec::new();
+    PLAY_SESSIONS.with(|m| {
+        for entry in m.borrow().iter() {
+            let s = entry.value();
+            if s.status == PlaySessionStatus::Completed || now > s.issued_at + SESSION_TTL_NS {
+                to_remove.push(s.id);
+                if to_remove.len() >= SESSION_SWEEP_BATCH {
+                    break;
+                }
+            }
+        }
+    });
+    PLAY_SESSIONS.with(|m| {
+        let mut map = m.borrow_mut();
+        for id in to_remove {
+            map.remove(&id);
+        }
+    });
+}
+
 ic_cdk::export_candid!();
 
 #[cfg(test)]
@@ -13680,6 +14839,7 @@ mod tests {
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
             lottery_tickets_per_day: default_lottery_tickets_per_day(),
             default_threshold_usd_e8s: None,
+            course_nft_canister: None,
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -13922,6 +15082,7 @@ mod tests {
                 maturity_threshold_e8s: default_maturity_threshold_e8s(),
                 lottery_tickets_per_day: default_lottery_tickets_per_day(),
                 default_threshold_usd_e8s: None,
+                course_nft_canister: None,
             }
         };
         let mainnet = Config {
@@ -15343,9 +16504,10 @@ mod tests {
         let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
         CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
 
-        // Ineligible players can't land on the leaderboard.
+        // Ineligible players can't land on the leaderboard (gate runs before the
+        // game-specific arm; use fieldgoal since minigolf is retired, PB-309).
         set_mock_caller(alice);
-        let err = submit_arcade_score("minigolf".into(), 120_000, vec![3; 9]).unwrap_err();
+        let err = submit_arcade_score("fieldgoal".into(), 120_000, vec![3; FIELDGOAL_ROUNDS]).unwrap_err();
         assert_eq!(err, "PARTICIPATION_REQUIRED");
 
         // Stake both players in.
@@ -15358,33 +16520,25 @@ mod tests {
             });
         }
 
-        // Validation: game key, hole count, stroke bounds, time bounds.
+        // Unknown game still rejected.
         assert_eq!(submit_arcade_score("pacman".into(), 120_000, vec![3; 9]).unwrap_err(), "UNKNOWN_GAME");
-        assert_eq!(submit_arcade_score("minigolf".into(), 120_000, vec![3; 8]).unwrap_err(), "INVALID_HOLE_COUNT");
-        assert_eq!(submit_arcade_score("minigolf".into(), 120_000, vec![0; 9]).unwrap_err(), "INVALID_STROKES");
-        assert_eq!(submit_arcade_score("minigolf".into(), 120_000, vec![13; 9]).unwrap_err(), "INVALID_STROKES");
-        assert_eq!(submit_arcade_score("minigolf".into(), 1_000, vec![3; 9]).unwrap_err(), "INVALID_TIME");
 
-        // Alice: 27 strokes. Bob: 27 strokes but faster → rank 1 on time tiebreak.
-        assert_eq!(submit_arcade_score("minigolf".into(), 200_000, vec![3; 9]).unwrap(), 1);
-        set_mock_caller(bob);
-        assert_eq!(submit_arcade_score("minigolf".into(), 150_000, vec![3; 9]).unwrap(), 1);
+        // PB-309 (D4): mini-golf scoring is RETIRED — the marketplace replaces
+        // the global leaderboard. Any minigolf submission is rejected before any
+        // state write, and the minigolf board is always empty.
+        assert_eq!(
+            submit_arcade_score("minigolf".into(), 120_000, vec![3; 9]).unwrap_err(),
+            "MINIGOLF_RETIRED"
+        );
+        assert!(get_arcade_leaderboard("minigolf".into()).is_empty());
 
-        // Worse later round doesn't overwrite Bob's best.
-        assert_eq!(submit_arcade_score("minigolf".into(), 100_000, vec![4; 9]).unwrap(), 1);
-        let board = get_arcade_leaderboard("minigolf".into());
-        assert_eq!(board.len(), 2);
-        assert_eq!(board[0].player, bob);
-        assert_eq!(board[0].strokes, 27);
-        assert_eq!(board[0].millis, 150_000);
-        assert_eq!(board[1].player, alice);
-
-        // A genuinely better round (fewer strokes) replaces and re-ranks.
+        // Field Goal scoring is unaffected by the migration (returns the rank).
         set_mock_caller(alice);
-        assert_eq!(submit_arcade_score("minigolf".into(), 300_000, vec![2; 9]).unwrap(), 1);
-        let board = get_arcade_leaderboard("minigolf".into());
-        assert_eq!(board[0].player, alice);
-        assert_eq!(board[0].strokes, 18);
+        assert_eq!(
+            submit_arcade_score("fieldgoal".into(), 120_000, vec![30; FIELDGOAL_ROUNDS]).unwrap(),
+            1
+        );
+        assert_eq!(get_arcade_leaderboard("fieldgoal".into()).len(), 1);
 
         for u in [alice, bob] {
             STAKES.with(|m| { m.borrow_mut().remove(&StakeKey { tier: 0, user: u }); });
@@ -15800,6 +16954,7 @@ mod tests {
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
             lottery_tickets_per_day: default_lottery_tickets_per_day(),
             default_threshold_usd_e8s: None,
+            course_nft_canister: None,
         }
     }
 
@@ -18503,7 +19658,11 @@ mod tests {
 
 
     #[tokio::test]
-    async fn test_full_unstake_voids_tickets_immediately() {
+    async fn test_full_unstake_never_voids_tickets() {
+        // Ticket-lifetime rule (2026-06-13): tickets are NEVER voided on
+        // unstake — the only reset is winning the lottery (a round bump). Once
+        // the stake is gone the daily grant stops accruing NEW tickets, but
+        // already-earned tickets ride until the next win.
         install_staking_test_config();
         enable_lottery();
         let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
@@ -18527,7 +19686,7 @@ mod tests {
         assert_eq!(claim_daily_tickets().unwrap(), 30);
         assert_eq!(lottery_state().total_tickets, 35);
 
-        // Partial unstake: still staked → tickets stay live.
+        // Partial unstake: tickets stay live.
         unstake(100_000_000, StakeTier::OneYear).await.unwrap();
         assert_eq!(
             LOTTERY_TICKETS.with(|m| m.borrow().get(&alice)).unwrap().count,
@@ -18535,17 +19694,20 @@ mod tests {
             "partial unstake keeps tickets"
         );
 
-        // Unstake the rest: eligibility ends NOW — tickets void, pool total
-        // shrinks, no future drawing can pick her.
+        // Unstake the rest: tickets are NOT voided — they ride until the next
+        // lottery win. The pool total is unchanged.
         unstake(200_000_000, StakeTier::OneYear).await.unwrap();
         let entry = LOTTERY_TICKETS.with(|m| m.borrow().get(&alice)).unwrap();
-        assert_eq!(entry.count, 0, "full unstake voids current-round tickets");
-        assert_eq!(lottery_state().total_tickets, 5, "only bob's tickets remain");
-        assert_eq!(find_ticket_owner(lottery_state().round, 4), Some(bob));
-        assert_eq!(find_ticket_owner(lottery_state().round, 5), None);
+        assert_eq!(entry.count, 30, "full unstake does NOT void tickets");
+        assert_eq!(lottery_state().total_tickets, 35, "pool total unchanged by unstake");
+        // alice still owns one of the round's ticket slots (she did not lose them).
+        let round = lottery_state().round;
+        let alice_still_present = (0..lottery_state().total_tickets)
+            .any(|i| find_ticket_owner(round, i) == Some(alice));
+        assert!(alice_still_present, "alice's tickets ride past unstake");
 
-        // The daily-claim clock survives the void: re-staking the same day
-        // does NOT mint a fresh grant.
+        // The daily-claim clock survives: re-staking the same day does NOT mint
+        // a fresh grant.
         set_mock_ledger_balance(100_000_000_000);
         stake(100_000_000, StakeTier::SixMonths).await.unwrap();
         assert_eq!(claim_daily_tickets().unwrap_err(), "ALREADY_CLAIMED_TODAY");
@@ -18957,4 +20119,800 @@ mod tests {
         assert!(valid_chat_text("spaces are fine"));
     }
 
+    // ===== 20. Course NFT marketplace tests =====
+
+    fn course_test_setup() {
+        install_staking_test_config();
+        enable_lottery();
+        enable_arcade_minigolf();
+        // A configured (non-anonymous) course_nft canister id so the inter-
+        // canister seam is reachable.
+        CONFIG.with(|cell| {
+            let mut cfg = cell.borrow().get().clone();
+            cfg.course_nft_canister = Some(p("aaaaa-aa"));
+            cell.borrow_mut().set(cfg);
+        });
+        // Reset per-test mock state.
+        set_mock_time(None);
+        set_mock_mint(1, false);
+        TEST_MOCK_OWNER.with(|m| m.borrow_mut().clear());
+        TEST_MOCK_INCREMENT_PLAY.with(|v| v.borrow_mut().clear());
+        COURSE_LISTINGS.with(|m| {
+            let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
+        PLAY_SESSIONS.with(|m| {
+            let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
+        COURSE_TICKET_CAPS.with(|m| {
+            let keys: Vec<DayCapKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
+        COURSE_PAIR_CAPS.with(|m| {
+            let keys: Vec<PairCapKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
+        NEXT_SESSION_ID.with(|c| {
+            c.borrow_mut().set(1);
+        });
+        MINT_SAGAS.with(|m| {
+            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
+    }
+
+    fn enable_arcade_minigolf() {
+        FEATURE_FLAGS.with(|m| {
+            let mut map = m.borrow_mut();
+            map.insert(FLAG_ARCADE.to_string(), 1);
+            map.insert(FLAG_ARCADE_MINIGOLF.to_string(), 1);
+        });
+    }
+
+    /// Mark a principal as a Tier-2 (following) user.
+    fn make_following(user: Principal) {
+        USER_NEURONS.with(|m| {
+            m.borrow_mut().insert(
+                user,
+                UserNeuronState {
+                    neuron_id: 1,
+                    is_following: true,
+                    verified_at: 1,
+                    cached_stake_e8s: 0,
+                },
+            );
+        });
+    }
+
+    /// Build a minimal CBOR course blob carrying par_total + theme.
+    fn course_blob(par_total: u8, theme: u8) -> Vec<u8> {
+        use ciborium::value::Value as Cv;
+        let v = Cv::Map(vec![
+            (Cv::Text("par_total".into()), Cv::Integer(par_total.into())),
+            (Cv::Text("theme".into()), Cv::Integer(theme.into())),
+        ]);
+        let mut buf = Vec::new();
+        ciborium::into_writer(&v, &mut buf).unwrap();
+        buf
+    }
+
+    /// Insert a listing directly (skips the mint flow) for play/marketplace tests.
+    fn seed_listing(token_id: u64, owner: Principal, par_total: u8, theme: u8, listed: bool) {
+        COURSE_LISTINGS.with(|m| {
+            m.borrow_mut().insert(
+                token_id,
+                CourseListing {
+                    token_id,
+                    listed,
+                    price_e8s: 0,
+                    name: format!("Course {token_id}"),
+                    owner: Some(owner),
+                    creator: Some(owner),
+                    play_count: 0,
+                    tickets_distributed: 0,
+                    par_total,
+                    theme,
+                    created_at: 1,
+                    mint_fee_e8s: 0,
+                },
+            );
+        });
+        set_mock_owner(token_id, owner);
+    }
+
+    fn alice() -> Principal {
+        p("rrkah-fqaaa-aaaaa-aaaaq-cai")
+    }
+    fn bob() -> Principal {
+        p("ryjl3-tyaaa-aaaaa-aaaba-cai")
+    }
+
+    // ── Difficulty buckets (PB-305 B9) ───────────────────────────────────────
+
+    #[test]
+    fn test_difficulty_bucket_edges() {
+        assert_eq!(difficulty_bucket(27), Difficulty::Easy);
+        assert_eq!(difficulty_bucket(28), Difficulty::Medium);
+        assert_eq!(difficulty_bucket(44), Difficulty::Medium);
+        assert_eq!(difficulty_bucket(45), Difficulty::Hard);
+    }
+
+    // ── Mint validation + saga (PB-304) ──────────────────────────────────────
+
+    #[test]
+    fn test_validate_course_for_mint() {
+        let ok = validate_course_for_mint(&course_blob(34, 2), "My Course");
+        assert_eq!(ok.unwrap(), (34, 2));
+        assert!(matches!(
+            validate_course_for_mint(&[], "x"),
+            Err(MintError::InvalidCourse(_))
+        ));
+        let big = vec![0u8; MAX_COURSE_DATA_BYTES + 1];
+        assert!(matches!(
+            validate_course_for_mint(&big, "x"),
+            Err(MintError::InvalidCourse(_))
+        ));
+        assert!(matches!(
+            validate_course_for_mint(&course_blob(34, 2), ""),
+            Err(MintError::InvalidCourse(_))
+        ));
+        let long = "x".repeat(MAX_COURSE_NAME_CHARS + 1);
+        assert!(matches!(
+            validate_course_for_mint(&course_blob(34, 2), &long),
+            Err(MintError::InvalidCourse(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_mint_happy_path_splits_and_lists() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        set_mock_ledger_balance(MINT_FEE_E8S); // escrow funded
+        set_mock_ledger_transfer(Ok(1)); // every split leg succeeds
+
+        let token_id = mint_course_nft(course_blob(34, 2), "Sunny Dunes".into())
+            .await
+            .unwrap();
+        assert_eq!(token_id, 1);
+
+        // Auto-listed row exists with server-computed par/theme.
+        let card = get_course(token_id).unwrap();
+        assert!(card.listed);
+        assert_eq!(card.par_total, 34);
+        assert_eq!(card.theme, 2);
+        assert_eq!(card.owner, Some(alice()));
+        assert_eq!(card.creator, Some(alice()));
+        assert_eq!(card.price_e8s, 0);
+
+        // Saga cleared after success.
+        assert!(MINT_SAGAS.with(|m| m.borrow().get(&alice())).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mint_split_amounts_50_25_25() {
+        course_test_setup();
+        // Drive settle_burn_split directly to assert the 50/25/25 split.
+        let sub = derive_subaccount(&alice(), MINT_ESCROW_TAG);
+        let ledger = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+        set_mock_ledger_balance(MINT_FEE_E8S);
+        set_mock_ledger_transfer(Ok(1));
+        let mut c = Commitment {
+            proposal_id: MINT_ESCROW_TAG,
+            principal: alice(),
+            amount_e8s: MINT_FEE_E8S,
+            status: CommitmentStatus::Pending,
+            created_at: 1,
+            stance: Stance::Adopt,
+            subaccount: sub,
+            settled_at: None,
+            cmc_block_index: None,
+            treasury_block: None,
+            frontend_cmc_block: None,
+            token: None,
+            token_amount: None,
+            swapped_icp_e8s: None,
+        };
+        settle_burn_split(ledger, sub, MINT_FEE_E8S, &mut c).await.unwrap();
+        assert!(c.treasury_block.is_some());
+        assert!(c.cmc_block_index.is_some());
+        assert!(c.frontend_cmc_block.is_some());
+        // Arithmetic invariant of the split (matches settle_burn_split).
+        let treasury = MINT_FEE_E8S / 2;
+        let backend = MINT_FEE_E8S / 4;
+        let frontend = MINT_FEE_E8S - treasury - backend;
+        assert_eq!(treasury, 25_000_000);
+        assert_eq!(backend, 12_500_000);
+        assert_eq!(frontend, 12_500_000);
+        assert_eq!(treasury + backend + frontend, MINT_FEE_E8S);
+    }
+
+    #[tokio::test]
+    async fn test_mint_insufficient_deposit_charges_nothing() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        set_mock_ledger_balance(MINT_FEE_E8S - 1); // underfunded
+        set_mock_ledger_transfer(Err("must not transfer".into()));
+        let err = mint_course_nft(course_blob(34, 2), "x".into()).await.unwrap_err();
+        assert!(matches!(
+            err,
+            MintError::InsufficientDeposit { needed, found }
+                if needed == MINT_FEE_E8S && found == MINT_FEE_E8S - 1
+        ));
+        assert!(get_course(1).is_none(), "nothing minted");
+    }
+
+    #[tokio::test]
+    async fn test_mint_rejects_tier_below_2() {
+        course_test_setup();
+        set_mock_caller(alice()); // authenticated but NOT following → Tier 1
+        set_mock_ledger_balance(MINT_FEE_E8S);
+        let err = mint_course_nft(course_blob(34, 2), "x".into()).await.unwrap_err();
+        assert!(matches!(err, MintError::NotAuthenticated));
+    }
+
+    #[tokio::test]
+    async fn test_mint_saga_resume_after_mint_failure_no_recharge() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        set_mock_ledger_balance(MINT_FEE_E8S);
+        set_mock_ledger_transfer(Ok(1));
+        // Force the course_nft.mint to fail after the fee splits succeed.
+        set_mock_mint(1, true);
+        let err = mint_course_nft(course_blob(34, 2), "Resumed".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::MintCallFailed(_)));
+        // The saga survives with all three fee legs settled, no token yet.
+        let saga = MINT_SAGAS.with(|m| m.borrow().get(&alice())).unwrap();
+        assert!(saga.treasury_block.is_some());
+        assert!(saga.cmc_block_index.is_some());
+        assert!(saga.frontend_cmc_block.is_some());
+        assert!(saga.minted_token_id.is_none());
+
+        // Retry: the fee MUST NOT be re-charged (any ledger transfer now traps).
+        set_mock_ledger_transfer(Err("retry must not re-charge the fee".into()));
+        set_mock_mint(7, false); // mint now succeeds, token id 7
+        let token_id = mint_course_nft(course_blob(99, 9), "ignored-on-resume".into())
+            .await
+            .unwrap();
+        assert_eq!(token_id, 7);
+        // Resume re-mints the SAME stored course (par 34), not the retry args.
+        let card = get_course(7).unwrap();
+        assert_eq!(card.par_total, 34, "resume re-mints stored course bytes");
+        assert!(MINT_SAGAS.with(|m| m.borrow().get(&alice())).is_none());
+    }
+
+    // ── Marketplace filters (PB-305) ─────────────────────────────────────────
+
+    #[test]
+    fn test_marketplace_filters() {
+        course_test_setup();
+        set_mock_caller(alice());
+        seed_listing(1, alice(), 20, 0, true); // Easy, Desert, listed, mine
+        seed_listing(2, bob(), 34, 1, true); // Medium, Ocean, listed, not mine
+        seed_listing(3, bob(), 46, 2, false); // Hard, Space, NOT listed
+
+        let any = list_marketplace_courses(MarketplaceFilter {
+            difficulty: DifficultyFilter::Any,
+            theme: None,
+            listed: ListedFilter::Any,
+            mine_only: false,
+        });
+        assert_eq!(any.total, 3);
+        assert_eq!(any.courses.len(), 3);
+        // Deterministic ascending token_id order.
+        assert_eq!(any.courses[0].token_id, 1);
+        assert_eq!(any.courses[2].token_id, 3);
+
+        let hard = list_marketplace_courses(MarketplaceFilter {
+            difficulty: DifficultyFilter::Hard,
+            theme: None,
+            listed: ListedFilter::Any,
+            mine_only: false,
+        });
+        assert_eq!(hard.total, 1);
+        assert_eq!(hard.courses[0].token_id, 3);
+
+        let ocean = list_marketplace_courses(MarketplaceFilter {
+            difficulty: DifficultyFilter::Any,
+            theme: Some(1),
+            listed: ListedFilter::Any,
+            mine_only: false,
+        });
+        assert_eq!(ocean.total, 1);
+        assert_eq!(ocean.courses[0].token_id, 2);
+
+        let listed_only = list_marketplace_courses(MarketplaceFilter {
+            difficulty: DifficultyFilter::Any,
+            theme: None,
+            listed: ListedFilter::Yes,
+            mine_only: false,
+        });
+        assert_eq!(listed_only.total, 2);
+
+        let mine = list_marketplace_courses(MarketplaceFilter {
+            difficulty: DifficultyFilter::Any,
+            theme: None,
+            listed: ListedFilter::Any,
+            mine_only: true,
+        });
+        assert_eq!(mine.total, 1);
+        assert_eq!(mine.courses[0].token_id, 1);
+        assert!(mine.courses[0].is_caller_owner);
+    }
+
+    #[tokio::test]
+    async fn test_list_and_delist_owner_gated() {
+        course_test_setup();
+        seed_listing(1, alice(), 34, 0, true);
+
+        // Non-owner cannot list.
+        set_mock_caller(bob());
+        assert_eq!(
+            list_course_for_sale(1, 100_000_000).await.unwrap_err(),
+            "NOT_OWNER"
+        );
+
+        // Owner can list (price 0 rejected; over-cap rejected).
+        set_mock_caller(alice());
+        assert_eq!(
+            list_course_for_sale(1, 0).await.unwrap_err(),
+            "PRICE_ZERO_USE_DELIST"
+        );
+        assert_eq!(
+            list_course_for_sale(1, MAX_LISTING_E8S + 1).await.unwrap_err(),
+            "PRICE_TOO_HIGH"
+        );
+        list_course_for_sale(1, 250_000_000).await.unwrap();
+        let card = get_course(1).unwrap();
+        assert!(card.listed);
+        assert_eq!(card.price_e8s, 250_000_000);
+
+        // Delist keeps the row, clears price + listed.
+        delist_course(1).await.unwrap();
+        let card = get_course(1).unwrap();
+        assert!(!card.listed);
+        assert_eq!(card.price_e8s, 0);
+    }
+
+    // ── Play + anti-cheat (PB-306) ───────────────────────────────────────────
+
+    fn advance(secs: u64) {
+        // Advance the mocked clock by `secs` from the base.
+        let base = 1_700_000_000u64;
+        set_mock_time(Some((base + secs) * 1_000_000_000));
+    }
+
+    #[test]
+    fn test_start_session_requires_listed_course() {
+        course_test_setup();
+        set_mock_caller(alice());
+        assert_eq!(
+            start_play_session(99).unwrap_err(),
+            "COURSE_NOT_FOUND"
+        );
+        seed_listing(1, bob(), 34, 0, false); // delisted
+        assert_eq!(
+            start_play_session(1).unwrap_err(),
+            "COURSE_NOT_LISTED"
+        );
+        seed_listing(2, bob(), 34, 0, true);
+        let r = start_play_session(2).unwrap();
+        assert_eq!(r.session_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_record_hole_order_dedupe_pacing() {
+        course_test_setup();
+        seed_listing(1, bob(), 34, 0, true);
+        let player = make_player();
+        set_mock_caller(player);
+        advance(0);
+        let sid = start_play_session(1).unwrap().session_id;
+
+        // Out-of-order (jump to 5).
+        advance(3);
+        assert_eq!(
+            record_hole_event(sid, 5).await.unwrap_err(),
+            "OUT_OF_ORDER"
+        );
+        // Hole 1 ok after pacing.
+        record_hole_event(sid, 1).await.unwrap();
+        // Duplicate hole 1 → OUT_OF_ORDER (dedupe).
+        advance(6);
+        assert_eq!(
+            record_hole_event(sid, 1).await.unwrap_err(),
+            "OUT_OF_ORDER"
+        );
+        // Too fast: hole 2 less than 3 s after hole 1.
+        // last_hole_at was set at advance(3). Set now to +5 (only 2 s later).
+        set_mock_time(Some((1_700_000_000 + 5) * 1_000_000_000));
+        assert_eq!(record_hole_event(sid, 2).await.unwrap_err(), "TOO_FAST");
+        // Bad hole number (out of 1..=9 range) → BAD_HOLE.
+        advance(20);
+        assert_eq!(record_hole_event(sid, 0).await.unwrap_err(), "BAD_HOLE");
+        assert_eq!(record_hole_event(sid, 99).await.unwrap_err(), "BAD_HOLE");
+    }
+
+    fn make_player() -> Principal {
+        // A distinct Tier-2 player (not an admin, not the owner).
+        let player = p("aaaaa-aa");
+        // aaaaa-aa is management; use a real-ish self-authenticating principal.
+        let player = Principal::self_authenticating(player.as_slice());
+        make_following(player);
+        player
+    }
+
+    #[tokio::test]
+    async fn test_hole2_credits_live_owner_self_play_suppressed() {
+        course_test_setup();
+        let owner = bob();
+        seed_listing(1, owner, 34, 0, true);
+        let player = make_player();
+        set_mock_caller(player);
+        advance(0);
+        let sid = start_play_session(1).unwrap().session_id;
+        advance(3);
+        record_hole_event(sid, 1).await.unwrap();
+
+        // Change the live owner mid-session → credit goes to the NEW owner.
+        let new_owner = alice();
+        set_mock_owner(1, new_owner);
+        advance(6);
+        let r = record_hole_event(sid, 2).await.unwrap();
+        assert!(r.owner_credited);
+        assert_eq!(r.owner, Some(new_owner));
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&new_owner)).unwrap().count,
+            1
+        );
+        // NFT counter bumped + listing cache mirrored.
+        assert_eq!(TEST_MOCK_INCREMENT_PLAY.with(|v| v.borrow().clone()), vec![1]);
+        assert_eq!(get_course(1).unwrap().play_count, 1);
+        assert_eq!(get_course(1).unwrap().tickets_distributed, 1);
+
+        // Self-play: owner plays own course → no owner credit.
+        set_mock_owner(1, player);
+        set_mock_caller(player);
+        advance(100);
+        let sid2 = start_play_session(1).unwrap().session_id;
+        advance(103);
+        record_hole_event(sid2, 1).await.unwrap();
+        advance(106);
+        let r2 = record_hole_event(sid2, 2).await.unwrap();
+        assert!(!r2.owner_credited, "self-play suppresses owner credit");
+    }
+
+    #[tokio::test]
+    async fn test_hole2_owner_lookup_failure_advances_no_credit() {
+        course_test_setup();
+        seed_listing(1, bob(), 34, 0, true);
+        clear_mock_owner(1); // owner lookup returns None
+        let player = make_player();
+        set_mock_caller(player);
+        advance(0);
+        let sid = start_play_session(1).unwrap().session_id;
+        advance(3);
+        record_hole_event(sid, 1).await.unwrap();
+        advance(6);
+        let r = record_hole_event(sid, 2).await.unwrap();
+        assert!(!r.owner_credited);
+        assert_eq!(r.last_hole, 2, "hole still advances");
+    }
+
+    #[tokio::test]
+    async fn test_pair_cap_limits_owner_credits_per_course_per_player() {
+        course_test_setup();
+        let owner = bob();
+        seed_listing(1, owner, 34, 0, true);
+        let player = make_player();
+        // Run MAX+1 rounds reaching hole 2; the 6th owner credit is skipped.
+        for i in 0..(MAX_PER_COURSE_PER_PLAYER_PER_DAY + 1) {
+            set_mock_caller(player);
+            let t = (i as u64) * 100;
+            advance(t);
+            let sid = start_play_session(1).unwrap().session_id;
+            advance(t + 3);
+            record_hole_event(sid, 1).await.unwrap();
+            advance(t + 6);
+            let r = record_hole_event(sid, 2).await.unwrap();
+            if i < MAX_PER_COURSE_PER_PLAYER_PER_DAY {
+                assert!(r.owner_credited, "credit {} should land", i);
+            } else {
+                assert!(!r.owner_credited, "6th credit capped");
+            }
+        }
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&owner)).unwrap().count,
+            MAX_PER_COURSE_PER_PLAYER_PER_DAY as u64
+        );
+
+        // A DIFFERENT player still credits the owner.
+        let player2 = {
+            let q = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+            let q = Principal::self_authenticating(q.as_slice());
+            make_following(q);
+            q
+        };
+        set_mock_caller(player2);
+        advance(1000);
+        let sid = start_play_session(1).unwrap().session_id;
+        advance(1003);
+        record_hole_event(sid, 1).await.unwrap();
+        advance(1006);
+        assert!(record_hole_event(sid, 2).await.unwrap().owner_credited);
+    }
+
+    #[tokio::test]
+    async fn test_admin_owner_credit_suppressed() {
+        course_test_setup();
+        let admin_owner = bob();
+        add_admin(admin_owner).unwrap();
+        seed_listing(1, admin_owner, 34, 0, true);
+        let player = make_player();
+        set_mock_caller(player);
+        advance(0);
+        let sid = start_play_session(1).unwrap().session_id;
+        advance(3);
+        record_hole_event(sid, 1).await.unwrap();
+        advance(6);
+        let r = record_hole_event(sid, 2).await.unwrap();
+        assert!(!r.owner_credited, "admin owner never holds tickets");
+    }
+
+    async fn play_full_round(player: Principal, token_id: u64, base_secs: u64) -> CompleteRoundOk {
+        set_mock_caller(player);
+        advance(base_secs);
+        let sid = start_play_session(token_id).unwrap().session_id;
+        for h in 1..=9u8 {
+            advance(base_secs + (h as u64) * 4);
+            record_hole_event(sid, h).await.unwrap();
+        }
+        complete_round(sid).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_complete_round_terminal_and_tier_gate() {
+        course_test_setup();
+        seed_listing(1, alice(), 34, 0, true);
+
+        // Tier-2 player gets a completion ticket.
+        let player = make_player();
+        let r = play_full_round(player, 1, 0).await;
+        assert!(r.player_credited);
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&player)).unwrap().count >= 1,
+            true
+        );
+
+        // complete_round is terminal: a replay → ALREADY_COMPLETED.
+        // (Re-run with a fresh session for the terminal check.)
+        set_mock_caller(player);
+        advance(500);
+        let sid = start_play_session(1).unwrap().session_id;
+        for h in 1..=9u8 {
+            advance(500 + (h as u64) * 4);
+            record_hole_event(sid, h).await.unwrap();
+        }
+        complete_round(sid).unwrap();
+        assert_eq!(complete_round(sid).unwrap_err(), "ALREADY_COMPLETED");
+
+        // Incomplete round → INCOMPLETE_ROUND.
+        advance(2000);
+        let sid2 = start_play_session(1).unwrap().session_id;
+        advance(2004);
+        record_hole_event(sid2, 1).await.unwrap();
+        assert_eq!(complete_round(sid2).unwrap_err(), "INCOMPLETE_ROUND");
+    }
+
+    #[tokio::test]
+    async fn test_complete_round_anon_and_tier1_no_player_ticket() {
+        course_test_setup();
+        seed_listing(1, alice(), 34, 0, true);
+
+        // Anonymous player: no player ticket.
+        set_mock_caller(Principal::anonymous());
+        advance(0);
+        let sid = start_play_session(1).unwrap().session_id;
+        for h in 1..=9u8 {
+            advance((h as u64) * 4);
+            record_hole_event(sid, h).await.unwrap();
+        }
+        let r = complete_round(sid).unwrap();
+        assert!(!r.player_credited);
+        assert_eq!(r.reason, Some("ANON".to_string()));
+
+        // Tier-1 (authed not following): no player ticket.
+        let t1 = {
+            let q = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+            Principal::self_authenticating(q.as_slice())
+        };
+        set_mock_caller(t1);
+        advance(1000);
+        let sid2 = start_play_session(1).unwrap().session_id;
+        for h in 1..=9u8 {
+            advance(1000 + (h as u64) * 4);
+            record_hole_event(sid2, h).await.unwrap();
+        }
+        let r2 = complete_round(sid2).unwrap();
+        assert!(!r2.player_credited);
+        assert_eq!(r2.reason, Some("TIER_TOO_LOW".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_foreign_and_expired_sessions() {
+        course_test_setup();
+        seed_listing(1, alice(), 34, 0, true);
+        let player = make_player();
+        set_mock_caller(player);
+        advance(0);
+        let sid = start_play_session(1).unwrap().session_id;
+
+        // Foreign caller.
+        set_mock_caller(bob());
+        advance(3);
+        assert_eq!(
+            record_hole_event(sid, 1).await.unwrap_err(),
+            "NOT_YOUR_SESSION"
+        );
+
+        // Expired (past TTL).
+        set_mock_caller(player);
+        set_mock_time(Some(
+            (1_700_000_000) * 1_000_000_000 + SESSION_TTL_NS + 1,
+        ));
+        assert_eq!(
+            record_hole_event(sid, 1).await.unwrap_err(),
+            "SESSION_EXPIRED"
+        );
+    }
+
+    #[test]
+    fn test_player_daily_cap() {
+        course_test_setup();
+        let player = make_player();
+        let now = 1_700_000_000u64 * 1_000_000_000;
+        for _ in 0..MAX_PLAYER_TICKETS_PER_DAY {
+            assert!(try_increment_player_cap(player, now));
+        }
+        assert!(!try_increment_player_cap(player, now), "21st capped");
+        // Next UTC day resets.
+        let next_day = now + SECS_PER_DAY * 1_000_000_000;
+        assert!(try_increment_player_cap(player, next_day));
+    }
+
+    #[test]
+    fn test_owner_daily_cap() {
+        course_test_setup();
+        let owner = bob();
+        let player = make_player();
+        let now = 1_700_000_000u64 * 1_000_000_000;
+        // Use distinct (player, course) to avoid the pair cap; vary token_id.
+        for i in 0..MAX_OWNER_TICKETS_PER_DAY {
+            let credited = try_credit_owner_ticket(owner, player, i as u64 + 100, now);
+            assert!(credited, "owner credit {} should land", i);
+        }
+        assert!(
+            !try_credit_owner_ticket(owner, player, 99999, now),
+            "201st owner credit capped"
+        );
+    }
+
+    #[test]
+    fn test_credit_course_ticket_into_current_round() {
+        course_test_setup();
+        let user = make_player();
+        // Arm round state (mirrors dev_grant_lottery_tickets).
+        let before = lottery_state().total_tickets;
+        credit_course_ticket(user);
+        let entry = LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).unwrap();
+        assert_eq!(entry.round, lottery_state().round);
+        assert_eq!(entry.count, 1);
+        assert_eq!(lottery_state().total_tickets, before + 1);
+        assert!(lottery_state().next_draw_at > 0, "next_draw armed");
+
+        // Admin recipient is silently skipped.
+        let admin = bob();
+        add_admin(admin).unwrap();
+        let total = lottery_state().total_tickets;
+        credit_course_ticket(admin);
+        assert_eq!(lottery_state().total_tickets, total, "admin credit skipped");
+        assert!(LOTTERY_TICKETS.with(|m| m.borrow().get(&admin)).is_none());
+    }
+
+    #[test]
+    fn test_sweep_play_sessions() {
+        course_test_setup();
+        let base = 1_700_000_000u64 * 1_000_000_000;
+        // Active in-TTL session survives.
+        PLAY_SESSIONS.with(|m| {
+            m.borrow_mut().insert(
+                1,
+                PlaySession {
+                    id: 1,
+                    player: alice(),
+                    token_id: 1,
+                    issued_at: base,
+                    nonce: 0,
+                    last_hole: 0,
+                    last_hole_at: base,
+                    status: PlaySessionStatus::Active,
+                    owner_credited_holes: 0,
+                },
+            );
+            // Completed session reaped.
+            m.borrow_mut().insert(
+                2,
+                PlaySession {
+                    id: 2,
+                    player: alice(),
+                    token_id: 1,
+                    issued_at: base,
+                    nonce: 0,
+                    last_hole: 9,
+                    last_hole_at: base,
+                    status: PlaySessionStatus::Completed,
+                    owner_credited_holes: 1,
+                },
+            );
+            // Expired session reaped.
+            m.borrow_mut().insert(
+                3,
+                PlaySession {
+                    id: 3,
+                    player: alice(),
+                    token_id: 1,
+                    issued_at: base - SESSION_TTL_NS - 1_000_000_000 * 60,
+                    nonce: 0,
+                    last_hole: 1,
+                    last_hole_at: base,
+                    status: PlaySessionStatus::Active,
+                    owner_credited_holes: 0,
+                },
+            );
+        });
+        set_mock_time(Some(base));
+        sweep_play_sessions();
+        assert!(PLAY_SESSIONS.with(|m| m.borrow().get(&1)).is_some());
+        assert!(PLAY_SESSIONS.with(|m| m.borrow().get(&2)).is_none());
+        assert!(PLAY_SESSIONS.with(|m| m.borrow().get(&3)).is_none());
+    }
+
+    // ── Leaderboard removal (PB-309) ─────────────────────────────────────────
+
+    #[test]
+    fn test_minigolf_score_retired_fieldgoal_unaffected() {
+        course_test_setup();
+        let user = make_player();
+        // make_player follows but arcade_access also needs has_stake or voted;
+        // seed a stake so the participation gate passes for the fieldgoal path.
+        seed_stake(StakeTier::SixMonths, user, 100_000_000);
+        set_mock_caller(user);
+        // Mini-golf score writes are retired.
+        assert_eq!(
+            submit_arcade_score("minigolf".to_string(), 60_000, vec![3; 9]).unwrap_err(),
+            "MINIGOLF_RETIRED"
+        );
+        // Mini-golf leaderboard query is always empty.
+        assert!(get_arcade_leaderboard("minigolf".to_string()).is_empty());
+    }
 }

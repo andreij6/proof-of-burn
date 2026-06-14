@@ -696,6 +696,54 @@ type Result_2 = variant { Ok : text; Err : text };
 type Result_3 = variant { Ok : ExplorerQuote; Err : text };
 type Result_4 = variant { Ok : nat32; Err : text };
 type Result_5 = variant { Ok : CrashVerifyView; Err : text };
+// ===== Course NFT marketplace (PB-300) =====
+type MintError = variant {
+  NotAuthenticated;
+  InvalidCourse : text;
+  InsufficientDeposit : record { needed : nat64; found : nat64 };
+  FeeSettlementFailed : text;
+  MintCallFailed : text;
+  AlreadyMinting;
+};
+type MintResult = variant { Ok : nat64; Err : MintError };
+type DifficultyFilter = variant { Any; Easy; Medium; Hard };
+type ListedFilter = variant { Any; Yes; No };
+type MarketplaceFilter = record {
+  difficulty : DifficultyFilter;
+  theme : opt nat8;
+  listed : ListedFilter;
+  mine_only : bool;
+};
+type CourseCard = record {
+  token_id : nat64;
+  name : text;
+  creator : opt principal;
+  owner : opt principal;
+  par_total : nat8;
+  play_count : nat64;
+  tickets_distributed : nat64;
+  theme : nat8;
+  listed : bool;
+  price_e8s : nat64;
+  created_at : nat64;
+  is_caller_owner : bool;
+};
+type MarketplacePage = record {
+  courses : vec CourseCard;
+  featured_token_id : opt nat64;
+  seed : nat64;
+  total : nat64;
+};
+type StartSessionOk = record { session_id : nat64; server_time : nat64 };
+type StartSessionResult = variant { Ok : StartSessionOk; Err : text };
+type RecordHoleOk = record {
+  last_hole : nat8;
+  owner_credited : bool;
+  owner : opt principal;
+};
+type RecordHoleResult = variant { Ok : RecordHoleOk; Err : text };
+type CompleteRoundOk = record { player_credited : bool; reason : opt text };
+type CompleteRoundResult = variant { Ok : CompleteRoundOk; Err : text };
 // Fixed staking terms. The 6-month minimum matches the NNS minimum dissolve
 // delay for voting eligibility, so no Mission 70 gate applies. Voting weight
 // and the daily lottery-ticket grant both scale with the same multiplier,
@@ -822,6 +870,28 @@ type YieldStatus = variant { Done; InProgress };
 service : (InitPayload) -> {
   add_admin : (principal) -> (Result);
   add_to_commitment : (nat64, nat64) -> (Result);
+  // ===== Course NFT marketplace (PB-300) =====
+  // Admin: wire the CourseNFT (ICRC-7) canister id (PB-301).
+  admin_set_course_nft_canister : (principal) -> (Result);
+  // Mint deposit escrow address (deposit 0.5 ICP here, then mint) (PB-304).
+  get_mint_deposit_address : () -> (LedgerAccount) query;
+  // Burn 0.5 ICP (50/25/25) and mint a course NFT to the caller (PB-304).
+  mint_course_nft : (blob, text) -> (MintResult);
+  // Browse minted courses (filtered, asc token_id; FE shuffles) (PB-305).
+  list_marketplace_courses : (MarketplaceFilter) -> (MarketplacePage) query;
+  get_course : (nat64) -> (opt CourseCard) query;
+  // Passthrough of the verbatim course_data blob for Play (PB-305).
+  get_course_data : (nat64) -> (opt blob);
+  // Listing visibility only — no payment (buy is Phase 2) (PB-305).
+  list_course_for_sale : (nat64, nat64) -> (Result);
+  delist_course : (nat64) -> (Result);
+  refresh_course_listing : (nat64) -> (Result);
+  // Play-to-earn pipeline + anti-cheat (PB-306).
+  start_play_session : (nat64) -> (StartSessionResult);
+  record_hole_event : (nat64, nat8) -> (RecordHoleResult);
+  complete_round : (nat64) -> (CompleteRoundResult);
+  // Local-dev: mint + list one sample course so the marketplace isn't empty.
+  dev_seed_course : () -> (Result_1);
   // Admin: add a permanent curated listing (no payment, no badge, no expiry).
   admin_add_dapp : (text, text, text) -> (Result_1);
   // Admin: add a fundable project. At least one per-token goal must be set.

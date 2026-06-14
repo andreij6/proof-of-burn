@@ -61,12 +61,13 @@ for L in ledger ckbtc-ledger cketh-ledger ckusdc-ledger ckusdt-ledger; do
   fi
 done
 
-# ── 3. Backend + frontend (upgrade in place, asset sync) ────────────────────
-note "Deploying backend + frontend…"
-icp deploy backend frontend -e "$ENV" --identity "$DEPLOY_IDENTITY" --yes
-ok "backend + frontend deployed"
+# ── 3. Backend + course_nft + frontend (upgrade in place, asset sync) ───────
+note "Deploying backend + course_nft + frontend…"
+icp deploy backend course_nft frontend -e "$ENV" --identity "$DEPLOY_IDENTITY" --yes
+ok "backend + course_nft + frontend deployed"
 
 BACKEND_ID=$(canister_id backend)
+COURSE_NFT_ID=$(canister_id course_nft)
 FRONTEND_ID=$(canister_id frontend)
 LEDGER_ID=$(canister_id ledger)
 CKBTC_ID=$(canister_id ckbtc-ledger)
@@ -96,7 +97,29 @@ ok "Token ledgers wired (ckBTC=$CKBTC_ID, ckETH=$CKETH_ID, ckUSDC=$CKUSDC_ID, ck
 # The arcade + early adopters ship dark (flags default OFF) — on for local testing.
 icp canister call backend admin_set_feature_flag '("arcade", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 icp canister call backend admin_set_feature_flag '("early_adopters", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-ok "Arcade + Early Adopters flags enabled (local)"
+# The Course Marketplace keys off the arcade_minigolf sub-flag (PB-305 A7).
+icp canister call backend admin_set_feature_flag '("arcade_minigolf", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+ok "Arcade + Early Adopters + arcade_minigolf flags enabled (local)"
+
+# ── 5b. Wire CourseNFT both directions, then seed a sample course ─────────────
+# Backend must be the allowlisted minter on course_nft (ids permute after a
+# wipe, so set it to the LIVE backend id), and the backend must know the
+# course_nft canister id. Both calls are idempotent.
+icp canister call course_nft set_minter "(principal \"$BACKEND_ID\")" -e "$ENV" --identity "$DEPLOY_IDENTITY" >/dev/null
+icp canister call backend admin_set_course_nft_canister "(principal \"$COURSE_NFT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+ok "CourseNFT wired (backend=$BACKEND_ID is minter; backend → course_nft=$COURSE_NFT_ID)"
+
+# Seed one sample course so the marketplace isn't empty (idempotent).
+if icp canister call backend list_marketplace_courses \
+     '(record { difficulty = variant { Any }; theme = null; listed = variant { Any }; mine_only = false })' \
+     --query -e "$ENV" | grep -q 'token_id = '; then
+  ok "Marketplace already has ≥1 course — skipping sample seed"
+else
+  note "Seeding 1 sample course…"
+  icp canister call backend dev_seed_course '()' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null \
+    && ok "Sample course minted + listed" \
+    || note "Sample course seed skipped (already seeded or course_nft not ready)"
+fi
 # Casino (Crash) is DISABLED pending the SVPP/points redesign. Force the flag
 # OFF (earlier deploys may have turned it on; flags persist across upgrades) and
 # skip casino seeding. Re-enable here once the new point system lands.
