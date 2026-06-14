@@ -39,7 +39,9 @@ jobs:
       # No package-lock.json in the repo, so `npm install` (not `npm ci`).
       - name: Install deps
         run: npm install
+      # Candid bindings (src/bindings) are gitignored — generate them from the
+      # committed .did files first. `typecheck` runs `gen:bindings` then tsc.
       - name: Typecheck
-        run: npx tsc -b
+        run: npm run typecheck
       - name: Unit tests
         run: npx vitest run
