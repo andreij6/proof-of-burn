@@ -15798,7 +15798,7 @@ async fn dev_seed_courses(count: u32) -> Result<u32, String> {
         let par_total: u8 = match i % 3 {
             0 => 22, // Easy
             1 => 36, // Medium
-            _ => 47, // Hard
+            _ => 45, // Hard (45 = max valid par_total; 9 holes × 5; must be 18..=45)
         };
         let to = if i % 3 == 0 { caller } else { mock_principal((i % 7) as u8) };
         let course_data = {

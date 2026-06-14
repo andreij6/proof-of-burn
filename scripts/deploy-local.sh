@@ -154,7 +154,7 @@ else
   icp canister call backend admin_add_project \
     '("ckBTC Tipping Widget", "An embeddable tip button for ICP dapps that routes a fee share to the treasury.", "ICRC-1 tips with a 2% protocol fee converted to cycles via the CMC — every tip burns ICP.", 2_500_000_000_000 : nat64)' \
     -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-  ok "Seeded 2 sample projects ($50,000 and $25,000 USD goals)"
+  ok "Seeded 2 sample projects (\$50,000 and \$25,000 USD goals)"
 fi
 
 # 6c. Sample active pool neurons (so the pool sidebar isn't empty).
