@@ -159,6 +159,8 @@ interface IdeaBoardProps {
 
 export default function IdeaBoard({ actor, identity, principal, host, rootKey, isAdmin, onSignIn }: IdeaBoardProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
+  // Creators can't upvote their own idea — hide the button for them.
+  const isMyIdea = (idea: Idea) => signedIn && !!principal && idea.poster.toText() === principal.toText();
 
   const [tab, setTab] = useState<'board' | 'projects' | 'about'>('board');
   const [ideas, setIdeas] = useState<Idea[]>([]);
@@ -731,17 +733,21 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
                         <Btn variant="ghost" sm style={{ height: 26, padding: '0 8px', fontSize: 11.5 }} onClick={() => openDetail(idea)}>
                           Details
                         </Btn>
-                        <Btn
-                          variant={idea.has_upvoted ? 'secondary' : 'primary'} sm
-                          style={{ height: 26, padding: '0 10px', fontSize: 11.5 }}
-                          disabled={idea.has_upvoted || upvotingId === idea.id}
-                          onClick={() => handleUpvote(idea)}
-                        >
-                          {upvotingId === idea.id
-                            ? <LiveDot size={6} color="var(--char-950)" />
-                            : <Icon name={idea.has_upvoted ? 'check' : 'arrowUp'} size={11} stroke={idea.has_upvoted ? 'var(--sprout-ink)' : 'var(--char-950)'} />}
-                          {idea.has_upvoted ? ' Upvoted' : ' Upvote'}
-                        </Btn>
+                        {isMyIdea(idea) ? (
+                          <span style={{ fontSize: 11, color: 'var(--fg-3)', alignSelf: 'center' }}>Your idea</span>
+                        ) : (
+                          <Btn
+                            variant={idea.has_upvoted ? 'secondary' : 'primary'} sm
+                            style={{ height: 26, padding: '0 10px', fontSize: 11.5 }}
+                            disabled={idea.has_upvoted || upvotingId === idea.id}
+                            onClick={() => handleUpvote(idea)}
+                          >
+                            {upvotingId === idea.id
+                              ? <LiveDot size={6} color="var(--char-950)" />
+                              : <Icon name={idea.has_upvoted ? 'check' : 'arrowUp'} size={11} stroke={idea.has_upvoted ? 'var(--sprout-ink)' : 'var(--char-950)'} />}
+                            {idea.has_upvoted ? ' Upvoted' : ' Upvote'}
+                          </Btn>
+                        )}
                       </span>
                     </div>
                   </div>
@@ -1068,18 +1074,24 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
               </>
             )}
 
-            <Btn
-              variant={detailIdea.has_upvoted ? 'secondary' : 'primary'} style={{ width: '100%' }}
-              disabled={detailIdea.has_upvoted || upvotingId === detailIdea.id}
-              onClick={async () => {
-                const idea = detailIdea;
-                await handleUpvote(idea);
-                setDetailIdea(null);
-              }}
-            >
-              <Icon name={detailIdea.has_upvoted ? 'check' : 'arrowUp'} size={14} stroke={detailIdea.has_upvoted ? 'var(--sprout-ink)' : 'var(--char-950)'} />
-              {detailIdea.has_upvoted ? 'Upvoted' : (signedIn ? 'Upvote' : 'Sign in to upvote')}
-            </Btn>
+            {isMyIdea(detailIdea) ? (
+              <span style={{ fontSize: 12.5, color: 'var(--fg-3)', textAlign: 'center', width: '100%', display: 'block' }}>
+                This is your idea — creators can't upvote their own.
+              </span>
+            ) : (
+              <Btn
+                variant={detailIdea.has_upvoted ? 'secondary' : 'primary'} style={{ width: '100%' }}
+                disabled={detailIdea.has_upvoted || upvotingId === detailIdea.id}
+                onClick={async () => {
+                  const idea = detailIdea;
+                  await handleUpvote(idea);
+                  setDetailIdea(null);
+                }}
+              >
+                <Icon name={detailIdea.has_upvoted ? 'check' : 'arrowUp'} size={14} stroke={detailIdea.has_upvoted ? 'var(--sprout-ink)' : 'var(--char-950)'} />
+                {detailIdea.has_upvoted ? 'Upvoted' : (signedIn ? 'Upvote' : 'Sign in to upvote')}
+              </Btn>
+            )}
             {isAdmin && (
               <div
                 className="row"
