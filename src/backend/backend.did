@@ -403,6 +403,14 @@ type FaucetStats = record {
   total_granted_icp_e8s : nat64;
   last_grant_at : nat64;
 };
+type FaucetGrant = record {
+  id : nat64;
+  dev : principal;
+  canister_id : principal;
+  amount_icp_e8s : nat64;
+  block_index : nat64;
+  at : nat64;
+};
 // Everything the faucet UI / a CLI needs in one query.
 type FaucetStatus = record {
   enabled : bool;
@@ -1283,6 +1291,7 @@ service : (InitPayload) -> {
   // optional canister id (gate / cooldown / params).
   get_faucet_stats : () -> (FaucetStats) query;
   get_faucet_status : (opt principal) -> (FaucetStatus) query;
+  list_faucet_grants : (nat32) -> (vec FaucetGrant) query;
   // App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
   // cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
   // the count of distinct NNS proposals this app has cast a vote on.
@@ -1405,7 +1414,7 @@ service : (InitPayload) -> {
   refund_registration : () -> (Result);
   // Cycles Faucet (PB-400): proof-of-control registration — the TARGET canister
   // calls this on itself (`msg_caller == canister_id` proves control).
-  register_faucet_canister : () -> (Result);
+  register_faucet_canister : (principal) -> (Result);
   remove_admin : (principal) -> (Result);
   // Set (or clear, with an empty string) the caller's X handle. A leading @
   // is stripped; X's own rules apply (1–15 chars, [A-Za-z0-9_]).

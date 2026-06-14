@@ -377,7 +377,7 @@ fn default_lottery_tickets_per_day() -> u64 {
 /// Per-claim grant, FIXED in USD e8s ($1 = 100_000_000). Priced to ICP at claim
 /// time via the cached XRC oracle. $2.00.
 fn default_faucet_grant_usd_e8s() -> u64 {
-    200_000_000
+    25_000_000 // $0.25 per grant (USD e8s)
 }
 /// Max claims per canister, EVER (25 × $2 = $50 lifetime ceiling per canister).
 fn default_faucet_canister_lifetime_cap() -> u32 {
@@ -16218,9 +16218,23 @@ pub struct FaucetStats {
     pub last_grant_at: u64,
 }
 
+/// One recorded faucet grant, for the public transaction list. `block_index` is
+/// the ICP-ledger block of the treasury→CMC transfer — the on-chain transaction
+/// a UI can link to. Keyed in FAUCET_GRANTS by `id` (== the grant's sequence).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FaucetGrant {
+    pub id: u64,
+    pub dev: Principal,
+    pub canister_id: Principal,
+    pub amount_icp_e8s: u64,
+    pub block_index: u64,
+    pub at: u64,
+}
+
 impl_storable!(FaucetRegistration);
 impl_storable!(FaucetCanisterUsage);
 impl_storable!(FaucetStats);
+impl_storable!(FaucetGrant);
 
 thread_local! {
     static FAUCET_REGISTRATIONS: RefCell<StableBTreeMap<Principal, FaucetRegistration, Memory>> =
@@ -16245,6 +16259,12 @@ thread_local! {
                 mm.borrow().get(MemoryId::new(93)),
                 FaucetStats::default(),
             ))
+        });
+
+    // 96 — recorded grants for the public transaction list (keyed by grant id).
+    static FAUCET_GRANTS: RefCell<StableBTreeMap<u64, FaucetGrant, Memory>> =
+        MEMORY_MANAGER.with(|mm| {
+            RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(96))))
         });
 }
 
@@ -16369,29 +16389,30 @@ fn faucet_eligibility_sync(caller: Principal, canister_id: Principal, config: &C
 /// `get_caller()` (the message's authenticated caller) IS the canister to
 /// register. Cheap, network-free rejects for obviously-bad principals.
 #[ic_cdk::update]
-fn register_faucet_canister() -> Result<(), String> {
-    let caller = get_caller();
-    if caller == Principal::anonymous() {
-        return Err("ANONYMOUS_NOT_ALLOWED".to_string());
-    }
+fn register_faucet_canister(canister_id: Principal) -> Result<(), String> {
+    // Any authenticated dev can register a canister id from the dapp — the
+    // self-call proof-of-control constraint was removed by product decision.
+    // The grant only ever tops up the target canister with cycles, so registering
+    // a canister you don't control just spends your own eligibility on it.
+    require_authenticated()?;
     // Must be an opaque (canister) principal — a user/self-authenticating
     // principal can't be a cycles destination. Opaque principals end in the
-    // 0x01 type byte; the management canister (empty) is not a real target.
-    let bytes = caller.as_slice();
+    // 0x01 type byte.
+    let bytes = canister_id.as_slice();
     if bytes.is_empty() || *bytes.last().unwrap() != 0x01 {
         return Err("NOT_A_CANISTER".to_string());
     }
-    if caller == get_canister_id() {
+    if canister_id == get_canister_id() {
         return Err("CANNOT_REGISTER_SELF".to_string());
     }
     let now = current_time();
     FAUCET_REGISTRATIONS.with(|m| {
         let mut m = m.borrow_mut();
         // Re-registration refreshes the timestamp but preserves any pending block.
-        let pending = m.get(&caller).and_then(|r| r.pending_block);
+        let pending = m.get(&canister_id).and_then(|r| r.pending_block);
         m.insert(
-            caller,
-            FaucetRegistration { canister_id: caller, registered_at: now, pending_block: pending },
+            canister_id,
+            FaucetRegistration { canister_id, registered_at: now, pending_block: pending },
         );
     });
     Ok(())
@@ -16489,12 +16510,25 @@ async fn claim_faucet_cycles(canister_id: Principal) -> Result<(), String> {
         usage.count = usage.count.saturating_add(1);
         m.insert(canister_id, usage);
     });
-    FAUCET_STATS.with(|c| {
+    let grant_id = FAUCET_STATS.with(|c| {
         let mut s = c.borrow().get().clone();
         s.total_claims = s.total_claims.saturating_add(1);
         s.total_granted_icp_e8s = s.total_granted_icp_e8s.saturating_add(grant_icp_e8s);
         s.last_grant_at = now;
+        let id = s.total_claims;
         let _ = c.borrow_mut().set(s);
+        id
+    });
+    // Record the grant for the public transaction list (with the on-chain block).
+    FAUCET_GRANTS.with(|m| {
+        m.borrow_mut().insert(grant_id, FaucetGrant {
+            id: grant_id,
+            dev: caller,
+            canister_id,
+            amount_icp_e8s: grant_icp_e8s,
+            block_index: block,
+            at: now,
+        });
     });
     AUDIT_LOG.with(|log| {
         let _ = log.borrow_mut().append(&AuditLogEntry {
@@ -16560,6 +16594,14 @@ fn get_faucet_status(canister_id: Option<Principal>) -> FaucetStatus {
 #[ic_cdk::query]
 fn get_faucet_stats() -> FaucetStats {
     FAUCET_STATS.with(|c| c.borrow().get().clone())
+}
+
+/// Recent faucet grants, most-recent-first, capped at 25 — backs the public
+/// transaction list. Each `block_index` is the on-chain ICP-ledger tx.
+#[ic_cdk::query]
+fn list_faucet_grants(limit: u32) -> Vec<FaucetGrant> {
+    let n = limit.min(25) as usize;
+    FAUCET_GRANTS.with(|m| m.borrow().iter().rev().take(n).map(|e| e.value()).collect())
 }
 
 // ── Admin param setters (all admin-settable, sanity-railed) ──
@@ -24330,25 +24372,24 @@ mod tests {
         });
     }
 
-    /// Register the target canister via proof-of-control (caller == canister).
+    /// Register the target canister — any authenticated dev can (no self-call proof).
     fn faucet_register(canister: Principal) {
-        set_mock_caller(canister);
-        register_faucet_canister().unwrap();
+        set_mock_caller(faucet_dev());
+        register_faucet_canister(canister).unwrap();
     }
 
     #[test]
-    fn test_faucet_register_proof_of_control() {
+    fn test_faucet_register_by_dev() {
         faucet_reset();
-        // A non-canister (self-authenticating) principal is rejected.
+        // A dev registers a canister id from the dapp (no proof-of-control).
         set_mock_caller(faucet_dev());
-        assert!(register_faucet_canister().is_err());
-        // The canister registering itself succeeds.
-        set_mock_caller(faucet_canister());
-        assert!(register_faucet_canister().is_ok());
+        assert!(register_faucet_canister(faucet_canister()).is_ok());
         assert!(FAUCET_REGISTRATIONS.with(|m| m.borrow().contains_key(&faucet_canister())));
-        // Anonymous rejected.
+        // A non-canister (self-authenticating) principal arg is rejected.
+        assert!(register_faucet_canister(faucet_dev()).is_err());
+        // Anonymous caller rejected.
         set_mock_caller(anon());
-        assert!(register_faucet_canister().is_err());
+        assert!(register_faucet_canister(faucet_canister()).is_err());
     }
 
     #[tokio::test]

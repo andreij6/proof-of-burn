@@ -73,8 +73,9 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
   const [canisterInput, setCanisterInput] = useState('');
   const [status, setStatus] = useState<FaucetStatus | null>(null);
   const [stats, setStats] = useState<{ total_claims: bigint; total_granted_icp_e8s: bigint } | null>(null);
+  const [grants, setGrants] = useState<Array<{ id: bigint; canister_id: Principal; amount_icp_e8s: bigint; block_index: bigint; at: bigint }>>([]);
   const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState<'' | 'claim'>('');
+  const [busy, setBusy] = useState<'' | 'claim' | 'register'>('');
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -92,12 +93,14 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
       // Wrapper-layer binding: an `opt principal` ARG is `Principal | null`,
       // NOT the raw-declarations `[]`/`[x]` array. Passing an array throws and
       // leaves `status` null → the page falsely renders "faucet is closed".
-      const [st, ss] = await Promise.all([
+      const [st, ss, gr] = await Promise.all([
         actor.get_faucet_status(cid),
         actor.get_faucet_stats().catch(() => null),
+        actor.list_faucet_grants(25).catch(() => []),
       ]);
       setStatus(st as FaucetStatus);
       if (ss) setStats(ss);
+      setGrants(gr ?? []);
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
@@ -106,6 +109,28 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
   }, [actor, parseCanister]);
 
   useEffect(() => { refresh(); }, [actor]); // initial + on actor change
+
+  // Register a canister id (any signed-in dev — no self-call proof-of-control).
+  const register = async () => {
+    setError(null); setNotice(null);
+    const cid = parseCanister();
+    if (!cid) { setError('Enter a valid canister id.'); return; }
+    setBusy('register');
+    try {
+      const res = await actor.register_faucet_canister(cid);
+      if (res?.__kind__ === 'Err') throw new Error(res.Err);
+      setNotice(`Registered ${cid.toText()}.`);
+      await refresh();
+    } catch (e: any) {
+      setError(String(e?.message ?? e));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // On-chain link for a grant's ICP-ledger block (mainnet only; local has no explorer).
+  const txUrl = (block: bigint): string | null =>
+    isLocal ? null : `https://dashboard.internetcomputer.org/transaction/${block}`;
 
   const claim = async () => {
     setError(null); setNotice(null);
@@ -175,9 +200,8 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
           <div style={card}>
             <Eyebrow>Your canister</Eyebrow>
             <p style={{ color: 'var(--fg-2)', margin: '4px 0 10px', fontSize: 13 }}>
-              Registration is proof-of-control: your canister must call
-              <code> register_faucet_canister()</code> on itself once. Then enter
-              its id below to check eligibility and claim.
+              Enter the canister id you want topped up, register it, then claim.
+              The grant only ever adds cycles to that canister.
             </p>
             <input
               value={canisterInput}
@@ -211,6 +235,10 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
             <div style={{ marginTop: 14, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
               {!signedIn ? (
                 <Btn variant="primary" onClick={onSignIn}>Sign in to claim</Btn>
+              ) : !status.registered ? (
+                <Btn variant="primary" disabled={busy === 'register' || !parseCanister()} onClick={register}>
+                  {busy === 'register' ? 'Registering…' : 'Register this canister'}
+                </Btn>
               ) : (
                 <Btn
                   variant="primary"
@@ -242,6 +270,41 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
             <div style={{ ...card, display: 'flex', gap: 24, flexWrap: 'wrap' }}>
               <Stat label="Grants all-time" value={String(stats.total_claims)} />
               <Stat label="ICP granted all-time" value={fmtIcp(stats.total_granted_icp_e8s)} />
+            </div>
+          )}
+
+          {grants.length > 0 && (
+            <div style={card}>
+              <Eyebrow>Recent grants</Eyebrow>
+              <p style={{ color: 'var(--fg-3)', fontSize: 12, margin: '4px 0 10px' }}>
+                Last {Math.min(grants.length, 25)}, most recent first. Each links to the
+                on-chain ICP-ledger transaction.
+              </p>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {grants.map((g) => {
+                  const url = txUrl(g.block_index);
+                  return (
+                    <div key={String(g.id)} style={{
+                      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                      gap: 12, fontSize: 13, borderBottom: '1px solid var(--border)', paddingBottom: 6,
+                    }}>
+                      <span style={{ color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>{fmtWhen(g.at)}</span>
+                      <span className="mono" style={{ color: 'var(--fg-2)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {formatPrincipal(g.canister_id)}
+                      </span>
+                      <span style={{ color: 'var(--fg)', whiteSpace: 'nowrap' }}>{fmtIcp(g.amount_icp_e8s)}</span>
+                      {url ? (
+                        <a href={url} target="_blank" rel="noreferrer"
+                          style={{ color: 'var(--burn)', display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+                          tx #{String(g.block_index)} <Icon name="external" size={11} stroke="var(--burn)" />
+                        </a>
+                      ) : (
+                        <span className="mono" style={{ color: 'var(--fg-3)', whiteSpace: 'nowrap' }}>block #{String(g.block_index)}</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
