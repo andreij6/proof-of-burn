@@ -147,6 +147,29 @@
   --ember-ink:  #C2353A;   /* darkened red for AA on light */
 }
 
+/* Force dark tokens on a subtree regardless of the global theme. The Landing is
+   a hardcoded-dark hero (black background, glowing neurons); without this, a
+   persisted LIGHT theme flips its foreground tokens dark → dark-on-black text.
+   Custom properties cascade from the nearest ancestor, so re-declaring the dark
+   values here wins for everything inside the Landing. */
+[data-force-theme="dark"] {
+  --bg:         var(--char-950);
+  --bg-alt:     var(--char-925);
+  --surface:    var(--char-900);
+  --surface-hi: var(--char-850);
+  --border:     var(--char-800);
+  --border-hi:  var(--char-700);
+  --fg:         var(--char-0);
+  --fg-1:       var(--char-50);
+  --fg-2:       var(--char-300);
+  --fg-3:       var(--char-500);
+  --fg-dim:     var(--char-700);
+  --burn-ink:   var(--burn);
+  --sprout-ink: var(--sprout);
+  --haze-ink:   var(--haze);
+  --ember-ink:  var(--ember);
+}
+
 /* =============================================================
    Semantic element styles — consume these, don't redefine.
    ============================================================= */

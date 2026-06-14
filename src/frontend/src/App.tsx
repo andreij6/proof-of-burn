@@ -1951,12 +1951,15 @@ export default function App() {
   if (page === 'landing') {
     return (
       <Landing
-        flags={{
+        // Only gate sections once flags have actually loaded; before that show
+        // everything (passing undefined → Landing's default-safe fallback),
+        // otherwise the not-yet-loaded flags hide every flagged section.
+        flags={featureFlags.length > 0 ? {
           staking: losslessEnabled,
           lottery: lotteryEnabled,
           ideas: ideaBoardEnabled,
           explorer: explorerEnabled,
-        }}
+        } : undefined}
         onEnter={() => {
           window.scrollTo(0, 0);
           setPage('dashboard');
