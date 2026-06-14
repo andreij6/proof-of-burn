@@ -109,14 +109,18 @@ export function Eyebrow({ children, accent, style }: { children: React.ReactNode
   );
 }
 
+// Tints are mixed into `transparent` so they read as a LIGHT wash on the
+// light theme and a DARK wash on the dark theme (the old fixed `*-dim` colors
+// were dark-only and looked wrong in light mode). Text uses the theme-aware
+// `*-ink` accents for AA contrast in both modes.
 export const CHIP_TONES = {
-  muted:   { bg: 'transparent',        bd: 'var(--border)',  fg: 'var(--fg-2)' },
-  burn:    { bg: 'var(--burn-950)',    bd: 'var(--burn)',    fg: 'var(--burn)' },
-  solid:   { bg: 'var(--burn)',        bd: 'var(--burn)',    fg: 'var(--char-950)' },
-  ok:      { bg: 'var(--sprout-dim)',  bd: 'var(--sprout)',  fg: 'var(--sprout)' },
-  danger:  { bg: 'var(--ember-dim)',   bd: 'var(--ember)',   fg: 'var(--ember)' },
-  pending: { bg: 'var(--haze-dim)',    bd: 'var(--haze)',    fg: 'var(--haze)' },
-  dashed:  { bg: 'transparent',        bd: 'var(--border-hi)', fg: 'var(--fg-3)' },
+  muted:   { bg: 'transparent',                                       bd: 'var(--border)',    fg: 'var(--fg-2)' },
+  burn:    { bg: 'color-mix(in srgb, var(--burn) 16%, transparent)',   bd: 'var(--burn)',     fg: 'var(--burn-ink)' },
+  solid:   { bg: 'var(--burn)',                                        bd: 'var(--burn)',     fg: 'var(--char-950)' },
+  ok:      { bg: 'color-mix(in srgb, var(--sprout) 18%, transparent)', bd: 'var(--sprout)',   fg: 'var(--sprout-ink)' },
+  danger:  { bg: 'color-mix(in srgb, var(--ember) 16%, transparent)',  bd: 'var(--ember)',    fg: 'var(--ember-ink)' },
+  pending: { bg: 'color-mix(in srgb, var(--haze) 20%, transparent)',   bd: 'var(--haze)',     fg: 'var(--haze-ink)' },
+  dashed:  { bg: 'transparent',                                        bd: 'var(--border-hi)', fg: 'var(--fg-3)' },
 };
 
 export function Chip({ tone = 'muted', children, style }: { tone?: keyof typeof CHIP_TONES; children: React.ReactNode; style?: React.CSSProperties }) {

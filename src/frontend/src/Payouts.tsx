@@ -195,7 +195,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
     `You are connecting to Caldera, an ICP governance dapp.`,
     `Backend canister: ${backendCanisterId} (${isLocal ? 'local replica' : 'IC mainnet'}). Candid: ${window?.location?.origin ?? ''}/llms-${env}.txt lists the flows.`,
     `Authentication: any self-generated principal works (no Internet Identity needed). Generate a key, sign your calls; queries are free and anonymous.`,
-    `House rules: staking and unstaking are whole-ICP only; voting is burn-only and needs an NNS neuron following the community leader; staking earns daily lottery tickets (claimable once per UTC day via claim_daily_tickets).`,
+    `House rules: staking and unstaking are whole-ICP only; voting is burn-only and open to any signed-in caller (following the community leader is encouraged but not required); staking earns daily lottery tickets (claimable once per UTC day via claim_daily_tickets).`,
     `Start by fetching the skill files on this origin (llms-${env}.txt, llms-rd-${env}.txt, llms-lottery-${env}.txt) and follow their instructions.`,
   ].join('\n');
   const copyQuickstart = () => {
@@ -445,7 +445,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
           </div>
 
           {/* Quickstart */}
-          <div className="col" style={{ ...card, gap: 10, border: '1px dashed var(--burn)', background: 'var(--burn-950)' }}>
+          <div className="col" style={{ ...card, gap: 10, border: '1px dashed var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between', alignItems: 'center' }}>
               <Eyebrow>Agent quickstart — one paste connects an agent</Eyebrow>
               <Btn variant="secondary" sm onClick={copyQuickstart}>
