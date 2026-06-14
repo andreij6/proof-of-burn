@@ -696,6 +696,7 @@ type Result_2 = variant { Ok : text; Err : text };
 type Result_3 = variant { Ok : ExplorerQuote; Err : text };
 type Result_4 = variant { Ok : nat32; Err : text };
 type Result_5 = variant { Ok : CrashVerifyView; Err : text };
+type ResultBool = variant { Ok : bool; Err : text };
 // ===== Course NFT marketplace (PB-300) =====
 type MintError = variant {
   NotAuthenticated;
@@ -745,6 +746,31 @@ type RecordHoleOk = record {
 type RecordHoleResult = variant { Ok : RecordHoleOk; Err : text };
 type CompleteRoundOk = record { player_credited : bool; reason : opt text };
 type CompleteRoundResult = variant { Ok : CompleteRoundOk; Err : text };
+// PB-310 ratings & reviews.
+type Rating = record {
+  token_id : nat64;
+  rater : principal;
+  stars : nat8;
+  text : opt text;
+  created_at : nat64;
+  updated_at : nat64;
+};
+type CourseRatingSummary = record {
+  token_id : nat64;
+  rating_sum : nat64;
+  count : nat32;
+  avg_x10 : nat32;
+  my_stars : opt nat8;
+};
+// PB-308 featured slot auction.
+type FeaturedSlot = record {
+  token_id : nat64;
+  bidder : principal;
+  token : ExplorerToken;
+  amount : nat64;
+  usd_value_e8s : nat64;
+  at : nat64;
+};
 // Fixed staking terms. The 6-month minimum matches the NNS minimum dissolve
 // delay for voting eligibility, so no Mission 70 gate applies. Voting weight
 // and the daily lottery-ticket grant both scale with the same multiplier,
@@ -893,6 +919,31 @@ service : (InitPayload) -> {
   start_play_session : (nat64) -> (StartSessionResult);
   record_hole_event : (nat64, nat8) -> (RecordHoleResult);
   complete_round : (nat64) -> (CompleteRoundResult);
+  // Favorites: private, per-user; convenience metadata only (PB-311).
+  toggle_favorite_course : (nat64) -> (ResultBool);
+  is_favorite : (nat64) -> (bool) query;
+  my_favorite_ids : () -> (vec nat64) query;
+  list_my_favorite_courses : () -> (vec CourseCard) query;
+  // Ratings & reviews: 1-5 stars + optional <=280-char text (PB-310).
+  rate_course : (nat64, nat8, opt text) -> (Result);
+  get_course_rating_summary : (nat64) -> (CourseRatingSummary) query;
+  list_course_reviews : (nat64, nat64, nat64) -> (vec Rating) query;
+  admin_remove_rating : (nat64, principal) -> (Result);
+  // Featured slot auction: ckBTC/ckETH/ckUSDT/ckUSDC, USD-compared, 100% to
+  // treasury, non-refundable, retained on delist/sale (PB-308).
+  bid_featured_slot : (nat64, ExplorerToken, nat64) -> (Result);
+  get_featured_slot : () -> (opt FeaturedSlot) query;
+  admin_clear_featured_slot : () -> (Result);
+  // Local-dev marketplace state visualisation (require_local_dev) (PB-312).
+  dev_seed_courses : (nat32) -> (Result_4);
+  dev_set_course_sale : (nat64, opt nat64) -> (Result);
+  dev_simulate_sale : (nat64, principal) -> (Result);
+  dev_give_course : (nat64) -> (Result);
+  dev_set_play_count : (nat64, nat64) -> (Result);
+  dev_set_featured : (nat64) -> (Result);
+  dev_clear_featured : () -> (Result);
+  dev_grant_favorite : (nat64) -> (Result);
+  dev_clear_courses : () -> (Result_1);
   // Admin: mint the genesis default course once (idempotent), so the
   // marketplace is never empty. Re-seed recovery for a no-op upgrade (PB-309).
   admin_seed_system_course : () -> (Result_1);

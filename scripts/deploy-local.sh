@@ -123,6 +123,14 @@ else
     && ok "Default course minted + listed (admin-owned, sellable)" \
     || note "Default course seed skipped (already minted or course_nft not ready)"
 fi
+# Local-dev (PB-312): top up the marketplace with a varied set of courses so the
+# grid renders busy (themes/difficulties/owners/prices/play-counts). Idempotent:
+# dev_seed_courses tops up toward the target rather than piling up, and the call
+# is hard-gated by require_local_dev so it can never run on mainnet/staging.
+note "Seeding a busy local marketplace (dev_seed_courses)…"
+icp canister call backend dev_seed_courses '(12 : nat32)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null \
+  && ok "Local marketplace seeded (up to 12 varied courses)" \
+  || note "dev_seed_courses skipped (not local, or course_nft not ready)"
 # Casino (Crash) is DISABLED pending the SVPP/points redesign. Force the flag
 # OFF (earlier deploys may have turned it on; flags persist across upgrades) and
 # skip casino seeding. Re-enable here once the new point system lands.

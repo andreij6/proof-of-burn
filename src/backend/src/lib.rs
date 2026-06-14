@@ -13625,9 +13625,14 @@ fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
 // 05-marketplace.md (PB-305), 06-play-to-earn-and-anticheat.md (PB-306),
 // 09-leaderboard-removal-and-arcade-migration.md (PB-309).
 //
-// MemoryIds (00 §5): 77 COURSE_LISTINGS, 79 PLAY_SESSIONS,
-// 80 COURSE_TICKET_CAPS, 82 NEXT_SESSION_ID, 83 MINT_SAGAS, 85 COURSE_PAIR_CAPS.
-// (78 FEATURED_SLOT, 81 RATINGS, 84 SALES reserved for later phases — not used.)
+// MemoryIds (00 §5): 77 COURSE_LISTINGS, 78 FEATURED_SLOT (PB-308),
+// 79 PLAY_SESSIONS, 80 COURSE_TICKET_CAPS, 81 COURSE_RATINGS (PB-310),
+// 82 NEXT_SESSION_ID, 83 MINT_SAGAS, 84 COURSE_SALES, 85 COURSE_PAIR_CAPS,
+// 86 SYSTEM_COURSE_MINTED, 87 FAVORITE_COURSES (PB-311).
+//
+// NOTE: spec 12-local-dev-options.md text says FAVORITE_COURSES is MemoryId 86,
+// but the authoritative overview §5 table AND 11-favorite-courses.md place it at
+// 87 (86 = SYSTEM_COURSE_MINTED). 87 is used here per the overview.
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -13696,6 +13701,11 @@ pub struct CourseListing {
     /// A course can be `listed && !for_sale` (playable but not buyable).
     #[serde(default)]
     pub for_sale: bool,
+    /// PB-310 running rating aggregate (upgrade-safe; cheap card reads).
+    #[serde(default)]
+    pub rating_sum: u64, // sum of stars
+    #[serde(default)]
+    pub rating_count: u32, // distinct raters
 }
 impl_storable!(CourseListing);
 
@@ -14220,6 +14230,8 @@ async fn mint_course_nft_inner(
                     created_at: saga.started_at,
                     mint_fee_e8s: MINT_FEE_E8S,
                     for_sale: false,
+                    rating_sum: 0,
+                    rating_count: 0,
                 },
             );
         });
@@ -14374,7 +14386,8 @@ fn list_marketplace_courses(filter: MarketplaceFilter) -> MarketplacePage {
             total: 0,
         };
     }
-    let featured_token_id: Option<u64> = None; // FEATURED_SLOT (PB-308) not built.
+    // PB-308: pin the featured course (dropping a dangling slot via get_featured_slot).
+    let featured_token_id: Option<u64> = get_featured_slot().map(|s| s.token_id);
     let mut matched: Vec<CourseCard> = COURSE_LISTINGS.with(|m| {
         m.borrow()
             .iter()
@@ -14458,6 +14471,8 @@ async fn list_course_for_sale(token_id: u64, price_e8s: u64) -> Result<(), Strin
             created_at: current_time(),
             mint_fee_e8s: 0,
             for_sale: false,
+            rating_sum: 0,
+            rating_count: 0,
         });
         row.listed = true;
         row.for_sale = true;
@@ -15214,6 +15229,8 @@ async fn seed_system_course_inner() -> Result<u64, String> {
                 created_at: current_time(),
                 mint_fee_e8s: 0,
                 for_sale: false, // admin lists it for sale later via the normal path
+                rating_sum: 0,
+                rating_count: 0,
             },
         );
     });
@@ -15248,6 +15265,772 @@ fn sweep_play_sessions() {
             map.remove(&id);
         }
     });
+}
+
+// ── Completion predicate (PB-306 read helper, consumed by PB-310) ────────────
+
+/// True if `player` has at least one COMPLETED play session for `token_id`
+/// (a full 9-hole round). Reused by the ratings completion gate (PB-310 A2) so
+/// the spec consumes a clean predicate rather than reaching into session
+/// internals. O(sessions) scan; the session map is swept of completed/expired
+/// rows by `sweep_play_sessions`, so it stays small in practice.
+fn has_completed_round(player: Principal, token_id: u64) -> bool {
+    PLAY_SESSIONS.with(|m| {
+        m.borrow().iter().any(|e| {
+            let s = e.value();
+            s.player == player
+                && s.token_id == token_id
+                && s.status == PlaySessionStatus::Completed
+        })
+    })
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 20.A Favorites (PB-311) — private, per-user, point-access. MemoryId 87.
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Convenience metadata only: never touches tickets, listings, ownership, or any
+// economics (11-favorite-courses.md). Point-access by the caller's Principal, so
+// the default CBOR codec (`impl_storable!`) is correct — NO custom Storable.
+
+const MAX_FAVORITE_COURSES: usize = 200; // per-user cap (overview §5 / B1).
+
+/// Private, per-user favorites list. Point-access ONLY (get/insert/remove by the
+/// caller's Principal) — never range-scanned, so the CBOR codec is sufficient.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FavoriteList {
+    #[serde(default)]
+    pub ids: Vec<u64>,
+}
+impl_storable!(FavoriteList);
+
+thread_local! {
+    static FAVORITE_COURSES: RefCell<StableBTreeMap<Principal, FavoriteList, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(87)))));
+}
+
+/// Shared add path (also reused by the local-dev `dev_grant_favorite`, PB-312):
+/// de-duped + capped; returns `true` if newly added, `false` if already present.
+fn favorite_add(caller: Principal, token_id: u64) -> Result<bool, String> {
+    FAVORITE_COURSES.with(|m| {
+        let mut map = m.borrow_mut();
+        let mut list = map.get(&caller).unwrap_or_default();
+        if list.ids.contains(&token_id) {
+            return Ok(false); // already a favorite — no-op add
+        }
+        if list.ids.len() >= MAX_FAVORITE_COURSES {
+            return Err("FAVORITES_FULL".to_string());
+        }
+        list.ids.push(token_id);
+        map.insert(caller, list);
+        Ok(true)
+    })
+}
+
+/// Toggle a course in the caller's favorites. Returns the NEW state
+/// (`Ok(true)` = now favorited, `Ok(false)` = now removed) so the frontend can
+/// reconcile its optimistic flip without a follow-up read (PB-311 B2).
+#[ic_cdk::update(guard = "require_authenticated")]
+fn toggle_favorite_course(token_id: u64) -> Result<bool, String> {
+    require_arcade_game_enabled(ARCADE_GAME_MINIGOLF)?;
+    let caller = get_caller();
+    // Cannot favorite a course that was never minted/listed.
+    let exists = COURSE_LISTINGS.with(|m| m.borrow().contains_key(&token_id));
+    if !exists {
+        return Err("COURSE_NOT_FOUND".to_string());
+    }
+    FAVORITE_COURSES.with(|m| {
+        let mut map = m.borrow_mut();
+        let mut list = map.get(&caller).unwrap_or_default();
+        if let Some(pos) = list.ids.iter().position(|&id| id == token_id) {
+            list.ids.remove(pos);
+            if list.ids.is_empty() {
+                map.remove(&caller); // keep the map tidy (B1)
+            } else {
+                map.insert(caller, list);
+            }
+            Ok(false)
+        } else {
+            if list.ids.len() >= MAX_FAVORITE_COURSES {
+                return Err("FAVORITES_FULL".to_string());
+            }
+            list.ids.push(token_id);
+            map.insert(caller, list);
+            Ok(true)
+        }
+    })
+}
+
+#[ic_cdk::query]
+fn is_favorite(token_id: u64) -> bool {
+    let caller = get_caller();
+    if caller == Principal::anonymous() {
+        return false;
+    }
+    FAVORITE_COURSES
+        .with(|m| m.borrow().get(&caller).map(|l| l.ids.contains(&token_id)))
+        .unwrap_or(false)
+}
+
+#[ic_cdk::query]
+fn my_favorite_ids() -> Vec<u64> {
+    let caller = get_caller();
+    if caller == Principal::anonymous() {
+        return vec![];
+    }
+    FAVORITE_COURSES.with(|m| m.borrow().get(&caller).map(|l| l.ids).unwrap_or_default())
+}
+
+#[ic_cdk::query]
+fn list_my_favorite_courses() -> Vec<CourseCard> {
+    let caller = get_caller();
+    if caller == Principal::anonymous() {
+        return vec![];
+    }
+    let ids = FAVORITE_COURSES
+        .with(|m| m.borrow().get(&caller).map(|l| l.ids))
+        .unwrap_or_default();
+    COURSE_LISTINGS.with(|m| {
+        let map = m.borrow();
+        ids.iter()
+            .filter_map(|id| map.get(id)) // skip burned/missing tokens (B4)
+            .map(|l| listing_to_card(&l, caller))
+            .collect()
+    })
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 20.B Ratings & reviews (PB-310, Phase 3). MemoryId 81.
+// ════════════════════════════════════════════════════════════════════════════
+//
+// One rating per (user, course): 1–5 stars + optional ≤280-char text. Gated on a
+// completed 9-hole round (PB-306) + Tier 2+; no self-rating by creator/owner.
+// Running aggregate (rating_sum/rating_count) cached on the listing for cheap
+// card reads. C2: RatingKey uses a hand-rolled fixed-width big-endian Storable
+// (token_id first, then principal) so `range(token_id..)` lists exactly one
+// course's reviews — a CBOR key would sort by principal first and bleed.
+
+const MAX_RATING_TEXT_CHARS: usize = MAX_DAPP_DESC_LEN; // 280
+const MAX_REVIEW_PAGE: u64 = 50;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RatingKey {
+    pub token_id: u64,
+    pub rater: Principal,
+}
+
+impl Storable for RatingKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let p = self.rater.as_slice(); // <= 29 bytes
+        let mut b = Vec::with_capacity(38);
+        b.extend_from_slice(&self.token_id.to_be_bytes()); // [0..8] token_id sorts first
+        b.push(p.len() as u8); // [8] principal length
+        b.extend_from_slice(p); // [9..] principal bytes
+        b.resize(38, 0);
+        Cow::Owned(b)
+    }
+    fn into_bytes(self) -> Vec<u8> {
+        self.to_bytes().into_owned()
+    }
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        let token_id = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
+        let len = bytes[8] as usize;
+        let rater = Principal::from_slice(&bytes[9..9 + len]);
+        Self { token_id, rater }
+    }
+    const BOUND: Bound = Bound::Bounded { max_size: 38, is_fixed_size: true };
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Rating {
+    pub token_id: u64,
+    pub rater: Principal,
+    pub stars: u8, // 1..=5
+    pub text: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+impl_storable!(Rating);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CourseRatingSummary {
+    pub token_id: u64,
+    pub rating_sum: u64,
+    pub count: u32,
+    pub avg_x10: u32, // avg*10, integer convenience (O2: no floats on the wire)
+    pub my_stars: Option<u8>,
+}
+
+thread_local! {
+    static COURSE_RATINGS: RefCell<StableBTreeMap<RatingKey, Rating, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(81)))));
+}
+
+#[ic_cdk::update(guard = "require_authenticated")]
+async fn rate_course(token_id: u64, stars: u8, text: Option<String>) -> Result<(), String> {
+    require_arcade_game_enabled(ARCADE_GAME_MINIGOLF)?;
+    let rater = get_caller();
+    if course_caller_tier(rater) < 2 {
+        return Err("TIER_TOO_LOW".to_string());
+    }
+    if !(1..=5).contains(&stars) {
+        return Err("BAD_STARS".to_string());
+    }
+    let text = match text {
+        Some(t) => {
+            let t = t.trim();
+            if t.is_empty() {
+                None
+            } else if t.chars().count() > MAX_RATING_TEXT_CHARS {
+                return Err("TEXT_TOO_LONG".to_string());
+            } else {
+                Some(t.to_string())
+            }
+        }
+        None => None,
+    };
+
+    let listing = COURSE_LISTINGS
+        .with(|m| m.borrow().get(&token_id))
+        .ok_or_else(|| "NO_COURSE".to_string())?;
+    // No self-rating: immutable creator OR the live owner.
+    if Some(rater) == listing.creator {
+        return Err("CANNOT_RATE_OWN_COURSE".to_string());
+    }
+    let owner = course_nft_owner_of(token_id).await?;
+    if owner == Some(rater) {
+        return Err("CANNOT_RATE_OWN_COURSE".to_string());
+    }
+    // Completion gate (PB-306 A2).
+    if !has_completed_round(rater, token_id) {
+        return Err("MUST_COMPLETE_ROUND".to_string());
+    }
+
+    let key = RatingKey { token_id, rater };
+    let now = current_time();
+    let existing = COURSE_RATINGS.with(|m| m.borrow().get(&key));
+    let (created_at, old_stars) = match &existing {
+        Some(r) => (r.created_at, Some(r.stars)),
+        None => (now, None),
+    };
+    COURSE_RATINGS.with(|m| {
+        m.borrow_mut().insert(
+            key,
+            Rating {
+                token_id,
+                rater,
+                stars,
+                text,
+                created_at,
+                updated_at: now,
+            },
+        );
+    });
+    // Maintain the running aggregate on the listing (B2).
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some(mut row) = map.get(&token_id) {
+            match old_stars {
+                Some(old) => {
+                    row.rating_sum = row.rating_sum + stars as u64 - old as u64;
+                }
+                None => {
+                    row.rating_sum = row.rating_sum.saturating_add(stars as u64);
+                    row.rating_count = row.rating_count.saturating_add(1);
+                }
+            }
+            map.insert(token_id, row);
+        }
+    });
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_course_rating_summary(token_id: u64) -> CourseRatingSummary {
+    let caller = get_caller();
+    let (rating_sum, count) = COURSE_LISTINGS
+        .with(|m| m.borrow().get(&token_id).map(|l| (l.rating_sum, l.rating_count)))
+        .unwrap_or((0, 0));
+    let avg_x10 = if count > 0 {
+        u32::try_from(rating_sum * 10 / count as u64).unwrap_or(50)
+    } else {
+        0
+    };
+    let my_stars = if caller == Principal::anonymous() {
+        None
+    } else {
+        COURSE_RATINGS.with(|m| m.borrow().get(&RatingKey { token_id, rater: caller }).map(|r| r.stars))
+    };
+    CourseRatingSummary {
+        token_id,
+        rating_sum,
+        count,
+        avg_x10,
+        my_stars,
+    }
+}
+
+#[ic_cdk::query]
+fn list_course_reviews(token_id: u64, offset: u64, limit: u64) -> Vec<Rating> {
+    let limit = limit.min(MAX_REVIEW_PAGE);
+    if limit == 0 {
+        return vec![];
+    }
+    // Range over exactly this course's rows (C2 key sorts token_id-first).
+    let lo = RatingKey { token_id, rater: Principal::from_slice(&[]) };
+    let hi = RatingKey { token_id: token_id.saturating_add(1), rater: Principal::from_slice(&[]) };
+    let mut rows: Vec<Rating> = COURSE_RATINGS.with(|m| {
+        m.borrow()
+            .range(lo..hi)
+            .map(|e| e.value())
+            .filter(|r| r.token_id == token_id)
+            .collect()
+    });
+    // Most-recent-first.
+    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    rows.into_iter().skip(offset as usize).take(limit as usize).collect()
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_remove_rating(token_id: u64, rater: Principal) -> Result<(), String> {
+    let key = RatingKey { token_id, rater };
+    let removed = COURSE_RATINGS.with(|m| m.borrow_mut().remove(&key));
+    if let Some(r) = removed {
+        COURSE_LISTINGS.with(|m| {
+            let mut map = m.borrow_mut();
+            if let Some(mut row) = map.get(&token_id) {
+                row.rating_sum = row.rating_sum.saturating_sub(r.stars as u64);
+                row.rating_count = row.rating_count.saturating_sub(1);
+                map.insert(token_id, row);
+            }
+        });
+        Ok(())
+    } else {
+        Err("NO_RATING".to_string())
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 20.C Featured slot auction (PB-308, Phase 3). MemoryId 78.
+// ════════════════════════════════════════════════════════════════════════════
+//
+// One global slot, perpetual highest-bid auction. Bids in ckBTC/ckETH/ckUSDT/
+// ckUSDC only, compared in USD via the XRC oracle; a bid wins iff its fresh USD
+// value strictly exceeds the stored holder's USD value. 100% to treasury,
+// non-refundable, single-leg pull. Slot RETAINED on delist/sale; admin clears it.
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FeaturedSlot {
+    pub token_id: u64,
+    pub bidder: Principal,
+    pub token: ExplorerToken,
+    pub amount: u64,         // token smallest-units actually collected
+    pub usd_value_e8s: u64, // amount valued in USD (e8s) at bid time
+    pub at: u64,
+}
+
+/// Newtype so the `Option` can carry the `impl_storable!` CBOR codec inside a
+/// `StableCell` (Rust orphan rules forbid impling `Storable` on `Option`).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FeaturedSlotCell(pub Option<FeaturedSlot>);
+impl_storable!(FeaturedSlotCell);
+
+thread_local! {
+    static FEATURED_SLOT: RefCell<StableCell<FeaturedSlotCell, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(
+            StableCell::init(mm.borrow().get(MemoryId::new(78)), FeaturedSlotCell(None))));
+
+    /// Lightweight in-flight bid lock (heap; PB-308 B4) so two concurrent bids
+    /// serialize and the second re-reads the current holder before collecting.
+    static FEATURED_BID_LOCK: RefCell<bool> = const { RefCell::new(false) };
+}
+
+fn featured_slot_get() -> Option<FeaturedSlot> {
+    FEATURED_SLOT.with(|c| c.borrow().get().0.clone())
+}
+fn featured_slot_set(slot: Option<FeaturedSlot>) {
+    FEATURED_SLOT.with(|c| {
+        let _ = c.borrow_mut().set(FeaturedSlotCell(slot));
+    });
+}
+
+/// USD (e8s) value of `amount` smallest-units of `token`, at the current oracle
+/// rate (async, oracle-refreshing form — PB-308 B2).
+async fn token_amount_usd_e8s_live(
+    token: ExplorerToken,
+    amount: u64,
+    cfg: &Config,
+) -> Result<u64, String> {
+    let rate = explorer_usd_rate_e8s(token, cfg).await?; // USD-e8s per whole token
+    let scale = 10u128.pow(explorer_token_decimals(token));
+    Ok(u64::try_from((amount as u128) * (rate as u128) / scale).unwrap_or(u64::MAX))
+}
+
+struct FeaturedBidLock;
+impl Drop for FeaturedBidLock {
+    fn drop(&mut self) {
+        FEATURED_BID_LOCK.with(|l| *l.borrow_mut() = false);
+    }
+}
+
+#[ic_cdk::update(guard = "require_authenticated")]
+async fn bid_featured_slot(
+    token_id: u64,
+    token: ExplorerToken,
+    amount: u64,
+) -> Result<(), String> {
+    require_arcade_game_enabled(ARCADE_GAME_MINIGOLF)?;
+    let bidder = get_caller();
+    if matches!(token, ExplorerToken::ICP) {
+        return Err("UNSUPPORTED_TOKEN".to_string());
+    }
+    if amount == 0 {
+        return Err("BAD_AMOUNT".to_string());
+    }
+    // course must exist + be listed/visible
+    let listing = COURSE_LISTINGS
+        .with(|m| m.borrow().get(&token_id))
+        .ok_or_else(|| "NOT_LISTABLE".to_string())?;
+    if !listing.listed {
+        return Err("NOT_LISTABLE".to_string());
+    }
+
+    // Serialize concurrent bids (B4): the second re-reads the holder before pull.
+    let acquired = FEATURED_BID_LOCK.with(|l| {
+        if *l.borrow() {
+            false
+        } else {
+            *l.borrow_mut() = true;
+            true
+        }
+    });
+    if !acquired {
+        return Err("BID_IN_PROGRESS".to_string());
+    }
+    let _lock = FeaturedBidLock;
+
+    let cfg = get_config();
+    let usd = token_amount_usd_e8s_live(token, amount, &cfg).await?;
+
+    // Must strictly beat the stored current holder's USD value.
+    if let Some(cur) = featured_slot_get() {
+        if usd <= cur.usd_value_e8s {
+            return Err(format!("BID_TOO_LOW:{}", cur.usd_value_e8s));
+        }
+    }
+
+    // Collect 100% to treasury (single-leg pull; non-refundable).
+    let ledger = explorer_token_ledger(token, &cfg);
+    let fee = explorer_token_fee(token, &cfg);
+    let treasury = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    call_icrc2_transfer_from(ledger, bidder, treasury, amount.saturating_sub(fee), fee)
+        .await
+        .map_err(|e| format!("PAYMENT_FAILED: {}", e))?;
+
+    // Win: set the slot immediately after collecting (no intervening await — B4).
+    featured_slot_set(Some(FeaturedSlot {
+        token_id,
+        bidder,
+        token,
+        amount,
+        usd_value_e8s: usd,
+        at: current_time(),
+    }));
+    log_dapp_event("course_featured_bid", token_id, bidder, usd);
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_featured_slot() -> Option<FeaturedSlot> {
+    let slot = featured_slot_get()?;
+    // Drop a dangling slot whose token_id no longer resolves (A4 edge).
+    let exists = COURSE_LISTINGS.with(|m| m.borrow().contains_key(&slot.token_id));
+    if exists {
+        Some(slot)
+    } else {
+        None
+    }
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_clear_featured_slot() -> Result<(), String> {
+    featured_slot_set(None);
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// 20.D Local-dev visualisation helpers (require_local_dev) — PB-312.
+// ════════════════════════════════════════════════════════════════════════════
+//
+// No production behaviour: every endpoint is `require_authenticated` +
+// `require_local_dev` (which also refuses a mainnet-ledger-wired config), and
+// reuses real code paths so visualised state matches production. The only thing
+// skipped is the money (burns/approves/bids). NOT gated on the arcade flag (you
+// seed state before flipping it).
+
+const DEV_MAX_SEED_COURSES: u32 = 60;
+
+/// Deterministic, reproducible mock principal for seeded owners/buyers. Never an
+/// admin, never the caller. (29-byte body keeps it a valid opaque principal.)
+fn mock_principal(n: u8) -> Principal {
+    Principal::from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, n])
+}
+
+/// Local-dev: mint up to `count` varied courses (tops up toward `count`, bounded).
+#[ic_cdk::update]
+async fn dev_seed_courses(count: u32) -> Result<u32, String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let caller = get_caller();
+    let count = count.min(DEV_MAX_SEED_COURSES);
+    let existing = COURSE_LISTINGS.with(|m| m.borrow().len() as u32);
+    if existing >= count {
+        return Ok(0);
+    }
+    let mut minted = 0u32;
+    let now = current_time();
+    for i in existing..count {
+        // Vary theme/difficulty/owner/price/play_count off the index.
+        let theme = (i % 5) as u8; // 0..=4 (Custom=4)
+        let par_total: u8 = match i % 3 {
+            0 => 22, // Easy
+            1 => 36, // Medium
+            _ => 47, // Hard
+        };
+        let to = if i % 3 == 0 { caller } else { mock_principal((i % 7) as u8) };
+        let course_data = {
+            use ciborium::value::Value as Cv;
+            let v = Cv::Map(vec![
+                (Cv::Text("par_total".into()), Cv::Integer(par_total.into())),
+                (Cv::Text("theme".into()), Cv::Integer(theme.into())),
+            ]);
+            let mut buf = Vec::new();
+            ciborium::into_writer(&v, &mut buf).map_err(|e| format!("ENCODE: {e}"))?;
+            buf
+        };
+        let name = format!("Dev Course {}", i + 1);
+        let token_id = course_nft_mint(CourseMintArgs {
+            to,
+            name: name.clone(),
+            creator: caller, // creator = caller so owner-vs-creator lines are visible
+            course_data,
+            par_total: par_total as u16,
+            mint_fee_e8s: MINT_FEE_E8S,
+        })
+        .await?;
+        let for_sale = i % 3 == 1;
+        let price_e8s = if for_sale {
+            MIN_SALE_PRICE_E8S + (i as u64 % 25) * 100_000_000
+        } else {
+            0
+        };
+        let play_count = if i % 2 == 0 { (i as u64) * 37 } else { 0 };
+        if play_count > 0 {
+            course_nft_increment_play(token_id).await; // cosmetic provenance bump
+        }
+        COURSE_LISTINGS.with(|m| {
+            m.borrow_mut().insert(
+                token_id,
+                CourseListing {
+                    token_id,
+                    listed: true,
+                    price_e8s,
+                    name,
+                    owner: Some(to),
+                    creator: Some(caller),
+                    play_count,
+                    tickets_distributed: play_count / 2,
+                    par_total,
+                    theme,
+                    created_at: now,
+                    mint_fee_e8s: MINT_FEE_E8S,
+                    for_sale,
+                    rating_sum: 0,
+                    rating_count: 0,
+                },
+            );
+        });
+        minted += 1;
+    }
+    Ok(minted)
+}
+
+/// Local-dev: force a course's for-sale state (same fields list/delist set).
+#[ic_cdk::update]
+fn dev_set_course_sale(token_id: u64, price_e8s: Option<u64>) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        let mut row = map.get(&token_id).ok_or_else(|| "NO_COURSE".to_string())?;
+        match price_e8s {
+            Some(p) => {
+                row.for_sale = true;
+                row.price_e8s = p;
+            }
+            None => {
+                row.for_sale = false;
+                row.price_e8s = 0;
+            }
+        }
+        map.insert(token_id, row);
+        Ok(())
+    })
+}
+
+async fn dev_simulate_sale_inner(token_id: u64, buyer: Principal) -> Result<(), String> {
+    let owner = course_nft_owner_of(token_id)
+        .await?
+        .ok_or_else(|| "TOKEN_NOT_FOUND".to_string())?;
+    course_nft_custodial_transfer(owner, buyer, token_id).await?; // real path
+    // Reconcile the cached owner via the real refresh path.
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some(mut row) = map.get(&token_id) {
+            row.owner = Some(buyer);
+            map.insert(token_id, row);
+        }
+    });
+    Ok(())
+}
+
+/// Local-dev: move a token to a mock/other owner (visualise "owned by someone").
+#[ic_cdk::update]
+async fn dev_simulate_sale(token_id: u64, buyer: Principal) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    dev_simulate_sale_inner(token_id, buyer).await
+}
+
+/// Local-dev: give the token to the caller (visualise "owned by me").
+#[ic_cdk::update]
+async fn dev_give_course(token_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let me = get_caller();
+    dev_simulate_sale_inner(token_id, me).await
+}
+
+/// Local-dev: set a course's play_count (and cosmetic tickets_distributed).
+#[ic_cdk::update]
+async fn dev_set_play_count(token_id: u64, n: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let current = COURSE_LISTINGS
+        .with(|m| m.borrow().get(&token_id).map(|l| l.play_count))
+        .ok_or_else(|| "NO_COURSE".to_string())?;
+    let delta = n.saturating_sub(current);
+    for _ in 0..delta.min(1_000) {
+        course_nft_increment_play(token_id).await; // authoritative count bump
+    }
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some(mut row) = map.get(&token_id) {
+            row.play_count = n;
+            row.tickets_distributed = n / 2;
+            map.insert(token_id, row);
+        }
+    });
+    Ok(())
+}
+
+/// Local-dev: pin a course in the featured slot WITHOUT a real ck-token bid.
+#[ic_cdk::update]
+fn dev_set_featured(token_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let listing = COURSE_LISTINGS
+        .with(|m| m.borrow().get(&token_id))
+        .ok_or_else(|| "NOT_LISTABLE".to_string())?;
+    if !listing.listed {
+        return Err("NOT_LISTABLE".to_string());
+    }
+    featured_slot_set(Some(FeaturedSlot {
+        token_id,
+        bidder: get_caller(),
+        token: ExplorerToken::CkUSDC,
+        amount: 50_000_000,                // 50 ckUSDC (6 decimals)
+        usd_value_e8s: 50 * USD_E8S_PER_USD, // $50
+        at: current_time(),
+    }));
+    Ok(())
+}
+
+/// Local-dev: vacate the featured slot.
+#[ic_cdk::update]
+fn dev_clear_featured() -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    featured_slot_set(None);
+    Ok(())
+}
+
+/// Local-dev: add a course to the caller's favourites (real add path; capped/dedup).
+#[ic_cdk::update]
+fn dev_grant_favorite(token_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    favorite_add(get_caller(), token_id).map(|_| ())
+}
+
+/// Local-dev: wipe all course listings, ratings, sales, the featured slot, and
+/// favourites referencing removed tokens, so the marketplace shows its empty
+/// state. Returns how many listings were removed.
+#[ic_cdk::update]
+async fn dev_clear_courses() -> Result<u64, String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let token_ids: Vec<u64> = COURSE_LISTINGS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    let removed = token_ids.len() as u64;
+    // Clear listings.
+    COURSE_LISTINGS.with(|m| {
+        let mut map = m.borrow_mut();
+        for id in &token_ids {
+            map.remove(id);
+        }
+    });
+    // Clear sale journals for removed tokens.
+    COURSE_SALES.with(|m| {
+        let mut map = m.borrow_mut();
+        for id in &token_ids {
+            map.remove(id);
+        }
+    });
+    // Clear ratings for removed tokens (range per token).
+    for id in &token_ids {
+        let lo = RatingKey { token_id: *id, rater: Principal::from_slice(&[]) };
+        let hi = RatingKey { token_id: id.saturating_add(1), rater: Principal::from_slice(&[]) };
+        let keys: Vec<RatingKey> =
+            COURSE_RATINGS.with(|m| m.borrow().range(lo..hi).map(|e| e.key().clone()).collect());
+        COURSE_RATINGS.with(|m| {
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
+    }
+    // Drop favourites pointing at removed tokens (keep other ids).
+    let removed_set: std::collections::HashSet<u64> = token_ids.iter().copied().collect();
+    FAVORITE_COURSES.with(|m| {
+        let principals: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
+        let mut map = m.borrow_mut();
+        for who in principals {
+            if let Some(mut list) = map.get(&who) {
+                list.ids.retain(|id| !removed_set.contains(id));
+                if list.ids.is_empty() {
+                    map.remove(&who);
+                } else {
+                    map.insert(who, list);
+                }
+            }
+        }
+    });
+    // Vacate the featured slot.
+    featured_slot_set(None);
+    Ok(removed)
 }
 
 ic_cdk::export_candid!();
@@ -20808,6 +21591,22 @@ mod tests {
                 map.remove(&k);
             }
         });
+        FAVORITE_COURSES.with(|m| {
+            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
+        COURSE_RATINGS.with(|m| {
+            let keys: Vec<RatingKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
+        featured_slot_set(None);
+        FEATURED_BID_LOCK.with(|l| *l.borrow_mut() = false);
     }
 
     fn enable_arcade_minigolf() {
@@ -20864,6 +21663,8 @@ mod tests {
                     created_at: 1,
                     mint_fee_e8s: 0,
                     for_sale: false,
+                    rating_sum: 0,
+                    rating_count: 0,
                 },
             );
         });
@@ -20889,6 +21690,8 @@ mod tests {
                     created_at: 1,
                     mint_fee_e8s: 0,
                     for_sale: true,
+                    rating_sum: 0,
+                    rating_count: 0,
                 },
             );
         });
@@ -22096,5 +22899,642 @@ mod tests {
         );
         // Flag NOT set → a later wired re-attempt can still mint.
         assert!(!SYSTEM_COURSE_MINTED.with(|c| *c.borrow().get()));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 20.A Favorites (PB-311)
+    // ════════════════════════════════════════════════════════════════════════
+
+    fn dave() -> Principal {
+        p("renrk-eyaaa-aaaaa-aaada-cai") // == carol(); distinct from alice/bob
+    }
+
+    /// Insert a COMPLETED play session so `has_completed_round` returns true.
+    fn seed_completed_session(player: Principal, token_id: u64) {
+        let id = NEXT_SESSION_ID.with(|c| {
+            let v = *c.borrow().get();
+            c.borrow_mut().set(v + 1);
+            v
+        });
+        PLAY_SESSIONS.with(|m| {
+            m.borrow_mut().insert(
+                id,
+                PlaySession {
+                    id,
+                    player,
+                    token_id,
+                    issued_at: 1,
+                    nonce: 0,
+                    last_hole: 9,
+                    last_hole_at: 1,
+                    status: PlaySessionStatus::Completed,
+                    owner_credited_holes: 1,
+                },
+            );
+        });
+    }
+
+    fn set_admins(admins: Vec<Principal>) {
+        CONFIG.with(|cell| {
+            let mut cfg = cell.borrow().get().clone();
+            cfg.admins = admins;
+            cell.borrow_mut().set(cfg);
+        });
+    }
+
+    #[test]
+    fn test_favorite_toggle_alternates_and_is_favorite_agrees() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        seed_listing(1, bob(), 27, 0, true);
+
+        assert!(toggle_favorite_course(1).unwrap()); // now favorited
+        assert!(is_favorite(1));
+        assert_eq!(my_favorite_ids(), vec![1]);
+        assert!(!toggle_favorite_course(1).unwrap()); // removed
+        assert!(!is_favorite(1));
+        assert!(my_favorite_ids().is_empty());
+        assert!(toggle_favorite_course(1).unwrap()); // re-added
+        assert!(is_favorite(1));
+    }
+
+    #[test]
+    fn test_favorite_dedupe_single_entry() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        seed_listing(1, bob(), 27, 0, true);
+        toggle_favorite_course(1).unwrap();
+        // favorite_add (the dev/shared path) is a no-op when present.
+        assert!(!favorite_add(alice(), 1).unwrap());
+        assert_eq!(my_favorite_ids(), vec![1]);
+    }
+
+    #[test]
+    fn test_favorite_cap_enforced() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        // Seed exactly MAX favorites without listings (favorite_add bypasses the
+        // existence check; the cap is what we're testing).
+        for id in 0..MAX_FAVORITE_COURSES as u64 {
+            favorite_add(alice(), id).unwrap();
+        }
+        assert_eq!(my_favorite_ids().len(), MAX_FAVORITE_COURSES);
+        // One more via toggle → FAVORITES_FULL.
+        seed_listing(9999, bob(), 27, 0, true);
+        assert_eq!(toggle_favorite_course(9999).unwrap_err(), "FAVORITES_FULL");
+        // Remove one then add succeeds.
+        assert!(!toggle_favorite_course_seeded(0));
+        seed_listing(0, bob(), 27, 0, true);
+        assert!(toggle_favorite_course(9999).unwrap());
+    }
+
+    // Helper: toggle off an id already present (returns the new state).
+    fn toggle_favorite_course_seeded(id: u64) -> bool {
+        seed_listing(id, bob(), 27, 0, true);
+        toggle_favorite_course(id).unwrap()
+    }
+
+    #[test]
+    fn test_favorite_missing_token_errors() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        assert_eq!(toggle_favorite_course(42).unwrap_err(), "COURSE_NOT_FOUND");
+        assert!(my_favorite_ids().is_empty());
+    }
+
+    #[test]
+    fn test_favorite_list_resolves_cards_skips_deleted() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        seed_listing(1, alice(), 27, 0, true);
+        seed_listing(2, bob(), 30, 1, true);
+        seed_listing(3, bob(), 47, 2, true);
+        toggle_favorite_course(1).unwrap();
+        toggle_favorite_course(2).unwrap();
+        toggle_favorite_course(3).unwrap();
+        // Simulate burn of token 2's listing row.
+        COURSE_LISTINGS.with(|m| {
+            m.borrow_mut().remove(&2);
+        });
+        let cards = list_my_favorite_courses();
+        let ids: Vec<u64> = cards.iter().map(|c| c.token_id).collect();
+        assert_eq!(ids, vec![1, 3]); // add order preserved, dead id omitted
+        assert!(cards[0].is_caller_owner); // token 1 owned by caller
+        assert!(!cards[1].is_caller_owner);
+    }
+
+    #[test]
+    fn test_favorite_auth_gate_anonymous() {
+        course_test_setup();
+        seed_listing(1, bob(), 27, 0, true);
+        set_mock_caller(anon());
+        // The mutating toggle is protected by the `require_authenticated` guard
+        // (enforced on-wasm by the ic_cdk macro; not invoked on the native
+        // entry). The read surfaces self-gate against the anonymous principal:
+        assert!(!is_favorite(1));
+        assert!(list_my_favorite_courses().is_empty());
+        assert!(my_favorite_ids().is_empty());
+    }
+
+    #[test]
+    fn test_favorite_private_per_user() {
+        course_test_setup();
+        make_following(alice());
+        make_following(bob());
+        seed_listing(1, dave(), 27, 0, true);
+        set_mock_caller(alice());
+        toggle_favorite_course(1).unwrap();
+        // Bob sees nothing.
+        set_mock_caller(bob());
+        assert!(!is_favorite(1));
+        assert!(my_favorite_ids().is_empty());
+        assert!(list_my_favorite_courses().is_empty());
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 20.B Ratings (PB-310)
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_rating_key_roundtrip_38_bytes() {
+        let k = RatingKey { token_id: 0x0102_0304_0506_0708, rater: alice() };
+        let bytes = k.to_bytes();
+        assert_eq!(bytes.len(), 38, "fixed 38-byte width");
+        let back = RatingKey::from_bytes(bytes);
+        assert_eq!(back, k);
+    }
+
+    #[test]
+    fn test_rating_key_range_isolation() {
+        course_test_setup();
+        // token_ids differing in their HIGH byte; raters chosen so a CBOR key
+        // (principal-first) would interleave them. The big-endian token_id-first
+        // key must keep each course's rows isolated.
+        let lo_token = 1u64;
+        let hi_token = 1u64 << 56; // high byte set
+        for (t, r) in [
+            (lo_token, alice()),
+            (lo_token, bob()),
+            (hi_token, dave()),
+        ] {
+            COURSE_RATINGS.with(|m| {
+                m.borrow_mut().insert(
+                    RatingKey { token_id: t, rater: r },
+                    Rating { token_id: t, rater: r, stars: 5, text: None, created_at: 1, updated_at: 1 },
+                );
+            });
+        }
+        let lo = list_course_reviews(lo_token, 0, 50);
+        assert_eq!(lo.len(), 2);
+        assert!(lo.iter().all(|r| r.token_id == lo_token));
+        let hi = list_course_reviews(hi_token, 0, 50);
+        assert_eq!(hi.len(), 1);
+        assert!(hi.iter().all(|r| r.token_id == hi_token));
+    }
+
+    #[tokio::test]
+    async fn test_rate_course_happy_and_aggregate() {
+        course_test_setup();
+        make_following(alice());
+        seed_listing(1, dave(), 27, 0, true); // owner+creator dave, not alice
+        seed_completed_session(alice(), 1);
+        set_mock_caller(alice());
+
+        rate_course(1, 4, Some("  nice course  ".into())).await.unwrap();
+        let sum = get_course_rating_summary(1);
+        assert_eq!(sum.count, 1);
+        assert_eq!(sum.rating_sum, 4);
+        assert_eq!(sum.avg_x10, 40);
+        assert_eq!(sum.my_stars, Some(4));
+        // text trimmed
+        let reviews = list_course_reviews(1, 0, 10);
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].text.as_deref(), Some("nice course"));
+
+        // Edit in place (upsert): one row, aggregate adjusts to new - old.
+        rate_course(1, 2, None).await.unwrap();
+        let sum = get_course_rating_summary(1);
+        assert_eq!(sum.count, 1, "still one rater");
+        assert_eq!(sum.rating_sum, 2);
+        assert_eq!(sum.my_stars, Some(2));
+        assert_eq!(list_course_reviews(1, 0, 10).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_rate_course_bad_stars_and_text_too_long() {
+        course_test_setup();
+        make_following(alice());
+        seed_listing(1, dave(), 27, 0, true);
+        seed_completed_session(alice(), 1);
+        set_mock_caller(alice());
+        assert_eq!(rate_course(1, 0, None).await.unwrap_err(), "BAD_STARS");
+        assert_eq!(rate_course(1, 6, None).await.unwrap_err(), "BAD_STARS");
+        let long = "x".repeat(MAX_RATING_TEXT_CHARS + 1);
+        assert_eq!(rate_course(1, 3, Some(long)).await.unwrap_err(), "TEXT_TOO_LONG");
+    }
+
+    #[tokio::test]
+    async fn test_rate_course_self_rating_rejected() {
+        course_test_setup();
+        make_following(dave());
+        seed_listing(1, dave(), 27, 0, true); // creator+owner == rater
+        seed_completed_session(dave(), 1);
+        set_mock_caller(dave());
+        assert_eq!(
+            rate_course(1, 5, None).await.unwrap_err(),
+            "CANNOT_RATE_OWN_COURSE"
+        );
+
+        // Owner-but-not-creator also rejected.
+        course_test_setup();
+        make_following(bob());
+        seed_listing(2, bob(), 27, 0, true); // creator=owner=bob here
+        // Make bob owner but creator alice (so creator check passes, owner fails).
+        COURSE_LISTINGS.with(|m| {
+            let mut row = m.borrow().get(&2).unwrap();
+            row.creator = Some(alice());
+            m.borrow_mut().insert(2, row);
+        });
+        set_mock_owner(2, bob());
+        seed_completed_session(bob(), 2);
+        set_mock_caller(bob());
+        assert_eq!(
+            rate_course(2, 5, None).await.unwrap_err(),
+            "CANNOT_RATE_OWN_COURSE"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rate_course_completion_gate() {
+        course_test_setup();
+        make_following(alice());
+        seed_listing(1, dave(), 27, 0, true);
+        set_mock_caller(alice());
+        // No completed session yet → rejected.
+        assert_eq!(
+            rate_course(1, 5, None).await.unwrap_err(),
+            "MUST_COMPLETE_ROUND"
+        );
+        // After completing → accepted.
+        seed_completed_session(alice(), 1);
+        rate_course(1, 5, None).await.unwrap();
+        assert_eq!(get_course_rating_summary(1).count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_rate_course_tier_and_anon_rejected() {
+        course_test_setup();
+        seed_listing(1, dave(), 27, 0, true);
+        seed_completed_session(bob(), 1);
+        set_mock_caller(bob()); // not following → tier 1
+        assert_eq!(rate_course(1, 5, None).await.unwrap_err(), "TIER_TOO_LOW");
+        set_mock_caller(anon());
+        assert!(rate_course(1, 5, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_admin_remove_rating_decrements() {
+        course_test_setup();
+        make_following(alice());
+        make_following(bob());
+        seed_listing(1, dave(), 27, 0, true);
+        seed_completed_session(alice(), 1);
+        seed_completed_session(bob(), 1);
+        set_mock_caller(alice());
+        rate_course(1, 4, None).await.unwrap();
+        set_mock_caller(bob());
+        rate_course(1, 2, None).await.unwrap();
+        assert_eq!(get_course_rating_summary(1).rating_sum, 6);
+        assert_eq!(get_course_rating_summary(1).count, 2);
+
+        // Admin removes alice's rating.
+        set_admins(vec![dave()]);
+        set_mock_caller(dave());
+        admin_remove_rating(1, alice()).unwrap();
+        let sum = get_course_rating_summary(1);
+        assert_eq!(sum.rating_sum, 2);
+        assert_eq!(sum.count, 1);
+        // Removing again → NO_RATING.
+        assert_eq!(admin_remove_rating(1, alice()).unwrap_err(), "NO_RATING");
+    }
+
+    #[test]
+    fn test_list_course_reviews_limit_capped() {
+        course_test_setup();
+        for i in 0..60u64 {
+            let r = mock_principal(i as u8);
+            COURSE_RATINGS.with(|m| {
+                m.borrow_mut().insert(
+                    RatingKey { token_id: 1, rater: r },
+                    Rating { token_id: 1, rater: r, stars: 3, text: None, created_at: i, updated_at: i },
+                );
+            });
+        }
+        assert_eq!(list_course_reviews(1, 0, 1000).len(), MAX_REVIEW_PAGE as usize);
+        assert_eq!(list_course_reviews(1, 0, 0).len(), 0);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 20.C Featured slot (PB-308)
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_featured_usd_valuation_across_decimals() {
+        // 0.001 ckBTC ($100k) = $100 ; 50 ckUSDC = $50. ckBTC wins.
+        let cfg = get_config();
+        let btc = token_amount_usd_e8s_live(ExplorerToken::CkBTC, 100_000, &cfg).await.unwrap();
+        let usdc = token_amount_usd_e8s_live(ExplorerToken::CkUSDC, 50_000_000, &cfg).await.unwrap();
+        assert!(btc > usdc, "0.001 ckBTC ({btc}) > 50 ckUSDC ({usdc})");
+        assert_eq!(usdc, 50 * USD_E8S_PER_USD);
+        assert_eq!(btc, 100 * USD_E8S_PER_USD);
+    }
+
+    #[tokio::test]
+    async fn test_bid_featured_rejects_icp_and_unlisted() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        seed_listing(1, bob(), 27, 0, true);
+        assert_eq!(
+            bid_featured_slot(1, ExplorerToken::ICP, 1).await.unwrap_err(),
+            "UNSUPPORTED_TOKEN"
+        );
+        assert_eq!(
+            bid_featured_slot(1, ExplorerToken::CkUSDC, 0).await.unwrap_err(),
+            "BAD_AMOUNT"
+        );
+        assert_eq!(
+            bid_featured_slot(99, ExplorerToken::CkUSDC, 1).await.unwrap_err(),
+            "NOT_LISTABLE"
+        );
+        seed_listing(2, bob(), 27, 0, false); // not listed
+        assert_eq!(
+            bid_featured_slot(2, ExplorerToken::CkUSDC, 1).await.unwrap_err(),
+            "NOT_LISTABLE"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bid_featured_strict_exceed_and_treasury_100pct() {
+        course_test_setup();
+        make_following(alice());
+        make_following(bob());
+        seed_listing(1, dave(), 27, 0, true);
+        seed_listing(2, dave(), 27, 0, true);
+
+        acct_reset();
+        let usdc_fee = explorer_token_fee(ExplorerToken::CkUSDC, &get_config());
+        // Fund alice for a 50 ckUSDC bid (+fee).
+        acct_set(alice(), None, 50_000_000 + usdc_fee);
+        set_mock_caller(alice());
+        bid_featured_slot(1, ExplorerToken::CkUSDC, 50_000_000).await.unwrap();
+        let slot = get_featured_slot().unwrap();
+        assert_eq!(slot.token_id, 1);
+        assert_eq!(slot.usd_value_e8s, 50 * USD_E8S_PER_USD);
+        // 100% (minus fee) to treasury.
+        let treasury = acct_get(get_canister_id(), Some(TREASURY_SUBACCOUNT));
+        assert_eq!(treasury, 50_000_000 - usdc_fee);
+
+        // Equal USD → BID_TOO_LOW.
+        acct_set(bob(), None, 50_000_000 + usdc_fee);
+        set_mock_caller(bob());
+        let err = bid_featured_slot(2, ExplorerToken::CkUSDC, 50_000_000).await.unwrap_err();
+        assert!(err.starts_with("BID_TOO_LOW:"), "{err}");
+        // Slot unchanged (still alice's token 1).
+        assert_eq!(get_featured_slot().unwrap().token_id, 1);
+
+        // Strictly higher → wins (0.001 ckBTC = $100 > $50).
+        let btc_fee = explorer_token_fee(ExplorerToken::CkBTC, &get_config());
+        acct_set(bob(), None, 100_000 + btc_fee);
+        bid_featured_slot(2, ExplorerToken::CkBTC, 100_000).await.unwrap();
+        assert_eq!(get_featured_slot().unwrap().token_id, 2);
+        acct_disable();
+    }
+
+    #[tokio::test]
+    async fn test_featured_retained_on_delist_and_dangling_drops() {
+        course_test_setup();
+        make_following(alice());
+        seed_listing(1, dave(), 27, 0, true);
+        acct_reset();
+        let usdc_fee = explorer_token_fee(ExplorerToken::CkUSDC, &get_config());
+        acct_set(alice(), None, 50_000_000 + usdc_fee);
+        set_mock_caller(alice());
+        bid_featured_slot(1, ExplorerToken::CkUSDC, 50_000_000).await.unwrap();
+
+        // Delist (flip listed=false): slot is RETAINED (still resolves).
+        COURSE_LISTINGS.with(|m| {
+            let mut row = m.borrow().get(&1).unwrap();
+            row.listed = false;
+            m.borrow_mut().insert(1, row);
+        });
+        assert!(get_featured_slot().is_some(), "retained on delist");
+
+        // Hard-delete the listing row → slot self-clears in the getter.
+        COURSE_LISTINGS.with(|m| {
+            m.borrow_mut().remove(&1);
+        });
+        assert!(get_featured_slot().is_none(), "dangling token_id dropped");
+        acct_disable();
+    }
+
+    #[test]
+    fn test_admin_clear_featured_slot() {
+        course_test_setup();
+        seed_listing(1, bob(), 27, 0, true);
+        featured_slot_set(Some(FeaturedSlot {
+            token_id: 1,
+            bidder: alice(),
+            token: ExplorerToken::CkUSDC,
+            amount: 1,
+            usd_value_e8s: 1,
+            at: 1,
+        }));
+        set_admins(vec![dave()]);
+        set_mock_caller(dave());
+        admin_clear_featured_slot().unwrap();
+        assert!(get_featured_slot().is_none());
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 20.D Local-dev endpoints (PB-312)
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// Point the config's ledger at the mainnet ICP principal so require_local_dev
+    /// refuses even with is_local=true.
+    fn wire_mainnet_ledger() {
+        CONFIG.with(|cell| {
+            let mut cfg = cell.borrow().get().clone();
+            cfg.ledger_canister_id = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
+            cell.borrow_mut().set(cfg);
+        });
+    }
+
+    fn set_is_local(v: bool) {
+        CONFIG.with(|cell| {
+            let mut cfg = cell.borrow().get().clone();
+            cfg.is_local = v;
+            cell.borrow_mut().set(cfg);
+        });
+    }
+
+    #[tokio::test]
+    async fn test_dev_endpoints_reject_when_not_local() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        seed_listing(1, alice(), 27, 0, true);
+        set_is_local(false);
+
+        assert_eq!(dev_seed_courses(5).await.unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_set_course_sale(1, Some(1)).unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_simulate_sale(1, bob()).await.unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_give_course(1).await.unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_set_play_count(1, 9).await.unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_set_featured(1).unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_clear_featured().unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_grant_favorite(1).unwrap_err(), "DEV_ONLY");
+        assert_eq!(dev_clear_courses().await.unwrap_err(), "DEV_ONLY");
+        // Nothing mutated.
+        assert!(get_course(1).unwrap().play_count == 0);
+        assert!(!get_course(1).unwrap().for_sale);
+        assert!(get_featured_slot().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dev_endpoints_reject_when_wired_to_mainnet_ledger() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        seed_listing(1, alice(), 27, 0, true);
+        set_is_local(true);
+        wire_mainnet_ledger(); // even with is_local=true
+        assert_eq!(dev_set_featured(1).unwrap_err(), "DEV_ONLY");
+        assert!(get_featured_slot().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_dev_seed_courses_varied_and_bounded() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        // is_local already true via install_staking_test_config.
+        let minted = dev_seed_courses(5).await.unwrap();
+        assert_eq!(minted, 5);
+        let total = COURSE_LISTINGS.with(|m| m.borrow().len());
+        assert_eq!(total, 5);
+        // Varied themes + for-sale states present.
+        let themes: std::collections::HashSet<u8> =
+            COURSE_LISTINGS.with(|m| m.borrow().iter().map(|e| e.value().theme).collect());
+        assert!(themes.len() >= 2, "varied themes: {themes:?}");
+        let any_for_sale = COURSE_LISTINGS.with(|m| m.borrow().iter().any(|e| e.value().for_sale));
+        assert!(any_for_sale);
+        // Re-seed tops up (no new mints).
+        assert_eq!(dev_seed_courses(5).await.unwrap(), 0);
+        assert_eq!(COURSE_LISTINGS.with(|m| m.borrow().len()), 5);
+    }
+
+    #[tokio::test]
+    async fn test_dev_set_course_sale_and_play_count_and_featured() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        seed_listing(1, alice(), 27, 0, true);
+
+        dev_set_course_sale(1, Some(12_345)).unwrap();
+        let c = get_course(1).unwrap();
+        assert!(c.for_sale);
+        assert_eq!(c.price_e8s, 12_345);
+        dev_set_course_sale(1, None).unwrap();
+        let c = get_course(1).unwrap();
+        assert!(!c.for_sale);
+        assert_eq!(c.price_e8s, 0);
+
+        dev_set_play_count(1, 100).await.unwrap();
+        let c = get_course(1).unwrap();
+        assert_eq!(c.play_count, 100);
+        assert_eq!(c.tickets_distributed, 50);
+        // increment_play called for the delta (capped at 1000).
+        assert_eq!(TEST_MOCK_INCREMENT_PLAY.with(|v| v.borrow().len()), 100);
+
+        dev_set_featured(1).unwrap();
+        let slot = get_featured_slot().unwrap();
+        assert_eq!(slot.token_id, 1);
+        assert_eq!(slot.usd_value_e8s, 50 * USD_E8S_PER_USD);
+        dev_clear_featured().unwrap();
+        assert!(get_featured_slot().is_none());
+        // dev_set_featured on unlisted → NOT_LISTABLE.
+        seed_listing(2, alice(), 27, 0, false);
+        assert_eq!(dev_set_featured(2).unwrap_err(), "NOT_LISTABLE");
+    }
+
+    #[tokio::test]
+    async fn test_dev_simulate_sale_and_give_course() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        seed_listing(1, alice(), 27, 0, true);
+        // Sell to a mock owner.
+        dev_simulate_sale(1, mock_principal(3)).await.unwrap();
+        assert_eq!(get_course(1).unwrap().owner, Some(mock_principal(3)));
+        assert_eq!(course_nft_owner_of(1).await.unwrap(), Some(mock_principal(3)));
+        // Give back to me.
+        dev_give_course(1).await.unwrap();
+        assert_eq!(get_course(1).unwrap().owner, Some(alice()));
+        assert!(get_course(1).unwrap().is_caller_owner);
+    }
+
+    #[tokio::test]
+    async fn test_dev_grant_favorite_uses_real_path() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        seed_listing(1, bob(), 27, 0, true);
+        dev_grant_favorite(1).unwrap();
+        assert!(is_favorite(1));
+        dev_grant_favorite(1).unwrap(); // idempotent (dedupe)
+        assert_eq!(my_favorite_ids(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_dev_clear_courses_empties_everything() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        let minted = dev_seed_courses(4).await.unwrap();
+        assert_eq!(minted, 4);
+        // Favorite + rate + feature one of them.
+        let some_id = COURSE_LISTINGS.with(|m| *m.borrow().iter().next().unwrap().key());
+        dev_grant_favorite(some_id).unwrap();
+        dev_set_featured(some_id).unwrap();
+        COURSE_RATINGS.with(|m| {
+            m.borrow_mut().insert(
+                RatingKey { token_id: some_id, rater: alice() },
+                Rating { token_id: some_id, rater: alice(), stars: 5, text: None, created_at: 1, updated_at: 1 },
+            );
+        });
+
+        let removed = dev_clear_courses().await.unwrap();
+        assert_eq!(removed, 4);
+        assert_eq!(COURSE_LISTINGS.with(|m| m.borrow().len()), 0);
+        assert!(get_featured_slot().is_none());
+        assert!(my_favorite_ids().is_empty());
+        assert!(list_course_reviews(some_id, 0, 10).is_empty());
+    }
+
+    #[test]
+    fn test_mock_principal_deterministic_not_admin_or_caller() {
+        course_test_setup();
+        set_admins(vec![alice()]);
+        set_mock_caller(alice());
+        assert_eq!(mock_principal(5), mock_principal(5)); // deterministic
+        assert_ne!(mock_principal(5), mock_principal(6));
+        assert_ne!(mock_principal(5), alice()); // never the caller/admin
+        assert_ne!(mock_principal(5), Principal::anonymous());
     }
 }
