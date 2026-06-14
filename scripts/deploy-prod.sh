@@ -65,9 +65,23 @@ if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
   [[ "$ans" == "y" || "$ans" == "Y" ]] || die "Aborted — commit first."
 fi
 
-note "Running backend test suite (unit + PocketIC)…"
-(cd src/backend && cargo test) || die "Backend tests failed — fix before deploying."
-ok "Backend tests green"
+# Unit tests always gate the deploy. The PocketIC integration suite needs the
+# pocket-ic server binary (POCKET_IC_BIN or `pocket-ic` on PATH); when it's
+# absent we run unit tests only and WARN loudly rather than blocking the deploy.
+note "Running backend unit tests…"
+cargo test -p backend --lib || die "Backend unit tests failed — fix before deploying."
+ok "Backend unit tests green"
+
+if [[ -n "${POCKET_IC_BIN:-}" ]] || command -v pocket-ic >/dev/null 2>&1; then
+  note "Running PocketIC integration suite…"
+  cargo test -p backend --test integration || die "PocketIC integration tests failed — fix before deploying."
+  ok "PocketIC integration tests green"
+else
+  note "⚠️  pocket-ic not found (POCKET_IC_BIN unset) — SKIPPING the integration suite."
+  note "    Install pocket-ic and re-run to exercise cross-canister flows before mainnet."
+  read -r -p "   Deploy to MAINNET without running integration tests? [y/N] " ans
+  [[ "$ans" == "y" || "$ans" == "Y" ]] || die "Aborted — install pocket-ic, then re-run."
+fi
 
 note "Running frontend test suite…"
 npm --prefix src/frontend test || die "Frontend tests failed — fix before deploying."
