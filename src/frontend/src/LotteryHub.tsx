@@ -1,5 +1,5 @@
 import { Principal } from "@icp-sdk/core/principal";
-import { Icon, Eyebrow, MoreInfo } from "./ui";
+import { Icon, Eyebrow, MoreInfo, Chip, LiveDot } from "./ui";
 import { useHashScreen } from "./nav";
 import Lottery from "./Lottery";
 import Staking from "./Staking";
@@ -56,6 +56,7 @@ export default function LotteryHub({
           <span className="row" style={{ gap: 10 }}>
             <Icon name="target" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Lottery</h4>
+            <Chip tone="pending"><LiveDot size={6} /> 3× weekly</Chip>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
             Earn a free ticket every day just by staking. Every draw is a chance to win, and your ICP is never at risk.{' '}
@@ -65,9 +66,15 @@ export default function LotteryHub({
                 collect free tickets every day (longer terms earn more). Your ICP stays yours — unstake
                 in full any time.
               </p>
-              <p style={{ margin: 0 }}>
+              <p style={{ margin: '0 0 8px' }}>
                 The neurons' yield funds the prize pool. Each draw has fixed odds, the winner is paid
                 straight to their wallet, and everyone's tickets reset for the next round.
+              </p>
+              <p style={{ margin: 0 }}>
+                Drawings run three times a week — Mon, Wed &amp; Sat nights (US Eastern). A drawing only
+                runs once the pot holds 25 ICP; below that the countdown rolls over to the next slot and
+                the pot keeps growing. The winner takes 80% of the pot; 20% seeds the next drawing. The
+                pot is fed by every pooled neuron's yield harvest.
               </p>
             </MoreInfo>
           </p>

@@ -741,9 +741,13 @@ thread_local! {
 #[ic_cdk::inspect_message]
 fn inspect_message() {
     let caller = get_caller();
-    // wallet_receive is the only update callable without authentication
+    // Anonymous ingress is blocked for update calls, EXCEPT a small allowlist of
+    // safe, read-only public getters. `get_lottery_info` reads the prize pot via
+    // an inter-canister ledger-balance call, which forces it to be an update —
+    // anonymous visitors still need it to see the pot + next drawing.
     let method = ic_cdk::api::call::method_name();
-    if caller == Principal::anonymous() && method != "wallet_receive" {
+    const ANON_OK: [&str; 2] = ["wallet_receive", "get_lottery_info"];
+    if caller == Principal::anonymous() && !ANON_OK.contains(&method.as_str()) {
         ic_cdk::trap("Anonymous callers are not permitted");
     }
     ic_cdk::api::call::accept_message();
@@ -3441,6 +3445,33 @@ async fn admin_get_frontend_cycles() -> Result<u64, String> {
     }
 }
 
+/// Admin: move cycles from THIS backend into the frontend canister — a one-way
+/// `deposit_cycles` top-up; the cycles are deducted from the backend's own
+/// balance. Used to rebalance an over-provisioned backend.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_send_cycles_to_frontend(amount_cycles: u64) -> Result<(), String> {
+    if amount_cycles == 0 {
+        return Err("INVALID_AMOUNT".to_string());
+    }
+    deposit_cycles_to(frontend_canister_id(), amount_cycles as u128).await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn deposit_cycles_to(target: Principal, cycles: u128) -> Result<(), String> {
+    ic_cdk::api::call::call_with_payment128(
+        Principal::management_canister(),
+        "deposit_cycles",
+        (CanisterIdRecord { canister_id: target },),
+        cycles,
+    )
+    .await
+    .map_err(|(c, m)| format!("DEPOSIT_CYCLES_FAILED ({:?}): {}", c, m))
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn deposit_cycles_to(_target: Principal, _cycles: u128) -> Result<(), String> {
+    Ok(())
+}
+
 /// Admin: withdraw ICP from the treasury subaccount to a destination
 /// principal. Guarded by the 15 ICP floor unless `override_floor`.
 #[ic_cdk::update(guard = "require_admin")]
@@ -4459,9 +4490,41 @@ async fn retry_failed_settlements() {
     }
 }
 
+/// Cycle top-up target: the sweep tops the backend up TOWARD 7T (and never past
+/// it), only ever spending treasury ICP that sits ABOVE the 15 ICP floor.
+const CYCLE_TOPUP_TARGET: u64 = 7_000_000_000_000;
+
+/// Subset decode of the CMC `get_icp_xdr_conversion_rate` reply.
+#[derive(CandidType, Deserialize)]
+struct CmcRateData {
+    xdr_permyriad_per_icp: u64,
+}
+#[derive(CandidType, Deserialize)]
+struct CmcRateResponse {
+    data: CmcRateData,
+}
+
+/// XDR-permyriad per ICP from the CMC. `cycles_minted = icp_e8s * this` (since
+/// 1 XDR = 1T cycles and the rate is per-10_000 XDR per whole ICP).
+#[cfg(target_arch = "wasm32")]
+async fn cmc_xdr_permyriad_per_icp() -> Result<u64, String> {
+    let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+    let res: Result<(CmcRateResponse,), _> =
+        ic_cdk::call(cmc, "get_icp_xdr_conversion_rate", ()).await;
+    res.map(|(r,)| r.data.xdr_permyriad_per_icp)
+        .map_err(|(c, m)| format!("CMC_RATE ({:?}): {}", c, m))
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn cmc_xdr_permyriad_per_icp() -> Result<u64, String> {
+    Ok(40_000) // test mock: 4 XDR/ICP → 1 ICP ≈ 4T cycles
+}
+
 async fn cycle_topup_check() {
     let cycles = canister_cycle_balance();
-    if cycles < 5_000_000_000_000 {
+    // Top up only toward the 7T target, and NEVER spend treasury below the 15
+    // ICP floor (that's reserved for payouts; only an explicit admin withdraw,
+    // with override, may go below it).
+    if cycles < CYCLE_TOPUP_TARGET {
         let config = CONFIG.with(|cell| cell.borrow().get().clone());
         let ledger_id = config.ledger_canister_id;
 
@@ -4480,14 +4543,31 @@ async fn cycle_topup_check() {
             None => {
                 let balance_res = call_ledger_balance(ledger_id, treasury_account).await;
                 let balance = match balance_res {
-                    Ok(b) if b > 1_000_000_000 => b,
+                    Ok(b) => b,
                     _ => return,
                 };
+                // Only the surplus ABOVE the 15 ICP floor is ever convertible.
+                let surplus = balance.saturating_sub(TREASURY_FLOOR_E8S);
+                if surplus <= ICP_FEE_E8S {
+                    return; // treasury at/near the floor — leave it for payouts
+                }
+                // Convert only enough ICP to reach the 7T target, capped at the
+                // surplus (so cycles never overshoot and the floor is preserved).
+                let needed_cycles = (CYCLE_TOPUP_TARGET - cycles) as u128;
+                let rate = match cmc_xdr_permyriad_per_icp().await {
+                    Ok(r) if r > 0 => r as u128,
+                    _ => return, // can't price the conversion — skip this tick
+                };
+                let needed_icp_e8s = (needed_cycles / rate) as u64;
+                let amount = needed_icp_e8s.min(surplus.saturating_sub(ICP_FEE_E8S));
+                if amount < 1_000_000 {
+                    return; // < 0.01 ICP isn't worth a top-up
+                }
                 let transfer_res = call_cmc_topup_transfer(
                     ledger_id,
                     Some(TREASURY_SUBACCOUNT),
                     get_canister_id(),
-                    balance - 10_000,
+                    amount,
                     10_000,
                 )
                 .await;
@@ -21726,6 +21806,29 @@ mod tests {
         cycle_topup_check().await;
         assert!(LAST_TOPUP_BLOCK.with(|c| c.borrow().is_none()));
         assert!(get_cycle_balance() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_cycle_topup_respects_treasury_floor() {
+        install_staking_test_config();
+        set_mock_cycles(1_000_000_000_000); // 1T < 7T target → sweep wants to top up
+
+        // Treasury exactly at the 15 ICP floor: nothing convertible.
+        set_mock_ledger_balance(TREASURY_FLOOR_E8S);
+        set_mock_ledger_transfer(Err("must not convert at floor".to_string()));
+        cycle_topup_check().await;
+        assert!(LAST_TOPUP_BLOCK.with(|c| c.borrow().is_none()), "no conversion at the floor");
+
+        // Below the floor: still nothing.
+        set_mock_ledger_balance(TREASURY_FLOOR_E8S - 100_000_000);
+        cycle_topup_check().await;
+        assert!(LAST_TOPUP_BLOCK.with(|c| c.borrow().is_none()), "no conversion below the floor");
+
+        // Above the floor: the surplus is converted (block sets then clears).
+        set_mock_ledger_balance(TREASURY_FLOOR_E8S + 2_000_000_000); // floor + 20 ICP
+        set_mock_ledger_transfer(Ok(77));
+        cycle_topup_check().await;
+        assert!(LAST_TOPUP_BLOCK.with(|c| c.borrow().is_none()), "cleared after a successful top-up");
     }
 
     #[tokio::test]

@@ -1043,6 +1043,7 @@ service : (InitPayload) -> {
   // canister (ops: `icp canister update-settings frontend --add-controller
   // <backend-id>`); otherwise returns the management canister's rejection.
   admin_get_frontend_cycles : () -> (Result_1);
+  admin_send_cycles_to_frontend : (nat64) -> (Result);
   // Owner one-time bootstrap: draw the genesis seed, build the hash chain,
   // publish the terminal commitment, seed builtin strategies, and start the
   // round loop. Idempotent (re-running with an initialized chain is a no-op
