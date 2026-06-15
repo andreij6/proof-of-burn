@@ -565,7 +565,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
                     <button key={c} onClick={() => { set(i); setEditorError(null); }} title={names[i]} style={{
                       width: 28, height: 28, borderRadius: 8, background: c, cursor: 'pointer',
                       border: i === sel ? '2px solid var(--burn)' : '2px solid var(--border)',
-                      boxShadow: i === sel ? '0 0 0 2px var(--burn-950)' : 'none',
+                      boxShadow: i === sel ? '0 0 0 2px color-mix(in srgb, var(--burn) 35%, transparent)' : 'none',
                     }} />
                   ))}
                 </span>
@@ -577,7 +577,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
                 {PAY_TOKENS.map(t => (
                   <button key={t.label} onClick={() => { setPayToken(t.token); setEditorError(null); }}
                     style={{
-                      background: payToken === t.token ? 'var(--burn-950)' : 'transparent',
+                      background: payToken === t.token ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
                       border: `1px solid ${payToken === t.token ? 'var(--burn)' : 'var(--border)'}`,
                       color: payToken === t.token ? 'var(--burn-ink)' : 'var(--fg-3)',
                       borderRadius: 999, padding: '5px 10px', fontSize: 11.5, fontWeight: 500,
@@ -648,7 +648,7 @@ function LeaderboardSection({ title, sub, scoreHeader, rows, empty, principal }:
                 return (
                   <tr key={r.rank} style={{
                     borderTop: '1px solid var(--border)',
-                    background: mine ? 'var(--burn-950)' : 'transparent',
+                    background: mine ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
                   }}>
                     <td style={{ ...LB_TD, color: r.rank <= 3 ? 'var(--burn-ink)' : 'var(--fg-3)', fontWeight: r.rank <= 3 ? 700 : 400 }}>{r.rank}</td>
                     <td style={{ ...LB_TD, textAlign: 'left' }} className="mono">

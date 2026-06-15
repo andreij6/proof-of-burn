@@ -83,6 +83,21 @@ const LABEL_STYLE: React.CSSProperties = {
   textTransform: 'uppercase', letterSpacing: '0.06em',
 };
 
+// Max categories a single listing may carry — mirrors the backend's
+// MAX_DAPP_CATEGORIES so the picker can't over-select.
+const MAX_CATEGORIES = 3;
+
+// Shared pill toggle (token picker, category picker, category filter).
+function pillStyle(active: boolean): React.CSSProperties {
+  return {
+    background: active ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
+    border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
+    color: active ? 'var(--burn-ink)' : 'var(--fg-3)',
+    borderRadius: 999, padding: '5px 10px', fontSize: 11.5, fontWeight: 500,
+    cursor: 'pointer', transition: 'all var(--dur-fast) var(--ease-out)',
+  };
+}
+
 interface ExplorerProps {
   actor: any;
   identity: any;
@@ -102,6 +117,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
   const [info, setInfo] = useState<ExplorerInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [gridPage, setGridPage] = useState(0);
+  const [catFilter, setCatFilter] = useState<string | null>(null);
 
   // Submit-listing modal
   const [isSubmitOpen, setIsSubmitOpen] = useState(false);
@@ -117,6 +133,8 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
   const [subStep, setSubStep] = useState('');
   const [subBusy, setSubBusy] = useState(false);
   const [subSuccess, setSubSuccess] = useState(false);
+  const [subCategories, setSubCategories] = useState<string[]>([]);
+  const [subVibe, setSubVibe] = useState(false);
 
   // Admin add-listing modal
   const [isAdminFormOpen, setIsAdminFormOpen] = useState(false);
@@ -125,6 +143,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
   const [admDesc, setAdmDesc] = useState('');
   const [admError, setAdmError] = useState<string | null>(null);
   const [admBusy, setAdmBusy] = useState(false);
+  const [admCategories, setAdmCategories] = useState<string[]>([]);
 
   useErrorImpression(subError, 'explorer_submit');
   useErrorImpression(admError, 'explorer_admin');
@@ -207,6 +226,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
     setSubToken(ExplorerToken.ICP); setSubDays('30');
     setQuote(null); setSubError(null); setSubStep('');
     setSubSuccess(false);
+    setSubCategories([]); setSubVibe(false);
     setIsSubmitOpen(true);
   };
 
@@ -257,7 +277,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
       }
 
       setSubStep("Step 2/2: Submitting your listing...");
-      const res = await actor.submit_dapp(name, url, desc, subToken, BigInt(daysNum));
+      const res = await actor.submit_dapp(name, url, desc, subToken, BigInt(daysNum), subCategories, subVibe);
       if (res.__kind__ === "Err") {
         throw new Error(res.Err);
       }
@@ -284,7 +304,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
     setAdmBusy(true);
     setAdmError(null);
     try {
-      const res = await actor.admin_add_dapp(name, url, desc);
+      const res = await actor.admin_add_dapp(name, url, desc, admCategories);
       if (res.__kind__ === "Err") throw new Error(res.Err);
       setIsAdminFormOpen(false);
       await refreshAll();
@@ -312,9 +332,19 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
     }
   };
 
-  const pageCount = Math.max(1, Math.ceil(dapps.length / GRID_PAGE_SIZE));
+  const allCategories: string[] = info?.available_categories ?? [];
+  const toggleCat = (list: string[], set: (v: string[]) => void, c: string) => {
+    if (list.includes(c)) set(list.filter(x => x !== c));
+    else if (list.length < MAX_CATEGORIES) set([...list, c]);
+  };
+  const setFilter = (c: string | null) => { setCatFilter(c); setGridPage(0); };
+
+  // Only offer filters for categories that actually have a live listing.
+  const presentCats = allCategories.filter(c => dapps.some(d => d.categories.includes(c)));
+  const filteredDapps = catFilter ? dapps.filter(d => d.categories.includes(catFilter)) : dapps;
+  const pageCount = Math.max(1, Math.ceil(filteredDapps.length / GRID_PAGE_SIZE));
   const safePage = Math.min(gridPage, pageCount - 1);
-  const pageDapps = dapps.slice(safePage * GRID_PAGE_SIZE, safePage * GRID_PAGE_SIZE + GRID_PAGE_SIZE);
+  const pageDapps = filteredDapps.slice(safePage * GRID_PAGE_SIZE, safePage * GRID_PAGE_SIZE + GRID_PAGE_SIZE);
 
   const subMeta = TOKEN_BASE[subToken];
   const pricePerDay = info ? fmtUSD(info.price_per_day_usd_e8s) : '$1';
@@ -340,6 +370,11 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
             </span>
           )}
         </div>
+        {d.is_vibe_coded && (
+          <Chip tone="ok" style={{ height: 19, fontSize: 10, alignSelf: 'flex-start' }}>
+            <Icon name="spark" size={10} /> Vibe coded
+          </Chip>
+        )}
         <h6 style={{ margin: 0, fontSize: 15, lineHeight: 1.35, overflowWrap: 'anywhere' }}>{d.name}</h6>
         <p style={{
           fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0, flex: 1,
@@ -412,6 +447,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
           {isAdmin && (
             <Btn variant="secondary" onClick={() => {
               setAdmName(''); setAdmUrl(''); setAdmDesc(''); setAdmError(null);
+              setAdmCategories([]);
               setIsAdminFormOpen(true);
             }}>
               <Icon name="key" size={13} stroke="var(--burn-ink)" /> Add curated
@@ -454,6 +490,17 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
         </div>
       )}
 
+      {/* ── Category filter ── */}
+      {!isLoading && presentCats.length > 0 && (
+        <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ ...LABEL_STYLE, marginRight: 2 }}>Filter</span>
+          <button type="button" onClick={() => setFilter(null)} style={pillStyle(catFilter === null)}>All</button>
+          {presentCats.map(c => (
+            <button key={c} type="button" onClick={() => setFilter(c)} style={pillStyle(catFilter === c)}>{c}</button>
+          ))}
+        </div>
+      )}
+
       {/* ── Directory grid ── */}
       {isLoading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
@@ -463,7 +510,12 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
       ) : pageDapps.length === 0 ? (
         <div className="col" style={{ alignItems: 'center', gap: 10, padding: '48px 0', color: 'var(--fg-3)' }}>
           <Icon name="compass" size={28} stroke="var(--fg-dim)" />
-          <span style={{ fontSize: 13 }}>No dapps listed yet. Be the first.</span>
+          <span style={{ fontSize: 13 }}>
+            {catFilter ? `No ${catFilter} dapps listed yet.` : 'No dapps listed yet. Be the first.'}
+          </span>
+          {catFilter && (
+            <Btn variant="secondary" sm onClick={() => setFilter(null)}>Clear filter</Btn>
+          )}
         </div>
       ) : (
         <div className="idea-grid">
@@ -531,6 +583,32 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
                     onChange={e => { setSubDesc(e.target.value); setSubError(null); }} />
                 </div>
 
+                {allCategories.length > 0 && (
+                  <div className="col" style={{ gap: 6 }}>
+                    <label style={LABEL_STYLE}>Categories · pick up to {MAX_CATEGORIES}</label>
+                    <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                      {allCategories.map(c => {
+                        const on = subCategories.includes(c);
+                        const full = !on && subCategories.length >= MAX_CATEGORIES;
+                        return (
+                          <button key={c} type="button" disabled={full}
+                            onClick={() => { toggleCat(subCategories, setSubCategories, c); setSubError(null); }}
+                            style={{ ...pillStyle(on), opacity: full ? 0.4 : 1, cursor: full ? 'not-allowed' : 'pointer' }}>
+                            {c}
+                          </button>
+                        );
+                      })}
+                    </span>
+                  </div>
+                )}
+
+                <label className="row" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={subVibe}
+                    onChange={e => setSubVibe(e.target.checked)}
+                    style={{ width: 15, height: 15, accentColor: 'var(--burn)', cursor: 'pointer' }} />
+                  This dapp is&nbsp;<b>vibe coded</b>&nbsp;(built largely with AI) — adds a badge to your card.
+                </label>
+
                 <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
                   <div className="col" style={{ gap: 6, flex: 1, minWidth: 140 }}>
                     <label style={LABEL_STYLE}>Days in the Explorer · {pricePerDay}/day</label>
@@ -561,7 +639,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
                 </div>
 
                 {/* Live quote */}
-                <div className="col" style={{ gap: 4, border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+                <div className="col" style={{ gap: 4, border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', background: 'var(--surface-hi)' }}>
                   {isQuoting ? (
                     <span className="row" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-3)' }}>
                       <LiveDot size={6} /> Fetching live price...
@@ -623,6 +701,24 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
               <textarea className="burn-input" rows={3} value={admDesc} maxLength={280}
                 onChange={e => { setAdmDesc(e.target.value); setAdmError(null); }} />
             </div>
+            {allCategories.length > 0 && (
+              <div className="col" style={{ gap: 6 }}>
+                <label style={LABEL_STYLE}>Categories · pick up to {MAX_CATEGORIES}</label>
+                <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  {allCategories.map(c => {
+                    const on = admCategories.includes(c);
+                    const full = !on && admCategories.length >= MAX_CATEGORIES;
+                    return (
+                      <button key={c} type="button" disabled={full}
+                        onClick={() => { toggleCat(admCategories, setAdmCategories, c); setAdmError(null); }}
+                        style={{ ...pillStyle(on), opacity: full ? 0.4 : 1, cursor: full ? 'not-allowed' : 'pointer' }}>
+                        {c}
+                      </button>
+                    );
+                  })}
+                </span>
+              </div>
+            )}
             {admError && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{admError}</span>}
             <Btn variant="primary" disabled={admBusy} onClick={executeAdminAdd}>
               {admBusy ? 'Adding...' : 'Add listing'}

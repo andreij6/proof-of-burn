@@ -148,9 +148,9 @@ function BalanceOfPowerBar({ adopt, reject }: { adopt: bigint; reject: bigint })
         <span style={{ color: 'var(--fg-3)' }}>balance of power</span>
         <span style={{ color: 'var(--ember)' }}>{empty ? "—" : `${rejectPct.toFixed(0)}%`} REJECT</span>
       </div>
-      <div className="row" style={{ height: 8, borderRadius: 999, overflow: 'hidden', background: 'var(--char-800)' }}>
+      <div className="row" style={{ height: 8, borderRadius: 999, overflow: 'hidden', background: 'var(--border)' }}>
         {empty ? (
-          <div style={{ width: '100%', height: '100%', background: 'var(--char-800)' }} />
+          <div style={{ width: '100%', height: '100%', background: 'var(--border)' }} />
         ) : (
           <>
             <div style={{ width: `${adoptPct}%`, height: '100%', background: 'var(--sprout)', transition: 'width .6s var(--ease-out)' }} />
@@ -178,7 +178,7 @@ function HeatBar({ pct = 0, committed, req, met }: { pct?: number; committed?: s
 
   return (
     <div className="col" style={{ gap: 7 }}>
-      <div style={{ height: 8, borderRadius: 999, background: 'var(--char-800)', overflow: 'hidden' }}>
+      <div style={{ height: 8, borderRadius: 999, background: 'var(--border)', overflow: 'hidden' }}>
         <div style={{
           width: `${barPct}%`, height: '100%', borderRadius: 999,
           background: met ? 'var(--sprout)' : 'var(--burn)',
@@ -2058,7 +2058,7 @@ export default function App() {
                         </span>
                       </span>
                       <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
-                        <b style={{ color: 'var(--burn-ink)' }}>Earn</b> a share of every burn by verifying your NNS neuron follows the leader.
+                        <b style={{ color: 'var(--sprout-ink)' }}>Earn</b> ICP from every protocol burn. A share of all burned ICP is split among verified members and paid out in ICP — your neuron keeps working for you with nothing to lock up or spend. To qualify, set your NNS neuron to follow the leader neuron and verify it here; as long as it keeps following, you keep earning from every burn.
                       </p>
                     </div>
                     <Btn variant="secondary" sm onClick={() => setPoolDetailsOpen(true)}>
@@ -2371,7 +2371,7 @@ export default function App() {
                       <>
                         <span style={{ color: 'var(--border-hi)' }}>·</span>
                         <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                          <span>Pending burn</span>
+                          <span>Pending</span>
                           <span className="mono" style={{ fontSize: 14, color: 'var(--haze-ink)' }} title="ICP committed to proposals that reached their threshold and will burn on deadline">
                             {`${fmtICP(globalStats.pending_burn_e8s)} ICP`}
                           </span>
@@ -2380,7 +2380,7 @@ export default function App() {
                     )}
                     <span style={{ color: 'var(--border-hi)' }}>·</span>
                     <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                      <span>Votes cast</span>
+                      <span>Committed</span>
                       <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
                         {globalStats ? globalStats.votes_cast.toString() : "…"}
                       </span>
@@ -3546,7 +3546,7 @@ export default function App() {
                 <React.Fragment key={s}>
                   <div style={{
                     flex: 1, height: 4, borderRadius: 2,
-                    background: poolWizardStep >= s ? 'var(--burn)' : 'var(--char-800)',
+                    background: poolWizardStep >= s ? 'var(--burn)' : 'var(--border)',
                     transition: 'background 200ms',
                   }} />
                   {i < 2 && <div style={{ width: 4 }} />}

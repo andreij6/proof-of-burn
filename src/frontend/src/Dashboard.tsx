@@ -334,8 +334,8 @@ export default function Dashboard({
             <div className="row" style={{ gap: 20, flexWrap: 'wrap' }}>
               <MiniStat label="ICP burned" value={fmtICP(globalStats.total_burned_e8s)} />
               <MiniStat label="TVL" value={`${fmtICP(globalStats.tvl_e8s)} ICP`} />
-              <MiniStat label="Pending burn" value={fmtICP(globalStats.pending_burn_e8s)} />
-              <MiniStat label="NNS votes cast" value={globalStats.votes_cast.toString()} />
+              <MiniStat label="Pending" value={fmtICP(globalStats.pending_burn_e8s)} />
+              <MiniStat label="Committed" value={globalStats.votes_cast.toString()} />
               <MiniStat label="Followers" value={globalStats.followers_count.toString()} />
             </div>
           </HubCard>

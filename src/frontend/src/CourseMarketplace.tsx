@@ -1145,7 +1145,7 @@ function PillGroup({ label, children }: { label: string; children: React.ReactNo
 function Pill({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button onClick={onClick} style={{
-      background: active ? 'var(--burn-950)' : 'transparent',
+      background: active ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
       border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
       color: active ? 'var(--burn-ink)' : 'var(--fg-3)',
       borderRadius: 999, padding: '5px 11px', fontSize: 11.5, fontWeight: 500,

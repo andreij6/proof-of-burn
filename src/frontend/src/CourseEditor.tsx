@@ -281,7 +281,7 @@ export default function CourseEditor({
                 className="col" style={{
                   gap: 4, textAlign: 'left', padding: 8, borderRadius: 8, cursor: 'pointer',
                   flex: '0 0 168px',
-                  background: i === activeHole ? 'var(--burn-950)' : 'transparent',
+                  background: i === activeHole ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
                   border: `1px solid ${i === activeHole ? 'var(--burn)' : 'var(--border)'}`,
                 }}>
                 <span className="row" style={{ justifyContent: 'space-between', gap: 6 }}>

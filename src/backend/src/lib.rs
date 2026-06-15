@@ -332,13 +332,6 @@ pub struct Commitment {
     /// must never swap twice). Set together with the amount_e8s update.
     #[serde(default)]
     pub swapped_icp_e8s: Option<u64>,
-    /// While a target canister is over-funded (≥10T cycles) its 25% cycle leg is
-    /// routed to the TREASURY (as ICP) instead of minted to cycles. Recorded per
-    /// leg so a retry never (re-)notifies the CMC for a treasury-routed leg.
-    #[serde(default)]
-    pub backend_to_treasury: bool,
-    #[serde(default)]
-    pub frontend_to_treasury: bool,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -2454,44 +2447,6 @@ async fn refundable_with_treasury_cover(
 /// 25% → backend cycles, 25% → frontend cycles. Idempotent via three per-step
 /// block indices on the Commitment; a retry skips completed transfers and only
 /// re-notifies the CMC (the CMC's memoized per-block result makes that safe).
-/// While a target canister holds at least this many cycles it is "over-funded":
-/// its 25% settlement cycle leg is routed to the TREASURY (as ICP) instead of
-/// being minted into cycles, until it falls back below the threshold.
-const CYCLE_ROUTE_THRESHOLD: u64 = 10_000_000_000_000; // 10T
-
-thread_local! {
-    /// Cached frontend cycle balance (refreshed by the timer via canister_status;
-    /// the backend is a controller of the frontend on mainnet). Drives the
-    /// frontend cycle-vs-treasury routing in settle_burn_split. 0 until the first
-    /// refresh → defaults to the normal "fund the frontend's cycles" path.
-    static FRONTEND_CYCLES_CACHE: std::cell::RefCell<u64> = const { std::cell::RefCell::new(0) };
-}
-
-fn frontend_cycles_cached() -> u64 {
-    FRONTEND_CYCLES_CACHE.with(|c| *c.borrow())
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn refresh_frontend_cycles_cache() {
-    let res: Result<(CanisterStatusCycles,), _> = ic_cdk::call(
-        Principal::management_canister(),
-        "canister_status",
-        (CanisterIdRecord { canister_id: frontend_canister_id() },),
-    )
-    .await;
-    if let Ok((s,)) = res {
-        let c = u64::try_from(s.cycles.0.clone()).unwrap_or(u64::MAX);
-        FRONTEND_CYCLES_CACHE.with(|cell| *cell.borrow_mut() = c);
-    }
-}
-#[cfg(not(target_arch = "wasm32"))]
-async fn refresh_frontend_cycles_cache() {}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn set_mock_frontend_cycles(c: u64) {
-    FRONTEND_CYCLES_CACHE.with(|cell| *cell.borrow_mut() = c);
-}
-
 async fn settle_burn_split(
     ledger_id: Principal,
     from_subaccount: [u8; 32],
@@ -2531,62 +2486,66 @@ async fn settle_burn_split(
 
     // 50% → treasury (held as ICP, admin-withdrawable)
     if commitment.treasury_block.is_none() {
-        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), treasury_dest.clone(), treasury_amt, Some(10_000))
+        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), treasury_dest, treasury_amt, Some(10_000))
             .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
         commitment.treasury_block = Some(b);
     }
 
-    // 25% → backend cycles — UNLESS the backend is over-funded (≥10T), in which
-    // case this leg routes to the TREASURY as ICP. The routing is decided once
-    // (when the leg's block first lands) and recorded on the commitment so a
-    // retry never (re-)notifies the CMC for a leg that went to the treasury.
+    // 25% → backend cycles (burns ICP → cycles via the CMC)
     if commitment.cmc_block_index.is_none() {
-        if canister_cycle_balance() >= CYCLE_ROUTE_THRESHOLD {
-            let b = call_ledger_transfer(ledger_id, Some(from_subaccount), treasury_dest.clone(), backend_amt, Some(10_000))
-                .await.map_err(|e| format!("BACKEND_TREASURY_XFER: {}", e))?;
-            commitment.cmc_block_index = Some(b);
-            commitment.backend_to_treasury = true;
-        } else {
-            let b = call_cmc_topup_transfer(ledger_id, Some(from_subaccount), get_canister_id(), backend_amt, 10_000)
-                .await.map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
-            commitment.cmc_block_index = Some(b);
-            commitment.backend_to_treasury = false;
-        }
+        let b = call_cmc_topup_transfer(
+            ledger_id,
+            Some(from_subaccount),
+            get_canister_id(),
+            backend_amt,
+            10_000,
+        )
+        .await
+        .map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
+        commitment.cmc_block_index = Some(b);
     }
-    if !commitment.backend_to_treasury {
-        if let Err(e) = notify_cmc_topup(cmc, get_canister_id(), commitment.cmc_block_index.unwrap(), commitment.proposal_id != 138388).await {
-            if e.starts_with("CMC_REFUNDED") {
-                // The ICP came back to the escrow subaccount — drop the block
-                // index so the retry re-transfers (re-notifying the refused
-                // block returns the memoized Refunded forever).
-                commitment.cmc_block_index = None;
-            }
-            return Err(format!("BACKEND_CMC_NOTIFY: {}", e));
+    if let Err(e) = notify_cmc_topup(
+        cmc,
+        get_canister_id(),
+        commitment.cmc_block_index.unwrap(),
+        commitment.proposal_id != 138388,
+    )
+    .await
+    {
+        if e.starts_with("CMC_REFUNDED") {
+            // The ICP came back to the escrow subaccount — drop the block
+            // index so the retry re-transfers (re-notifying the refused
+            // block returns the memoized Refunded forever).
+            commitment.cmc_block_index = None;
         }
+        return Err(format!("BACKEND_CMC_NOTIFY: {}", e));
     }
 
-    // 25% → frontend cycles — UNLESS the frontend is over-funded (≥10T, cached),
-    // in which case this leg routes to the TREASURY as ICP.
+    // 25% → frontend cycles (burns ICP → cycles via the CMC)
     if commitment.frontend_cmc_block.is_none() {
-        if frontend_cycles_cached() >= CYCLE_ROUTE_THRESHOLD {
-            let b = call_ledger_transfer(ledger_id, Some(from_subaccount), treasury_dest.clone(), frontend_amt, Some(10_000))
-                .await.map_err(|e| format!("FRONTEND_TREASURY_XFER: {}", e))?;
-            commitment.frontend_cmc_block = Some(b);
-            commitment.frontend_to_treasury = true;
-        } else {
-            let b = call_cmc_topup_transfer(ledger_id, Some(from_subaccount), frontend_canister_id(), frontend_amt, 10_000)
-                .await.map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
-            commitment.frontend_cmc_block = Some(b);
-            commitment.frontend_to_treasury = false;
-        }
+        let b = call_cmc_topup_transfer(
+            ledger_id,
+            Some(from_subaccount),
+            frontend_canister_id(),
+            frontend_amt,
+            10_000,
+        )
+        .await
+        .map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
+        commitment.frontend_cmc_block = Some(b);
     }
-    if !commitment.frontend_to_treasury {
-        if let Err(e) = notify_cmc_topup(cmc, frontend_canister_id(), commitment.frontend_cmc_block.unwrap(), commitment.proposal_id != 138388).await {
-            if e.starts_with("CMC_REFUNDED") {
-                commitment.frontend_cmc_block = None;
-            }
-            return Err(format!("FRONTEND_CMC_NOTIFY: {}", e));
+    if let Err(e) = notify_cmc_topup(
+        cmc,
+        frontend_canister_id(),
+        commitment.frontend_cmc_block.unwrap(),
+        commitment.proposal_id != 138388,
+    )
+    .await
+    {
+        if e.starts_with("CMC_REFUNDED") {
+            commitment.frontend_cmc_block = None;
         }
+        return Err(format!("FRONTEND_CMC_NOTIFY: {}", e));
     }
 
     Ok(())
@@ -3160,10 +3119,7 @@ async fn commit_inner(
         frontend_cmc_block: None,
         token: token_commit.map(|(t, _)| t),
         token_amount: token_commit.map(|(_, a)| a),
-        swapped_icp_e8s: None,
-        backend_to_treasury: false,
-        frontend_to_treasury: false,
-    };
+        swapped_icp_e8s: None,    };
 
     COMMITMENTS.with(|map| {
         map.borrow_mut().insert(key, commitment);
@@ -3632,10 +3588,7 @@ async fn admin_fund_early_adopter_neuron(amount_e8s: u64, override_floor: bool) 
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     /// Host-test cycles balance (default: comfortably above the top-up floor).
-    // 8T: healthy (≥ the 7T cycle_topup target) yet below the 10T route
-    // threshold, so settlement tests exercise the normal CMC cycle legs unless
-    // they explicitly raise the balance.
-    static TEST_MOCK_CYCLES: RefCell<u64> = const { RefCell::new(8_000_000_000_000) };
+    static TEST_MOCK_CYCLES: RefCell<u64> = const { RefCell::new(10_000_000_000_000) };
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -4193,7 +4146,8 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
         let vote_rec = VoteRecord {
             proposal_id: pid,
             vote: if vote_choice == 1 { Vote::Yes } else { Vote::No },
-            icp_burned_e8s: if met { proposal.total_committed_e8s } else { 0 },
+            // Only the cycle-converted half is "burned"; the treasury 50% is held.
+            icp_burned_e8s: if met { proposal.total_committed_e8s - proposal.total_committed_e8s / 2 } else { 0 },
             decided_at: current_time(),
             nns_outcome: Some(if vote_choice == 1 { "adopted".to_string() } else { "rejected".to_string() }),
         };
@@ -4263,18 +4217,23 @@ async fn settle_proposal_commitments(proposal_id: u64) {
                 Ok(()) => {
                     commitment.status = CommitmentStatus::Burned;
                     commitment.settled_at = Some(now);
+                    // "Burned" counts ONLY the portion converted to cycles (the
+                    // backend + frontend legs) — the 50% routed to the treasury is
+                    // HELD as ICP, not burned. Mirrors settle_burn_split's
+                    // treasury_amt = amount/2, so burned = amount − amount/2.
+                    let burned_e8s = commitment.amount_e8s - commitment.amount_e8s / 2;
                     // F-105: checked addition — clamp to u64::MAX on overflow
                     // rather than silently wrapping (release build traps under
                     // overflow-checks = true, so this is a defensive fallback).
                     total_burned_this_sweep = total_burned_this_sweep
-                        .checked_add(commitment.amount_e8s)
+                        .checked_add(burned_e8s)
                         .unwrap_or(u64::MAX);
 
                     let existing = USER_AGGREGATES.with(|map| map.borrow().get(&user));
                     if let Some(mut agg) = existing {
                         agg.total_committed_escrow = agg.total_committed_escrow.saturating_sub(commitment.amount_e8s);
                         agg.total_burned = agg.total_burned
-                            .checked_add(commitment.amount_e8s)
+                            .checked_add(burned_e8s)
                             .unwrap_or(agg.total_burned);
                         USER_AGGREGATES.with(|map| { map.borrow_mut().insert(user, agg); });
                     }
@@ -4658,7 +4617,6 @@ fn setup_timers() {
             fetch_live_proposals().await;
         }
         fetch_leader_neuron_info().await;
-        refresh_frontend_cycles_cache().await; // drives over-funded → treasury routing
         proposal_sync_sweep().await;
         retry_failed_settlements().await;
         retry_failed_upvotes().await;
@@ -9206,6 +9164,15 @@ pub struct DappListing {
     pub token: Option<ExplorerToken>,
     /// Amount paid in `token`'s smallest unit (0 for admin listings).
     pub amount_paid: u64,
+    /// Categories this dapp belongs to (subset of `DAPP_CATEGORIES`). Drives
+    /// the Explorer's category filter; not shown on the grid cards.
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// True if the submitter flagged the dapp as "vibe coded" (built largely
+    /// with AI assistance). Shown as a badge above the title. Always false for
+    /// curated/admin and default-seeded listings.
+    #[serde(default)]
+    pub is_vibe_coded: bool,
 }
 
 /// A locked price for one caller: deposit `amount` (+ one ledger fee) on the
@@ -9240,6 +9207,8 @@ pub struct ExplorerInfo {
     pub min_days: u64,
     pub max_days: u64,
     pub quote_ttl_nanos: u64,
+    /// Canonical category list the UI offers in the submit dialog + filter.
+    pub available_categories: Vec<String>,
 }
 
 impl_storable!(DappListing);
@@ -9883,66 +9852,127 @@ fn log_dapp_event(event_type: &str, dapp_id: u64, user: Principal, amount: u64) 
 /// seeds on every network. Per-entry insert-if-missing (matched by name) so
 /// entries added later still land on already-populated directories at
 /// post_upgrade without duplicating existing cards.
+/// Canonical Explorer categories. The submit dialog + filter read this list
+/// from `ExplorerInfo`; community submissions are validated against it so the
+/// filter only ever has to match known values.
+const DAPP_CATEGORIES: [&str; 11] = [
+    "DeFi",
+    "DEX",
+    "Wallet",
+    "NFT",
+    "Gaming",
+    "Social",
+    "DAO",
+    "AI",
+    "Analytics",
+    "Infrastructure",
+    "Marketplace",
+];
+const MAX_DAPP_CATEGORIES: usize = 3;
+
+/// Validate + normalize submitted categories: each must be a known category
+/// (case-insensitive), deduped, capped at `MAX_DAPP_CATEGORIES`. Empty is
+/// allowed (an uncategorized listing simply never matches a category filter).
+fn validate_dapp_categories(cats: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in cats {
+        let c = c.trim();
+        if c.is_empty() {
+            continue;
+        }
+        let canon = DAPP_CATEGORIES
+            .iter()
+            .find(|k| k.eq_ignore_ascii_case(c))
+            .ok_or_else(|| format!("UNKNOWN_CATEGORY: {}", c))?;
+        if !out.iter().any(|e| e == *canon) {
+            out.push((*canon).to_string());
+        }
+    }
+    if out.len() > MAX_DAPP_CATEGORIES {
+        return Err("TOO_MANY_CATEGORIES".to_string());
+    }
+    Ok(out)
+}
+
 fn seed_default_dapps() {
     let owner = CONFIG.with(|c| {
         c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
     });
     let now = current_time();
-    let samples: [(&str, &str, &str); 10] = [
+    let samples: [(&str, &str, &str, &[&str]); 10] = [
         (
             "idGeek 2.0",
             "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
             "Secure, automated and decentralized marketplace for buying and selling Internet Identities with their linked assets — including SNS neurons — executed entirely by smart contracts on the Internet Computer.",
+            &["Marketplace", "DeFi"],
         ),
         (
             "Liquidium",
             "https://liquidium.fi/",
             "Cross-chain lending protocol: supply Bitcoin and borrow stablecoins without selling your holdings. Chain Fusion collateral across chains, auto-compounded yield for lenders, no lock-ups, fully non-custodial.",
+            &["DeFi"],
         ),
         (
             "ICPSwap",
             "https://app.icpswap.com/",
             "The Internet Computer's leading decentralized exchange: swap, provide concentrated liquidity, and farm across ICP, ckBTC, ckETH and stablecoin pools — every order book, position and fee settled fully on-chain.",
+            &["DEX", "DeFi"],
         ),
         (
             "OISY Wallet",
             "https://oisy.com/",
             "Browser-based multi-chain wallet powered by Chain Fusion: hold and send BTC, ETH, SOL, ICP and ERC-20 tokens from one interface — no extension, no seed phrase, secured by Internet Identity and threshold cryptography.",
+            &["Wallet"],
         ),
         (
             "OpenChat",
             "https://oc.app/",
             "Fully on-chain messaging that feels like your favorite chat app: communities, channels, and instant crypto transfers in-chat. Governed by its own SNS DAO — the flagship proof that social runs on the Internet Computer.",
+            &["Social", "DAO"],
         ),
         (
             "Partyhats",
             "https://partyhats.xyz/",
             "Fully on-chain casino with no house edge: burn PARTY tokens to play mines and other provably-fair games, provide liquidity on PartyDEX to earn yield, and trade ICP Party Hat NFTs — every bet and payout settled by smart contracts on the Internet Computer.",
+            &["Gaming", "DeFi"],
         ),
         (
             "Dyvr",
             "https://dyvr.com/",
             "Emerging Internet Computer dapp — visit the site for the latest on what Dyvr is building on ICP.",
+            &["Infrastructure"],
         ),
         (
             "onicai",
             "https://www.onicai.com/",
             "AI-as-a-Service platform pioneering on-chain artificial intelligence: run large language models entirely inside ICP canisters, compete in incentivized AI tournaments via funnAI, and build with open-source GGUF tooling — no off-chain inference required.",
+            &["AI"],
         ),
         (
             "DGDG",
             "https://dgdg.app/",
             "NFT marketplace and aggregator for the Internet Computer: browse, buy and list collections like ICP.DOG, ICP Punks and ICP Flower with transparent creator fees and royalties, connecting via Internet Identity, Plug, Stoic or Bitfinity.",
+            &["NFT", "Marketplace"],
         ),
         (
             "IC Terminal",
             "https://icterminal.com/metrics.php?m=active_addresses&r=1d&chartStyle=line",
             "On-chain analytics terminal for the Internet Computer: track active addresses, transaction volume, token metrics and network activity through customizable real-time charts — a data dashboard for monitoring the health of the IC ecosystem.",
+            &["Analytics"],
         ),
     ];
-    let existing: Vec<String> = DAPPS.with(|m| m.borrow().iter().map(|e| e.value().name.clone()).collect());
-    for (name, url, description) in samples {
-        if existing.iter().any(|n| n == name) {
+    for (name, url, description, categories) in samples {
+        // If this default listing already exists (seeded by an earlier
+        // version), backfill its categories on upgrade rather than skipping —
+        // the field decodes as empty for pre-categories listings.
+        let existing = DAPPS.with(|m| {
+            m.borrow().iter().find(|e| e.value().name == name).map(|e| (*e.key(), e.value()))
+        });
+        if let Some((existing_id, mut d)) = existing {
+            if !d.community && d.categories.is_empty() {
+                d.categories = categories.iter().map(|c| c.to_string()).collect();
+                DAPPS.with(|m| { m.borrow_mut().insert(existing_id, d); });
+            }
             continue;
         }
         let id = next_dapp_id();
@@ -9961,6 +9991,8 @@ fn seed_default_dapps() {
                 days: 0,
                 token: None,
                 amount_paid: 0,
+                categories: categories.iter().map(|c| c.to_string()).collect(),
+                is_vibe_coded: false,
             });
         });
     }
@@ -9985,6 +10017,7 @@ fn get_explorer_info() -> ExplorerInfo {
         min_days: EXPLORER_MIN_DAYS,
         max_days: EXPLORER_MAX_DAYS,
         quote_ttl_nanos: EXPLORER_QUOTE_TTL_NANOS,
+        available_categories: DAPP_CATEGORIES.iter().map(|c| c.to_string()).collect(),
     }
 }
 
@@ -10085,6 +10118,8 @@ async fn submit_dapp(
     description: String,
     token: ExplorerToken,
     days: u64,
+    categories: Vec<String>,
+    is_vibe_coded: bool,
 ) -> Result<u64, String> {
     require_authenticated()?;
     require_explorer_enabled()?;
@@ -10095,6 +10130,7 @@ async fn submit_dapp(
     let url = url.trim().to_string();
     let description = description.trim().to_string();
     validate_dapp_text(&name, &url, &description)?;
+    let categories = validate_dapp_categories(&categories)?;
     if !(EXPLORER_MIN_DAYS..=EXPLORER_MAX_DAYS).contains(&days) {
         return Err("INVALID_DAYS".to_string());
     }
@@ -10169,6 +10205,8 @@ async fn submit_dapp(
             days,
             token: Some(token),
             amount_paid: quote.amount,
+            categories,
+            is_vibe_coded,
         });
     });
     EXPLORER_QUOTES.with(|m| {
@@ -10240,11 +10278,12 @@ async fn admin_reject_dapp(id: u64) -> Result<(), String> {
 
 /// Admin: add a permanent curated listing (no payment, no badge, no expiry).
 #[ic_cdk::update(guard = "require_admin")]
-fn admin_add_dapp(name: String, url: String, description: String) -> Result<u64, String> {
+fn admin_add_dapp(name: String, url: String, description: String, categories: Vec<String>) -> Result<u64, String> {
     let name = name.trim().to_string();
     let url = url.trim().to_string();
     let description = description.trim().to_string();
     validate_dapp_text(&name, &url, &description)?;
+    let categories = validate_dapp_categories(&categories)?;
     let at_quota = DAPPS.with(|m| m.borrow().len() >= MAX_DAPPS);
     if at_quota {
         return Err("DAPP_QUOTA_REACHED".to_string());
@@ -10267,6 +10306,8 @@ fn admin_add_dapp(name: String, url: String, description: String) -> Result<u64,
             days: 0,
             token: None,
             amount_paid: 0,
+            categories,
+            is_vibe_coded: false,
         });
     });
     log_dapp_event("dapp_admin_add", id, caller, 0);
@@ -14423,10 +14464,7 @@ async fn mint_course_nft_inner(
             frontend_cmc_block: saga.frontend_cmc_block,
             token: None,
             token_amount: None,
-            swapped_icp_e8s: None,
-            backend_to_treasury: false,
-            frontend_to_treasury: false,
-        };
+            swapped_icp_e8s: None,        };
         let settle = settle_burn_split(ledger_id, mint_sub, MINT_FEE_E8S, &mut commitment).await;
         // Mirror block indices back regardless of outcome (partial progress).
         saga.treasury_block = commitment.treasury_block;
@@ -17041,10 +17079,7 @@ mod tests {
             frontend_cmc_block: None,
             token: None,
             token_amount: None,
-            swapped_icp_e8s: None,
-            backend_to_treasury: false,
-            frontend_to_treasury: false,
-        }
+            swapped_icp_e8s: None,        }
     }
 
     fn sample_proposal(id: u64, status: &str, threshold: u64, committed: u64) -> Proposal {
@@ -17306,10 +17341,7 @@ mod tests {
             frontend_cmc_block: Some(123_457),
             token: None,
             token_amount: None,
-            swapped_icp_e8s: None,
-            backend_to_treasury: false,
-            frontend_to_treasury: false,
-        };
+            swapped_icp_e8s: None,        };
         let bytes = commitment.to_bytes();
         let decoded = Commitment::from_bytes(bytes);
         assert_eq!(decoded.proposal_id, commitment.proposal_id);
@@ -18820,7 +18852,7 @@ mod tests {
         set_mock_caller(user);
 
         // No quote yet → submit refused.
-        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30)
+        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30, vec![], false)
             .await
             .unwrap_err();
         assert_eq!(err, "NO_QUOTE");
@@ -18831,22 +18863,31 @@ mod tests {
         assert_eq!(quote.usd_total_e8s, 3_000_000_000);
 
         // Token/days must match the quote.
-        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::CkBTC, 30)
+        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::CkBTC, 30, vec![], false)
             .await
             .unwrap_err();
         assert_eq!(err, "QUOTE_MISMATCH");
 
         // Underfunded escrow refused; funded escrow accepted.
         set_mock_ledger_balance(quote.amount); // missing the fee
-        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30)
+        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30, vec![], false)
             .await
             .unwrap_err();
         assert_eq!(err, "INSUFFICIENT_DEPOSIT");
         set_mock_ledger_balance(quote.amount + 10_000);
         set_mock_ledger_transfer(Ok(7));
-        let id = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30)
-            .await
-            .unwrap();
+        let id = submit_dapp(
+            "D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30,
+            // mixed case + a dup → canonicalized + deduped to ["DeFi", "DEX"].
+            vec!["defi".into(), "DeFi".into(), "DEX".into()], true,
+        )
+        .await
+        .unwrap();
+        {
+            let stored = list_my_dapp_submissions();
+            assert_eq!(stored[0].categories, vec!["DeFi".to_string(), "DEX".to_string()]);
+            assert!(stored[0].is_vibe_coded, "vibe-coded flag persists");
+        }
 
         // Pending: hidden from the public list, visible to the submitter,
         // queued for the admin.
@@ -18854,7 +18895,7 @@ mod tests {
         assert_eq!(list_my_dapp_submissions().len(), 1);
         assert_eq!(list_my_dapp_submissions()[0].status, DappStatus::Pending);
         // The quote is consumed — a second submit needs a new one.
-        let err = submit_dapp("E".into(), "https://e.app".into(), "desc".into(), ExplorerToken::ICP, 30)
+        let err = submit_dapp("E".into(), "https://e.app".into(), "desc".into(), ExplorerToken::ICP, 30, vec![], false)
             .await
             .unwrap_err();
         assert_eq!(err, "NO_QUOTE");
@@ -18867,7 +18908,42 @@ mod tests {
         assert!(mine.community, "community submissions carry the badge flag");
         let expires = mine.expires_at.expect("paid listings expire");
         assert_eq!(expires - mine.approved_at.unwrap(), 30 * DAY_NANOS);
+        assert_eq!(mine.categories, vec!["DeFi".to_string(), "DEX".to_string()]);
+        assert!(mine.is_vibe_coded);
         assert_eq!(admin_approve_dapp(id).unwrap_err(), "NOT_PENDING");
+        clear_dapps();
+    }
+
+    #[test]
+    fn test_validate_dapp_categories() {
+        // Canonicalizes case + dedups.
+        assert_eq!(
+            validate_dapp_categories(&["defi".into(), "DeFi".into()]).unwrap(),
+            vec!["DeFi".to_string()]
+        );
+        // Empty is allowed (uncategorized).
+        assert_eq!(validate_dapp_categories(&[]).unwrap(), Vec::<String>::new());
+        // Unknown rejected; over-cap rejected.
+        assert!(validate_dapp_categories(&["Nonsense".into()]).is_err());
+        assert!(validate_dapp_categories(
+            &["DeFi".into(), "DEX".into(), "NFT".into(), "AI".into()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_seed_default_dapps_categorized_and_not_vibe_coded() {
+        clear_dapps();
+        seed_default_dapps();
+        let dapps = list_dapps();
+        assert!(!dapps.is_empty());
+        for d in &dapps {
+            assert!(!d.is_vibe_coded, "{} must not be vibe-coded", d.name);
+            assert!(!d.categories.is_empty(), "{} needs ≥1 category", d.name);
+            for c in &d.categories {
+                assert!(DAPP_CATEGORIES.contains(&c.as_str()), "{} canonical", c);
+            }
+        }
         clear_dapps();
     }
 
@@ -18881,7 +18957,7 @@ mod tests {
         assert_eq!(quote.amount, 5_000_000); // $5 at 6 decimals
         set_mock_ledger_balance(quote.amount + 10_000);
         set_mock_ledger_transfer(Ok(1));
-        let id = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::CkUSDC, 5)
+        let id = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::CkUSDC, 5, vec![], false)
             .await
             .unwrap();
 
@@ -18916,6 +18992,8 @@ mod tests {
                 days: 1,
                 token: Some(ExplorerToken::ICP),
                 amount_paid: 20_000_000,
+                categories: vec![],
+                is_vibe_coded: false,
             });
         });
         assert!(list_dapps().is_empty(), "expired listings never render");
@@ -20978,7 +21056,9 @@ mod tests {
         assert!(c.treasury_block.is_some() && c.cmc_block_index.is_some() && c.frontend_cmc_block.is_some());
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(prop.status, "settled");
-        assert_eq!(prop.total_burned_e8s, Some(200_000_000 - 30_000));
+        // Burned = cycle-converted half of the post-fee proceeds (treasury 50% held).
+        let proceeds = 200_000_000u64 - 30_000;
+        assert_eq!(prop.total_burned_e8s, Some(proceeds - proceeds / 2));
     }
 
     #[tokio::test]
@@ -21098,7 +21178,8 @@ mod tests {
 
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(prop.status, "settled");
-        assert_eq!(prop.total_burned_e8s, Some(200_000_000));
+        // Burned counts only the cycle-converted half (200M − 100M treasury).
+        assert_eq!(prop.total_burned_e8s, Some(100_000_000));
         assert!(prop.vote_executed_at.is_some());
         assert!(prop.pool_distributed, "reward distribution ran (no members → no-op)");
 
@@ -21110,12 +21191,12 @@ mod tests {
         // The vote record reflects the adopt majority.
         let vote = VOTES.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(vote.vote, Vote::Yes);
-        assert_eq!(vote.icp_burned_e8s, 200_000_000);
+        assert_eq!(vote.icp_burned_e8s, 100_000_000);
 
         // Aggregates moved from escrow to burned.
         let agg = USER_AGGREGATES.with(|m| m.borrow().get(&alice)).unwrap();
         assert_eq!(agg.total_committed_escrow, 0);
-        assert_eq!(agg.total_burned, 200_000_000);
+        assert_eq!(agg.total_burned, 100_000_000);
     }
 
     #[tokio::test]
@@ -22940,17 +23021,11 @@ mod tests {
             frontend_cmc_block: None,
             token: None,
             token_amount: None,
-            swapped_icp_e8s: None,
-            backend_to_treasury: false,
-            frontend_to_treasury: false,
-        };
+            swapped_icp_e8s: None,        };
         settle_burn_split(ledger, sub, MINT_FEE_E8S, &mut c).await.unwrap();
         assert!(c.treasury_block.is_some());
         assert!(c.cmc_block_index.is_some());
         assert!(c.frontend_cmc_block.is_some());
-        // Default test cycles (8T) are below the 10T route threshold → both
-        // cycle legs go to the CMC, not the treasury.
-        assert!(!c.backend_to_treasury && !c.frontend_to_treasury);
         // Arithmetic invariant of the split (matches settle_burn_split).
         let treasury = MINT_FEE_E8S / 2;
         let backend = MINT_FEE_E8S / 4;
@@ -22959,24 +23034,6 @@ mod tests {
         assert_eq!(backend, 12_500_000);
         assert_eq!(frontend, 12_500_000);
         assert_eq!(treasury + backend + frontend, MINT_FEE_E8S);
-    }
-
-    #[tokio::test]
-    async fn test_settle_routes_cycle_legs_to_treasury_when_overfunded() {
-        install_staking_test_config();
-        let ledger = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
-        // Both canisters over the 10T route threshold.
-        set_mock_cycles(11_000_000_000_000);
-        set_mock_frontend_cycles(11_000_000_000_000);
-        set_mock_ledger_balance(1_000_000_000);
-        set_mock_ledger_transfer(Ok(9));
-        let mut c = sample_commitment(4242, alice(), 1_000_000_000, CommitmentStatus::Pending);
-        let (sub, amt) = (c.subaccount, c.amount_e8s);
-        settle_burn_split(ledger, sub, amt, &mut c).await.unwrap();
-        // Over-funded → the 25% cycle legs route to the treasury as ICP.
-        assert!(c.backend_to_treasury, "backend leg → treasury when ≥10T");
-        assert!(c.frontend_to_treasury, "frontend leg → treasury when ≥10T");
-        assert!(c.treasury_block.is_some() && c.cmc_block_index.is_some() && c.frontend_cmc_block.is_some());
     }
 
     #[tokio::test]

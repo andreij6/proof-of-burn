@@ -191,7 +191,7 @@ export default function CourseEditor({ actor }: { actor: any }) {
           <button key={i} onClick={() => loadHole(i)} style={{
             width: 30, height: 28, borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600,
             border: `1px solid ${i === holeIdx ? 'var(--burn)' : 'var(--border)'}`,
-            background: i === holeIdx ? 'var(--burn-950)' : 'transparent',
+            background: i === holeIdx ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
             color: i === holeIdx ? 'var(--burn-ink)' : 'var(--fg-3)',
           }}>
             {i + 1}
@@ -218,7 +218,7 @@ export default function CourseEditor({ actor }: { actor: any }) {
             display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 9px', borderRadius: 999,
             cursor: 'pointer', fontSize: 11.5,
             border: `1px solid ${tool === t.key ? 'var(--burn)' : 'var(--border)'}`,
-            background: tool === t.key ? 'var(--burn-950)' : 'transparent',
+            background: tool === t.key ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
             color: tool === t.key ? 'var(--burn-ink)' : 'var(--fg-2)',
           }}>
             <span style={{ width: 12, height: 12, borderRadius: 3, background: t.color, border: '1px solid rgba(255,255,255,0.25)' }} />

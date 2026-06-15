@@ -125,8 +125,6 @@ type Commitment = record {
   // must never swap twice). Set together with the amount_e8s update.
   swapped_icp_e8s : opt nat64;
   settled_at : opt nat64;
-  backend_to_treasury : bool;
-  frontend_to_treasury : bool;
 };
 type CommitmentStatus = variant {
   Burned;
@@ -279,6 +277,12 @@ type DappListing = record {
   // None = permanent (admin listings). Community listings expire
   // `days` after approval and are then deleted by the sweep.
   expires_at : opt nat64;
+  // Categories (subset of ExplorerInfo.available_categories); drives the
+  // Explorer filter, not shown on the grid cards.
+  categories : vec text;
+  // True if the submitter flagged the dapp as "vibe coded" (badge above the
+  // title). Always false for curated/default listings.
+  is_vibe_coded : bool;
 };
 type DappStatus = variant {
   Approved;
@@ -375,6 +379,8 @@ type ExplorerInfo = record {
   ckbtc_ledger : principal;
   fee_ckbtc_sats : nat64;
   fee_ckusdt_micro : nat64;
+  // Canonical category list the UI offers in the submit dialog + filter.
+  available_categories : vec text;
 };
 // A locked price for one caller: deposit `amount` (+ one ledger fee) on the
 // token's ledger, then call `submit_dapp` before `expires_at`.
@@ -1021,7 +1027,7 @@ service : (InitPayload) -> {
   // marketplace is never empty. Re-seed recovery for a no-op upgrade (PB-309).
   admin_seed_system_course : () -> (Result_1);
   // Admin: add a permanent curated listing (no payment, no badge, no expiry).
-  admin_add_dapp : (text, text, text) -> (Result_1);
+  admin_add_dapp : (text, text, text, vec text) -> (Result_1);
   // Admin: add a fundable project. At least one per-token goal must be set.
   // Add a fundable project with a single USD goal (USD e8s). Every project
   // accepts any supported crypto; contributions are valued in USD.
@@ -1454,7 +1460,7 @@ service : (InitPayload) -> {
   // deposited on get_explorer_deposit_address. The payment moves to the
   // treasury immediately; the listing stays Pending — invisible to the
   // public — until an admin approves it. Rejection refunds from the treasury.
-  submit_dapp : (text, text, text, IdeaToken, nat64) -> (BalanceResult);
+  submit_dapp : (text, text, text, IdeaToken, nat64, vec text, bool) -> (BalanceResult);
   unregister_leader_neuron : (nat64) -> (Result);
   // Split `amount_e8s` off the tier's pool neuron and start dissolving it; the
   // sweep disburses to the caller's wallet once the tier's full term passes.

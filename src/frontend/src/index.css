@@ -145,6 +145,14 @@
   --sprout-ink: #15663A;   /* 6.38:1 */
   --haze-ink:   #8A5A00;   /* 5.39:1 */
   --ember-ink:  #C2353A;   /* darkened red for AA on light */
+
+  /* Tinted "dim" notice surfaces. The :root (dark) values are deep tints meant
+     for a dark background; on the light surface they read as dark boxes with
+     dark text (unreadable). Re-tint them as pale washes over the light surface
+     so the accent-ink/accent text on top stays legible. */
+  --ember-dim:  color-mix(in srgb, var(--ember) 12%, var(--char-0));
+  --sprout-dim: color-mix(in srgb, var(--sprout) 14%, var(--char-0));
+  --haze-dim:   color-mix(in srgb, var(--haze) 16%, var(--char-0));
 }
 
 /* Force dark tokens on a subtree regardless of the global theme. The Landing is
