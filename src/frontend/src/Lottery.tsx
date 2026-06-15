@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
-import { DrawStatus } from "./bindings/backend";
+import { DrawStatus, ExplorerToken } from "./bindings/backend";
 import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 import { useErrorImpression } from "./analytics";
@@ -46,6 +46,8 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [info, setInfo] = useState<LotteryInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [icpRateE8s, setIcpRateE8s] = useState<bigint>(0n); // USD-e8s per 1 ICP
   const [draws, setDraws] = useState<LotteryDraw[]>([]);
   const [winners, setWinners] = useState<LotteryDraw[]>([]);
   const [skillCopied, setSkillCopied] = useState(false);
@@ -59,16 +61,21 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
   const refresh = async () => {
     if (!actor) return;
     try {
-      const [i, d, w] = await Promise.all([
+      const [i, d, w, rates] = await Promise.all([
         actor.get_lottery_info(),
         actor.list_lottery_draws(),
         actor.list_recent_winners(),
+        actor.get_usd_rates().catch(() => [] as { token: string; rate_usd_e8s: bigint }[]),
       ]);
       setInfo(i);
       setDraws(d);
       setWinners(w);
+      const icp = (rates ?? []).find((r: { token: string; rate_usd_e8s: bigint }) => r.token === ExplorerToken.ICP);
+      setIcpRateE8s(icp?.rate_usd_e8s ?? 0n);
     } catch (err) {
       console.error("Failed to fetch lottery state:", err);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -157,6 +164,9 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
   };
 
   const countdown = info && info.next_draw_at > 0n ? countdownLabel(info.next_draw_at) : null;
+  const jackpotUsd = info && icpRateE8s > 0n
+    ? Number(info.pot_e8s * icpRateE8s / 100_000_000n) / 1e8
+    : null;
   const winChance = info && info.my_tickets > 0n
     ? `${info.my_tickets.toLocaleString()} in ${info.odds_denominator.toLocaleString()}`
     : null;
@@ -226,50 +236,38 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         </div>
       )}
 
-      <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
-        {/* ── Next draw ── */}
-        <div className="col" style={{ ...card, gap: 10, flex: '1 1 240px', minWidth: 240 }}>
-          <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-            <Eyebrow>Next drawing</Eyebrow>
-            <Chip tone="pending"><LiveDot size={6} /> 3× weekly</Chip>
-          </span>
-          <b className="mono" style={{ fontSize: 24 }}>
-            {countdown ?? (info && info.next_draw_at > 0n ? "any moment" : "—")}
+      {/* ── Next drawing + jackpot — one full-width card; details live in the
+            "How the lossless lottery works" dialog above. ── */}
+      <div className="col" style={{ ...card, gap: 6, width: '100%', alignItems: 'center', textAlign: 'center' }}>
+        <Eyebrow>Next drawing</Eyebrow>
+        {/* Date */}
+        <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>
+          {info && info.next_draw_at > 0n ? drawDate(info.next_draw_at) : "Scheduled at the first ticket claim."}
+        </span>
+        {/* Countdown */}
+        <b className="mono" style={{ fontSize: 30, lineHeight: 1.15 }}>
+          {loading && !info
+            ? <LiveDot size={9} color="var(--burn-ink)" />
+            : countdown ?? (info && info.next_draw_at > 0n ? "any moment" : "—")}
+        </b>
+        {/* Jackpot */}
+        <Eyebrow style={{ marginTop: 8 }}>Jackpot</Eyebrow>
+        <div className="row" style={{ gap: 10, alignItems: 'baseline', justifyContent: 'center' }}>
+          <b className="mono" style={{ fontSize: 30, lineHeight: 1.15, color: 'var(--sprout-ink)' }}>
+            {loading && !info ? <LiveDot size={9} color="var(--sprout-ink)" /> : fmtICP(info?.pot_e8s ?? 0n)}
           </b>
-          <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-            {info && info.next_draw_at > 0n
-              ? drawDate(info.next_draw_at)
-              : "Scheduled at the first ticket claim."}
-          </span>
-          <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-            <Icon name="clock" size={12} stroke="var(--fg-3)" />
-            Drawings: Mon, Wed &amp; Sat nights (US Eastern).
-          </span>
-          {info && info.pot_e8s < info.min_pot_e8s && (
-            <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--haze-ink)' }}>
-              <Icon name="info" size={12} stroke="var(--haze-ink)" />
-              Drawings only run once the pot holds {fmtICP(info.min_pot_e8s)} ICP — below that,
-              the countdown rolls over to the next slot and the pot keeps growing.
-            </span>
-          )}
+          <span style={{ fontSize: 13, color: 'var(--sprout-ink)' }}>ICP</span>
         </div>
+        {/* Jackpot in USD */}
+        <Eyebrow style={{ marginTop: 8 }}>Jackpot in USD</Eyebrow>
+        <b className="mono" style={{ fontSize: 22, lineHeight: 1.15, color: 'var(--sprout-ink)' }}>
+          {loading && !info
+            ? <LiveDot size={8} color="var(--sprout-ink)" />
+            : jackpotUsd != null ? `$${jackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}
+        </b>
+      </div>
 
-        {/* ── Prize pool ── */}
-        <div className="col" style={{ ...card, gap: 10, flex: '1 1 240px', minWidth: 240 }}>
-          <Eyebrow>Prize pool</Eyebrow>
-          <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
-            <b className="mono" style={{ fontSize: 24 }}>{fmtICP(info?.pot_e8s ?? 0n)}</b>
-            <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>ICP</span>
-          </div>
-          <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-            80% to the winner · 20% seeds the next drawing.
-          </span>
-          <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-            <Icon name="zap" size={12} stroke="var(--fg-3)" />
-            Fed by every pooled neuron's yield harvest.
-          </span>
-        </div>
-
+      <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
         {/* ── Your tickets ── */}
         <div className="col" style={{ ...card, gap: 10, flex: '1 1 240px', minWidth: 240 }}>
           <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
