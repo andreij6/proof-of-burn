@@ -332,6 +332,13 @@ pub struct Commitment {
     /// must never swap twice). Set together with the amount_e8s update.
     #[serde(default)]
     pub swapped_icp_e8s: Option<u64>,
+    /// While a target canister is over-funded (≥10T cycles) its 25% cycle leg is
+    /// routed to the TREASURY (as ICP) instead of minted to cycles. Recorded per
+    /// leg so a retry never (re-)notifies the CMC for a treasury-routed leg.
+    #[serde(default)]
+    pub backend_to_treasury: bool,
+    #[serde(default)]
+    pub frontend_to_treasury: bool,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -2447,6 +2454,44 @@ async fn refundable_with_treasury_cover(
 /// 25% → backend cycles, 25% → frontend cycles. Idempotent via three per-step
 /// block indices on the Commitment; a retry skips completed transfers and only
 /// re-notifies the CMC (the CMC's memoized per-block result makes that safe).
+/// While a target canister holds at least this many cycles it is "over-funded":
+/// its 25% settlement cycle leg is routed to the TREASURY (as ICP) instead of
+/// being minted into cycles, until it falls back below the threshold.
+const CYCLE_ROUTE_THRESHOLD: u64 = 10_000_000_000_000; // 10T
+
+thread_local! {
+    /// Cached frontend cycle balance (refreshed by the timer via canister_status;
+    /// the backend is a controller of the frontend on mainnet). Drives the
+    /// frontend cycle-vs-treasury routing in settle_burn_split. 0 until the first
+    /// refresh → defaults to the normal "fund the frontend's cycles" path.
+    static FRONTEND_CYCLES_CACHE: std::cell::RefCell<u64> = const { std::cell::RefCell::new(0) };
+}
+
+fn frontend_cycles_cached() -> u64 {
+    FRONTEND_CYCLES_CACHE.with(|c| *c.borrow())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn refresh_frontend_cycles_cache() {
+    let res: Result<(CanisterStatusCycles,), _> = ic_cdk::call(
+        Principal::management_canister(),
+        "canister_status",
+        (CanisterIdRecord { canister_id: frontend_canister_id() },),
+    )
+    .await;
+    if let Ok((s,)) = res {
+        let c = u64::try_from(s.cycles.0.clone()).unwrap_or(u64::MAX);
+        FRONTEND_CYCLES_CACHE.with(|cell| *cell.borrow_mut() = c);
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn refresh_frontend_cycles_cache() {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_frontend_cycles(c: u64) {
+    FRONTEND_CYCLES_CACHE.with(|cell| *cell.borrow_mut() = c);
+}
+
 async fn settle_burn_split(
     ledger_id: Principal,
     from_subaccount: [u8; 32],
@@ -2486,66 +2531,62 @@ async fn settle_burn_split(
 
     // 50% → treasury (held as ICP, admin-withdrawable)
     if commitment.treasury_block.is_none() {
-        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), treasury_dest, treasury_amt, Some(10_000))
+        let b = call_ledger_transfer(ledger_id, Some(from_subaccount), treasury_dest.clone(), treasury_amt, Some(10_000))
             .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
         commitment.treasury_block = Some(b);
     }
 
-    // 25% → backend cycles
+    // 25% → backend cycles — UNLESS the backend is over-funded (≥10T), in which
+    // case this leg routes to the TREASURY as ICP. The routing is decided once
+    // (when the leg's block first lands) and recorded on the commitment so a
+    // retry never (re-)notifies the CMC for a leg that went to the treasury.
     if commitment.cmc_block_index.is_none() {
-        let b = call_cmc_topup_transfer(
-            ledger_id,
-            Some(from_subaccount),
-            get_canister_id(),
-            backend_amt,
-            10_000,
-        )
-        .await
-        .map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
-        commitment.cmc_block_index = Some(b);
-    }
-    if let Err(e) = notify_cmc_topup(
-        cmc,
-        get_canister_id(),
-        commitment.cmc_block_index.unwrap(),
-        commitment.proposal_id != 138388,
-    )
-    .await
-    {
-        if e.starts_with("CMC_REFUNDED") {
-            // The ICP came back to the escrow subaccount — drop the block
-            // index so the retry re-transfers (re-notifying the refused
-            // block returns the memoized Refunded forever).
-            commitment.cmc_block_index = None;
+        if canister_cycle_balance() >= CYCLE_ROUTE_THRESHOLD {
+            let b = call_ledger_transfer(ledger_id, Some(from_subaccount), treasury_dest.clone(), backend_amt, Some(10_000))
+                .await.map_err(|e| format!("BACKEND_TREASURY_XFER: {}", e))?;
+            commitment.cmc_block_index = Some(b);
+            commitment.backend_to_treasury = true;
+        } else {
+            let b = call_cmc_topup_transfer(ledger_id, Some(from_subaccount), get_canister_id(), backend_amt, 10_000)
+                .await.map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
+            commitment.cmc_block_index = Some(b);
+            commitment.backend_to_treasury = false;
         }
-        return Err(format!("BACKEND_CMC_NOTIFY: {}", e));
+    }
+    if !commitment.backend_to_treasury {
+        if let Err(e) = notify_cmc_topup(cmc, get_canister_id(), commitment.cmc_block_index.unwrap(), commitment.proposal_id != 138388).await {
+            if e.starts_with("CMC_REFUNDED") {
+                // The ICP came back to the escrow subaccount — drop the block
+                // index so the retry re-transfers (re-notifying the refused
+                // block returns the memoized Refunded forever).
+                commitment.cmc_block_index = None;
+            }
+            return Err(format!("BACKEND_CMC_NOTIFY: {}", e));
+        }
     }
 
-    // 25% → frontend cycles
+    // 25% → frontend cycles — UNLESS the frontend is over-funded (≥10T, cached),
+    // in which case this leg routes to the TREASURY as ICP.
     if commitment.frontend_cmc_block.is_none() {
-        let b = call_cmc_topup_transfer(
-            ledger_id,
-            Some(from_subaccount),
-            frontend_canister_id(),
-            frontend_amt,
-            10_000,
-        )
-        .await
-        .map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
-        commitment.frontend_cmc_block = Some(b);
-    }
-    if let Err(e) = notify_cmc_topup(
-        cmc,
-        frontend_canister_id(),
-        commitment.frontend_cmc_block.unwrap(),
-        commitment.proposal_id != 138388,
-    )
-    .await
-    {
-        if e.starts_with("CMC_REFUNDED") {
-            commitment.frontend_cmc_block = None;
+        if frontend_cycles_cached() >= CYCLE_ROUTE_THRESHOLD {
+            let b = call_ledger_transfer(ledger_id, Some(from_subaccount), treasury_dest.clone(), frontend_amt, Some(10_000))
+                .await.map_err(|e| format!("FRONTEND_TREASURY_XFER: {}", e))?;
+            commitment.frontend_cmc_block = Some(b);
+            commitment.frontend_to_treasury = true;
+        } else {
+            let b = call_cmc_topup_transfer(ledger_id, Some(from_subaccount), frontend_canister_id(), frontend_amt, 10_000)
+                .await.map_err(|e| format!("FRONTEND_CMC_XFER: {}", e))?;
+            commitment.frontend_cmc_block = Some(b);
+            commitment.frontend_to_treasury = false;
         }
-        return Err(format!("FRONTEND_CMC_NOTIFY: {}", e));
+    }
+    if !commitment.frontend_to_treasury {
+        if let Err(e) = notify_cmc_topup(cmc, frontend_canister_id(), commitment.frontend_cmc_block.unwrap(), commitment.proposal_id != 138388).await {
+            if e.starts_with("CMC_REFUNDED") {
+                commitment.frontend_cmc_block = None;
+            }
+            return Err(format!("FRONTEND_CMC_NOTIFY: {}", e));
+        }
     }
 
     Ok(())
@@ -3120,6 +3161,8 @@ async fn commit_inner(
         token: token_commit.map(|(t, _)| t),
         token_amount: token_commit.map(|(_, a)| a),
         swapped_icp_e8s: None,
+        backend_to_treasury: false,
+        frontend_to_treasury: false,
     };
 
     COMMITMENTS.with(|map| {
@@ -3589,7 +3632,10 @@ async fn admin_fund_early_adopter_neuron(amount_e8s: u64, override_floor: bool) 
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     /// Host-test cycles balance (default: comfortably above the top-up floor).
-    static TEST_MOCK_CYCLES: RefCell<u64> = const { RefCell::new(10_000_000_000_000) };
+    // 8T: healthy (≥ the 7T cycle_topup target) yet below the 10T route
+    // threshold, so settlement tests exercise the normal CMC cycle legs unless
+    // they explicitly raise the balance.
+    static TEST_MOCK_CYCLES: RefCell<u64> = const { RefCell::new(8_000_000_000_000) };
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -4612,6 +4658,7 @@ fn setup_timers() {
             fetch_live_proposals().await;
         }
         fetch_leader_neuron_info().await;
+        refresh_frontend_cycles_cache().await; // drives over-funded → treasury routing
         proposal_sync_sweep().await;
         retry_failed_settlements().await;
         retry_failed_upvotes().await;
@@ -14377,6 +14424,8 @@ async fn mint_course_nft_inner(
             token: None,
             token_amount: None,
             swapped_icp_e8s: None,
+            backend_to_treasury: false,
+            frontend_to_treasury: false,
         };
         let settle = settle_burn_split(ledger_id, mint_sub, MINT_FEE_E8S, &mut commitment).await;
         // Mirror block indices back regardless of outcome (partial progress).
@@ -16993,6 +17042,8 @@ mod tests {
             token: None,
             token_amount: None,
             swapped_icp_e8s: None,
+            backend_to_treasury: false,
+            frontend_to_treasury: false,
         }
     }
 
@@ -17256,6 +17307,8 @@ mod tests {
             token: None,
             token_amount: None,
             swapped_icp_e8s: None,
+            backend_to_treasury: false,
+            frontend_to_treasury: false,
         };
         let bytes = commitment.to_bytes();
         let decoded = Commitment::from_bytes(bytes);
@@ -22888,11 +22941,16 @@ mod tests {
             token: None,
             token_amount: None,
             swapped_icp_e8s: None,
+            backend_to_treasury: false,
+            frontend_to_treasury: false,
         };
         settle_burn_split(ledger, sub, MINT_FEE_E8S, &mut c).await.unwrap();
         assert!(c.treasury_block.is_some());
         assert!(c.cmc_block_index.is_some());
         assert!(c.frontend_cmc_block.is_some());
+        // Default test cycles (8T) are below the 10T route threshold → both
+        // cycle legs go to the CMC, not the treasury.
+        assert!(!c.backend_to_treasury && !c.frontend_to_treasury);
         // Arithmetic invariant of the split (matches settle_burn_split).
         let treasury = MINT_FEE_E8S / 2;
         let backend = MINT_FEE_E8S / 4;
@@ -22901,6 +22959,24 @@ mod tests {
         assert_eq!(backend, 12_500_000);
         assert_eq!(frontend, 12_500_000);
         assert_eq!(treasury + backend + frontend, MINT_FEE_E8S);
+    }
+
+    #[tokio::test]
+    async fn test_settle_routes_cycle_legs_to_treasury_when_overfunded() {
+        install_staking_test_config();
+        let ledger = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+        // Both canisters over the 10T route threshold.
+        set_mock_cycles(11_000_000_000_000);
+        set_mock_frontend_cycles(11_000_000_000_000);
+        set_mock_ledger_balance(1_000_000_000);
+        set_mock_ledger_transfer(Ok(9));
+        let mut c = sample_commitment(4242, alice(), 1_000_000_000, CommitmentStatus::Pending);
+        let (sub, amt) = (c.subaccount, c.amount_e8s);
+        settle_burn_split(ledger, sub, amt, &mut c).await.unwrap();
+        // Over-funded → the 25% cycle legs route to the treasury as ICP.
+        assert!(c.backend_to_treasury, "backend leg → treasury when ≥10T");
+        assert!(c.frontend_to_treasury, "frontend leg → treasury when ≥10T");
+        assert!(c.treasury_block.is_some() && c.cmc_block_index.is_some() && c.frontend_cmc_block.is_some());
     }
 
     #[tokio::test]
