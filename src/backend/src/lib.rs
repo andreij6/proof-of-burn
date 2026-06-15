@@ -9841,7 +9841,7 @@ fn seed_default_dapps() {
         c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
     });
     let now = current_time();
-    let samples: [(&str, &str, &str); 9] = [
+    let samples: [(&str, &str, &str); 10] = [
         (
             "idGeek 2.0",
             "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
@@ -9886,6 +9886,11 @@ fn seed_default_dapps() {
             "DGDG",
             "https://dgdg.app/",
             "NFT marketplace and aggregator for the Internet Computer: browse, buy and list collections like ICP.DOG, ICP Punks and ICP Flower with transparent creator fees and royalties, connecting via Internet Identity, Plug, Stoic or Bitfinity.",
+        ),
+        (
+            "IC Terminal",
+            "https://icterminal.com/metrics.php?m=active_addresses&r=1d&chartStyle=line",
+            "On-chain analytics terminal for the Internet Computer: track active addresses, transaction volume, token metrics and network activity through customizable real-time charts — a data dashboard for monitoring the health of the IC ecosystem.",
         ),
     ];
     let existing: Vec<String> = DAPPS.with(|m| m.borrow().iter().map(|e| e.value().name.clone()).collect());
@@ -18723,7 +18728,7 @@ mod tests {
         seed_default_dapps();
         seed_default_dapps(); // re-run inserts nothing new
         let listed = list_dapps();
-        assert_eq!(listed.len(), 9);
+        assert_eq!(listed.len(), 10);
         assert_eq!(listed[0].name, "idGeek 2.0");
         assert_eq!(listed[1].name, "Liquidium");
         assert_eq!(listed[2].name, "ICPSwap");
@@ -18733,6 +18738,7 @@ mod tests {
         assert_eq!(listed[6].name, "Dyvr");
         assert_eq!(listed[7].name, "onicai");
         assert_eq!(listed[8].name, "DGDG");
+        assert_eq!(listed[9].name, "IC Terminal");
         assert!(listed.iter().all(|d| !d.community && d.expires_at.is_none()));
     }
 
@@ -18743,10 +18749,10 @@ mod tests {
         // Simulate a directory seeded before the newer curated entries existed.
         let icpswap_id = list_dapps().iter().find(|d| d.name == "ICPSwap").unwrap().id;
         DAPPS.with(|m| { m.borrow_mut().remove(&icpswap_id); });
-        assert_eq!(list_dapps().len(), 8);
+        assert_eq!(list_dapps().len(), 9);
         seed_default_dapps();
         let listed = list_dapps();
-        assert_eq!(listed.len(), 9, "missing curated entry is backfilled");
+        assert_eq!(listed.len(), 10, "missing curated entry is backfilled");
         assert_eq!(listed.iter().filter(|d| d.name == "ICPSwap").count(), 1, "no duplicates");
     }
 
