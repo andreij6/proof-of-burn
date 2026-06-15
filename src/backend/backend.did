@@ -125,6 +125,8 @@ type Commitment = record {
   // must never swap twice). Set together with the amount_e8s update.
   swapped_icp_e8s : opt nat64;
   settled_at : opt nat64;
+  backend_to_treasury : bool;
+  frontend_to_treasury : bool;
 };
 type CommitmentStatus = variant {
   Burned;
