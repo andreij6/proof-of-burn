@@ -1394,6 +1394,8 @@ export default function App() {
         }
         setTxSuccess(true);
         setTxStep(`Committed! Your ${voteToken} stays escrowed — it converts to ICP only if the vote passes; otherwise it comes back as ${voteToken}.`);
+        // Land on the Committed tab so the user sees what they just voted on.
+        setActiveTab('committed');
         await refreshAllData();
       } catch (err: any) {
         console.error("Token commitment error:", err);
@@ -1483,7 +1485,9 @@ export default function App() {
       // Success!
       setTxSuccess(true);
       setTxStep("Commitment finalized successfully!");
-      
+      // Land on the Committed tab so the user sees what they just voted on.
+      setActiveTab('committed');
+
       // Refresh data
       await refreshAllData();
       
