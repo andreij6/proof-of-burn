@@ -11,6 +11,7 @@ import FieldGoal from "./arcade/FieldGoal";
 import CourseMarketplace from "./CourseMarketplace";
 import CourseEditor from "./CourseEditor";
 import CoursePlay from "./CoursePlay";
+import MiniGolf from "./arcade/MiniGolf";
 import type { CourseCard } from "./bindings/backend";
 import {
   ROUNDS_PER_GAME as FG_ROUNDS, MIN_DISTANCE_YDS, MAX_DISTANCE_YDS,
@@ -20,7 +21,13 @@ import {
   fmtMillis,
   HAIR_COLORS, HAIR_NAMES, SKIN_COLORS, SKIN_NAMES, OUTFIT_COLORS, OUTFIT_NAMES,
   DEFAULT_CHARACTER, type CharacterLook,
+  COURSE as CALDERA_COURSE, COURSE_PAR_TOTAL as CALDERA_PAR,
 } from "./arcade/engine";
+
+// Caldera Ridge — the original built-in 9-hole course that shipped with Mini
+// Golf before course NFTs (PB-301+). It's not an NFT (no token_id), so it plays
+// for fun straight through the MiniGolf engine, with no marketplace/sale badge.
+const CALDERA_COURSE_NAME = 'Caldera Ridge';
 
 // ==========================================
 // Arcade — participation-gated skill games.
@@ -177,7 +184,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   // marketplace; "create" opens the editor; "play" opens a course in the engine.
   // The active view lives in the hash (#/arcade, #/arcade/course-play, …) so the
   // Back button returns to the lobby instead of leaving the page.
-  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'course-editor' | 'course-play'>('/arcade', 'lobby');
+  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'course-editor' | 'course-play' | 'classic-play'>('/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
   // Lobby sub-page — one per game (its card, persona and leaderboard).
   const [tab, setTab] = useState<'minigolf' | 'fieldgoal'>('minigolf');
@@ -375,6 +382,24 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     );
   }
 
+  // Caldera Ridge — the original built-in course. No token_id / scored session;
+  // it runs straight in the MiniGolf engine and is played for fun (the old
+  // built-in leaderboard stayed retired with PB-309).
+  if (view === 'classic-play') {
+    return (
+      <div className="idea-board-container">
+        <MiniGolf
+          course={CALDERA_COURSE}
+          character={myLook}
+          fullAccess={fullAccess}
+          onRoundComplete={() => { /* play-for-fun: classic course isn't scored */ }}
+          onExit={() => { setTab('minigolf'); setView('lobby'); }}
+          onGoParticipate={onGoParticipate}
+        />
+      </div>
+    );
+  }
+
   if (view === 'fieldgoal') {
     return (
       <div className="idea-board-container">
@@ -434,22 +459,43 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
         </div>
       ) : activeTab === 'minigolf' ? (
         <>
-          {/* Mini Golf is now the Course Marketplace (PB-309). The golfer
-              persona card sits above it; play any community course for
-              tickets. The old built-in course + leaderboard are retired. */}
-          <div className="card row" style={{ gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            <GolferPreview look={myLook} size={72} />
-            <div className="col" style={{ gap: 4 }}>
-              <span style={LABEL_STYLE}>Your golfer</span>
+          {/* Mini Golf is now the Course Marketplace (PB-309). A row of two
+              cards sits above it: the original built-in "Caldera Ridge" course
+              (left) and the golfer persona (right). Community courses below earn
+              tickets; Caldera Ridge plays for fun (no sale badge — it's not an NFT). */}
+          <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
+            {/* Caldera Ridge — original course, left of the golfer card */}
+            <div className="card col" style={{ gap: 8, flex: '1 1 260px' }}>
+              <span style={LABEL_STYLE}>Classic course</span>
+              <h6 style={{ margin: 0, fontSize: 16 }}>{CALDERA_COURSE_NAME}</h6>
               <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{HAIR_NAMES[myLook.hair]}</Chip>
-                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{SKIN_NAMES[myLook.skin]}</Chip>
-                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{OUTFIT_NAMES[myLook.outfit]}</Chip>
+                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>9 holes</Chip>
+                <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>Par {CALDERA_PAR}</Chip>
               </span>
+              <p style={{ fontSize: 12, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0, flex: 1 }}>
+                The original nine — the course that shipped before community courses.
+                Play it free, just for the round.
+              </p>
+              <Btn variant="primary" sm style={{ alignSelf: 'flex-start' }} onClick={() => setView('classic-play')}>
+                <Icon name="flame" size={11} stroke="var(--char-950)" /> Play
+              </Btn>
             </div>
-            <Btn variant="secondary" sm style={{ marginLeft: 'auto' }} onClick={() => openEditor('golfer')}>
-              <Icon name="edit" size={12} /> Customize · $1 in any token
-            </Btn>
+
+            {/* Your golfer persona */}
+            <div className="card row" style={{ gap: 12, alignItems: 'center', flexWrap: 'wrap', flex: '1 1 320px' }}>
+              <GolferPreview look={myLook} size={72} />
+              <div className="col" style={{ gap: 4 }}>
+                <span style={LABEL_STYLE}>Your golfer</span>
+                <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{HAIR_NAMES[myLook.hair]}</Chip>
+                  <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{SKIN_NAMES[myLook.skin]}</Chip>
+                  <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{OUTFIT_NAMES[myLook.outfit]}</Chip>
+                </span>
+              </div>
+              <Btn variant="secondary" sm style={{ marginLeft: 'auto' }} onClick={() => openEditor('golfer')}>
+                <Icon name="edit" size={12} /> Customize · $1 in any token
+              </Btn>
+            </div>
           </div>
 
           <CourseMarketplace

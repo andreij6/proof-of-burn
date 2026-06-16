@@ -255,16 +255,6 @@ export default function CourseEditor({
         </span>
       </div>
 
-      {!gate.ok && (
-        <div className="card" style={{ borderColor: 'var(--border-hi)', fontSize: 12, color: 'var(--fg-3)' }}>
-          <b style={{ color: 'var(--fg-2)' }}>Before you can mint:</b>
-          <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
-            {gate.reasons.slice(0, 6).map((r, i) => <li key={i}>{r}</li>)}
-            {gate.reasons.length > 6 && <li>…and {gate.reasons.length - 6} more</li>}
-          </ul>
-        </div>
-      )}
-
       {/* ── Row 2 — horizontal hole selector ── */}
       <div className="card col" style={{ gap: 8 }}>
         <span className="row" style={{ justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
