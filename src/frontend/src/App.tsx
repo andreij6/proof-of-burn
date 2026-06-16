@@ -496,6 +496,8 @@ export default function App() {
 
   // Active tab selection
   const [activeTab, setActiveTab] = useState<'open' | 'committed' | 'history'>('open');
+  // Past Proposals pagination (50 per page; latest 250 only).
+  const [historyPage, setHistoryPage] = useState(0);
 
   // Help modal status
   const [isHelpOpen, setIsHelpOpen] = useState(false);
@@ -1984,7 +1986,15 @@ export default function App() {
     pastItems.push({ id: BigInt(r.proposal_id), record: r });
   });
   pastItems.sort((a, b) => (b.id > a.id ? 1 : b.id < a.id ? -1 : 0));
-  const displayedPastItems = pastItems.slice(0, 100);
+  // Past Proposals: cap to the latest 250, shown 50 per page.
+  const HISTORY_PER_PAGE = 50;
+  const cappedPast = pastItems.slice(0, 250);
+  const totalHistoryPages = Math.max(1, Math.ceil(cappedPast.length / HISTORY_PER_PAGE));
+  const safeHistoryPage = Math.min(historyPage, totalHistoryPages - 1);
+  const displayedPastItems = cappedPast.slice(
+    safeHistoryPage * HISTORY_PER_PAGE,
+    safeHistoryPage * HISTORY_PER_PAGE + HISTORY_PER_PAGE,
+  );
 
   // First contact: the landing page renders full-bleed with no app chrome.
   // "Go to App" drops the visitor on the voting dashboard (works for
@@ -2970,7 +2980,7 @@ export default function App() {
                         <span className="row" style={{ gap: 8 }}>
                           <Icon name="list" size={13} stroke="var(--fg-2)" />
                           <b style={{ fontSize: 14, color: 'var(--fg)' }}>Past Proposals</b>
-                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {displayedPastItems.length}</span>
+                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {cappedPast.length}</span>
                         </span>
                         <Eyebrow style={{ whiteSpace: 'nowrap' }}>settled · cycles · returned</Eyebrow>
                       </div>
@@ -2983,6 +2993,7 @@ export default function App() {
                     ) : displayedPastItems.length === 0 ? (
                       <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No settled proposals yet.</div>
                     ) : (
+                      <>
                       <div className="col" style={{ gap: 0 }}>
                         {displayedPastItems.map(item => {
                           if (item.proposal) {
@@ -3053,6 +3064,20 @@ export default function App() {
                           return null;
                         })}
                       </div>
+                      {totalHistoryPages > 1 && (
+                        <div className="row" style={{ justifyContent: 'center', alignItems: 'center', gap: 12, paddingTop: 12 }}>
+                          <Btn variant="ghost" sm disabled={safeHistoryPage === 0} onClick={() => setHistoryPage(safeHistoryPage - 1)}>
+                            <Icon name="chevLeft" size={13} /> Prev
+                          </Btn>
+                          <span className="mono" style={{ fontSize: 12, color: 'var(--fg-3)' }}>
+                            Page {safeHistoryPage + 1} of {totalHistoryPages}
+                          </span>
+                          <Btn variant="ghost" sm disabled={safeHistoryPage >= totalHistoryPages - 1} onClick={() => setHistoryPage(safeHistoryPage + 1)}>
+                            Next <Icon name="chevRight" size={13} />
+                          </Btn>
+                        </div>
+                      )}
+                      </>
                     )}
                   </div>
                 )}
