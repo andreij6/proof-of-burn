@@ -2404,7 +2404,7 @@ export default function App() {
 
                     <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
                       <span>Burned</span>
-                      <span className="mono" style={{ fontSize: 14, color: 'var(--burn-300)' }}>
+                      <span className="mono" style={{ fontSize: 14, color: 'var(--burn-ink)' }}>
                         {globalStats ? `${fmtICP(globalStats.total_burned_e8s)} ICP` : "…"}
                       </span>
                     </span>
