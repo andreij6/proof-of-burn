@@ -37,6 +37,7 @@ import Payouts from "./Payouts";
 import Admin from "./Admin";
 import Landing from "./Landing";
 import Dashboard from "./Dashboard";
+import AboutUs from "./AboutUs";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext } from "./ui";
 import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress } from "./tokens";
@@ -47,10 +48,11 @@ import { useErrorImpression } from "./analytics";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
+  about: '/about',
   voting: '/voting',
   ideas: '/community',
   earn: '/earn',
@@ -1764,6 +1766,10 @@ export default function App() {
           <Icon name="list" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
           Dashboard
         </Btn>
+        <Btn variant={page === 'about' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('about')}>
+          <Icon name="info" size={14} stroke={page === 'about' ? 'var(--char-950)' : 'currentColor'} />
+          About Us
+        </Btn>
 
         <Eyebrow style={{ margin: '14px 0 4px' }}>Participate</Eyebrow>
         <Btn variant={page === 'voting' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('voting')}>
@@ -2031,7 +2037,13 @@ export default function App() {
             expressive transition on navigation. */}
         <main style={{ flex: 1, minWidth: 320, overflowY: 'auto' }}>
           <Reveal key={page} motion={motion} style={{ display: 'block', minHeight: '100%' }}>
-          {page === 'ideas' ? (
+          {page === 'about' ? (
+            <AboutUs
+              signedIn={!!principal && !principal.isAnonymous()}
+              onSignIn={handleLogin}
+              go={(p) => setPage(p)}
+            />
+          ) : page === 'ideas' ? (
             <IdeaBoard
               actor={actor}
               identity={identity}
@@ -2352,15 +2364,9 @@ export default function App() {
                   border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-alt)',
                   padding: '12px 14px', gap: 10
                 }}>
-                  {/* Voting totals only — TVL, burned, pending burn, votes cast. */}
+                  {/* Voting totals only — burned, pending burn, committed. */}
                   <div className="row" style={{ justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', width: '100%' }}>
 
-                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                      <span>TVL</span>
-                      <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
-                        {globalStats ? `${fmtICP(globalStats.tvl_e8s)} ICP` : "…"}
-                      </span>
-                    </span>
                     <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
                       <span>Burned</span>
                       <span className="mono" style={{ fontSize: 14, color: 'var(--burn-300)' }}>

@@ -564,8 +564,12 @@ type LotteryDraw = record {
   // this lands below `total_tickets`.
   winning_ticket : opt nat64;
   round : nat64;
-  // Gross 80% prize (the winner nets this minus one ledger fee).
+  // Gross 65% prize (the winner nets this minus one ledger fee).
   prize_e8s : nat64;
+  // Gross 5% of the pot burned to backend-canister cycles on a win.
+  cycle_burn_e8s : nat64;
+  // Idempotency block index for the cycle-burn (ICP→CMC) leg.
+  cycle_burn_block : opt nat64;
 };
 // Everything the Lottery page needs in one call (update — it reads the pot
 // balance from the ledger).

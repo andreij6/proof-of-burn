@@ -617,7 +617,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Moves treasury ICP into the neuron's stake (transfer + refresh). Tier allocations boost
               that neuron's yield — and therefore the lottery pot — without belonging to any staker;
-              Perm-tier allocations compound the Perm neuron's yield (split 50/50 treasury/lottery). The 15 ICP floor and
+              Perm-tier allocations compound the Perm neuron's yield (split 30/70 treasury/lottery). The 15 ICP floor and
               override apply here too. Allocations are one-way: getting ICP back out means a neuron
               dissolve, so treat them as permanent.
             </span>
@@ -684,7 +684,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               dashboard cache). Every platform neuron should follow the primary on topics 0
               (catch-all), 4 (Governance) and 14 (SNS). Tier-neuron yield harvests automatically once
               it crosses {config ? fmtICP(config.maturity_threshold_e8s) : '1.05'} ICP (then splits
-              50/50 lottery/treasury); the Perm neuron settles its yield on the same cadence. "Run
+              70/30 lottery/treasury); the Perm neuron settles its yield on the same cadence. "Run
               sweep now" on the Overview forces a harvest check immediately.
             </span>
           </div>
@@ -1046,14 +1046,14 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <Li>Three pooled NNS neurons, one per term: 6 months, 1 year, 2 years. Your ICP joins the term's neuron; your principal is never spent. Every neuron is made PUBLIC on the NNS the moment it's configured — anyone can audit it on the dashboard.</Li>
             <Li>Staking grants <b>no voting power</b> — voting is burn-only. Staking's sole reward is lottery eligibility: the term length scales the daily ticket grant (6mo / 1y / 2y → 5 / 10 / 20 tickets per ICP per day).</Li>
             <Li>Whole-ICP amounts only. Unstake any time: the tier's neuron splits, the split dissolves for the full term, then the FULL amount lands back in your wallet automatically — the treasury fronts every neuron fee. Zero-loss means zero: commit X, get X back. A dissolving unstake can also be RESTAKED into any tier (merge; treasury fronts that fee too).</Li>
-            <Li>Neuron maturity harvests once it crosses ~1.05 ICP and is split <b>50% lottery prize pot / 50% treasury</b> — all three neurons feed the same pot.</Li>
+            <Li>Neuron maturity harvests once it crosses ~1.05 ICP and is split <b>70% lottery prize pot / 30% treasury</b> — all the staking neurons feed the same pot.</Li>
             <Li>Staking is also the lottery's eligibility gate (below).</Li>
           </Section>
 
           <Section icon="spark" title="Lossless lottery — dynamic odds, funded by yield">
             <Li>Stakers only — and eligibility is live: daily grant = base ({base}) × term multiplier × whole ICP staked, claimed automatically on login. Fully unstake and any tickets already held void immediately; the same happens on promotion to admin.</Li>
             <Li>Drawings 3× a week (Mon/Wed/Sat nights US Eastern), but a drawing only runs when the pot holds at least 25 ICP — below that it rolls over and the pot keeps growing. Odds are dynamic: every drawing that runs has a 1-in-13 chance of paying out regardless of ticket supply (≈ one winner a month, 96% chance within 3 months), decided by on-chain randomness (raw_rand). A user's win chance is their share of all tickets.</Li>
-            <Li>Tickets accumulate round over round until someone hits. The winner takes 80% of the prize pot; 20% seeds the next round; all tickets reset.</Li>
+            <Li>Tickets accumulate round over round until someone hits. The winner takes 65% of the prize pot; 30% seeds the next round; 5% is burned to backend-canister cycles; all tickets reset.</Li>
             <Li>The pot is funded purely by staking yield — players never pay in, so nobody can lose money.</Li>
             <Li>Prize payouts are journaled and retried until the transfer lands; a win can never be paid twice or lost.</Li>
           </Section>
@@ -1067,7 +1067,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           <Section icon="spark" title="Perm tier — the platform's permanent stake">
             <Li>Permanent (no unstake, by design) stake into a platform-controlled 2-year neuron that follows the primary on every topic. Open to everyone, forever — no membership cap or close.</Li>
             <Li>Perm stakes earn <b>lottery tickets only</b>: a flat 40 tickets/day per whole ICP staked. No ICP yield is ever paid to Perm stakers.</Li>
-            <Li>The Perm neuron's harvested yield is split <b>50% treasury / 50% lottery prize pot</b> — never distributed to users.</Li>
+            <Li>The Perm neuron's harvested yield is split <b>30% treasury / 70% lottery prize pot</b> — never distributed to users.</Li>
           </Section>
 
           <Section icon="coins" title="Payout history — every satoshi accounted for">

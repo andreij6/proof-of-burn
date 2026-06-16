@@ -107,9 +107,10 @@ export default function Dashboard({
     let cancelled = false;
     (async () => {
       const [lot, eaInfo, pays, ideas] = await Promise.all([
-        // get_lottery_info is an update method — anonymous ingress is rejected,
-        // so only ask once signed in. Signed-out visitors get static promo copy.
-        flags.lottery && signedIn ? actor.get_lottery_info().catch(() => null) : Promise.resolve(null),
+        // get_lottery_info is an update method but anonymous-allowlisted, so we
+        // fetch it for everyone — signed-out visitors still see the live jackpot
+        // and the countdown to the next drawing.
+        flags.lottery ? actor.get_lottery_info().catch(() => null) : Promise.resolve(null),
         flags.earlyAdopters ? actor.get_early_adopter_info().catch(() => null) : Promise.resolve(null),
         signedIn ? actor.get_my_payouts().catch(() => []) : Promise.resolve([]),
         flags.ideas ? actor.list_ideas().catch(() => null) : Promise.resolve(null),
@@ -243,6 +244,11 @@ export default function Dashboard({
           )}
         </HubCard>
 
+        <HubCard eyebrow="Neuron Syndicate" icon="coins" onClick={() => go('earn')}>
+          <Big>Earn from every burn</Big>
+          <Sub>Verify your NNS neuron follows the leader and earn a share of every protocol burn — paid in ICP, with nothing locked up.</Sub>
+        </HubCard>
+
         {flags.staking && (
           <HubCard eyebrow="Staking" icon="zap" onClick={() => go('lottery')}
             chip={signedIn && !stakingUsed ? <Chip tone="muted">new to you</Chip> : undefined}>
@@ -253,20 +259,26 @@ export default function Dashboard({
               </>
             ) : (
               <>
-                <Big>Lossless staking</Big>
-                <Sub>Three fixed terms (6mo / 1y / 2y). Withdraw exactly what you put in — the yield funds the lottery and the protocol.</Sub>
+                <Big>Earn Lottery Tickets</Big>
+                <Sub>Stake losslessly across three fixed terms (6mo / 1y / 2y) for daily lottery tickets. Withdraw exactly what you put in — only the yield funds the lottery and the protocol.</Sub>
               </>
             )}
           </HubCard>
         )}
 
         {flags.lottery && (
-          <HubCard eyebrow="Lottery" icon="target" onClick={() => go('lottery')}
+          <HubCard eyebrow="Lossless lottery" icon="target" onClick={() => go('lottery')}
             chip={drawCountdown ? <Chip tone="pending"><LiveDot size={5} /> {drawCountdown}</Chip> : undefined}>
-            <Big>{lottery ? `${fmtICP(lottery.pot_e8s)} ICP pot` : 'Lossless lottery'}</Big>
+            <Big>{lottery ? `${fmtICP(lottery.pot_e8s)} ICP jackpot` : 'Lossless lottery'}</Big>
+            {lottery && (
+              <span className="row" style={{ gap: 7, alignItems: 'center', fontSize: 12.5, color: 'var(--fg-2)' }}>
+                <Icon name="clock" size={13} stroke="var(--haze-ink)" />
+                Next drawing {drawCountdown ? `in ${drawCountdown}` : 'soon'}
+              </span>
+            )}
             <Sub>
               {lottery && lottery.admin_excluded
-                ? 'Admins are excluded from play — the pot still grows from staking yield.'
+                ? 'Admins are excluded from play — the jackpot still grows from staking yield.'
                 : myTickets > 0n
                   ? `You hold ${myTickets.toString()} tickets this round. Draws run three times a week.`
                   : 'Stakers collect free tickets daily — more stake, more tickets. About one winner a month.'}
@@ -333,10 +345,9 @@ export default function Dashboard({
           <HubCard span2 eyebrow="Protocol totals" icon="eye" onClick={() => go('voting')}>
             <div className="row" style={{ gap: 20, flexWrap: 'wrap' }}>
               <MiniStat label="ICP burned" value={fmtICP(globalStats.total_burned_e8s)} />
-              <MiniStat label="TVL" value={`${fmtICP(globalStats.tvl_e8s)} ICP`} />
               <MiniStat label="Pending" value={fmtICP(globalStats.pending_burn_e8s)} />
               <MiniStat label="Committed" value={globalStats.votes_cast.toString()} />
-              <MiniStat label="Followers" value={globalStats.followers_count.toString()} />
+              <MiniStat label="Syndicate" value={globalStats.followers_count.toString()} />
             </div>
           </HubCard>
         )}

@@ -6369,8 +6369,8 @@ pub struct StakingPool {
     /// the local mock credits exactly this amount to the simulated neuron.
     pub pending_refresh_e8s: u64,
     pub pending_maturity: Vec<MaturityDisbursement>,
-    /// Lifetime yield harvested from this tier's neuron (split 50% lottery
-    /// pot / 50% treasury at distribution).
+    /// Lifetime yield harvested from this tier's neuron (split 70% lottery
+    /// pot / 30% treasury at distribution).
     pub total_yield_e8s: u64,
 }
 
@@ -7757,6 +7757,11 @@ async fn harvest_staking_maturity() {
     }
 }
 
+/// Staking-neuron yield split: this % of harvested yield goes to the lottery
+/// prize pot, the remainder (30%) to the treasury. Applies to both the tier
+/// neurons' yield inbox and the permanent Booster (early-adopter) neuron.
+const YIELD_LOTTERY_PCT: u64 = 70;
+
 async fn distribute_yield_inbox() {
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
 
@@ -7791,9 +7796,9 @@ async fn distribute_yield_inbox() {
     }
 
     let spendable = balance - 2 * ICP_FEE_E8S;
-    // 50% lottery / 50% treasury — every staking neuron (including the
-    // permanent Booster neuron) splits its yield evenly.
-    let lottery_amt = spendable / 2;
+    // 70% lottery / 30% treasury — every staking neuron (including the
+    // permanent Booster neuron) routes most of its yield to the prize pot.
+    let lottery_amt = spendable.saturating_mul(YIELD_LOTTERY_PCT) / 100;
     let treasury_amt = spendable - lottery_amt;
 
     let id = NEXT_YIELD_ID.with(|c| {
@@ -7824,7 +7829,7 @@ async fn distribute_yield_inbox() {
     });
 }
 
-/// 50% → lottery prize pot, 50% → treasury. Idempotent via per-leg block
+/// 70% → lottery prize pot, 30% → treasury. Idempotent via per-leg block
 /// indices, like `settle_burn_split`.
 async fn settle_yield_split(dist: &mut YieldDistribution) -> Result<(), String> {
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
@@ -8107,8 +8112,9 @@ fn dev_add_mock_maturity(amount_e8s: u64, tier: StakeTier) -> Result<(), String>
 // ticket, three draws a week (Mon/Wed/Sat nights US Eastern — fixed here as
 // the corresponding Tue/Thu/Sun 03:00 UTC instants). Tickets accumulate
 // across draws until someone wins, then the round restarts. The prize pool is
-// the staking-yield lottery pot (LOTTERY_SUBACCOUNT): a winner takes 80%, the
-// remaining 20% seeds the next round. Feature-flagged via FLAG_LOSSLESS_LOTTERY
+// the staking-yield lottery pot (LOTTERY_SUBACCOUNT): a winner takes 65%, 30%
+// seeds the next round, and 5% is burned to backend cycles via the CMC.
+// Feature-flagged via FLAG_LOSSLESS_LOTTERY
 // (ships dark). Payout history records every ICP/token payout the site makes
 // to a user (lottery wins, unstake disbursements, upvote shares, refunds).
 
@@ -8135,8 +8141,10 @@ const LOTTERY_MIN_POT_E8S: u64 = 2_500_000_000;
 fn lottery_odds_denominator(total_tickets: u64) -> u64 {
     total_tickets.max(1).saturating_mul(LOTTERY_DRAWS_PER_WIN)
 }
-/// Winner takes 80% of the pot; 20% stays for the next drawing.
-const LOTTERY_WINNER_SHARE_PCT: u64 = 80;
+/// Jackpot split on a win: 65% to the winner, 30% stays for the next drawing,
+/// 5% is burned to backend-canister cycles (ICP → cycles via the CMC).
+const LOTTERY_WINNER_SHARE_PCT: u64 = 65;
+const LOTTERY_CYCLE_BURN_PCT: u64 = 5;
 /// Draw instant within a draw day (≈ Powerball's 22:59 US Eastern the night
 /// before, expressed in UTC).
 const LOTTERY_DRAW_HOUR_UTC: u64 = 3;
@@ -8207,9 +8215,17 @@ pub struct LotteryDraw {
     /// this lands below `total_tickets`.
     pub winning_ticket: Option<u64>,
     pub winner: Option<Principal>,
-    /// Gross 80% prize (the winner nets this minus one ledger fee).
+    /// Gross 65% prize (the winner nets this minus one ledger fee).
     pub prize_e8s: u64,
     pub payout_block: Option<u64>,
+    /// Gross 5% of the pot burned to backend-canister cycles on a win (the
+    /// transfer nets one ledger fee). 0 when there's no winner.
+    #[serde(default)]
+    pub cycle_burn_e8s: u64,
+    /// Idempotency for the cycle-burn leg: the ICP→CMC transfer block index.
+    /// None until it lands; reset to None on CMC_REFUNDED to re-transfer.
+    #[serde(default)]
+    pub cycle_burn_block: Option<u64>,
     pub status: DrawStatus,
 }
 
@@ -8513,6 +8529,7 @@ async fn run_lottery_draw(forced_winning_ticket: Option<u64>) {
     // A win needs a hit ticket AND a prize big enough to actually transfer —
     // otherwise the drawing rolls over (tickets keep accumulating).
     let prize_e8s = pot_e8s.saturating_mul(LOTTERY_WINNER_SHARE_PCT) / 100;
+    let cycle_burn_e8s = pot_e8s.saturating_mul(LOTTERY_CYCLE_BURN_PCT) / 100;
     let winner = if winning_ticket < state.total_tickets && prize_e8s > ICP_FEE_E8S {
         find_ticket_owner(state.round, winning_ticket)
     } else {
@@ -8533,6 +8550,8 @@ async fn run_lottery_draw(forced_winning_ticket: Option<u64>) {
         winning_ticket: Some(winning_ticket),
         winner,
         prize_e8s: if winner.is_some() { prize_e8s } else { 0 },
+        cycle_burn_e8s: if winner.is_some() { cycle_burn_e8s } else { 0 },
+        cycle_burn_block: None,
         payout_block: None,
         status: if winner.is_some() { DrawStatus::PayoutPending } else { DrawStatus::Done },
     };
@@ -8573,13 +8592,17 @@ async fn run_lottery_draw(forced_winning_ticket: Option<u64>) {
     });
 }
 
-/// Transfer 80% of the pot (minus one ledger fee) to the winner. Idempotent:
-/// the persisted block index makes a retry skip the transfer.
+/// Settle a winning draw: 65% to the winner, 5% burned to backend-canister
+/// cycles via the CMC (30% stays in the pot as rollover). Both legs are
+/// idempotent via their persisted block indices, so a retry skips completed
+/// legs — same pattern as `settle_burn_split`.
 async fn settle_lottery_payout(draw: &mut LotteryDraw) -> Result<(), String> {
     let winner = draw.winner.ok_or("NO_WINNER")?;
     let net_prize = draw.prize_e8s.saturating_sub(ICP_FEE_E8S);
+    let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+
+    // Leg 1: 65% → winner.
     if draw.payout_block.is_none() {
-        let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
         let dest = LedgerAccount { owner: winner, subaccount: None };
         let b = call_ledger_transfer(
             ledger_id,
@@ -8597,6 +8620,36 @@ async fn settle_lottery_payout(draw: &mut LotteryDraw) -> Result<(), String> {
             m.borrow_mut().insert(draw.id, draw.clone());
         });
     }
+
+    // Leg 2: 5% → backend-canister cycles (burns ICP → cycles via the CMC).
+    // Skipped when the slice is too small to clear a ledger fee (tiny pots).
+    if draw.cycle_burn_e8s > ICP_FEE_E8S {
+        let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+        if draw.cycle_burn_block.is_none() {
+            let b = call_cmc_topup_transfer(
+                ledger_id,
+                Some(LOTTERY_SUBACCOUNT),
+                get_canister_id(),
+                draw.cycle_burn_e8s.saturating_sub(ICP_FEE_E8S),
+                ICP_FEE_E8S,
+            )
+            .await
+            .map_err(|e| format!("LOTTERY_CYCLE_XFER: {}", e))?;
+            draw.cycle_burn_block = Some(b);
+            LOTTERY_DRAWS.with(|m| {
+                m.borrow_mut().insert(draw.id, draw.clone());
+            });
+        }
+        if let Err(e) = notify_cmc_topup(cmc, get_canister_id(), draw.cycle_burn_block.unwrap(), false).await {
+            if e.starts_with("CMC_REFUNDED") {
+                // ICP bounced back to the pot subaccount — drop the block index
+                // so the retry re-transfers (re-notifying stays Refunded).
+                draw.cycle_burn_block = None;
+            }
+            return Err(format!("LOTTERY_CYCLE_NOTIFY: {}", e));
+        }
+    }
+
     draw.status = DrawStatus::Done;
 
     let mut state = lottery_state();
@@ -9899,7 +9952,7 @@ fn seed_default_dapps() {
         c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
     });
     let now = current_time();
-    let samples: [(&str, &str, &str, &[&str]); 10] = [
+    let samples: [(&str, &str, &str, &[&str]); 11] = [
         (
             "idGeek 2.0",
             "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
@@ -9959,6 +10012,12 @@ fn seed_default_dapps() {
             "https://icterminal.com/metrics.php?m=active_addresses&r=1d&chartStyle=line",
             "On-chain analytics terminal for the Internet Computer: track active addresses, transaction volume, token metrics and network activity through customizable real-time charts — a data dashboard for monitoring the health of the IC ecosystem.",
             &["Analytics"],
+        ),
+        (
+            "Taggr",
+            "https://taggr.link/",
+            "Fully on-chain SocialFi network — a decentralized blog, forum and social platform where users truly own their content. The community governs every code change through on-chain voting, and the network self-funds its own cycles from user activity, aiming to run perpetually and censorship-resistant on the Internet Computer.",
+            &["Social", "DAO"],
         ),
     ];
     for (name, url, description, categories) in samples {
@@ -11306,12 +11365,13 @@ fn derive_early_adopter_subaccount(user: &Principal) -> [u8; 32] {
 /// • Otherwise the first 1,000 ICP is the treasury's and the excess (net of
 ///   the one ledger fee burned moving it into the share pool — found by
 ///   local e2e) feeds the distribution pot.
-/// Booster yield routing: 50% treasury / 50% lottery pot — never to users, and
+/// Booster yield routing: 30% treasury / 70% lottery pot — never to users, and
 /// no restake to the neuron. Returns `(restake=0, treasury_cut, lottery_net)`;
-/// the lottery half is fee-adjusted for its onward transfer.
+/// the lottery share is fee-adjusted for its onward transfer.
 fn early_adopter_route_yield(yield_e8s: u64, fee: u64) -> (u64, u64, u64) {
-    let treasury_cut = yield_e8s / 2;
-    let lottery = yield_e8s.saturating_sub(treasury_cut);
+    // 70% lottery / 30% treasury, matching the tier-neuron yield split.
+    let lottery = yield_e8s.saturating_mul(YIELD_LOTTERY_PCT) / 100;
+    let treasury_cut = yield_e8s.saturating_sub(lottery);
     let lottery_net = if lottery > fee { lottery - fee } else { 0 };
     (0, treasury_cut, lottery_net)
 }
@@ -11666,9 +11726,9 @@ async fn early_adopter_run_settlement(now: u64) -> Result<(), String> {
         job.cut_done = true;
         persist_job(&job);
     }
-    // The "pool" leg now sends the user-half to the LOTTERY POT (not a per-user
-    // share pool). Boosters never pay ICP to users — yield is 50% treasury (the
-    // cut leg above) / 50% lottery (here).
+    // The "pool" leg now sends the lottery share to the LOTTERY POT (not a
+    // per-user share pool). Boosters never pay ICP to users — yield is 30%
+    // treasury (the cut leg above) / 70% lottery (here).
     if !job.pool_done {
         if job.excess_net_e8s > 0 {
             let lottery = LedgerAccount { owner: canister, subaccount: Some(LOTTERY_SUBACCOUNT) };
@@ -18813,7 +18873,7 @@ mod tests {
         seed_default_dapps();
         seed_default_dapps(); // re-run inserts nothing new
         let listed = list_dapps();
-        assert_eq!(listed.len(), 10);
+        assert_eq!(listed.len(), 11);
         assert_eq!(listed[0].name, "idGeek 2.0");
         assert_eq!(listed[1].name, "Liquidium");
         assert_eq!(listed[2].name, "ICPSwap");
@@ -18824,6 +18884,7 @@ mod tests {
         assert_eq!(listed[7].name, "onicai");
         assert_eq!(listed[8].name, "DGDG");
         assert_eq!(listed[9].name, "IC Terminal");
+        assert_eq!(listed[10].name, "Taggr");
         assert!(listed.iter().all(|d| !d.community && d.expires_at.is_none()));
     }
 
@@ -18834,10 +18895,10 @@ mod tests {
         // Simulate a directory seeded before the newer curated entries existed.
         let icpswap_id = list_dapps().iter().find(|d| d.name == "ICPSwap").unwrap().id;
         DAPPS.with(|m| { m.borrow_mut().remove(&icpswap_id); });
-        assert_eq!(list_dapps().len(), 9);
+        assert_eq!(list_dapps().len(), 10);
         seed_default_dapps();
         let listed = list_dapps();
-        assert_eq!(listed.len(), 10, "missing curated entry is backfilled");
+        assert_eq!(listed.len(), 11, "missing curated entry is backfilled");
         assert_eq!(listed.iter().filter(|d| d.name == "ICPSwap").count(), 1, "no duplicates");
     }
 
@@ -19201,13 +19262,13 @@ mod tests {
 
     #[test]
     fn test_early_adopter_route_yield_rules() {
-        // Booster yield splits 50% treasury / 50% lottery — no restake, no
+        // Booster yield splits 30% treasury / 70% lottery — no restake, no
         // per-user shares. Returns (restake=0, treasury_cut, lottery_net).
         assert_eq!(early_adopter_route_yield(0, 0), (0, 0, 0));
-        assert_eq!(early_adopter_route_yield(100 * ICP, 0), (0, 50 * ICP, 50 * ICP));
-        // The lottery half is net of one onward-transfer fee.
-        assert_eq!(early_adopter_route_yield(100 * ICP, 10_000), (0, 50 * ICP, 50 * ICP - 10_000));
-        // A half at/below one fee doesn't move.
+        assert_eq!(early_adopter_route_yield(100 * ICP, 0), (0, 30 * ICP, 70 * ICP));
+        // The lottery share is net of one onward-transfer fee.
+        assert_eq!(early_adopter_route_yield(100 * ICP, 10_000), (0, 30 * ICP, 70 * ICP - 10_000));
+        // A share at/below one fee doesn't move.
         assert_eq!(early_adopter_route_yield(2, 10_000), (0, 1, 0));
     }
 
@@ -19256,7 +19317,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_early_adopter_settlement_routes_50_50_no_user_payout() {
+    async fn test_early_adopter_settlement_routes_30_70_no_user_payout() {
         clear_early_adopters();
         enable_early_adopters_flag();
         let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
@@ -19271,7 +19332,7 @@ mod tests {
         assert!(info.neuron_id.is_some(), "neuron claimed at first stake");
         assert!(info.follows_primary_neuron, "follows the leader on all topics");
 
-        // 100 ICP yield → 50 treasury / 50 lottery. Users get NOTHING.
+        // 100 ICP yield → 30 treasury / 70 lottery. Users get NOTHING.
         set_mock_ledger_balance(100 * ICP);
         early_adopter_run_settlement(current_time()).await.unwrap();
         set_mock_caller(alice);
@@ -19280,7 +19341,7 @@ mod tests {
         let rounds = list_early_adopter_rounds();
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].yield_e8s, 100 * ICP);
-        assert_eq!(rounds[0].treasury_e8s, 50 * ICP);
+        assert_eq!(rounds[0].treasury_e8s, 30 * ICP);
         assert_eq!(rounds[0].distributed_e8s, 0, "no user distribution");
         assert_eq!(rounds[0].restaked_e8s, 0);
         clear_early_adopters();
@@ -19307,8 +19368,8 @@ mod tests {
         assert!(early_adopter_run_settlement(current_time()).await.is_err());
         let job = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().pending_job.clone()).expect("journal persisted");
         assert_eq!(job.yield_e8s, 750 * ICP);
-        assert_eq!(job.treasury_cut_e8s, 375 * ICP, "50% treasury");
-        assert_eq!(job.excess_net_e8s, 375 * ICP - 10_000, "50% lottery, net of fee");
+        assert_eq!(job.treasury_cut_e8s, 225 * ICP, "30% treasury");
+        assert_eq!(job.excess_net_e8s, 525 * ICP - 10_000, "70% lottery, net of fee");
         assert!(!job.cut_done);
 
         // Resume with the inbox apparently drained: the journal's amounts must
@@ -19320,7 +19381,7 @@ mod tests {
         let rounds = list_early_adopter_rounds();
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].yield_e8s, 750 * ICP, "original month, not the re-read remainder");
-        assert_eq!(rounds[0].treasury_e8s, 375 * ICP, "cut taken exactly once");
+        assert_eq!(rounds[0].treasury_e8s, 225 * ICP, "cut taken exactly once");
         assert_eq!(rounds[0].distributed_e8s, 0, "no user payout");
         clear_early_adopters();
     }
@@ -20478,15 +20539,15 @@ mod tests {
         assert_eq!(pool_2y.pending_maturity.len(), 1);
         assert_eq!(pool_2y.total_yield_e8s, 110_000_000);
 
-        // Distribute: 50% lottery pot / 50% treasury, single shared pot.
+        // Distribute: 70% lottery pot / 30% treasury, single shared pot.
         set_mock_ledger_balance(220_000_000);
         distribute_yield_inbox().await;
         let dists = list_yield_distributions();
         assert_eq!(dists.len(), 1);
         let d = &dists[0];
         let spendable = 220_000_000 - 2 * ICP_FEE_E8S;
-        assert_eq!(d.lottery_amount_e8s, spendable / 2);
-        assert_eq!(d.treasury_amount_e8s, spendable - spendable / 2);
+        assert_eq!(d.lottery_amount_e8s, spendable * 70 / 100);
+        assert_eq!(d.treasury_amount_e8s, spendable - spendable * 70 / 100);
         assert_eq!(d.lottery_amount_e8s + d.treasury_amount_e8s, spendable);
         assert_eq!(d.status, YieldStatus::Done);
 
@@ -20694,7 +20755,9 @@ mod tests {
         let draw = LOTTERY_DRAWS.with(|m| m.borrow().get(&1)).unwrap();
         assert_eq!(draw.status, DrawStatus::Done);
         assert_eq!(draw.winner, Some(alice));
-        assert_eq!(draw.prize_e8s, 800_000_000, "winner takes 80%");
+        assert_eq!(draw.prize_e8s, 650_000_000, "winner takes 65%");
+        assert_eq!(draw.cycle_burn_e8s, 50_000_000, "5% burned to backend cycles");
+        assert!(draw.cycle_burn_block.is_some(), "cycle-burn leg settled");
         assert_eq!(draw.payout_block, Some(7));
         assert_eq!(draw.total_tickets, 5);
 
@@ -20703,14 +20766,14 @@ mod tests {
         assert_eq!(state.total_tickets, 0);
         assert_eq!(state.last_winner, Some(alice));
         assert_eq!(state.draws_held, 1);
-        assert_eq!(state.total_paid_e8s, 800_000_000 - ICP_FEE_E8S);
+        assert_eq!(state.total_paid_e8s, 650_000_000 - ICP_FEE_E8S);
 
         let payouts: Vec<Payout> =
             PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
         assert_eq!(payouts.len(), 1);
         assert_eq!(payouts[0].user, alice);
         assert_eq!(payouts[0].payout_type, PayoutType::LotteryWin);
-        assert_eq!(payouts[0].amount, 800_000_000 - ICP_FEE_E8S);
+        assert_eq!(payouts[0].amount, 650_000_000 - ICP_FEE_E8S);
         // get_my_payouts is caller-scoped.
         assert_eq!(get_my_payouts().len(), 1);
         set_mock_caller(p("ryjl3-tyaaa-aaaaa-aaaba-cai"));
@@ -20774,7 +20837,7 @@ mod tests {
         let payouts: Vec<Payout> =
             PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
         assert_eq!(payouts.len(), 1, "paid exactly once");
-        assert_eq!(lottery_state().total_paid_e8s, 800_000_000 - ICP_FEE_E8S);
+        assert_eq!(lottery_state().total_paid_e8s, 650_000_000 - ICP_FEE_E8S);
 
         // A second tick finds nothing pending and doesn't double-pay.
         lottery_draw_check().await;
@@ -22208,8 +22271,10 @@ mod tests {
                     pot_e8s: 100,
                     winning_ticket: Some(0),
                     winner: if won { Some(alice) } else { None },
-                    prize_e8s: if won { 80 } else { 0 },
+                    prize_e8s: if won { 65 } else { 0 },
                     payout_block: None,
+                    cycle_burn_e8s: if won { 5 } else { 0 },
+                    cycle_burn_block: None,
                     status: DrawStatus::Done,
                 });
             });
