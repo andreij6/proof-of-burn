@@ -73,8 +73,8 @@ export default function LotteryHub({
               <p style={{ margin: 0 }}>
                 Drawings run three times a week — Mon, Wed &amp; Sat nights (US Eastern). A drawing only
                 runs once the pot holds 25 ICP; below that the countdown rolls over to the next slot and
-                the pot keeps growing. The winner takes 80% of the pot; 20% seeds the next drawing. The
-                pot is fed by every pooled neuron's yield harvest.
+                the pot keeps growing. The winner takes 65% of the pot; 30% seeds the next drawing; 5%
+                is burned to backend-canister cycles. The pot is fed by every pooled neuron's yield harvest.
               </p>
             </MoreInfo>
           </p>

@@ -58,8 +58,8 @@ const SECTIONS: Section[] = [
     icon: 'target',
     eyebrow: 'Lossless Lottery',
     title: 'A winner about once a month. Nobody loses.',
-    body: 'Stakers collect free tickets daily — 5, 10 or 20 per ICP by term, scaling with your stake. Three drawings a week, each with a 1-in-13 chance of crowning a winner, and a pot funded purely by staking yield. Win, and 80% lands in your wallet automatically.',
-    chips: ['3 drawings a week', '80% jackpot · 20% rolls over', 'paid instantly, no claiming'],
+    body: 'Stakers collect free tickets daily — 5, 10 or 20 per ICP by term, scaling with your stake. Three drawings a week, each with a 1-in-13 chance of crowning a winner, and a pot funded purely by staking yield. Win, and 65% lands in your wallet automatically.',
+    chips: ['3 drawings a week', '65% jackpot · 30% rolls over · 5% burned', 'paid instantly, no claiming'],
     flag: 'lottery',
   },
   {

@@ -6530,7 +6530,7 @@ pub struct StakingPoolInfo {
     pub total_staked_e8s: u64,
     pub min_stake_e8s: u64,
     pub min_unstake_e8s: u64,
-    /// Lifetime yield harvested across all tiers (split 50/50 lottery pot /
+    /// Lifetime yield harvested across all tiers (split 70/30 lottery pot /
     /// treasury at distribution).
     pub total_yield_e8s: u64,
 }
@@ -11615,7 +11615,7 @@ async fn advance_early_adopter_bootstrap() -> Result<(), String> {
     Ok(())
 }
 
-/// Boosters never pay ICP to users — yield funds the lottery + treasury (50/50).
+/// Boosters never pay ICP to users — yield funds the lottery + treasury (70/30 lottery/treasury).
 /// Retained as a hard guard against any legacy `claimable_e8s`: it always
 /// refuses. Legacy shares are drained to the treasury at the next settlement.
 #[ic_cdk::update]

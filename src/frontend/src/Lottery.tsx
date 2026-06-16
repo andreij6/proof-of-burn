@@ -12,7 +12,8 @@ import { useErrorImpression } from "./analytics";
 // (6mo = 5, 1y = 10, 2y = 20, summed across tiers). Each ticket has the
 // dynamic odds (each drawing has a 1-in-13 chance of a winner) at the three weekly
 // drawings. Tickets accumulate until someone wins, then the round restarts:
-// the winner takes 80% of the pot, 20% seeds the next drawing.
+// the winner takes 65% of the pot, 30% seeds the next drawing, and 5% is
+// burned to backend-canister cycles.
 // ==========================================
 
 interface LotteryProps {
@@ -194,8 +195,9 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
               least one within 3 months); your tickets are your share of that chance.
             </p>
             <p style={{ margin: 0 }}>
-              Tickets pile up until someone wins — then the winner takes 80% of the prize pool, 20%
-              seeds the next round, and everyone's tickets reset. The pool is funded by staking yield,
+              Tickets pile up until someone wins — then the winner takes 65% of the prize pool, 30%
+              seeds the next round, 5% is burned to backend-canister cycles, and everyone's tickets
+              reset. The pool is funded by staking yield,
               so no one ever pays in. Win and the ICP lands straight in your wallet — nothing to claim,
               ever. Staying staked is the deal: unstake everything and your tickets void on the spot.
             </p>

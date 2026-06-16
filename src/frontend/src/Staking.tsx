@@ -14,7 +14,7 @@ import { useErrorImpression } from "./analytics";
 // NOT grant voting power — voting is burn-only. Unstaking splits the tier's
 // neuron and dissolves it for the tier's full term. A fourth, PERMANENT
 // "Booster" neuron (2-year dissolve, never unstakeable) earns 40 tickets/ICP/day.
-// Every neuron's yield is harvested into one inbox and split 50% lottery / 50%
+// Every neuron's yield is harvested into one inbox and split 70% lottery / 30%
 // treasury.
 // ==========================================
 

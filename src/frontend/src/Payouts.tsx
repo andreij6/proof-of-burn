@@ -65,7 +65,7 @@ function parseUnits(text: string, decimals: number): bigint | null {
 
 const TX_META: Record<string, { label: string; icon: string; blurb: string }> = {
   // In — payouts the site made to you.
-  LotteryWin: { label: 'Lottery jackpot', icon: 'target', blurb: '80% of the prize pool' },
+  LotteryWin: { label: 'Lottery jackpot', icon: 'target', blurb: '65% of the prize pool' },
   UnstakeDisbursement: { label: 'Unstake disbursement', icon: 'zap', blurb: 'Dissolved stake returned to your wallet' },
   IdeaUpvoteShare: { label: 'Idea upvote share', icon: 'bulb', blurb: 'Legacy — upvoting is now free, no poster share' },
   CommitmentRefund: { label: 'Commitment refund', icon: 'undo', blurb: 'Escrow returned — threshold unmet' },

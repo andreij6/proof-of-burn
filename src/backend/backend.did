@@ -862,7 +862,7 @@ type StakingBootstrap = variant {
 type StakingPoolInfo = record {
   min_stake_e8s : nat64;
   total_staked_e8s : nat64;
-  // Lifetime yield harvested across all tiers (split 50/50 lottery pot /
+  // Lifetime yield harvested across all tiers (split 70/30 lottery pot /
   // treasury at distribution).
   total_yield_e8s : nat64;
   pools : vec TierPoolInfo;
@@ -951,7 +951,7 @@ type VoteRecord = record {
   icp_burned_e8s : nat64;
 };
 // Saga journal for one yield distribution: the shared yield inbox (fed by
-// all three tier neurons) is drained 50% to the lottery prize pot / 50% to
+// all three tier neurons) is drained 70% to the lottery prize pot / 30% to
 // the treasury. Persisted per-leg block indices make a retry skip completed
 // transfers (same idempotency as `settle_burn_split`).
 type YieldDistribution = record {
