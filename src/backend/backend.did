@@ -167,6 +167,7 @@ type Config = record {
   min_unstake_e8s : nat64;
   // ── Lossless lottery ──
   lottery_tickets_per_day : nat64;
+  lottery_min_unique_holders : nat64;
   pool_initiation_fee_e8s : nat64;
   cketh_ledger_canister_id : opt principal;
   ai_price_e8s : nat64;
@@ -581,6 +582,10 @@ type LotteryInfo = record {
   // Drawings only run when the pot holds at least this much (rolls over
   // otherwise). The countdown still ticks below the line.
   min_pot_e8s : nat64;
+  // Distinct ticket-holders in the current round (players progress bar).
+  unique_holders : nat64;
+  // Minimum distinct holders a draw needs (admin-tunable; 0 = no gate).
+  min_unique_holders : nat64;
   // Base daily grant for a 6-month staker (admin-tunable).
   tickets_per_day : nat64;
   odds_denominator : nat64;
@@ -1119,6 +1124,7 @@ service : (InitPayload) -> {
   admin_set_frontend_canister : (principal) -> (Result);
   // Admin: tune how many tickets a daily login credits.
   admin_set_lottery_config : (opt nat64) -> (Result);
+  admin_set_lottery_min_holders : (nat64) -> (Result);
   // Admin: retune a token's minimum upvote (smallest units) as exchange
   // rates move, keeping minimums roughly value-aligned across tokens.
   admin_set_min_upvote : (IdeaToken, nat64) -> (Result);
@@ -1239,6 +1245,8 @@ service : (InitPayload) -> {
   // Local-dev: grant the caller `count` lottery tickets in the current round
   // (demo a non-empty holding without staking). Returns the new ticket count.
   dev_grant_lottery_tickets : (nat64) -> (Result_1);
+  dev_fund_lottery_pot : (nat64) -> (Result);
+  dev_seed_lottery_holders : (nat64) -> (Result_1);
   // Local-dev: run one staking sweep pass immediately (instead of waiting for
   // the 5-minute timer).
   dev_run_staking_sweep : () -> (Result);

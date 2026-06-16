@@ -55,6 +55,9 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Local-dev control inputs.
+  const [devPotIcp, setDevPotIcp] = useState('25');
+  const [devHolders, setDevHolders] = useState('25');
   useErrorImpression(error, 'lottery');
   // 1-second tick so the countdown re-renders.
   const [, setTick] = useState(0);
@@ -138,6 +141,24 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
     await refresh();
   });
 
+  const handleDevFundPot = () => run('devpot', async () => {
+    const icp = parseFloat(devPotIcp);
+    if (!isFinite(icp) || icp <= 0) { setError("Enter a positive ICP amount."); return; }
+    const res = await actor.dev_fund_lottery_pot(BigInt(Math.round(icp * 1e8)));
+    if (res.__kind__ === "Err") { setError(res.Err); return; }
+    setNotice(`Added ${icp} ICP to the pot.`);
+    await refresh();
+  });
+
+  const handleDevSeedHolders = () => run('devholders', async () => {
+    const n = parseInt(devHolders, 10);
+    if (!Number.isFinite(n) || n <= 0) { setError("Enter a positive count."); return; }
+    const res = await actor.dev_seed_lottery_holders(BigInt(n));
+    if (res.__kind__ === "Err") { setError(res.Err); return; }
+    setNotice(`Seeded ${n} synthetic holders — the round now has ${res.Ok} unique holders.`);
+    await refresh();
+  });
+
   // Surface the lottery's local-dev controls in App's Dashboard & Controls panel.
   usePageDevControls(isLocal && signedIn, () => (
     <div className="col" style={{ gap: 8 }}>
@@ -156,8 +177,25 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
       <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
         Grant adds 10 tickets to your current-round holding (no staking needed). Force-win rigs ticket #0.
       </span>
+      <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)', marginTop: 4 }}>Lottery · pot & players</span>
+      <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <input className="burn-input" type="number" min="0" step="1" value={devPotIcp}
+          onChange={(e) => setDevPotIcp(e.target.value)} style={{ width: 88 }} aria-label="ICP to add to pot" />
+        <Btn variant="secondary" sm onClick={handleDevFundPot} disabled={busy !== null}>
+          {busy === 'devpot' ? <LiveDot size={7} /> : <Icon name="zap" size={13} />} Add ICP to pot
+        </Btn>
+        <input className="burn-input" type="number" min="1" step="1" value={devHolders}
+          onChange={(e) => setDevHolders(e.target.value)} style={{ width: 88 }} aria-label="unique holders to add" />
+        <Btn variant="secondary" sm onClick={handleDevSeedHolders} disabled={busy !== null}>
+          {busy === 'devholders' ? <LiveDot size={7} /> : <Icon name="target" size={13} />} Add unique holders
+        </Btn>
+      </div>
+      <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+        "Add ICP to pot" tops up the pot from the canister. "Add unique holders" seeds N synthetic
+        ticket-holders so you can cross the minimum-players gate.
+      </span>
     </div>
-  ), [busy]);
+  ), [busy, devPotIcp, devHolders]);
 
   const card: React.CSSProperties = {
     border: '1px solid var(--border)', borderRadius: 10,
@@ -268,6 +306,31 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
             : jackpotUsd != null ? `$${jackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}
         </b>
       </div>
+
+      {/* ── Draw thresholds — pot & players must both fill for a drawing to run ── */}
+      {info && (
+        <div className="col" style={{ ...card, gap: 12, width: '100%' }}>
+          <Eyebrow>Draw thresholds</Eyebrow>
+          <ThresholdBar
+            label="Jackpot pot"
+            current={Number(info.pot_e8s) / 1e8}
+            target={Number(info.min_pot_e8s) / 1e8}
+            unit="ICP"
+            fill="var(--sprout-ink)"
+          />
+          <ThresholdBar
+            label="Unique players"
+            current={Number(info.unique_holders)}
+            target={Number(info.min_unique_holders)}
+            unit="players"
+            fill="var(--burn)"
+          />
+          <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+            A drawing runs only when <b>both</b> bars are full — enough ICP in the pot and enough unique
+            players in the round. Otherwise the round rolls over and the countdown restarts.
+          </span>
+        </div>
+      )}
 
       <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
         {/* ── Your tickets ── */}
@@ -407,6 +470,31 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         )}
       </div>
 
+    </div>
+  );
+}
+
+// Progress bar for a draw threshold (pot or unique players). Theme-token colors;
+// turns green and shows ✓ once the threshold is met. target ≤ 0 = no gate.
+function ThresholdBar({ label, current, target, unit, fill }: {
+  label: string; current: number; target: number; unit: string; fill: string;
+}) {
+  const noGate = target <= 0;
+  const pct = noGate ? 100 : Math.min(100, (current / target) * 100);
+  const met = noGate || current >= target;
+  return (
+    <div className="col" style={{ gap: 5, width: '100%' }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>{label}</span>
+        <span className="mono" style={{ fontSize: 12, color: met ? 'var(--sprout-ink)' : 'var(--fg-2)' }}>
+          {current.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+          {noGate ? '' : ` / ${target.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} {unit}
+          {met ? ' ✓' : ''}
+        </span>
+      </div>
+      <div style={{ height: 9, borderRadius: 999, background: 'var(--bg-alt)', border: '1px solid var(--border)', overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: met ? 'var(--sprout-ink)' : fill, borderRadius: 999, transition: 'width 300ms ease' }} />
+      </div>
     </div>
   );
 }

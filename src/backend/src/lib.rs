@@ -376,6 +376,13 @@ fn default_lottery_tickets_per_day() -> u64 {
     5
 }
 
+/// Minimum number of UNIQUE ticket-holding users a round needs before a draw can
+/// run; below this the drawing rolls over (admin-tunable). Guards against a draw
+/// with too thin a field. 0 disables the gate.
+fn default_lottery_min_unique_holders() -> u64 {
+    25
+}
+
 // ── Cycles Faucet (PB-400) defaults ──
 /// Per-claim grant, FIXED in USD e8s ($1 = 100_000_000). Priced to ICP at claim
 /// time via the cached XRC oracle. $2.00.
@@ -450,6 +457,9 @@ pub struct Config {
     /// ── Lossless lottery ──
     #[serde(default = "default_lottery_tickets_per_day")]
     pub lottery_tickets_per_day: u64,
+    /// Minimum unique ticket-holders for a draw to run (else it rolls over).
+    #[serde(default = "default_lottery_min_unique_holders")]
+    pub lottery_min_unique_holders: u64,
     /// USD-denominated voting threshold (e8s of USD, i.e. $1 = 100_000_000).
     /// When set it supersedes `default_threshold` for new proposals; pots are
     /// valued at the cached ICP/USD rate. None = legacy ICP thresholds.
@@ -668,7 +678,7 @@ thread_local! {
             min_stake_e8s: default_min_stake_e8s(),
             min_unstake_e8s: default_min_unstake_e8s(),
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
-            lottery_tickets_per_day: default_lottery_tickets_per_day(),
+            lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
             faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
@@ -852,7 +862,7 @@ fn init(payload: InitPayload) {
         min_stake_e8s: default_min_stake_e8s(),
         min_unstake_e8s: default_min_unstake_e8s(),
         maturity_threshold_e8s: default_maturity_threshold_e8s(),
-        lottery_tickets_per_day: default_lottery_tickets_per_day(),
+        lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
         default_threshold_usd_e8s: None,
         course_nft_canister: None,
         faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
@@ -8279,6 +8289,10 @@ pub struct LotteryInfo {
     /// Drawings only run when the pot holds at least this much (rolls over
     /// otherwise). The countdown still ticks below the line.
     pub min_pot_e8s: u64,
+    /// Distinct ticket-holders in the current round (the players progress bar).
+    pub unique_holders: u64,
+    /// Minimum distinct holders a draw needs (admin-tunable; 0 = no gate).
+    pub min_unique_holders: u64,
     pub draws_held: u64,
     pub last_winner: Option<Principal>,
     pub last_win_at: Option<u64>,
@@ -8439,6 +8453,20 @@ fn find_ticket_owner(round: u64, index: u64) -> Option<Principal> {
     })
 }
 
+/// Count the unique users holding at least one ticket in `round` (synthetic and
+/// real alike). Drives the minimum-players gate on a draw.
+fn lottery_unique_holders(round: u64) -> u64 {
+    LOTTERY_TICKETS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| {
+                let t = e.value();
+                t.round == round && t.count > 0
+            })
+            .count() as u64
+    })
+}
+
 /// Timer hook: retry an unfinished prize payout first, then hold a draw once
 /// the scheduled instant passes.
 async fn lottery_draw_check() {
@@ -8508,6 +8536,21 @@ async fn run_lottery_draw(forced_winning_ticket: Option<u64>) {
             pot_e8s, LOTTERY_MIN_POT_E8S
         ));
         return;
+    }
+
+    // Minimum-players gate: a round needs at least `lottery_min_unique_holders`
+    // distinct ticket holders or the drawing rolls over (tickets keep
+    // accumulating, countdown still advanced above). Forced dev draws bypass it.
+    let min_holders = config.lottery_min_unique_holders;
+    if forced_winning_ticket.is_none() {
+        let holders = lottery_unique_holders(state.round);
+        if holders < min_holders {
+            canister_print(&format!(
+                "lottery drawing skipped: {} unique holders below the {} minimum — rolls over",
+                holders, min_holders
+            ));
+            return;
+        }
     }
 
     let mut state = lottery_state();
@@ -8815,6 +8858,8 @@ async fn get_lottery_info() -> LotteryInfo {
         pot_e8s,
         odds_denominator: lottery_odds_denominator(state.total_tickets),
         min_pot_e8s: LOTTERY_MIN_POT_E8S,
+        unique_holders: lottery_unique_holders(state.round),
+        min_unique_holders: config.lottery_min_unique_holders,
         draws_held: state.draws_held,
         last_winner: state.last_winner,
         last_win_at: state.last_win_at,
@@ -9003,6 +9048,21 @@ fn admin_set_lottery_config(tickets_per_day: Option<u64>) -> Result<(), String> 
     })
 }
 
+/// Admin: set the minimum number of unique ticket-holders a round needs before a
+/// draw runs (below it the drawing rolls over). 0 disables the gate.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_lottery_min_holders(min_holders: u64) -> Result<(), String> {
+    if min_holders > 100_000 {
+        return Err("INVALID_MIN_HOLDERS".to_string());
+    }
+    CONFIG.with(|cell| {
+        let mut config = cell.borrow().get().clone();
+        config.lottery_min_unique_holders = min_holders;
+        cell.borrow_mut().set(config);
+    });
+    Ok(())
+}
+
 /// Local-dev: hold a drawing immediately. `force_win` rigs the winning ticket
 /// to index 0 so the full payout path can be exercised without 1-in-292M luck.
 #[ic_cdk::update]
@@ -9042,6 +9102,62 @@ fn dev_grant_lottery_tickets(count: u64) -> Result<u64, String> {
     LOTTERY_TICKETS.with(|m| { m.borrow_mut().insert(caller, entry.clone()); });
     set_lottery_state(state);
     Ok(entry.count)
+}
+
+/// Local-dev: top up the lottery pot by transferring ICP from the canister's
+/// default account into the pot subaccount, so the pot threshold can be exercised
+/// without waiting on staking yield. Local only.
+#[ic_cdk::update]
+async fn dev_fund_lottery_pot(amount_e8s: u64) -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    require_lottery_enabled()?;
+    if amount_e8s == 0 {
+        return Err("AMOUNT_ZERO".to_string());
+    }
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let dest = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(LOTTERY_SUBACCOUNT),
+    };
+    call_ledger_transfer(config.ledger_canister_id, None, dest, amount_e8s, Some(10_000))
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("pot funding failed: {}", e))
+}
+
+/// Local-dev: seed `count` synthetic unique ticket-holders (1 ticket each) in the
+/// current round so the minimum-players gate and the players progress bar can be
+/// exercised without real users. Returns the new unique-holder count. Local only.
+#[ic_cdk::update]
+fn dev_seed_lottery_holders(count: u64) -> Result<u64, String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    require_lottery_enabled()?;
+    let now = current_time();
+    let mut state = lottery_state();
+    if state.next_draw_at == 0 {
+        state.next_draw_at = next_draw_after(now);
+    }
+    for i in 0..count {
+        // 28-byte opaque principal: "DLOT" + round + now + index — distinct per
+        // index and per call, and won't collide with real user principals.
+        let mut bytes = [0u8; 28];
+        bytes[..4].copy_from_slice(b"DLOT");
+        bytes[4..12].copy_from_slice(&state.round.to_be_bytes());
+        bytes[12..20].copy_from_slice(&now.to_be_bytes());
+        bytes[20..28].copy_from_slice(&i.to_be_bytes());
+        let p = Principal::from_slice(&bytes);
+        LOTTERY_TICKETS.with(|m| {
+            m.borrow_mut().insert(
+                p,
+                TicketEntry { round: state.round, count: 1, last_claim_day: 0 },
+            );
+        });
+        state.total_tickets = state.total_tickets.saturating_add(1);
+    }
+    set_lottery_state(state.clone());
+    Ok(lottery_unique_holders(state.round))
 }
 
 /// Local-dev: seed a varied set of mock payout records for the caller so the
@@ -17332,7 +17448,7 @@ mod tests {
             min_stake_e8s: default_min_stake_e8s(),
             min_unstake_e8s: default_min_unstake_e8s(),
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
-            lottery_tickets_per_day: default_lottery_tickets_per_day(),
+            lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
             faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
@@ -17579,7 +17695,7 @@ mod tests {
                 min_stake_e8s: default_min_stake_e8s(),
                 min_unstake_e8s: default_min_unstake_e8s(),
                 maturity_threshold_e8s: default_maturity_threshold_e8s(),
-                lottery_tickets_per_day: default_lottery_tickets_per_day(),
+                lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
                 default_threshold_usd_e8s: None,
                 course_nft_canister: None,
                 faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
@@ -19588,7 +19704,7 @@ mod tests {
             min_stake_e8s: default_min_stake_e8s(),
             min_unstake_e8s: default_min_unstake_e8s(),
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
-            lottery_tickets_per_day: default_lottery_tickets_per_day(),
+            lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
             faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
@@ -22197,6 +22313,13 @@ mod tests {
     async fn test_dev_lottery_draw_local_real_odds() {
         install_staking_test_config();
         enable_lottery();
+        // This test exercises the pot-threshold + odds path, not the min-players
+        // gate — disable that gate so a single holder can still draw.
+        CONFIG.with(|c| {
+            let mut cfg = c.borrow().get().clone();
+            cfg.lottery_min_unique_holders = 0;
+            c.borrow_mut().set(cfg);
+        });
         let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         set_mock_caller(alice);
         seed_stake(StakeTier::SixMonths, alice, 100_000_000);
@@ -22228,6 +22351,50 @@ mod tests {
         assert_eq!(dev_run_lottery_draw(true).await.unwrap_err(), "NO_TICKETS");
     }
 
+    #[tokio::test]
+    async fn test_lottery_min_holders_gate() {
+        install_staking_test_config();
+        enable_lottery();
+        set_mock_ledger_transfer(Ok(1));
+        set_mock_ledger_balance(5_000_000_000); // above the pot minimum
+        // Require 3 unique holders.
+        CONFIG.with(|c| {
+            let mut cfg = c.borrow().get().clone();
+            cfg.lottery_min_unique_holders = 3;
+            c.borrow_mut().set(cfg);
+        });
+        let round = lottery_state().round;
+        let seed = |i: u64| {
+            let mut b = [0u8; 28];
+            b[..4].copy_from_slice(b"TEST");
+            b[20..28].copy_from_slice(&i.to_be_bytes());
+            LOTTERY_TICKETS.with(|m| {
+                m.borrow_mut().insert(
+                    Principal::from_slice(&b),
+                    TicketEntry { round, count: 1, last_claim_day: 0 },
+                );
+            });
+        };
+
+        // Two holders — below the gate → the drawing rolls over, no record.
+        seed(0);
+        seed(1);
+        let mut s = lottery_state();
+        s.total_tickets = 2;
+        set_lottery_state(s);
+        run_lottery_draw(None).await;
+        assert_eq!(list_lottery_draws().len(), 0, "below min holders: rolls over");
+        assert_eq!(lottery_state().draws_held, 0);
+
+        // Third holder reaches the gate → the drawing runs (winner None at these
+        // odds, but a draw record is created).
+        seed(2);
+        let mut s = lottery_state();
+        s.total_tickets = 3;
+        set_lottery_state(s);
+        run_lottery_draw(None).await;
+        assert_eq!(list_lottery_draws().len(), 1, "at min holders: draw runs");
+    }
 
     #[tokio::test]
     async fn test_admins_are_excluded_from_the_lottery() {
