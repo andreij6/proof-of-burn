@@ -305,6 +305,13 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
             ? <LiveDot size={8} color="var(--sprout-ink)" />
             : jackpotUsd != null ? `$${jackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}
         </b>
+        {/* Participants */}
+        <Eyebrow style={{ marginTop: 8 }}>Participants</Eyebrow>
+        <b className="mono" style={{ fontSize: 22, lineHeight: 1.15 }}>
+          {loading && !info
+            ? <LiveDot size={8} color="var(--burn-ink)" />
+            : Number(info?.unique_holders ?? 0n).toLocaleString()}
+        </b>
       </div>
 
       {/* ── Draw thresholds — pot & players must both fill for a drawing to run ── */}
@@ -319,7 +326,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
             fill="var(--sprout-ink)"
           />
           <ThresholdBar
-            label="Unique players"
+            label="Participants"
             current={Number(info.unique_holders)}
             target={Number(info.min_unique_holders)}
             unit="players"
