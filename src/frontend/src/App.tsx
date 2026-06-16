@@ -1385,7 +1385,8 @@ export default function App() {
         setTxStep("Step 2/2: Locking the escrow and registering your stance...");
         const res = await actor.commit_token(confirmProposalId, confirmStance, meta.variant, smallest);
         if (res.__kind__ === "Err") {
-          throw new Error(`Commit failed: ${res.Err}`);
+          const code = res.Err as string;
+          throw new Error(code === "BELOW_MINIMUM" ? `Too small — ${voteToken} commitments start at $1.` : `Commit failed: ${code}`);
         }
         setTxSuccess(true);
         setTxStep(`Committed! Your ${voteToken} stays escrowed — it converts to ICP only if the vote passes; otherwise it comes back as ${voteToken}.`);
@@ -1400,9 +1401,20 @@ export default function App() {
     }
 
     const amount = parseFloat(confirmAmount);
-    if (isNaN(amount) || amount < 1.0) {
-      setTxError("Please enter a valid amount (minimum 1.0 ICP).");
+    if (isNaN(amount) || amount <= 0) {
+      setTxError("Please enter a valid amount.");
       return;
+    }
+    // Dollar-value voting: the floor is $1 worth of ICP (matches the backend's
+    // XRC-valued minimum), not a fixed 1 ICP. Validate client-side when the rate
+    // is known; the backend enforces $1 regardless.
+    const icpRateUsd = usdRates[ExplorerToken.ICP] ?? 0n;
+    if (icpRateUsd > 0n) {
+      const usdE8s = BigInt(Math.round(amount * 1e8)) * icpRateUsd / 100_000_000n;
+      if (usdE8s < 100_000_000n) {
+        setTxError("Too small — votes start at $1 worth of ICP.");
+        return;
+      }
     }
     const amountE8s = BigInt(Math.floor(amount * 100_000_000));
     // Option C: capped by wallet balance only (no neuron stake cap).
@@ -1457,7 +1469,11 @@ export default function App() {
       const commitResult = await actor.commit(confirmProposalId, confirmStance, amountE8s);
 
       if (commitResult.__kind__ === "Err") {
-        throw new Error(`Commit registration failed: ${commitResult.Err}`);
+        const code = commitResult.Err as string;
+        throw new Error(
+          code === "BELOW_MINIMUM" ? "Too small — votes start at $1 worth of ICP."
+          : `Commit registration failed: ${code}`,
+        );
       }
 
       // Success!
@@ -1490,9 +1506,18 @@ export default function App() {
     if (!actor || !addMoreProposalId) return;
 
     const amount = parseFloat(addMoreAmount);
-    if (isNaN(amount) || amount < 1.0) {
-      setAddMoreTxError("Please enter a valid amount (minimum 1.0 ICP).");
+    if (isNaN(amount) || amount <= 0) {
+      setAddMoreTxError("Please enter a valid amount.");
       return;
+    }
+    // Dollar-value voting: $1-worth-of-ICP floor (backend enforces it too).
+    const icpRateUsd = usdRates[ExplorerToken.ICP] ?? 0n;
+    if (icpRateUsd > 0n) {
+      const usdE8s = BigInt(Math.round(amount * 1e8)) * icpRateUsd / 100_000_000n;
+      if (usdE8s < 100_000_000n) {
+        setAddMoreTxError("Too small — top-ups start at $1 worth of ICP.");
+        return;
+      }
     }
     const amountE8s = BigInt(Math.floor(amount * 100_000_000));
     // Only charge 1 ledger fee for the deposit (no protocol fee on top-ups)
@@ -1544,7 +1569,9 @@ export default function App() {
       const result = await actor.add_to_commitment(addMoreProposalId, amountE8s);
 
       if (result.__kind__ === "Err") {
-        throw new Error(`Add-to-commitment failed: ${result.Err}`);
+        const code = result.Err as string;
+        if (code === "BELOW_MINIMUM") throw new Error("Too small — top-ups start at $1 worth of ICP.");
+        throw new Error(`Add-to-commitment failed: ${code}`);
       }
 
       setAddMoreTxSuccess(true);
@@ -4066,7 +4093,7 @@ export default function App() {
                     }}>ICP</span>
                   </div>
                   <div className="row" style={{ gap: 12, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
-                    <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>1.0 ICP</span></span>
+                    <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>$1 in ICP</span></span>
                     <span>Wallet: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(holdings)} ICP</span></span>
                   </div>
                 </div>
@@ -4225,9 +4252,9 @@ export default function App() {
             <div className="col" style={{ gap: 14, fontSize: 13, lineHeight: 1.5, color: 'var(--fg-2)' }}>
               
               <div className="col" style={{ gap: 4 }}>
-                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Min Burn (1.0 ICP)</span>
+                <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Min Burn ($1 in ICP)</span>
                 <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
-                  The minimum amount of ICP required to commit to any governance proposal. This ensures voting signals represent meaningful economic conviction and prevents spam.
+                  The minimum commit is $1 worth of ICP, valued live via the XRC oracle, to commit to any governance proposal. This ensures voting signals represent meaningful economic conviction and prevents spam.
                 </p>
               </div>
 
