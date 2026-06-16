@@ -1319,8 +1319,12 @@ export default function App() {
     const rate = usdRates[meta.variant] ?? 0n;
     if (rate <= 0n) { setConfirmAmount(""); return; }
     const usdE8s = BigInt(Math.round(usd * 1e8));
-    const smallest = usdE8s * BigInt(10) ** BigInt(meta.decimals) / rate;
     const d = BigInt(10) ** BigInt(meta.decimals);
+    // Round UP (ceil division): floor division lands the token amount a hair
+    // below the entered USD, so a "$1" vote values back to $0.99999998 and trips
+    // the $1 minimum on BOTH the client and the backend (which share this exact
+    // cached rate). Ceil guarantees the deposit values to >= the entered USD.
+    const smallest = (usdE8s * d + rate - 1n) / rate;
     const whole = smallest / d;
     const frac = (smallest % d).toString().padStart(meta.decimals, '0').replace(/0+$/, '');
     setConfirmAmount(frac ? `${whole}.${frac}` : whole.toString());
