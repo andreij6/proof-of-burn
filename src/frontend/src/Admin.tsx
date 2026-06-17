@@ -962,10 +962,20 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Courses rated below 2.0★ with at least 5 ratings, worst first.{' '}
               <MoreInfo title="Course moderation">
-                These are surfaced for review only — nothing auto-hides. Hiding removes a course
-                from the public marketplace (existing owners keep the NFT); burning permanently
-                destroys the NFT and cannot be undone. Both are admin-discretion actions taken
-                without warning to the owner.
+                <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                  <Eyebrow accent>The gist</Eyebrow>
+                  <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                    Courses are <b>surfaced for review only — nothing auto-hides</b>. Both actions below
+                    are admin-discretion and taken without warning to the owner.
+                  </p>
+                </div>
+                <div className="col" style={{ gap: 6 }}>
+                  <Eyebrow accent>Your options</Eyebrow>
+                  <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                    <li><b>Hide:</b> removes the course from the public marketplace — existing owners keep the NFT. Reversible.</li>
+                    <li><b>Burn:</b> <span style={{ color: 'var(--ember-ink)' }}>permanently destroys the NFT and cannot be undone.</span></li>
+                  </ul>
+                </div>
               </MoreInfo>
             </span>
 

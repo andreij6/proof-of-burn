@@ -2505,16 +2505,28 @@ export default function App() {
                     Burn ICP to steer the NNS proposals you care about — your conviction decides
                     which way the community neuron votes.{' '}
                     <MoreInfo title="How burn voting works">
-                      <p style={{ margin: 0 }}>
-                        Committing ICP temporarily borrows the community leader neuron's voting
-                        power. The more you commit, the more weight your side carries — adopt and
-                        reject commitments face off, and the heavier side decides the neuron's vote.
-                      </p>
-                      <p style={{ margin: 0 }}>
-                        Commitments are escrowed until the proposal's deadline. If the dollar
-                        threshold is met and the neuron votes, your commitment is spent; if not,
-                        it is returned in full — no fees either way.
-                      </p>
+                      <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                        <Eyebrow accent>The gist</Eyebrow>
+                        <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                          Committing ICP <b>temporarily borrows the community leader neuron's voting power</b>.
+                          The heavier side — adopt vs reject — decides how the neuron votes.
+                        </p>
+                      </div>
+                      <div className="col" style={{ gap: 6 }}>
+                        <Eyebrow accent>How your weight counts</Eyebrow>
+                        <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                          <li><b>More commit = more weight:</b> your ICP adds to your side's total.</li>
+                          <li><b>Adopt vs reject face off:</b> the heavier side decides the neuron's vote.</li>
+                        </ul>
+                      </div>
+                      <div className="col" style={{ gap: 6 }}>
+                        <Eyebrow accent>What happens to your ICP</Eyebrow>
+                        <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                          <li><b>Escrowed</b> until the proposal's deadline.</li>
+                          <li><b>Threshold met &amp; neuron votes →</b> your commitment is spent (burned).</li>
+                          <li><b>Threshold not met →</b> returned in full. No fees either way.</li>
+                        </ul>
+                      </div>
                     </MoreInfo>
                   </p>
                 </div>

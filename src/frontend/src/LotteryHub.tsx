@@ -61,21 +61,35 @@ export default function LotteryHub({
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
             Earn a free ticket every day just by staking. Every draw is a chance to win, and your ICP is never at risk.{' '}
             <MoreInfo title="How the lossless lottery works">
-              <p style={{ margin: '0 0 8px' }}>
-                Staking is the entry ticket: lock ICP into a 6-month, 1-year or 2-year pooled neuron and
-                collect free tickets every day (longer terms earn more). Your ICP stays yours — unstake
-                in full any time.
-              </p>
-              <p style={{ margin: '0 0 8px' }}>
-                The neurons' yield funds the prize pool. Each draw has fixed odds, the winner is paid
-                straight to their wallet, and everyone's tickets reset for the next round.
-              </p>
-              <p style={{ margin: 0 }}>
-                Drawings run three times a week — Mon, Wed &amp; Sat nights (US Eastern). A drawing only
-                runs once the pot holds 25 ICP; below that the countdown rolls over to the next slot and
-                the pot keeps growing. The winner takes 65% of the pot; 30% seeds the next drawing; 5%
-                is burned to backend-canister cycles. The pot is fed by every pooled neuron's yield harvest.
-              </p>
+              <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                <Eyebrow accent>The gist</Eyebrow>
+                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                  <b>Nobody pays in.</b> Staking earns free daily tickets, the prize pool is funded by
+                  neuron yield, and your ICP always stays yours.
+                </p>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>Earning &amp; odds</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Staking is the entry ticket:</b> lock ICP into a 6-month / 1-year / 2-year pooled neuron for free daily tickets (longer terms earn more).</li>
+                  <li><b>Unstake in full any time</b> — your ICP stays yours.</li>
+                  <li><b>Fixed odds</b> per draw; the winner is paid straight to their wallet and everyone's tickets reset.</li>
+                </ul>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>When a drawing runs</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Three times a week:</b> Mon, Wed &amp; Sat nights (US Eastern).</li>
+                  <li><b>Only when both thresholds are met</b> — the pot holds <b>≥ 25 ICP</b> and there are enough unique participants; otherwise it rolls over and the pot keeps growing.</li>
+                </ul>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>The split</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>65% to the winner</b>; <b>30% seeds the next drawing</b>; <b>5% burned</b> to backend-canister cycles.</li>
+                  <li>The pot is fed by <b>every pooled neuron's yield harvest</b>.</li>
+                </ul>
+              </div>
             </MoreInfo>
           </p>
         </div>

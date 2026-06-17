@@ -212,10 +212,21 @@ export default function Faucet({ actor, principal, isLocal, onSignIn, onGoVote }
               per canister. A canister can claim at most {status.lifetime_cap} times, ever.
             </p>
             <MoreInfo label="How the grant is priced" title="Pricing & delivery">
-              The grant is fixed in USD and priced to ICP at claim time via the
-              XRC oracle. The ICP is then converted to cycles by the IC's Cycles
-              Minting Canister at its live XDR rate and minted straight into your
-              canister, so the actual cycles delivered depend on the CMC rate.
+              <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                <Eyebrow accent>The gist</Eyebrow>
+                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                  The grant is <b>fixed in USD</b> and delivered as <b>cycles minted straight into your
+                  canister</b> — so the exact cycles depend on live rates.
+                </p>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>From dollars to cycles</Eyebrow>
+                <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Priced to ICP</b> at claim time via the XRC oracle.</li>
+                  <li><b>Converted to cycles</b> by the IC's Cycles Minting Canister at its live XDR rate.</li>
+                  <li><b>Minted into your canister</b> — actual cycles delivered depend on the CMC rate.</li>
+                </ol>
+              </div>
             </MoreInfo>
           </div>
 

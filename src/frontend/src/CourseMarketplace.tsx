@@ -309,13 +309,29 @@ export default function CourseMarketplace({
             Play any community-built course for fun — and earn lottery tickets when you
             finish a round. Courses are NFTs you can create, own, buy, and sell.{' '}
             <MoreInfo title="Create → mint → list → earn → buy/sell">
-              <p>Build a 9-hole course in the editor, mint it as an NFT (0.5 ICP), and it is
-              auto-listed here. Players earn a lottery ticket for completing a round; you, the
-              course owner, earn a ticket each time a player reaches hole 2.</p>
-              <p>List your course for sale at any ICP price, re-price, or delist it. Buying a
-              course transfers the earning rights to you; the sale price splits 75% to the
-              seller, 10% to the original creator (a permanent royalty), and 15% to the protocol
-              (cycles + treasury). Promote any course to the featured slot with a ck-token bid.</p>
+              <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                <Eyebrow accent>The gist</Eyebrow>
+                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                  Build a course, <b>mint it as an NFT</b>, and earn lottery tickets from players — then
+                  list it for sale and keep earning a creator royalty forever.
+                </p>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>Create &amp; earn</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Build &amp; mint:</b> a 9-hole course in the editor, minted as an NFT (<b>0.5 ICP</b>), auto-listed here.</li>
+                  <li><b>Players earn</b> a lottery ticket for completing a round.</li>
+                  <li><b>You earn</b> a ticket each time a player reaches hole 2.</li>
+                </ul>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>Buy &amp; sell</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>List, re-price, or delist</b> at any ICP price; buying transfers the earning rights.</li>
+                  <li><b>Sale split:</b> 75% seller · 10% original creator (permanent royalty) · 15% protocol (cycles + treasury).</li>
+                  <li><b>Featured slot:</b> promote any course to the top with a ck-token bid.</li>
+                </ul>
+              </div>
             </MoreInfo>
           </p>
         </div>

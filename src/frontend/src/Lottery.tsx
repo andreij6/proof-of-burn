@@ -232,23 +232,37 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
           Stakers collect free tickets every day — win and the ICP lands straight in your wallet.{' '}
           <MoreInfo title="How the lossless lottery works">
-            <p style={{ margin: 0 }}>
-              Stakers collect free tickets daily — 5 for a 6-month stake, 10 for 1 year, 20 for 2 years
-              (tiers add up), and the grant scales with how much you stake: 1 ICP for 6 months earns
-              5 tickets a day, 500 ICP for 2 years earns 10,000.
-            </p>
-            <p style={{ margin: 0 }}>
-              Every drawing has a fixed 1-in-13 chance of crowning a winner no matter how many tickets
-              exist (three drawings a week ≈ one jackpot a month on average, and a 96% chance of at
-              least one within 3 months); your tickets are your share of that chance.
-            </p>
-            <p style={{ margin: 0 }}>
-              Tickets pile up until someone wins — then the winner takes 65% of the prize pool, 30%
-              seeds the next round, 5% is burned to backend-canister cycles, and everyone's tickets
-              reset. The pool is funded by staking yield,
-              so no one ever pays in. Win and the ICP lands straight in your wallet — nothing to claim,
-              ever. Staying staked is the deal: unstake everything and your tickets void on the spot.
-            </p>
+            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+              <Eyebrow accent>The gist</Eyebrow>
+              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                <b>Nobody ever pays in.</b> The prize pool is funded by staking yield — you collect free
+                tickets just for staking, and winnings land straight in your wallet.
+              </p>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Earning tickets</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Stake to qualify:</b> 5 / 10 / 20 tickets a day per ICP for 6-month / 1-year / 2-year terms (tiers add up).</li>
+                <li><b>Scales with your stake:</b> 1 ICP for 6 months → 5 tickets/day; 500 ICP for 2 years → 10,000/day.</li>
+                <li><b>Stay staked:</b> unstake everything and your tickets void on the spot.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>The odds</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Fixed 1-in-13 chance</b> of a winner per drawing, regardless of ticket count.</li>
+                <li>Three drawings a week ≈ <b>one jackpot a month</b> on average (96% chance of one within 3 months).</li>
+                <li>Your tickets are your <b>share of that chance</b>.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>The payout</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>65% to the winner</b> — paid automatically, nothing to claim.</li>
+                <li><b>30% seeds the next round</b>; <b>5% is burned</b> to backend-canister cycles.</li>
+                <li>Everyone's tickets reset and a fresh round begins.</li>
+              </ul>
+            </div>
           </MoreInfo>
         </span>
         <button onClick={copyAgentSkill} style={{

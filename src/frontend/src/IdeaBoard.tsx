@@ -602,14 +602,21 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
             Pitch ways to burn more ICP, back the best ideas, and fund official projects.{' '}
             <MoreInfo title="How Community R&D works">
-              <p style={{ margin: 0 }}>
-                Pitch ways to burn more ICP and grow the token's value, upvote the best ideas for
-                free, and fund official projects with ICP, ckBTC, or ckETH.
-              </p>
-              <p style={{ margin: 0 }}>
-                <b>Upvotes are free</b> — one per person per idea, no crypto required. Project
-                funding goes 100% to the treasury. Ideas with no upvotes for 30 days are deleted.
-              </p>
+              <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                <Eyebrow accent>The gist</Eyebrow>
+                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                  Pitch ways to <b>burn more ICP and grow the token's value</b>, upvote the best ideas for
+                  free, and fund official projects.
+                </p>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>How it works</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Upvotes are free:</b> one per person per idea, no crypto required.</li>
+                  <li><b>Fund projects</b> with ICP, ckBTC, or ckETH — funding goes <b>100% to the treasury</b>.</li>
+                  <li><b>Stay active:</b> ideas with no upvotes for 30 days are deleted.</li>
+                </ul>
+              </div>
             </MoreInfo>
           </p>
         </div>

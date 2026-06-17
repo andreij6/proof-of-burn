@@ -325,16 +325,27 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
             Wager your SVPP across our games — your staked ICP is never at risk.{' '}
             <MoreInfo title="How the Casino works">
-              <p style={{ margin: '0 0 8px' }}>
-                <b>SVPP</b> (Staked Voting Power Points) are minted by staking ICP — 1 staked ICP =
-                1,000 SVPP (more the longer you stay staked). Games move only this derived number —
-                your staked ICP is never wagered, never at risk, and always unstakeable in full. Go
-                broke and your ICP is exactly where you left it.
-              </p>
-              <p style={{ margin: 0 }}>
-                <b>Crash</b> is house-banked with a 1% edge that's burned forever. A casino-wide
-                stop-loss stands you down before zero.
-              </p>
+              <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                <Eyebrow accent>The gist</Eyebrow>
+                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                  You play in <b>SVPP</b>, not ICP — your staked ICP is <b>never wagered and never at
+                  risk</b>. Go broke and your ICP is exactly where you left it.
+                </p>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>SVPP</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Minted by staking:</b> 1 staked ICP = 1,000 SVPP (more the longer you stay staked).</li>
+                  <li><b>Games move only this derived number</b> — principal is untouched and always unstakeable in full.</li>
+                </ul>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>The games</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Crash</b> is house-banked with a <b>1% edge that's burned forever</b>.</li>
+                  <li>A casino-wide <b>stop-loss</b> stands you down before zero.</li>
+                </ul>
+              </div>
             </MoreInfo>
           </p>
         </div>
@@ -368,9 +379,27 @@ export default function Casino({ actor, principal, isLocal, onSignIn, onGoStakin
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
             Cash out before the rising multiplier crashes. You play in SVPP — your staked ICP is never at risk.{' '}
             <MoreInfo title="How Crash works">
-              <p><b>SVPP</b> (Staked Voting Power Points) are minted from your staked ICP — 1 staked ICP = 1,000 SVPP. Betting moves only this derived number — your principal is never touched and is always unstakeable in full.</p>
-              <p>The house keeps a 1% edge, and <b>burns it</b>: the edge is destroyed forever, not collected. Destroyed SVPP can only re-enter the system by staking more ICP.</p>
-              <p>Every crash point was fixed at genesis by a hash chain — open any past round's <b>verify</b> dialog to recompute it yourself.</p>
+              <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                <Eyebrow accent>The gist</Eyebrow>
+                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                  Cash out before the multiplier crashes. You bet in <b>SVPP</b>, so your staked ICP is
+                  never touched — and the game is <b>provably fair</b>.
+                </p>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>SVPP betting</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Minted from staked ICP:</b> 1 staked ICP = 1,000 SVPP.</li>
+                  <li>Betting moves only this derived number — <b>principal is never touched</b> and always unstakeable in full.</li>
+                </ul>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>The edge &amp; fairness</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>1% edge, burned forever</b> — destroyed, not collected. Destroyed SVPP only re-enters by staking more ICP.</li>
+                  <li><b>Provably fair:</b> every crash point was fixed at genesis by a hash chain — open any past round's <b>verify</b> dialog to recompute it yourself.</li>
+                </ul>
+              </div>
             </MoreInfo>
           </p>
         </div>

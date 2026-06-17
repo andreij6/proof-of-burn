@@ -435,11 +435,21 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
             Discover ICP dapps — or list your own for {pricePerDay}/day.{' '}
             <MoreInfo title="Listing on the Explorer">
-              <p style={{ margin: 0 }}>
-                List your dapp for {pricePerDay}/day (1–3650 days), paid in ICP, ckBTC, ckETH,
-                ckUSDC or ckUSDT at live exchange rates. Community listings are reviewed by an
-                admin before they appear.
-              </p>
+              <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                <Eyebrow accent>The gist</Eyebrow>
+                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                  Get your dapp in front of ICP users for <b>{pricePerDay}/day</b> — paid in any major
+                  token, reviewed by an admin before it goes live.
+                </p>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>How listing works</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Pick a duration:</b> 1–3650 days at {pricePerDay}/day.</li>
+                  <li><b>Pay in any token:</b> ICP, ckBTC, ckETH, ckUSDC or ckUSDT, priced at live exchange rates.</li>
+                  <li><b>Admin-reviewed:</b> community listings are checked before they appear.</li>
+                </ul>
+              </div>
             </MoreInfo>
           </p>
         </div>

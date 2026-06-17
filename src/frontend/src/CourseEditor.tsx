@@ -221,13 +221,33 @@ export default function CourseEditor({
         <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 580, margin: 0 }}>
           Build a 9-hole course, then mint it as an NFT.{' '}
           <MoreInfo title="Create → mint → list → earn">
-            <p>Place a tee and a cup on each of the 9 holes, set each par, add obstacles, and
-            mint. Minting burns 0.5 ICP and auto-lists your course in the marketplace.
-            You earn a lottery ticket each time a player reaches hole 2 on your course.</p>
+            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+              <Eyebrow accent>The gist</Eyebrow>
+              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                Design a 9-hole course, <b>mint it as an NFT</b>, and earn a lottery ticket every time a
+                player reaches hole 2.
+              </p>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Steps</Eyebrow>
+              <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Design:</b> place a tee and a cup on each of the 9 holes, set par, add obstacles.</li>
+                <li><b>Mint:</b> burns <b>0.5 ICP</b> and auto-lists your course in the marketplace.</li>
+                <li><b>Earn:</b> a lottery ticket each time a player reaches hole 2 on your course.</li>
+              </ol>
+            </div>
           </MoreInfo>{' '}
           <MoreInfo title="Course rules">
-            <p>Courses you mint are public NFTs. Low-rated courses may be hidden or burned by
-            moderators without warning.</p>
+            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+              <Eyebrow accent>The gist</Eyebrow>
+              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                Courses you mint are <b>public NFTs</b> — and subject to moderation.
+              </p>
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+              <li><b>Public &amp; permanent:</b> anyone can play or buy a minted course.</li>
+              <li><span style={{ color: 'var(--ember-ink)' }}><b>Low-rated courses may be hidden or burned</b> by moderators without warning.</span></li>
+            </ul>
           </MoreInfo>
         </p>
       </div>
