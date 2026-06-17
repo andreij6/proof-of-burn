@@ -26,6 +26,7 @@ import type {
   IdeaBoardInfo,
   ExplorerInfo,
   UserStakeInfo,
+  LotteryDraw,
 } from "./bindings/backend";
 import IdeaBoard, { parseTokenAmount, fmtTokenAmount } from "./IdeaBoard";
 import LotteryHub from "./LotteryHub";
@@ -498,6 +499,35 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'open' | 'committed' | 'history'>('open');
   // Past Proposals pagination (50 per page; latest 250 only).
   const [historyPage, setHistoryPage] = useState(0);
+  // Lottery win banner — shows the winner a celebratory banner for 2 days after a
+  // draw finalizes; dismissible and remembered per draw id so it won't nag.
+  const [winBanner, setWinBanner] = useState<{ id: bigint; prize: bigint } | null>(null);
+  useEffect(() => {
+    if (!actor || !principal || principal.isAnonymous()) { setWinBanner(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const winners: LotteryDraw[] = await actor.list_recent_winners();
+        const me = principal.toString();
+        const TWO_DAYS_MS = 2 * 86_400_000;
+        const mine = winners
+          .filter(d => !!d.winner && d.winner.toString() === me
+            && Date.now() - Number(d.drawn_at / 1_000_000n) < TWO_DAYS_MS)
+          .sort((a, b) => (b.drawn_at > a.drawn_at ? 1 : b.drawn_at < a.drawn_at ? -1 : 0))[0];
+        if (cancelled) return;
+        if (mine && localStorage.getItem(`lottery_win_seen_${mine.id}`) === null) {
+          setWinBanner({ id: mine.id, prize: mine.prize_e8s });
+        } else {
+          setWinBanner(null);
+        }
+      } catch { /* best-effort — no banner if the call fails */ }
+    })();
+    return () => { cancelled = true; };
+  }, [actor, principal]);
+  const dismissWinBanner = () => {
+    if (winBanner) { try { localStorage.setItem(`lottery_win_seen_${winBanner.id}`, '1'); } catch { /* sandboxed */ } }
+    setWinBanner(null);
+  };
 
   // Help modal status
   const [isHelpOpen, setIsHelpOpen] = useState(false);
@@ -2081,6 +2111,26 @@ export default function App() {
         {/* Content column. Keyed by page so every page fades/blurs in with the
             expressive transition on navigation. */}
         <main style={{ flex: 1, minWidth: 320, overflowY: 'auto' }}>
+          {winBanner && (
+            <div role="status" style={{
+              display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between',
+              margin: '12px 16px 0', padding: '12px 16px', borderRadius: 12,
+              background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))',
+              border: '1px solid var(--burn)', color: 'var(--fg)',
+            }}>
+              <span className="row" style={{ gap: 10, alignItems: 'center', minWidth: 0, flexWrap: 'wrap' }}>
+                <Icon name="spark" size={18} stroke="var(--burn-ink)" />
+                <span style={{ fontSize: 13.5 }}>
+                  🎉 You won the lottery! <b className="mono" style={{ color: 'var(--sprout-ink)' }}>{fmtICP(winBanner.prize)} ICP</b> was paid straight to your wallet.
+                  <button onClick={() => setPage('lottery')} style={{ background: 'none', border: 'none', color: 'var(--burn-ink)', cursor: 'pointer', textDecoration: 'underline', padding: 0, marginLeft: 6, fontSize: 13.5 }}>View drawing</button>
+                </span>
+              </span>
+              <button onClick={dismissWinBanner} title="Dismiss" aria-label="Dismiss win banner"
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)', padding: 2, flexShrink: 0 }}>
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+          )}
           <Reveal key={page} motion={motion} style={{ display: 'block', minHeight: '100%' }}>
           {page === 'about' ? (
             <AboutUs
