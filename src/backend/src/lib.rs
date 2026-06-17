@@ -10140,7 +10140,7 @@ fn seed_default_dapps() {
         ),
         (
             "Liquidium",
-            "https://liquidium.fi/",
+            "https://app.liquidium.fi/i/actual-coral-giraffe",
             "Cross-chain lending protocol: supply Bitcoin and borrow stablecoins without selling your holdings. Chain Fusion collateral across chains, auto-compounded yield for lenders, no lock-ups, fully non-custodial.",
             &["DeFi"],
         ),
@@ -22040,6 +22040,33 @@ mod tests {
         let agg = USER_AGGREGATES.with(|m| m.borrow().get(&alice)).unwrap();
         assert_eq!(agg.total_committed_escrow, 0);
         assert_eq!(agg.total_burned, 100_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_cutoff_voted_reject_also_burns() {
+        // observations.md #3 invariant: once the threshold is met and the neuron
+        // votes, committed ICP is BURNED regardless of direction. A REJECT vote
+        // returns nothing to the committer, exactly like an ADOPT vote — meeting
+        // threshold + voting is what spends the ICP, not the vote's outcome.
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(11));
+        let pid = 700_035u64;
+        open_proposal(pid, 200_000_000);
+        commit(pid, Stance::Reject, 200_000_000).await.unwrap(); // meets threshold, reject majority
+
+        process_proposal_cutoff(pid).await.unwrap();
+
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert!(prop.vote_executed_at.is_some(), "neuron voted");
+        let vote = VOTES.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(vote.vote, Vote::No, "reject majority → No");
+
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.status, CommitmentStatus::Burned, "met + voted → burned, never returned");
     }
 
     #[tokio::test]

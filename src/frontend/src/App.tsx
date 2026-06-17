@@ -97,6 +97,41 @@ export function pageFromHash(hash: string): AppPage | null {
 export type WalletToken = 'ICP' | 'ckBTC' | 'ckETH' | 'ckUSDC' | 'ckUSDT';
 export const WALLET_TOKENS: WalletToken[] = ['ICP', 'ckBTC', 'ckETH', 'ckUSDC', 'ckUSDT'];
 
+// ── Shared commitment minimum ──
+// Every commitment — an initial vote on an Open proposal OR an "add more"
+// top-up — must be worth at least $1, valued at the live XRC rate. The backend
+// enforces this regardless; these are the single source of truth on the client
+// so the Open-proposal flow and the add-more flow can never drift apart.
+export const MIN_COMMIT_USD = 1;
+export const MIN_COMMIT_USD_E8S = BigInt(MIN_COMMIT_USD) * 100_000_000n;
+
+/** USD-e8s value of `amountIcp` ICP at the given ICP→USD rate (e8s); 0 when the
+ *  amount is invalid or the rate is unknown. */
+export function icpToUsdE8s(amountIcp: number, icpRateUsd: bigint): bigint {
+  if (!isFinite(amountIcp) || amountIcp <= 0 || icpRateUsd <= 0n) return 0n;
+  return BigInt(Math.round(amountIcp * 1e8)) * icpRateUsd / 100_000_000n;
+}
+
+/** Does an ICP amount clear the shared $1 commitment minimum? When the rate is
+ *  unknown we can't value it client-side, so we don't block (any positive
+ *  amount passes here; the backend still enforces the floor). */
+export function meetsMinCommitIcp(amountIcp: number, icpRateUsd: bigint): boolean {
+  if (icpRateUsd <= 0n) return isFinite(amountIcp) && amountIcp > 0;
+  return icpToUsdE8s(amountIcp, icpRateUsd) >= MIN_COMMIT_USD_E8S;
+}
+
+/** Did a proposal reach its burn threshold? ICP-threshold proposals compare
+ *  directly; USD-threshold ones need the live rate — when it's unknown we
+ *  don't claim "unmet" (so we never hide a row we can't actually evaluate). */
+export function proposalThresholdMet(
+  p: { total_committed_e8s: bigint; threshold_e8s: bigint; threshold_usd_e8s?: bigint },
+  icpRateUsd: bigint,
+): boolean {
+  if (!p.threshold_usd_e8s) return p.total_committed_e8s >= p.threshold_e8s;
+  if (icpRateUsd <= 0n) return true;
+  return thresholdProgress(p, icpRateUsd).pct >= 100;
+}
+
 // Inline neuron glyph (from src/assets/neuron.svg). Rendered as inline SVG rather
 // than an <img>, because Vite inlines small SVGs as data URIs and the `#` in the
 // `#FF6A1F` fills breaks data-URI parsing (shows a broken image).
@@ -1389,8 +1424,8 @@ export default function App() {
       const rate = usdRates[meta.variant] ?? 0n;
       if (rate > 0n) {
         const usd = smallest * rate / BigInt(10) ** BigInt(meta.decimals);
-        if (usd < 100_000_000n) {
-          setTxError(`Too small — ${voteToken} commitments start at $1.`);
+        if (usd < MIN_COMMIT_USD_E8S) {
+          setTxError(`Too small — ${voteToken} commitments start at $${MIN_COMMIT_USD}.`);
           return;
         }
       }
@@ -1443,16 +1478,13 @@ export default function App() {
       setTxError("Please enter a valid amount.");
       return;
     }
-    // Dollar-value voting: the floor is $1 worth of ICP (matches the backend's
-    // XRC-valued minimum), not a fixed 1 ICP. Validate client-side when the rate
-    // is known; the backend enforces $1 regardless.
+    // Dollar-value voting: the floor is the shared $1-worth-of-ICP minimum
+    // (matches the backend's XRC-valued minimum), not a fixed 1 ICP. Validate
+    // client-side when the rate is known; the backend enforces it regardless.
     const icpRateUsd = usdRates[ExplorerToken.ICP] ?? 0n;
-    if (icpRateUsd > 0n) {
-      const usdE8s = BigInt(Math.round(amount * 1e8)) * icpRateUsd / 100_000_000n;
-      if (usdE8s < 100_000_000n) {
-        setTxError("Too small — votes start at $1 worth of ICP.");
-        return;
-      }
+    if (!meetsMinCommitIcp(amount, icpRateUsd)) {
+      setTxError(`Too small — votes start at $${MIN_COMMIT_USD} worth of ICP.`);
+      return;
     }
     const amountE8s = BigInt(Math.floor(amount * 100_000_000));
     // Option C: capped by wallet balance only (no neuron stake cap).
@@ -1550,14 +1582,12 @@ export default function App() {
       setAddMoreTxError("Please enter a valid amount.");
       return;
     }
-    // Dollar-value voting: $1-worth-of-ICP floor (backend enforces it too).
+    // Dollar-value voting: shared $1-worth-of-ICP floor (same decision as the
+    // Open-proposal commit; backend enforces it too).
     const icpRateUsd = usdRates[ExplorerToken.ICP] ?? 0n;
-    if (icpRateUsd > 0n) {
-      const usdE8s = BigInt(Math.round(amount * 1e8)) * icpRateUsd / 100_000_000n;
-      if (usdE8s < 100_000_000n) {
-        setAddMoreTxError("Too small — top-ups start at $1 worth of ICP.");
-        return;
-      }
+    if (!meetsMinCommitIcp(amount, icpRateUsd)) {
+      setAddMoreTxError(`Too small — top-ups start at $${MIN_COMMIT_USD} worth of ICP.`);
+      return;
     }
     const amountE8s = BigInt(Math.floor(amount * 100_000_000));
     // Only charge 1 ledger fee for the deposit (no protocol fee on top-ups)
@@ -2008,11 +2038,18 @@ export default function App() {
   }).sort(byNewest);
 
   const nonCommitVotes = tier >= 1 ? voteHistory.filter(r => !historyProposals.find(p => p.id === r.proposal_id)) : [];
+  // Past Proposals only lists proposals whose burn threshold was actually met.
+  // Threshold-missed proposals returned every commitment and nothing was burned,
+  // so they're omitted entirely (per observations.md).
+  const icpRateUsdForHistory = usdRates[ExplorerToken.ICP] ?? 0n;
   const pastItems: { id: bigint; proposal?: Proposal; record?: VoteRecord }[] = [];
   historyProposals.forEach(p => {
+    if (!proposalThresholdMet(p, icpRateUsdForHistory)) return;
     pastItems.push({ id: BigInt(p.id), proposal: p });
   });
   nonCommitVotes.forEach(r => {
+    // Following-only vote records with nothing burned mean the threshold missed.
+    if (r.icp_burned_e8s === 0n) return;
     pastItems.push({ id: BigInt(r.proposal_id), record: r });
   });
   pastItems.sort((a, b) => (b.id > a.id ? 1 : b.id < a.id ? -1 : 0));
@@ -3045,7 +3082,6 @@ export default function App() {
                           <b style={{ fontSize: 14, color: 'var(--fg)' }}>Past Proposals</b>
                           <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>· {cappedPast.length}</span>
                         </span>
-                        <Eyebrow style={{ whiteSpace: 'nowrap' }}>settled · cycles · returned</Eyebrow>
                       </div>
                     </Reveal>
 
@@ -3074,11 +3110,6 @@ export default function App() {
                                     {p.title}
                                   </span>
                                   <div className="row" style={{ gap: 8, flexShrink: 0 }}>
-                                    {p.total_committed_e8s < p.threshold_e8s && (
-                                      <Chip tone="muted" style={{ height: 20, fontSize: 11, border: '1px dashed var(--border-hi)' }}>
-                                        Threshold unmet
-                                      </Chip>
-                                    )}
                                     {voteRec && (
                                       <Chip tone={voteRec.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>
                                         {voteRec.vote === Vote.Yes ? 'Adopt' : voteRec.vote === Vote.No ? 'Reject' : 'abstained'}
@@ -3111,11 +3142,6 @@ export default function App() {
                                   {title}
                                 </span>
                                 <div className="row" style={{ gap: 8, flexShrink: 0 }}>
-                                  {record.icp_burned_e8s === 0n && (
-                                    <Chip tone="muted" style={{ height: 20, fontSize: 11, border: '1px dashed var(--border-hi)' }}>
-                                      Threshold unmet
-                                    </Chip>
-                                  )}
                                   <Chip tone={record.vote === Vote.Yes ? 'ok' : 'muted'} style={{ height: 20, fontSize: 11 }}>{voteStr}</Chip>
                                   {record.icp_burned_e8s > 0n && (
                                     <span className="mono" style={{ fontSize: 11.5, color: 'var(--burn-ink)' }}>{fmtICP(record.icp_burned_e8s)} spent</span>
@@ -4004,7 +4030,7 @@ export default function App() {
                   {/* Min only — no wallet balance shown here */}
                   <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', width: '100%', flexWrap: 'wrap', gap: 8 }}>
                     <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                      Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>$1</span>
+                      Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>${MIN_COMMIT_USD}</span>
                     </span>
                     <button
                       type="button"
@@ -4053,7 +4079,7 @@ export default function App() {
                     : (tokenBalances.ckusdt ?? 0n);
                   const usd = parseFloat(confirmUsd);
                   const hasAmount = isFinite(usd) && usd > 0 && needed > 0n;
-                  const belowMin = hasAmount && usd < 1;
+                  const belowMin = hasAmount && usd < MIN_COMMIT_USD;
                   const insufficient = hasAmount && needed > bal;
                   const canSubmit = tier >= 2 && hasAmount && !belowMin && !insufficient;
                   return (
@@ -4073,7 +4099,7 @@ export default function App() {
                         disabled={!canSubmit}
                         onClick={() => { if (canSubmit) executeTransaction(); }}
                       >
-                        <Icon name="flame" size={14} stroke="var(--char-950)" /> {insufficient ? 'Not enough funds' : belowMin ? 'Minimum is $1' : 'Submit'}
+                        <Icon name="flame" size={14} stroke="var(--char-950)" /> {insufficient ? 'Not enough funds' : belowMin ? `Minimum is $${MIN_COMMIT_USD}` : 'Submit'}
                       </Btn>
                     </div>
                   </div>
@@ -4174,7 +4200,7 @@ export default function App() {
                   <div style={{ position: 'relative' }}>
                     <input
                       type="number"
-                      min="1"
+                      min="0"
                       step="0.1"
                       placeholder="0.0"
                       className="burn-input"
@@ -4189,7 +4215,7 @@ export default function App() {
                     }}>ICP</span>
                   </div>
                   <div className="row" style={{ gap: 12, fontSize: 11.5, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
-                    <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>$1 in ICP</span></span>
+                    <span>Min: <span className="mono" style={{ color: 'var(--fg-2)' }}>${MIN_COMMIT_USD} in ICP</span></span>
                     <span>Wallet: <span className="mono" style={{ color: 'var(--fg-2)' }}>{fmtICP(holdings)} ICP</span></span>
                   </div>
                 </div>
@@ -4216,20 +4242,25 @@ export default function App() {
                     <LiveDot size={8} color="var(--burn-ink)" />
                     <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>{addMoreTxStep}</span>
                   </div>
-                ) : (
+                ) : (() => {
+                  // Same $1-worth minimum as the Open-proposal commit (shared helper).
+                  const addMoreValid = meetsMinCommitIcp(parseFloat(addMoreAmount), usdRates[ExplorerToken.ICP] ?? 0n);
+                  return (
                   <div className="row" style={{ gap: 12 }}>
                     <Btn variant="secondary" style={{ flex: 1 }} onClick={() => setIsAddingMore(false)}>
                       Cancel
                     </Btn>
                     <Btn
                       variant="primary"
-                      style={{ flex: 1, opacity: addMoreAmount && parseFloat(addMoreAmount) >= 1 ? 1 : 0.45 }}
+                      style={{ flex: 1, opacity: addMoreValid ? 1 : 0.45 }}
+                      disabled={!addMoreValid}
                       onClick={executeAddMore}
                     >
                       <Icon name="flame" size={14} stroke="var(--char-950)" /> Add {addMoreAmount ? `${parseFloat(addMoreAmount).toFixed(1)} ICP` : "ICP"}
                     </Btn>
                   </div>
-                )}
+                  );
+                })()}
               </div>
             )}
           </div>
