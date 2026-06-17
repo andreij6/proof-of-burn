@@ -1,9 +1,11 @@
 type ActivePoolNeuron = record {
   rank : nat32;
+  // When the neuron joined the syndicate (activation time; falls back to
+  // draft-creation time for older records).
+  registered_at : nat64;
   registered_by : principal;
   voting_power : nat64;
   neuron_id : nat64;
-  registered_at : nat64;
 };
 type ArcadeBarDef = record {
   // Pivot cell (grid coords).
@@ -135,9 +137,13 @@ type CommitmentStatus = variant {
   Returned;
   Pending;
 };
+type CompleteRoundOk = record { player_credited : bool; reason : opt text };
 type Config = record {
+  // Minimum unique ticket-holders for a draw to run (else it rolls over).
+  lottery_min_unique_holders : nat64;
   // ── Lossless staking (3 fixed tiers: 6mo / 1y / 2y) ──
   min_stake_e8s : nat64;
+  faucet_canister_lifetime_cap : nat32;
   maturity_threshold_e8s : nat64;
   // Admin overrides for the per-token minimum upvote (smallest units).
   // `None` falls back to the value-aligned defaults; retune via
@@ -149,6 +155,7 @@ type Config = record {
   // ignored — same safety posture as the pinned leader neuron.
   ckbtc_ledger_canister_id : opt principal;
   ckusdt_ledger_canister_id : opt principal;
+  faucet_claim_window_ns : nat64;
   // USD-denominated voting threshold (e8s of USD, i.e. $1 = 100_000_000).
   // When set it supersedes `default_threshold` for new proposals; pots are
   // valued at the cached ICP/USD rate. None = legacy ICP thresholds.
@@ -156,18 +163,26 @@ type Config = record {
   ckusdc_ledger_canister_id : opt principal;
   min_upvote_ckbtc_e8s : opt nat64;
   default_threshold : nat64;
+  // ── Cycles Faucet (PB-400) — all admin-settable, defaulted on decode ──
+  faucet_grant_usd_e8s : nat64;
   // True when the canister was initialised against a local dev network
   // (detected from the owner's principal or ledger canister id at init).
   // Gating the NNS mock fallback on this flag — not re-deriving environment
   // per call — is what prevents the F-101/F-102 mainnet bypass.
   is_local : bool;
   admins : vec principal;
+  // CourseNFT (ICRC-7) canister id — the authoritative token ledger for the
+  // Course NFT marketplace (PB-300). Set by `admin_set_course_nft_canister`
+  // and by `deploy-local.sh`. None until wired; the backend is the
+  // allowlisted minter/custodian on that canister.
+  course_nft_canister : opt principal;
   ledger_canister_id : principal;
   min_upvote_cketh_wei : opt nat64;
+  faucet_treasury_floor_e8s : nat64;
+  faucet_vote_window_ns : nat64;
   min_unstake_e8s : nat64;
   // ── Lossless lottery ──
   lottery_tickets_per_day : nat64;
-  lottery_min_unique_holders : nat64;
   pool_initiation_fee_e8s : nat64;
   cketh_ledger_canister_id : opt principal;
   ai_price_e8s : nat64;
@@ -176,16 +191,28 @@ type Config = record {
   // fallback so it works without re-init after an upgrade.
   frontend_canister_id : opt principal;
   primary_neuron_id : nat64;
-  // CourseNFT (ICRC-7) canister id — authoritative token ledger for the Course
-  // NFT marketplace (PB-300). Exposed so the frontend can build per-token URLs.
-  // None until wired via `admin_set_course_nft_canister` / deploy-local.sh.
-  course_nft_canister : opt principal;
-  // ── Cycles Faucet (PB-400) — all admin-settable, defaulted on decode ──
-  faucet_grant_usd_e8s : nat64;
-  faucet_canister_lifetime_cap : nat32;
-  faucet_claim_window_ns : nat64;
-  faucet_vote_window_ns : nat64;
-  faucet_treasury_floor_e8s : nat64;
+};
+type CourseCard = record {
+  theme : nat8;
+  creator : opt principal;
+  is_caller_owner : bool;
+  token_id : nat64;
+  owner : opt principal;
+  name : text;
+  for_sale : bool;
+  created_at : nat64;
+  par_total : nat8;
+  tickets_distributed : nat64;
+  play_count : nat64;
+  price_e8s : nat64;
+  listed : bool;
+};
+type CourseRatingSummary = record {
+  rating_sum : nat64;
+  token_id : nat64;
+  count : nat32;
+  avg_x10 : nat32;
+  my_stars : opt nat8;
 };
 type CrashBetView = record {
   payout_x100 : nat64;
@@ -262,9 +289,15 @@ type CrashVerifyView = record {
 type DappListing = record {
   id : nat64;
   url : text;
+  // Categories this dapp belongs to (subset of `DAPP_CATEGORIES`). Drives
+  // the Explorer's category filter; not shown on the grid cards.
+  categories : vec text;
   status : DappStatus;
   token : opt IdeaToken;
   submitter : principal;
+  // Optional X/Twitter handle (without the leading @), e.g. "ICPSwap".
+  // Rendered as a link on the card. None = no handle shown.
+  twitter : opt text;
   days : nat64;
   name : text;
   // True for paid community submissions (badged in the UI); false for
@@ -275,22 +308,20 @@ type DappListing = record {
   created_at : nat64;
   // Amount paid in `token`'s smallest unit (0 for admin listings).
   amount_paid : nat64;
+  // True if the submitter flagged the dapp as "vibe coded" (built largely
+  // with AI assistance). Shown as a badge above the title. Always false for
+  // curated/admin and default-seeded listings.
+  is_vibe_coded : bool;
   // None = permanent (admin listings). Community listings expire
   // `days` after approval and are then deleted by the sweep.
   expires_at : opt nat64;
-  // Categories (subset of ExplorerInfo.available_categories); drives the
-  // Explorer filter, not shown on the grid cards.
-  categories : vec text;
-  // True if the submitter flagged the dapp as "vibe coded" (badge above the
-  // title). Always false for curated/default listings.
-  is_vibe_coded : bool;
-  twitter : opt text;
 };
 type DappStatus = variant {
   Approved;
   // Community submission awaiting admin review — never shown publicly.
   Pending;
 };
+type DifficultyFilter = variant { Any; Easy; Hard; Medium };
 type DrawStatus = variant {
   Done;
   // A winner was drawn but the prize transfer hasn't succeeded yet; the
@@ -367,6 +398,8 @@ type EscrowKind = variant { Explorer; Arcade; EarlyAdopter };
 // Everything the Explorer UI needs in one query.
 type ExplorerInfo = record {
   cketh_ledger : principal;
+  // Canonical category list the UI offers in the submit dialog + filter.
+  available_categories : vec text;
   fee_icp_e8s : nat64;
   max_days : nat64;
   ckusdt_ledger : principal;
@@ -381,8 +414,6 @@ type ExplorerInfo = record {
   ckbtc_ledger : principal;
   fee_ckbtc_sats : nat64;
   fee_ckusdt_micro : nat64;
-  // Canonical category list the UI offers in the submit dialog + filter.
-  available_categories : vec text;
 };
 // A locked price for one caller: deposit `amount` (+ one ledger fee) on the
 // token's ledger, then call `submit_dapp` before `expires_at`.
@@ -397,46 +428,59 @@ type ExplorerQuote = record {
   expires_at : nat64;
 };
 type ExplorerToken = variant { ICP; CkUSDC; CkUSDT; CkBTC; CkETH };
-// Cycles Faucet (PB-400): structured eligibility gate — the first failing gate.
+// Structured eligibility result — a developer's CLI/agent can render exactly
+// which gate is blocking and when they're next eligible (review optimization).
 type FaucetGate = variant {
-  Eligible;
-  FaucetDisabled;
-  CanisterNotRegistered;
-  NoPoolNeuron;
-  NotVotedInWindow;
-  ClaimedThisWeek : record { next_at : nat64 };
   CanisterLifetimeReached : record { count : nat32 };
+  CanisterNotRegistered;
   TreasuryLow;
+  FaucetDisabled;
+  NoPoolNeuron;
+  Eligible;
+  ClaimedThisWeek : record { next_at : nat64 };
+  NotVotedInWindow;
+};
+// One recorded faucet grant, for the public transaction list. `block_index` is
+// the ICP-ledger block of the treasury→CMC transfer — the on-chain transaction
+// a UI can link to. Keyed in FAUCET_GRANTS by `id` (== the grant's sequence).
+type FaucetGrant = record {
+  at : nat64;
+  id : nat64;
+  dev : principal;
+  block_index : nat64;
+  canister_id : principal;
+  amount_icp_e8s : nat64;
 };
 // All-time faucet stats (public transparency).
 type FaucetStats = record {
+  // All-time count of successful grants.
   total_claims : nat64;
-  total_granted_icp_e8s : nat64;
   last_grant_at : nat64;
-};
-type FaucetGrant = record {
-  id : nat64;
-  dev : principal;
-  canister_id : principal;
-  amount_icp_e8s : nat64;
-  block_index : nat64;
-  at : nat64;
+  // All-time ICP spent on grants (e8s; the treasury outflow, fees excluded).
+  total_granted_icp_e8s : nat64;
 };
 // Everything the faucet UI / a CLI needs in one query.
 type FaucetStatus = record {
-  enabled : bool;
-  gate : FaucetGate;
-  registered : bool;
-  has_pool_neuron : bool;
-  voted_in_window : bool;
-  canister_claims_used : nat32;
-  next_eligible_at : nat64;
-  grant_usd_e8s : nat64;
-  lifetime_cap : nat32;
-  claim_window_ns : nat64;
-  vote_window_ns : nat64;
   treasury_floor_e8s : nat64;
+  // Caller burn-voted within the window (G3).
+  voted_in_window : bool;
+  // Caller has an active pool neuron (G2).
+  has_pool_neuron : bool;
+  // The blocking gate for `(caller, canister_id)`, or `Eligible`.
+  gate : FaucetGate;
+  lifetime_cap : nat32;
+  // Lifetime claims used by the registered canister (of `lifetime_cap`).
+  canister_claims_used : nat32;
+  grant_usd_e8s : nat64;
+  // Effective flag for the caller (On for all, AdminOn → admins only).
+  enabled : bool;
+  vote_window_ns : nat64;
+  // Next time this dev OR canister may claim again (max of the two), 0 if now.
+  next_eligible_at : nat64;
+  // Estimated grant ICP at the current cached rate (e8s). 0 if rate unknown.
   est_grant_icp_e8s : nat64;
+  claim_window_ns : nat64;
+  registered : bool;
 };
 type FeatureFlag = record {
   key : text;
@@ -446,6 +490,40 @@ type FeatureFlag = record {
   // The raw three-state setting (for the admin panel to display/cycle).
   state : FlagState;
 };
+type FeaturedDapp = record {
+  id : nat64;
+  status : FeaturedStatus;
+  applicant : principal;
+  token : opt IdeaToken;
+  days : nat64;
+  approved_at : opt nat64;
+  created_at : nat64;
+  amount_paid : nat64;
+  payment_block : opt nat64;
+  usd_total_e8s : nat64;
+  listing_id : nat64;
+  expires_at : opt nat64;
+};
+// Everything the Explorer hero needs in one query.
+type FeaturedInfo = record {
+  max_days : nat64;
+  active : vec FeaturedView;
+  slots_total : nat32;
+  min_days : nat64;
+  price_per_day_usd_e8s : nat64;
+  slots_open : nat32;
+};
+type FeaturedSlot = record {
+  at : nat64;
+  token : IdeaToken;
+  token_id : nat64;
+  usd_value_e8s : nat64;
+  amount : nat64;
+  bidder : principal;
+};
+type FeaturedStatus = variant { Active; Rejected; Expired; Pending };
+// A featured placement joined to its listing — what the UI renders.
+type FeaturedView = record { listing : DappListing; featured : FeaturedDapp };
 // A feature's three states. `Off` = nobody; `On` = everybody; `AdminOn` =
 // admins only (preview/playtest a feature live without exposing it).
 type FlagState = variant { On; Off; AdminOn };
@@ -472,7 +550,7 @@ type Idea = record {
   total_ckbtc_e8s : nat64;
   // Detail-view opens by signed-in users (drives "most viewed" sorting).
   views : nat64;
-  // Whether the calling principal has upvoted this idea (per-caller, computed).
+  // Filled per-caller at query time: whether the caller has upvoted. Not stored.
   has_upvoted : bool;
   description : text;
   created_at : nat64;
@@ -536,6 +614,7 @@ type License = record {
   buyer : principal;
   listing_id : nat64;
 };
+type ListedFilter = variant { No; Any; Yes };
 type Listing = record {
   id : nat64;
   title : text;
@@ -556,6 +635,9 @@ type Listing = record {
 type LotteryDraw = record {
   id : nat64;
   status : DrawStatus;
+  // Gross 5% of the pot burned to backend-canister cycles on a win (the
+  // transfer nets one ledger fee). 0 when there's no winner.
+  cycle_burn_e8s : nat64;
   winner : opt principal;
   drawn_at : nat64;
   // Lottery-pot balance at draw time.
@@ -566,12 +648,11 @@ type LotteryDraw = record {
   // this lands below `total_tickets`.
   winning_ticket : opt nat64;
   round : nat64;
+  // Idempotency for the cycle-burn leg: the ICP→CMC transfer block index.
+  // None until it lands; reset to None on CMC_REFUNDED to re-transfer.
+  cycle_burn_block : opt nat64;
   // Gross 65% prize (the winner nets this minus one ledger fee).
   prize_e8s : nat64;
-  // Gross 5% of the pot burned to backend-canister cycles on a win.
-  cycle_burn_e8s : nat64;
-  // Idempotency block index for the cycle-burn (ICP→CMC) leg.
-  cycle_burn_block : opt nat64;
 };
 // Everything the Lottery page needs in one call (update — it reads the pot
 // balance from the ledger).
@@ -583,13 +664,11 @@ type LotteryInfo = record {
   // Drawings only run when the pot holds at least this much (rolls over
   // otherwise). The countdown still ticks below the line.
   min_pot_e8s : nat64;
-  // Distinct ticket-holders in the current round (players progress bar).
-  unique_holders : nat64;
-  // Minimum distinct holders a draw needs (admin-tunable; 0 = no gate).
-  min_unique_holders : nat64;
   // Base daily grant for a 6-month staker (admin-tunable).
   tickets_per_day : nat64;
   odds_denominator : nat64;
+  // Minimum distinct holders a draw needs (admin-tunable; 0 = no gate).
+  min_unique_holders : nat64;
   enabled : bool;
   pot_e8s : nat64;
   // The caller's actual daily grant across their staked tiers (0 = not
@@ -600,17 +679,47 @@ type LotteryInfo = record {
   // Whether the caller holds any stake (the eligibility gate).
   eligible : bool;
   total_tickets : nat64;
+  // Distinct ticket-holders in the current round (the players progress bar).
+  unique_holders : nat64;
   // True when the caller is an admin — admins never hold tickets.
   admin_excluded : bool;
   my_tickets : nat64;
   round : nat64;
 };
 type MarketKind = variant { Crash };
+type MarketplaceFilter = record {
+  theme : opt nat8;
+  difficulty : DifficultyFilter;
+  mine_only : bool;
+  listed : ListedFilter;
+};
+type MarketplacePage = record {
+  total : nat64;
+  courses : vec CourseCard;
+  seed : nat64;
+  featured_token_id : opt nat64;
+};
 type MaturityDisbursement = record {
   amount_e8s : nat64;
   // When the minted ICP should arrive in the yield inbox (~+7 days).
   expected_at : nat64;
   initiated_at : nat64;
+};
+type MintError = variant {
+  InvalidCourse : text;
+  AlreadyMinting;
+  InsufficientDeposit : record { found : nat64; needed : nat64 };
+  NotAuthenticated;
+  FeeSettlementFailed : text;
+  MintCallFailed : text;
+};
+// One surfaced moderation candidate (admin-only view).
+type ModerationCandidate = record {
+  token_id : nat64;
+  owner : opt principal;
+  hidden : bool;
+  rating_count : nat32;
+  avg_x10 : nat32;
 };
 type MyCasinoView = record {
   chips : nat64;
@@ -709,16 +818,18 @@ type PoolNeuron = record {
 type PoolStatus = variant { Inactive; Active; Draft };
 type ProgressionRule = record { action : BetAction; factor_x100 : nat64 };
 // goes 100% to the protocol treasury, which pays for the project's
-// execution. Per-token goals of 0 mean "not seeking that token".
+// execution. Each project has ONE USD-denominated goal and accepts any
+// supported crypto; contributions (tracked per-token) are valued at the
+// cached USD rate and summed into `raised_usd_e8s` for progress.
 type Project = record {
   id : nat64;
-  // The single funding goal, in USD e8s ($1 = 100_000_000).
-  goal_usd_e8s : nat64;
-  // Total raised across all tokens, valued in USD e8s (computed per query).
-  raised_usd_e8s : nat64;
   raised_ckbtc_e8s : nat64;
   title : text;
+  // The single funding goal, in USD e8s ($1 = 100_000_000).
+  goal_usd_e8s : nat64;
   goal_ckbtc_e8s : nat64;
+  // Filled at query time: per-token raised pots valued in USD e8s. Not stored.
+  raised_usd_e8s : nat64;
   raised_cketh_wei : nat64;
   description : text;
   created_at : nat64;
@@ -760,96 +871,30 @@ type Proposal = record {
   // threshold by the USD VALUE of its pots, not raw ICP.
   threshold_usd_e8s : opt nat64;
 };
-type Result = variant { Ok; Err : text };
-type Result_1 = variant { Ok : nat64; Err : text };
-type Result_2 = variant { Ok : text; Err : text };
-type Result_3 = variant { Ok : ExplorerQuote; Err : text };
-type Result_4 = variant { Ok : nat32; Err : text };
-type Result_5 = variant { Ok : CrashVerifyView; Err : text };
-type ResultBool = variant { Ok : bool; Err : text };
-// ===== Course NFT marketplace (PB-300) =====
-type MintError = variant {
-  NotAuthenticated;
-  InvalidCourse : text;
-  InsufficientDeposit : record { needed : nat64; found : nat64 };
-  FeeSettlementFailed : text;
-  MintCallFailed : text;
-  AlreadyMinting;
-};
-type MintResult = variant { Ok : nat64; Err : MintError };
-type DifficultyFilter = variant { Any; Easy; Medium; Hard };
-type ListedFilter = variant { Any; Yes; No };
-type MarketplaceFilter = record {
-  difficulty : DifficultyFilter;
-  theme : opt nat8;
-  listed : ListedFilter;
-  mine_only : bool;
-};
-type CourseCard = record {
+type Rating = record {
+  updated_at : nat64;
   token_id : nat64;
-  name : text;
-  creator : opt principal;
-  owner : opt principal;
-  par_total : nat8;
-  play_count : nat64;
-  tickets_distributed : nat64;
-  theme : nat8;
-  listed : bool;
-  price_e8s : nat64;
+  "text" : opt text;
   created_at : nat64;
-  is_caller_owner : bool;
-  for_sale : bool;
+  stars : nat8;
+  rater : principal;
 };
-type MarketplacePage = record {
-  courses : vec CourseCard;
-  featured_token_id : opt nat64;
-  seed : nat64;
-  total : nat64;
-};
-type StartSessionOk = record { session_id : nat64; server_time : nat64 };
-type StartSessionResult = variant { Ok : StartSessionOk; Err : text };
 type RecordHoleOk = record {
+  owner : opt principal;
   last_hole : nat8;
   owner_credited : bool;
-  owner : opt principal;
 };
-type RecordHoleResult = variant { Ok : RecordHoleOk; Err : text };
-type CompleteRoundOk = record { player_credited : bool; reason : opt text };
-type CompleteRoundResult = variant { Ok : CompleteRoundOk; Err : text };
-// PB-310 ratings & reviews.
-type Rating = record {
-  token_id : nat64;
-  rater : principal;
-  stars : nat8;
-  text : opt text;
-  created_at : nat64;
-  updated_at : nat64;
-};
-type CourseRatingSummary = record {
-  token_id : nat64;
-  rating_sum : nat64;
-  count : nat32;
-  avg_x10 : nat32;
-  my_stars : opt nat8;
-};
-// PB-3xx course moderation: one admin-surfaced low-rating candidate. Surfacing
-// only — never auto-acts.
-type ModerationCandidate = record {
-  token_id : nat64;
-  owner : opt principal;
-  avg_x10 : nat32;
-  rating_count : nat32;
-  hidden : bool;
-};
-// PB-308 featured slot auction.
-type FeaturedSlot = record {
-  token_id : nat64;
-  bidder : principal;
-  token : ExplorerToken;
-  amount : nat64;
-  usd_value_e8s : nat64;
-  at : nat64;
-};
+type Result = variant { Ok; Err : text };
+type Result_1 = variant { Ok : nat64; Err : text };
+type Result_10 = variant { Ok : CrashVerifyView; Err : text };
+type Result_2 = variant { Ok : text; Err : text };
+type Result_3 = variant { Ok : CompleteRoundOk; Err : text };
+type Result_4 = variant { Ok : nat32; Err : text };
+type Result_5 = variant { Ok : ExplorerQuote; Err : text };
+type Result_6 = variant { Ok : nat64; Err : MintError };
+type Result_7 = variant { Ok : RecordHoleOk; Err : text };
+type Result_8 = variant { Ok : StartSessionOk; Err : text };
+type Result_9 = variant { Ok : bool; Err : text };
 // Fixed staking terms. The 6-month minimum matches the NNS minimum dissolve
 // delay for voting eligibility, so no Mission 70 gate applies. Voting weight
 // and the daily lottery-ticket grant both scale with the same multiplier,
@@ -875,6 +920,7 @@ type StakingPoolInfo = record {
   min_unstake_e8s : nat64;
 };
 type Stance = variant { Reject; Adopt };
+type StartSessionOk = record { server_time : nat64; session_id : nat64 };
 type StrategyStop = record {
   // -loss in VP-x1000 that ends the session (0 = none).
   stop_loss_vp_x1000 : nat64;
@@ -957,7 +1003,7 @@ type VoteRecord = record {
   icp_burned_e8s : nat64;
 };
 // Saga journal for one yield distribution: the shared yield inbox (fed by
-// all three tier neurons) is drained 70% to the lottery prize pot / 30% to
+// all three tier neurons) is drained 50% to the lottery prize pot / 50% to
 // the treasury. Persisted per-leg block indices make a retry skip completed
 // transfers (same idempotency as `settle_burn_split`).
 type YieldDistribution = record {
@@ -976,79 +1022,29 @@ type YieldStatus = variant { Done; InProgress };
 service : (InitPayload) -> {
   add_admin : (principal) -> (Result);
   add_to_commitment : (nat64, nat64) -> (Result);
-  // ===== Course NFT marketplace (PB-300) =====
-  // Admin: wire the CourseNFT (ICRC-7) canister id (PB-301).
-  admin_set_course_nft_canister : (principal) -> (Result);
-  // Mint deposit escrow address (deposit 0.5 ICP here, then mint) (PB-304).
-  get_mint_deposit_address : () -> (LedgerAccount) query;
-  // Burn 0.5 ICP (50/25/25) and mint a course NFT to the caller (PB-304).
-  mint_course_nft : (blob, text) -> (MintResult);
-  // Browse minted courses (filtered, asc token_id; FE shuffles) (PB-305).
-  list_marketplace_courses : (MarketplaceFilter) -> (MarketplacePage) query;
-  get_course : (nat64) -> (opt CourseCard) query;
-  // Passthrough of the verbatim course_data blob for Play (PB-305).
-  get_course_data : (nat64) -> (opt blob);
-  // Put a (live-owned) course up for fixed-price sale / take it off sale (PB-307).
-  list_course_for_sale : (nat64, nat64) -> (Result);
-  delist_course : (nat64) -> (Result);
-  refresh_course_listing : (nat64) -> (Result);
-  // Buy a listed-for-sale course: pure-escrow saga, 75/10/5/5/5 split (PB-307).
-  buy_course_nft : (nat64) -> (Result);
-  // Owner-initiated burn (auth'd against the LIVE icrc7 owner) + marketplace
-  // state cleanup (drop listing row, clear featured slot if pointed here).
-  burn_course_nft : (nat64) -> (Result);
-  // Play-to-earn pipeline + anti-cheat (PB-306).
-  start_play_session : (nat64) -> (StartSessionResult);
-  record_hole_event : (nat64, nat8) -> (RecordHoleResult);
-  complete_round : (nat64) -> (CompleteRoundResult);
-  // Favorites: private, per-user; convenience metadata only (PB-311).
-  toggle_favorite_course : (nat64) -> (ResultBool);
-  is_favorite : (nat64) -> (bool) query;
-  my_favorite_ids : () -> (vec nat64) query;
-  list_my_favorite_courses : () -> (vec CourseCard) query;
-  // Ratings & reviews: 1-5 stars + optional <=280-char text (PB-310).
-  rate_course : (nat64, nat8, opt text) -> (Result);
-  get_course_rating_summary : (nat64) -> (CourseRatingSummary) query;
-  list_course_reviews : (nat64, nat64, nat64) -> (vec Rating) query;
-  admin_remove_rating : (nat64, principal) -> (Result);
-  // Course moderation (admin discretion, PB-3xx). Hidden courses vanish from
-  // public browsing but stay resolvable by token id; nothing is hidden/burned
-  // automatically. The candidates query SURFACES low-rated courses only.
-  admin_hide_course : (nat64) -> (Result);
-  admin_unhide_course : (nat64) -> (Result);
-  admin_burn_course : (nat64) -> (Result);
-  admin_list_moderation_candidates : (nat32) -> (vec ModerationCandidate) query;
-  // Featured slot auction: ckBTC/ckETH/ckUSDT/ckUSDC, USD-compared, 100% to
-  // treasury, non-refundable, retained on delist/sale (PB-308).
-  bid_featured_slot : (nat64, ExplorerToken, nat64) -> (Result);
-  get_featured_slot : () -> (opt FeaturedSlot) query;
-  admin_clear_featured_slot : () -> (Result);
-  // Local-dev marketplace state visualisation (require_local_dev) (PB-312).
-  dev_seed_courses : (nat32) -> (Result_4);
-  dev_set_course_sale : (nat64, opt nat64) -> (Result);
-  dev_simulate_sale : (nat64, principal) -> (Result);
-  dev_give_course : (nat64) -> (Result);
-  dev_set_play_count : (nat64, nat64) -> (Result);
-  dev_set_featured : (nat64) -> (Result);
-  dev_clear_featured : () -> (Result);
-  dev_grant_favorite : (nat64) -> (Result);
-  dev_clear_courses : () -> (Result_1);
-  // Admin: mint the genesis default course once (idempotent), so the
-  // marketplace is never empty. Re-seed recovery for a no-op upgrade (PB-309).
-  admin_seed_system_course : () -> (Result_1);
   // Admin: add a permanent curated listing (no payment, no badge, no expiry).
   admin_add_dapp : (text, text, text, vec text) -> (Result_1);
-  // Admin: add a fundable project. At least one per-token goal must be set.
-  // Add a fundable project with a single USD goal (USD e8s). Every project
-  // accepts any supported crypto; contributions are valued in USD.
+  // Admin: add a fundable project with a single USD goal. Every project accepts
+  // any supported crypto; contributions are valued in USD toward the goal.
   admin_add_project : (text, text, text, nat64) -> (Result_1);
   // Admin: approve a pending community listing. Its paid `days` window starts
   // now.
   admin_approve_dapp : (nat64) -> (Result);
+  // Admin: approve a pending featured application — goes live for `days`.
+  // Synchronous (no await) so the max-3 count-then-set is atomic / race-safe.
+  admin_approve_featured : (nat64) -> (Result);
+  // Admin-forced burn of ANY course token regardless of owner (PB-3xx). Same
+  // destructive marketplace cleanup as `burn_course_nft`, but skips the
+  // caller-is-live-owner check (the burn is on admin authority). The course_nft
+  // canister accepts a burn from the backend (the allowlisted minter), so this
+  // works for any token. Idempotent: a "token already gone" reject from the
+  // wrapper is treated as success.
+  admin_burn_course : (nat64) -> (Result);
   // Admin diagnostic: live follow status of every platform-owned neuron
   // (the three staking tiers + the early-adopter neuron), read from NNS
   // governance. Answers "are our neurons actually following the primary?".
   admin_check_neuron_following : () -> (vec NeuronFollowStatus);
+  admin_clear_featured_slot : () -> (Result);
   admin_delete_chat : (nat64) -> (Result);
   // Admin: allocate treasury ICP into the early-adopter neuron (compounds the
   // program's yield; distributed by the normal monthly bands).
@@ -1061,12 +1057,13 @@ service : (InitPayload) -> {
   // canister (ops: `icp canister update-settings frontend --add-controller
   // <backend-id>`); otherwise returns the management canister's rejection.
   admin_get_frontend_cycles : () -> (Result_1);
-  admin_send_cycles_to_frontend : (nat64) -> (Result);
+  admin_hide_course : (nat64) -> (Result);
   // Owner one-time bootstrap: draw the genesis seed, build the hash chain,
   // publish the terminal commitment, seed builtin strategies, and start the
   // round loop. Idempotent (re-running with an initialized chain is a no-op
   // except for re-arming the loop). The `crash` flag must already be ON.
   admin_init_crash : () -> (Result_2);
+  admin_list_moderation_candidates : (nat32) -> (vec ModerationCandidate) query;
   // Admin: every unstake record across all users — the split neurons the
   // canister manages on users' behalf (dissolving, restaked, disbursed).
   admin_list_pending_unstakes : () -> (vec PendingUnstake) query;
@@ -1080,20 +1077,40 @@ service : (InitPayload) -> {
   // fails) so a concurrent second reject — or an interleaved approve — can't
   // refund the same payment twice across the await (review 2026-06-11).
   admin_reject_dapp : (nat64) -> (Result);
+  // Admin: reject a pending featured application — refund from the treasury
+  // (claim-before-await so a concurrent reject can't double-refund).
+  admin_reject_featured : (nat64) -> (Result);
   // Admin: remove any listing outright (no refund — use admin_reject_dapp for
   // pending submissions that should get their payment back).
   admin_remove_dapp : (nat64) -> (Result);
+  // Admin: take a live featured placement down early (no refund — the premium was
+  // already earned). Frees its slot immediately.
+  admin_remove_featured : (nat64) -> (Result);
   // Admin: remove an idea from the board at any time. Settled upvotes stay in the
   // treasury/poster; any in-flight upvote saga refunds via the orphan path.
   admin_remove_idea : (nat64) -> (Result);
   // Admin: remove a project from the board. Settled funding stays in the
   // treasury; any in-flight funding saga refunds via the orphan path.
   admin_remove_project : (nat64) -> (Result);
+  admin_remove_rating : (nat64, principal) -> (Result);
   // Admin: drop one hole's override, reverting it to the built-in layout.
   admin_reset_arcade_hole : (nat8) -> (Result);
+  // Genesis default course (PB-309 A7/B3). Minted exactly ONCE to the admin
+  // principal as a NORMAL ICRC-7 course NFT, auto-listed and playable, so the
+  // marketplace is never empty. Idempotent: guarded by `SYSTEM_COURSE_MINTED`, so
+  // re-deploys/upgrades — and the admin SELLING it via the normal sale path —
+  // never mint a second copy. No transfer restriction: it's "default" only in
+  // that it always exists from genesis. Admin-gated; callable from deploy-local
+  // and prod to recover a no-op seed without another upgrade (B6).
+  admin_seed_system_course : () -> (Result_1);
+  // Admin: move cycles from THIS backend into the frontend canister — a one-way
+  // `deposit_cycles` top-up; the cycles are deducted from the backend's own
+  // balance. Used to rebalance an over-provisioned backend.
+  admin_send_cycles_to_frontend : (nat64) -> (Result);
   // Admin: replace one hole's voxel layout (0-based index). Validated so a
   // typo can't ship an unplayable grid.
   admin_set_arcade_hole : (nat8, ArcadeHoleDef) -> (Result);
+  admin_set_course_nft_canister : (principal) -> (Result);
   admin_set_default_threshold : (nat64) -> (Result);
   // Admin: change the default voting threshold at any time. Updates the config
   // default (applied to all future / live-ingested proposals) AND re-applies the
@@ -1108,12 +1125,11 @@ service : (InitPayload) -> {
   // ledgers. Local-only — mainnet ledgers are hard-pinned.
   admin_set_explorer_ledger : (ExplorerToken, principal) -> (Result);
   admin_set_exposure_cap : (nat64) -> (Result);
-  // ── Cycles Faucet (PB-400) admin param setters ──
+  admin_set_faucet_claim_window_days : (nat64) -> (Result);
   admin_set_faucet_grant_usd : (nat64) -> (Result);
   admin_set_faucet_lifetime_cap : (nat32) -> (Result);
-  admin_set_faucet_claim_window_days : (nat64) -> (Result);
-  admin_set_faucet_vote_window_days : (nat64) -> (Result);
   admin_set_faucet_treasury_floor : (nat64) -> (Result);
+  admin_set_faucet_vote_window_days : (nat64) -> (Result);
   // Admin: enable/disable a feature completely. Unknown keys are allowed (a
   // kill-switch can be staged before the feature ships) but validated and
   // capped so the map can't be spammed.
@@ -1125,6 +1141,8 @@ service : (InitPayload) -> {
   admin_set_frontend_canister : (principal) -> (Result);
   // Admin: tune how many tickets a daily login credits.
   admin_set_lottery_config : (opt nat64) -> (Result);
+  // Admin: set the minimum number of unique ticket-holders a round needs before a
+  // draw runs (below it the drawing rolls over). 0 disables the gate.
   admin_set_lottery_min_holders : (nat64) -> (Result);
   // Admin: retune a token's minimum upvote (smallest units) as exchange
   // rates move, keeping minimums roughly value-aligned across tokens.
@@ -1146,7 +1164,8 @@ service : (InitPayload) -> {
   // an emergency seed that the next successful XRC refresh overwrites.
   admin_set_usd_rate : (IdeaToken, nat64) -> (Result);
   admin_trigger_sweep : () -> (Result);
-  // Admin: update a project's details and its single USD funding goal (USD e8s).
+  admin_unhide_course : (nat64) -> (Result);
+  // Admin: update a project's details and its single USD funding goal.
   admin_update_project : (nat64, text, text, text, nat64) -> (Result);
   // Catastrophic-wedge escape hatch (writer #4): refund every wager in the
   // current round (delta 0 for all, house delta 0) and archive it void.
@@ -1160,6 +1179,32 @@ service : (InitPayload) -> {
   admin_withdraw_treasury_token : (IdeaToken, principal, nat64, bool) -> (
       Result,
     );
+  // Apply to feature an Approved listing you own. Requires a fresh featured quote
+  // and the quoted amount (+ fee) deposited on get_featured_deposit_address. The
+  // premium moves to the treasury; the application is Pending until an admin
+  // approves it (rejection refunds). One active/pending placement per listing.
+  apply_featured : (nat64, IdeaToken, nat64) -> (Result_1);
+  bid_featured_slot : (nat64, IdeaToken, nat64) -> (Result);
+  // Owner-initiated burn of a course NFT, with backend marketplace cleanup
+  // (PB-3xx). Destructive + a security boundary, so:
+  // 1. Reject anonymous.
+  // 2. Verify the caller is the LIVE owner via `course_nft.icrc7_owner_of`
+  // (never the cached listing row — the cache can be stale / spoofable).
+  // A non-owner gets `NOT_OWNER`; a missing token gets `TOKEN_NOT_FOUND`.
+  // 3. Burn on the verified owner's behalf via `course_nft.burn(nat)` (the
+  // backend is the allowlisted minter, which the canister also accepts for
+  // burn). A "token already gone" reject is treated as success by the
+  // wrapper so the path is idempotent.
+  // 4. Clean up backend state: drop the COURSE_LISTINGS row and clear
+  // FEATURED_SLOT if it pointed at this token. Favorites are per-user lists
+  // that already skip missing tokens (list_my_favorite_courses), so they are
+  // left to lazy cleanup rather than scanned here.
+  burn_course_nft : (nat64) -> (Result);
+  // Buy a listed-for-sale course (PB-307). Pure-escrow saga (A6/C3):
+  // validate → pull buyer's price into escrow → transfer NFT FIRST →
+  // pay the 75/10/5/5/5 legs out of escrow. On transfer failure, refund the
+  // escrow to the buyer (the treasury never fronts the price).
+  buy_course_nft : (nat64) -> (Result);
   // Buy a license: 80% to the seller, 20% to the treasury (one payment path for
   // both kinds). The buyer must have pre-approved the canister via icrc2_approve.
   buy_license : (nat64, IdeaToken) -> (Result_1);
@@ -1169,11 +1214,15 @@ service : (InitPayload) -> {
   // frontend calls this on login / page load; returns the caller's
   // current-round ticket count.
   claim_daily_tickets : () -> (Result_1);
-  // Claim the caller's current monthly share. Shares not claimed before the
-  // next settlement are forfeited to the treasury.
+  // Boosters never pay ICP to users — yield funds the lottery + treasury (70/30 lottery/treasury).
+  // Retained as a hard guard against any legacy `claimable_e8s`: it always
+  // refuses. Legacy shares are drained to the treasury at the next settlement.
   claim_early_adopter_yield : () -> (Result_1);
-  // Cycles Faucet (PB-400): claim a $2-USD cycles grant for a registered
-  // canister. Enforces G1–G6 then tops it up via the CMC pipeline.
+  // Claim a $2-USD cycles grant for a previously-registered canister. Enforces
+  // G1–G6, then tops up the target via the existing CMC pipeline. Idempotent
+  // saga: the in-flight block index is journaled on the registration so a retry
+  // re-notifies the same block (never double-mints); a CMC refund drops it so the
+  // retry re-transfers. Records the claim only AFTER the cycles are minted.
   claim_faucet_cycles : (principal) -> (Result);
   commit : (nat64, Stance, nat64) -> (Result);
   // Commit a vote in ANY supported token. The token is ESCROWED — it only
@@ -1183,6 +1232,7 @@ service : (InitPayload) -> {
   // oracle ICP-equivalent at commit time. Fund the per-proposal escrow
   // (get_deposit_address) on the TOKEN's ledger first. $1 minimum.
   commit_token : (nat64, Stance, IdeaToken, nat64) -> (Result);
+  complete_round : (nat64) -> (Result_3);
   // Self-attested follow (Option C). We do NOT verify neuron ownership on-chain:
   // because Internet Identity gives this app a per-dapp principal that can't equal
   // the user's NNS principal, and the canister isn't a hotkey on arbitrary neurons,
@@ -1217,6 +1267,9 @@ service : (InitPayload) -> {
   // at the quoted rate — the same quote + deposit flow as the golfer
   // (get_arcade_customize_quote / get_arcade_deposit_address).
   customize_kicker : (nat8, nat8, nat8, IdeaToken) -> (Result);
+  // PB-307 A2: take a course off sale. Flips `for_sale=false`, clears the price.
+  // The listing row (and `listed` visibility / ticket accrual) is preserved.
+  delist_course : (nat64) -> (Result);
   // Local-dev: credit simulated maturity to one tier's mock pool neuron so
   // the yield harvest + distribution can be exercised end-to-end.
   dev_add_mock_maturity : (nat64, StakeTier) -> (Result);
@@ -1224,6 +1277,13 @@ service : (InitPayload) -> {
   // console / How-it-works flows in local testing). Hard-blocked off the local
   // network by `require_local_dev` — this can never run in production.
   dev_become_admin : () -> (Result);
+  // Local-dev: wipe all course listings, ratings, sales, the featured slot, and
+  // favourites referencing removed tokens, so the marketplace shows its empty
+  // state. Returns how many listings were removed.
+  dev_clear_courses : () -> (Result_1);
+  // Local-dev: vacate the featured slot.
+  dev_clear_featured : () -> (Result);
+  dev_clear_featured_dapps : () -> (Result);
   // Local-dev: make a pending unstake disbursable right now (clears both the
   // record's ETA and the mock neuron's dissolve clock).
   dev_fast_forward_dissolve : (nat64) -> (Result);
@@ -1234,6 +1294,21 @@ service : (InitPayload) -> {
   // from the canister's own account on the token's local ledger. Rejected on
   // mainnet (ledger canister ID check). Never callable by anonymous.
   dev_faucet_token : (IdeaToken) -> (Result);
+  // Local-dev: top up the lottery pot by transferring ICP from the canister's
+  // default account into the pot subaccount, so the pot threshold can be exercised
+  // without waiting on staking yield. Local only.
+  dev_fund_lottery_pot : (nat64) -> (Result);
+  // Local-dev: move ICP from the canister's own default account (same source as
+  // `dev_faucet_token`) into the treasury subaccount, so the faucet floor gate
+  // passes and grants have ICP to draw from.
+  dev_fund_treasury : (nat64) -> (Result);
+  // Local-dev: give the token to the caller (visualise "owned by me").
+  dev_give_course : (nat64) -> (Result);
+  // Local-dev: add a course to the caller's favourites (real add path; capped/dedup).
+  dev_grant_favorite : (nat64) -> (Result);
+  // Local-dev: grant the caller `count` lottery tickets in the current round so
+  // the UI can be demoed with a non-empty holding without staking. Local only.
+  dev_grant_lottery_tickets : (nat64) -> (Result_1);
   // Local-dev: wipe the proposals and their vote/commitment journals, then
   // reseed the mock set — so you can vote on fresh proposals again. Returns
   // the number of proposals seeded. Never available off the local network.
@@ -1243,12 +1318,6 @@ service : (InitPayload) -> {
   // Local-dev: hold a drawing immediately. `force_win` rigs the winning ticket
   // to index 0 so the full payout path can be exercised without 1-in-292M luck.
   dev_run_lottery_draw : (bool) -> (Result);
-  // Local-dev: grant the caller `count` lottery tickets in the current round
-  // (demo a non-empty holding without staking). Returns the new ticket count.
-  dev_grant_lottery_tickets : (nat64) -> (Result_1);
-  dev_fund_lottery_pot : (nat64) -> (Result);
-  dev_seed_lottery_holders : (nat64) -> (Result_1);
-  dev_simulate_lottery_win : () -> (Result_1);
   // Local-dev: run one staking sweep pass immediately (instead of waiting for
   // the 5-minute timer).
   dev_run_staking_sweep : () -> (Result);
@@ -1257,6 +1326,18 @@ service : (InitPayload) -> {
   // dev stakes and varied builtin strategies so every round has company, plus a
   // little opening chatter. Bots react to outcomes via `crash_bot_chatter`.
   dev_seed_casino_play : () -> (Result_2);
+  // Local-dev: mint up to `count` varied courses (tops up toward `count`, bounded).
+  dev_seed_courses : (nat32) -> (Result_4);
+  // Local-dev: insert mock faucet grants so the "Recent grants" list renders.
+  dev_seed_faucet_grants : (nat32) -> (Result);
+  // Local-dev: replace all featured rows with `active` live + `pending` pending
+  // placements, referencing the first approved listings, so every hero/admin
+  // state can be previewed without paying. Local only.
+  dev_seed_featured_dapps : (nat64, nat64) -> (Result_1);
+  // Local-dev: seed `count` synthetic unique ticket-holders (1 ticket each) in the
+  // current round so the minimum-players gate and the players progress bar can be
+  // exercised without real users. Returns the new unique-holder count. Local only.
+  dev_seed_lottery_holders : (nat64) -> (Result_1);
   // Local-dev: seed a varied set of mock payout records for the caller so the
   // Profile page has realistic data. No-op if the caller already has payouts.
   dev_seed_payouts : () -> (Result);
@@ -1264,12 +1345,25 @@ service : (InitPayload) -> {
   // can seed mock pool members (with varied VP) for UI testing. Rejected on
   // mainnet (ledger canister ID check). Never callable by anonymous.
   dev_seed_pool_neuron : (nat64, nat64) -> (Result);
+  // Local-dev: force a course's for-sale state (same fields list/delist set).
+  dev_set_course_sale : (nat64, opt nat64) -> (Result);
   // Local-dev: jump the page to a significant preset state (VISUAL ONLY —
   // model state is rewritten, ledger balances are not, so claims won't pay).
   // 0 = fresh & open (empty everything), 1 = open with members + a varied
   // 6-month history + a claimable share for the caller, 2 = membership
   // closed (same history plus the 2,000+ ICP month that latched it).
   dev_set_early_adopter_preset : (nat8) -> (Result);
+  // Local-dev: pin a course in the featured slot WITHOUT a real ck-token bid.
+  dev_set_featured : (nat64) -> (Result);
+  // Local-dev: set a course's play_count (and cosmetic tickets_distributed).
+  dev_set_play_count : (nat64, nat64) -> (Result);
+  // Local-dev: insert a finished winning-draw record with the CALLER as the winner
+  // so an admin can preview the "you won" banner UI. Cosmetic only — NO ICP is
+  // transferred (payout/cycle blocks are pre-set so the payout sweep treats it as
+  // already settled). Local only. Returns the synthetic draw id.
+  dev_simulate_lottery_win : () -> (Result_1);
+  // Local-dev: move a token to a mock/other owner (visualise "owned by someone").
+  dev_simulate_sale : (nat64, principal) -> (Result);
   distribute_pool_rewards : (nat64) -> (Result);
   // Stake into the platform's 2-year early adopter neuron. PERMANENT: there is
   // no unstake path, by design — the principal can never be withdrawn.
@@ -1287,7 +1381,7 @@ service : (InitPayload) -> {
   get_arcade_course : () -> (vec ArcadeCourseEntry) query;
   // Price the $1 customization in `token` at the live oracle rate and lock
   // it for the caller for 15 minutes (same pattern as Explorer quotes).
-  get_arcade_customize_quote : (IdeaToken) -> (Result_3);
+  get_arcade_customize_quote : (IdeaToken) -> (Result_5);
   // The caller's deposit account for arcade fees. Fund it on the ICP ledger
   // with `customize_fee + 0.0001 ICP`, then call `customize_character`.
   get_arcade_deposit_address : () -> (LedgerAccount) query;
@@ -1302,6 +1396,9 @@ service : (InitPayload) -> {
   get_casino_chat : (nat64) -> (vec ChatMsgView) query;
   get_casino_stats : () -> (CasinoStatsView) query;
   get_config : () -> (Config) query;
+  get_course : (nat64) -> (opt CourseCard) query;
+  get_course_data : (nat64) -> (opt blob);
+  get_course_rating_summary : (nat64) -> (CourseRatingSummary) query;
   // Last `n` finished rounds (newest first), each with its revealed seed for the
   // client-side verify dialog (C14).
   get_crash_history : (nat64) -> (vec CrashHistoryItem) query;
@@ -1326,14 +1423,19 @@ service : (InitPayload) -> {
   // Price `days` of visibility in `token` at the live USD rate and lock that
   // price for the caller for 15 minutes. An update (not a query) because the
   // mainnet path may refresh the rate via the XRC.
-  get_explorer_quote : (IdeaToken, nat64) -> (Result_3);
-  // Cycles Faucet (PB-400): all-time stats, and per-caller status for an
-  // optional canister id (gate / cooldown / params).
+  get_explorer_quote : (IdeaToken, nat64) -> (Result_5);
   get_faucet_stats : () -> (FaucetStats) query;
+  // Public faucet status for `(caller, canister_id)`. `canister_id == None` gives
+  // flag + params + the caller's G2/G3 standing (no canister-specific gate).
   get_faucet_status : (opt principal) -> (FaucetStatus) query;
-  list_faucet_grants : (nat32) -> (vec FaucetGrant) query;
-  dev_fund_treasury : (nat64) -> (Result);
-  dev_seed_faucet_grants : (nat32) -> (Result);
+  // Anonymous-OK query: the active featured set (joined to listings) + slot/price
+  // info. The hero picks one of `active` at random client-side per page load.
+  get_featured_dapps : () -> (FeaturedInfo) query;
+  get_featured_deposit_address : () -> (LedgerAccount) query;
+  // Quote `days` of featured placement in `token` at the live USD rate; locks the
+  // price for the caller for 15 minutes (separate from the listing quote).
+  get_featured_quote : (IdeaToken, nat64) -> (Result_5);
+  get_featured_slot : () -> (opt FeaturedSlot) query;
   // App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
   // cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
   // the count of distinct NNS proposals this app has cast a vote on.
@@ -1358,9 +1460,12 @@ service : (InitPayload) -> {
   // The lottery prize-pot account. Anyone may top it up (sweeten the pot) by
   // transferring ICP here — the funds become part of the next jackpots.
   get_lottery_pot_address : () -> (LedgerAccount) query;
+  get_mint_deposit_address : () -> (LedgerAccount) query;
   get_my_autopilot : () -> (opt AutopilotState) query;
   get_my_casino : () -> (MyCasinoView) query;
   get_my_commitments : () -> (vec Commitment) query;
+  // The caller's own featured applications (any state), joined to their listings.
+  get_my_featured : () -> (vec FeaturedView) query;
   get_my_licenses : () -> (vec License) query;
   // The caller's payout history, newest first (capped).
   get_my_payouts : () -> (vec Payout) query;
@@ -1391,8 +1496,14 @@ service : (InitPayload) -> {
   // dollar thresholds and conversion previews. Same source the canister uses
   // for valuations (XRC-cached on mainnet, admin/static locally).
   get_usd_rates : () -> (vec TokenUsdRate) query;
+  is_favorite : (nat64) -> (bool) query;
   list_active_proposals : () -> (vec Proposal) query;
   list_all_proposals : () -> (vec Proposal) query;
+  // PB-307 A2/B3: put a (live-owned) course up for fixed-price sale. Sets
+  // `for_sale=true` + `price_e8s`. Owner-gated against the LIVE owner
+  // (`icrc7_owner_of`), not the cached row. Keeps the course `listed` (playable).
+  list_course_for_sale : (nat64, nat64) -> (Result);
+  list_course_reviews : (nat64, nat64, nat64) -> (vec Rating) query;
   list_crash_strategies : () -> (vec CrashStrategy) query;
   // All live (approved, unexpired) listings: admin-curated first in curation
   // order, then community listings in approval order.
@@ -1402,6 +1513,9 @@ service : (InitPayload) -> {
   list_early_adopter_rounds : () -> (vec EarlyAdopterRound) query;
   // The full early adopter roster, largest stake first.
   list_early_adopters : () -> (vec EarlyAdopterPublic) query;
+  // Recent faucet grants, most-recent-first, capped at 25 — backs the public
+  // transaction list. Each `block_index` is the on-chain ICP-ledger tx.
+  list_faucet_grants : (nat32) -> (vec FaucetGrant) query;
   // All flags the canister knows about (known defaults merged with any extra
   // admin-created keys). Public so anonymous viewers can hide gated UI.
   list_feature_flags : () -> (vec FeatureFlag) query;
@@ -1411,13 +1525,18 @@ service : (InitPayload) -> {
   // Most recent drawings, newest first (capped at 50).
   list_lottery_draws : () -> (vec LotteryDraw) query;
   list_marketplace : (opt MarketKind) -> (vec Listing) query;
+  list_marketplace_courses : (MarketplaceFilter) -> (MarketplacePage) query;
   // The caller's own submissions in every state — lets the UI show "pending
   // admin approval" and time remaining.
   list_my_dapp_submissions : () -> (vec DappListing) query;
+  list_my_favorite_courses : () -> (vec CourseCard) query;
   list_my_pending_unstakes : () -> (vec PendingUnstake) query;
   // Admin: the approval queue, oldest first.
   list_pending_dapps : () -> (vec DappListing) query;
-  // All projects, newest first.
+  // Admin: pending featured applications awaiting review.
+  list_pending_featured : () -> (vec FeaturedView) query;
+  // All projects, newest first. `raised_usd_e8s` is computed per call from the
+  // per-token raised pots at the cached USD rate.
   list_projects : () -> (vec Project) query;
   // The last 10 winning drawings, newest first — the public winners board.
   list_recent_winners : () -> (vec LotteryDraw) query;
@@ -1434,12 +1553,15 @@ service : (InitPayload) -> {
   // source must be a child tracked in PENDING_UNSTAKES, and is additionally
   // checked against every platform neuron id before any governance call.
   merge_unstake : (nat64, StakeTier) -> (Result);
+  mint_course_nft : (blob, text) -> (Result_6);
+  my_favorite_ids : () -> (vec nat64) query;
   notify_top_up : (NotifyTopUpArgs) -> (NotifyTopUpResult);
   // Post to the global casino chat (signed-in only, 200 chars, 1 msg/5 s).
   // Rendered as plain text by the UI — no markup, no links: zero injection
   // surface. Muted users' posts are silently accepted but only echoed to them.
   post_casino_chat : (text) -> (BalanceResult);
   post_idea : (text, text, text) -> (BalanceResult);
+  rate_course : (nat64, nat8, opt text) -> (Result);
   // Withdraw the caller's remaining balance from one of their pay-first
   // deposit subaccounts (Explorer listing / Arcade customization / Early Adopter
   // stake). These accounts are funded right before a paid action; if that
@@ -1450,12 +1572,15 @@ service : (InitPayload) -> {
   // Deliberately NOT feature-flag-gated: stranded funds must stay recoverable
   // even after a kill switch.
   reclaim_escrow : (EscrowKind, IdeaToken) -> (BalanceResult);
+  record_hole_event : (nat64, nat8) -> (Result_7);
   // Count a detail-view open (signed-in users only — anonymous ingress is
   // already rejected by inspect_message). Drives "most viewed" sorting.
   record_idea_view : (nat64) -> (Result);
+  refresh_course_listing : (nat64) -> (Result);
   refund_registration : () -> (Result);
-  // Cycles Faucet (PB-400): proof-of-control registration — the TARGET canister
-  // calls this on itself (`msg_caller == canister_id` proves control).
+  // Proof-of-control registration. The TARGET canister calls this on itself, so
+  // `get_caller()` (the message's authenticated caller) IS the canister to
+  // register. Cheap, network-free rejects for obviously-bad principals.
   register_faucet_canister : (principal) -> (Result);
   remove_admin : (principal) -> (Result);
   // Set (or clear, with an empty string) the caller's X handle. A leading @
@@ -1464,6 +1589,8 @@ service : (InitPayload) -> {
   stake : (nat64, StakeTier) -> (Result);
   // Start auto-pilot with a strategy the caller may use (builtin / owned / licensed).
   start_autopilot : (nat64) -> (Result);
+  // Pure synchronous update — no `raw_rand`, no inter-canister await (PB-306 A2).
+  start_play_session : (nat64) -> (Result_8);
   stop_autopilot : () -> (Result);
   // Submit a finished round. Requires full access (the hole-1 preview can't
   // produce a 9-hole score). Insert-if-better per (game, player); returns the
@@ -1474,17 +1601,25 @@ service : (InitPayload) -> {
   // deposited on get_explorer_deposit_address. The payment moves to the
   // treasury immediately; the listing stays Pending — invisible to the
   // public — until an admin approves it. Rejection refunds from the treasury.
-  submit_dapp : (text, text, text, IdeaToken, nat64, vec text, bool) -> (BalanceResult);
+  submit_dapp : (text, text, text, IdeaToken, nat64, vec text, bool) -> (
+      BalanceResult,
+    );
+  // Toggle a course in the caller's favorites. Returns the NEW state
+  // (`Ok(true)` = now favorited, `Ok(false)` = now removed) so the frontend can
+  // reconcile its optimistic flip without a follow-up read (PB-311 B2).
+  toggle_favorite_course : (nat64) -> (Result_9);
   unregister_leader_neuron : (nat64) -> (Result);
   // Split `amount_e8s` off the tier's pool neuron and start dissolving it; the
   // sweep disburses to the caller's wallet once the tier's full term passes.
   // Returns the pending-unstake id. The user nets amount − 0.0002 ICP (split +
   // disburse fees).
   unstake : (nat64, StakeTier) -> (BalanceResult);
-  // Upvote an idea — FREE. No crypto is collected; one upvote per user per idea.
+  // Upvote an idea — FREE. No crypto is collected; one upvote per user per idea
+  // (mirrors `record_idea_view`). Bumps the idea's count and resets its 30-day
+  // expiry clock.
   upvote_idea : (nat64) -> (Result);
   // Provably-fair verification for a finished round (C14): returns the seed, the
   // recomputed crash point, and the chain-link proof back to the genesis terminal.
-  verify_crash_round : (nat64) -> (Result_5) query;
+  verify_crash_round : (nat64) -> (Result_10) query;
   wallet_receive : () -> (Result);
 }

@@ -4633,6 +4633,7 @@ fn setup_timers() {
         retry_failed_fundings().await;
         delete_expired_ideas();
         delete_expired_dapps();
+        expire_featured().await;
         cycle_topup_check().await;
         staking_sweep().await;
         lottery_draw_check().await;
@@ -10537,6 +10538,424 @@ async fn admin_reject_dapp(id: u64) -> Result<(), String> {
         }
     }
     log_dapp_event("dapp_reject", id, listing.submitter, listing.amount_paid);
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Featured Dapp — a paid, time-boxed "hero" placement on the Explorer (PB-FEAT).
+// Up to MAX_FEATURED_ACTIVE active at once; the UI shows one at random per load.
+// Money flow mirrors the explorer's paid-listing pattern: deposit a quoted
+// premium on the featured escrow subaccount, apply (moves it to the treasury,
+// status Pending), an admin approves (Active for `days`) or rejects (refund).
+// Stale Pending applications auto-refund after FEATURED_PENDING_TTL; Active ones
+// auto-expire on the timer. MemoryIds 88 / 89 / 94.
+// ════════════════════════════════════════════════════════════════════════════
+
+const FEATURED_PRICE_PER_DAY_USD_E8S: u64 = 1_000_000_000; // $10/day (10× a listing)
+const FEATURED_MIN_DAYS: u64 = 7;
+const FEATURED_MAX_DAYS: u64 = 90;
+const MAX_FEATURED_ACTIVE: usize = 3;
+const FEATURED_PENDING_TTL_NANOS: u64 = 7 * DAY_NANOS;
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeaturedStatus { Pending, Active, Expired, Rejected }
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FeaturedDapp {
+    pub id: u64,
+    pub listing_id: u64,
+    pub applicant: Principal,
+    pub status: FeaturedStatus,
+    pub token: Option<ExplorerToken>,
+    pub amount_paid: u64,
+    pub usd_total_e8s: u64,
+    pub days: u64,
+    pub created_at: u64,
+    pub approved_at: Option<u64>,
+    pub expires_at: Option<u64>,
+    #[serde(default)]
+    pub payment_block: Option<u64>,
+}
+impl_storable!(FeaturedDapp);
+
+/// A featured placement joined to its listing — what the UI renders.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FeaturedView {
+    pub featured: FeaturedDapp,
+    pub listing: DappListing,
+}
+
+/// Everything the Explorer hero needs in one query.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FeaturedInfo {
+    pub active: Vec<FeaturedView>,
+    pub slots_total: u32,
+    pub slots_open: u32,
+    pub price_per_day_usd_e8s: u64,
+    pub min_days: u64,
+    pub max_days: u64,
+}
+
+thread_local! {
+    static FEATURED: RefCell<StableBTreeMap<u64, FeaturedDapp, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(88))))
+    });
+    static NEXT_FEATURED_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(89)), 1u64))
+    });
+    static FEATURED_QUOTES: RefCell<StableBTreeMap<Principal, ExplorerQuote, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(94))))
+    });
+}
+
+fn next_featured_id() -> u64 {
+    NEXT_FEATURED_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    })
+}
+
+/// Per-caller escrow subaccount for featured premiums — distinct from the
+/// explorer listing escrow so the two never collide.
+fn derive_featured_subaccount(user: &Principal) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_featured_v1");
+    hasher.update(user.as_slice());
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&hasher.finalize());
+    sub
+}
+
+fn featured_quote_amount(days: u64, rate_usd_e8s: u64, decimals: u32) -> Result<(u64, u64), String> {
+    if !(FEATURED_MIN_DAYS..=FEATURED_MAX_DAYS).contains(&days) {
+        return Err("INVALID_DAYS".to_string());
+    }
+    if rate_usd_e8s == 0 {
+        return Err("RATE_UNAVAILABLE".to_string());
+    }
+    let usd_total = (days as u128) * (FEATURED_PRICE_PER_DAY_USD_E8S as u128);
+    let scale = 10u128.pow(decimals);
+    let amount = u64::try_from(usd_total.saturating_mul(scale) / (rate_usd_e8s as u128))
+        .map_err(|_| "AMOUNT_OVERFLOW".to_string())?;
+    if amount == 0 {
+        return Err("AMOUNT_TOO_SMALL".to_string());
+    }
+    Ok((amount, usd_total as u64))
+}
+
+/// A featured row counts against the 3-slot cap when it's Active, not past its
+/// window, and its listing still exists.
+fn featured_is_live(f: &FeaturedDapp, now: u64) -> bool {
+    f.status == FeaturedStatus::Active
+        && f.expires_at.map(|e| now <= e).unwrap_or(false)
+        && DAPPS.with(|m| m.borrow().get(&f.listing_id).is_some())
+}
+
+fn featured_active_count(now: u64) -> usize {
+    FEATURED.with(|m| m.borrow().iter().filter(|e| featured_is_live(&e.value(), now)).count())
+}
+
+fn featured_view(f: FeaturedDapp) -> Option<FeaturedView> {
+    DAPPS.with(|m| m.borrow().get(&f.listing_id)).map(|listing| FeaturedView { featured: f, listing })
+}
+
+/// Anonymous-OK query: the active featured set (joined to listings) + slot/price
+/// info. The hero picks one of `active` at random client-side per page load.
+#[ic_cdk::query]
+fn get_featured_dapps() -> FeaturedInfo {
+    let now = current_time();
+    let active: Vec<FeaturedView> = FEATURED.with(|m| {
+        m.borrow().iter()
+            .map(|e| e.value())
+            .filter(|f| featured_is_live(f, now))
+            .filter_map(featured_view)
+            .collect()
+    });
+    let slots_open = (MAX_FEATURED_ACTIVE as u32).saturating_sub(active.len() as u32);
+    FeaturedInfo {
+        active,
+        slots_total: MAX_FEATURED_ACTIVE as u32,
+        slots_open,
+        price_per_day_usd_e8s: FEATURED_PRICE_PER_DAY_USD_E8S,
+        min_days: FEATURED_MIN_DAYS,
+        max_days: FEATURED_MAX_DAYS,
+    }
+}
+
+/// The caller's own featured applications (any state), joined to their listings.
+#[ic_cdk::query]
+fn get_my_featured() -> Vec<FeaturedView> {
+    let caller = get_caller();
+    FEATURED.with(|m| {
+        m.borrow().iter()
+            .map(|e| e.value())
+            .filter(|f| f.applicant == caller && f.status != FeaturedStatus::Rejected)
+            .filter_map(featured_view)
+            .collect()
+    })
+}
+
+/// Admin: pending featured applications awaiting review.
+#[ic_cdk::query]
+fn list_pending_featured() -> Vec<FeaturedView> {
+    if require_admin().is_err() {
+        return vec![];
+    }
+    FEATURED.with(|m| {
+        m.borrow().iter()
+            .map(|e| e.value())
+            .filter(|f| f.status == FeaturedStatus::Pending)
+            .filter_map(featured_view)
+            .collect()
+    })
+}
+
+fn get_featured_deposit_address_inner(caller: Principal) -> LedgerAccount {
+    LedgerAccount { owner: get_canister_id(), subaccount: Some(derive_featured_subaccount(&caller)) }
+}
+
+#[ic_cdk::query]
+fn get_featured_deposit_address() -> LedgerAccount {
+    get_featured_deposit_address_inner(get_caller())
+}
+
+/// Quote `days` of featured placement in `token` at the live USD rate; locks the
+/// price for the caller for 15 minutes (separate from the listing quote).
+#[ic_cdk::update]
+async fn get_featured_quote(token: ExplorerToken, days: u64) -> Result<ExplorerQuote, String> {
+    require_authenticated()?;
+    require_explorer_enabled()?;
+    let caller = get_caller();
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let rate = explorer_usd_rate_e8s(token, &config).await?;
+    let (amount, usd_total_e8s) = featured_quote_amount(days, rate, explorer_token_decimals(token))?;
+    let now = current_time();
+    let quote = ExplorerQuote {
+        token, days, amount, rate_usd_e8s: rate, usd_total_e8s,
+        created_at: now, expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
+    };
+    FEATURED_QUOTES.with(|m| { m.borrow_mut().insert(caller, quote.clone()); });
+    Ok(quote)
+}
+
+/// Apply to feature an Approved listing you own. Requires a fresh featured quote
+/// and the quoted amount (+ fee) deposited on get_featured_deposit_address. The
+/// premium moves to the treasury; the application is Pending until an admin
+/// approves it (rejection refunds). One active/pending placement per listing.
+#[ic_cdk::update]
+async fn apply_featured(listing_id: u64, token: ExplorerToken, days: u64) -> Result<u64, String> {
+    require_authenticated()?;
+    require_explorer_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    if !(FEATURED_MIN_DAYS..=FEATURED_MAX_DAYS).contains(&days) {
+        return Err("INVALID_DAYS".to_string());
+    }
+
+    // Listing must exist, be approved, and be the caller's.
+    let listing = DAPPS.with(|m| m.borrow().get(&listing_id)).ok_or_else(|| "DAPP_NOT_FOUND".to_string())?;
+    if listing.status != DappStatus::Approved {
+        return Err("LISTING_NOT_APPROVED".to_string());
+    }
+    if listing.submitter != caller {
+        return Err("NOT_LISTING_OWNER".to_string());
+    }
+    // One active/pending placement per listing.
+    let dup = FEATURED.with(|m| m.borrow().iter().any(|e| {
+        let f = e.value();
+        f.listing_id == listing_id && matches!(f.status, FeaturedStatus::Pending | FeaturedStatus::Active)
+    }));
+    if dup {
+        return Err("ALREADY_FEATURED".to_string());
+    }
+
+    let now = current_time();
+    let quote = FEATURED_QUOTES.with(|m| m.borrow().get(&caller)).ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.token != token || quote.days != days {
+        return Err("QUOTE_MISMATCH".to_string());
+    }
+    if now > quote.expires_at {
+        return Err("QUOTE_EXPIRED".to_string());
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    let sub = derive_featured_subaccount(&caller);
+    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    if balance < quote.amount.saturating_add(fee) {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+    let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
+    let block = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
+        .await
+        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
+
+    let id = next_featured_id();
+    FEATURED.with(|m| {
+        m.borrow_mut().insert(id, FeaturedDapp {
+            id, listing_id, applicant: caller, status: FeaturedStatus::Pending,
+            token: Some(token), amount_paid: quote.amount, usd_total_e8s: quote.usd_total_e8s,
+            days, created_at: now, approved_at: None, expires_at: None, payment_block: Some(block),
+        });
+    });
+    FEATURED_QUOTES.with(|m| { m.borrow_mut().remove(&caller); });
+    log_dapp_event("featured_apply", id, caller, quote.amount);
+    Ok(id)
+}
+
+/// Admin: approve a pending featured application — goes live for `days`.
+/// Synchronous (no await) so the max-3 count-then-set is atomic / race-safe.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_approve_featured(id: u64) -> Result<(), String> {
+    let now = current_time();
+    if featured_active_count(now) >= MAX_FEATURED_ACTIVE {
+        return Err("FEATURED_SLOTS_FULL".to_string());
+    }
+    FEATURED.with(|m| {
+        let mut m = m.borrow_mut();
+        let mut f = m.get(&id).ok_or_else(|| "FEATURED_NOT_FOUND".to_string())?;
+        if f.status != FeaturedStatus::Pending {
+            return Err("NOT_PENDING".to_string());
+        }
+        f.status = FeaturedStatus::Active;
+        f.approved_at = Some(now);
+        f.expires_at = Some(now.saturating_add(f.days.saturating_mul(DAY_NANOS)));
+        m.insert(id, f);
+        Ok(())
+    })?;
+    log_dapp_event("featured_approve", id, get_caller(), 0);
+    Ok(())
+}
+
+/// Admin: reject a pending featured application — refund from the treasury
+/// (claim-before-await so a concurrent reject can't double-refund).
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_reject_featured(id: u64) -> Result<(), String> {
+    let mut f = FEATURED.with(|m| m.borrow().get(&id)).ok_or_else(|| "FEATURED_NOT_FOUND".to_string())?;
+    if f.status != FeaturedStatus::Pending {
+        return Err("NOT_PENDING".to_string());
+    }
+    // Claim before await.
+    let pending = f.clone();
+    f.status = FeaturedStatus::Rejected;
+    FEATURED.with(|m| { m.borrow_mut().insert(id, f); });
+    if let Some(token) = pending.token {
+        let config = CONFIG.with(|c| c.borrow().get().clone());
+        let fee = explorer_token_fee(token, &config);
+        let refund = pending.amount_paid.saturating_sub(fee);
+        if refund > 0 {
+            let ledger_id = explorer_token_ledger(token, &config);
+            let dest = LedgerAccount { owner: pending.applicant, subaccount: None };
+            if let Err(e) = call_ledger_transfer(ledger_id, Some(TREASURY_SUBACCOUNT), dest, refund, Some(fee)).await {
+                FEATURED.with(|m| { m.borrow_mut().insert(id, pending.clone()); }); // restore Pending
+                return Err(format!("REFUND_FAILED: {}", e));
+            }
+        }
+    }
+    log_dapp_event("featured_reject", id, pending.applicant, pending.amount_paid);
+    Ok(())
+}
+
+/// Admin: take a live featured placement down early (no refund — the premium was
+/// already earned). Frees its slot immediately.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_remove_featured(id: u64) -> Result<(), String> {
+    FEATURED.with(|m| -> Result<(), String> {
+        let mut m = m.borrow_mut();
+        let mut f = m.get(&id).ok_or_else(|| "FEATURED_NOT_FOUND".to_string())?;
+        f.status = FeaturedStatus::Expired;
+        m.insert(id, f);
+        Ok(())
+    })?;
+    log_dapp_event("featured_remove", id, get_caller(), 0);
+    Ok(())
+}
+
+/// Timer sweep: expire live placements past their window, and auto-refund
+/// Pending applications older than FEATURED_PENDING_TTL so a never-reviewed
+/// payment is never parked indefinitely.
+async fn expire_featured() {
+    let now = current_time();
+    // Active → Expired (synchronous, no money).
+    let to_expire: Vec<u64> = FEATURED.with(|m| {
+        m.borrow().iter().filter_map(|e| {
+            let f = e.value();
+            let past = f.expires_at.map(|x| now > x).unwrap_or(false);
+            if f.status == FeaturedStatus::Active && past { Some(f.id) } else { None }
+        }).collect()
+    });
+    for id in to_expire {
+        FEATURED.with(|m| {
+            let mut m = m.borrow_mut();
+            if let Some(mut f) = m.get(&id) {
+                f.status = FeaturedStatus::Expired;
+                m.insert(id, f);
+            }
+        });
+    }
+    // Stale Pending → auto-refund (reuse the reject path).
+    let stale: Vec<u64> = FEATURED.with(|m| {
+        m.borrow().iter().filter_map(|e| {
+            let f = e.value();
+            if f.status == FeaturedStatus::Pending && now.saturating_sub(f.created_at) > FEATURED_PENDING_TTL_NANOS {
+                Some(f.id)
+            } else { None }
+        }).collect()
+    });
+    for id in stale {
+        let _ = admin_reject_featured(id).await;
+    }
+}
+
+/// Local-dev: replace all featured rows with `active` live + `pending` pending
+/// placements, referencing the first approved listings, so every hero/admin
+/// state can be previewed without paying. Local only.
+#[ic_cdk::update]
+fn dev_seed_featured_dapps(active: u64, pending: u64) -> Result<u64, String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let now = current_time();
+    let caller = get_caller();
+    // Approved listings to attach placements to.
+    let listing_ids: Vec<u64> = DAPPS.with(|m| {
+        m.borrow().iter().filter(|e| e.value().status == DappStatus::Approved).map(|e| *e.key()).collect()
+    });
+    if listing_ids.is_empty() {
+        return Err("NO_APPROVED_LISTINGS".to_string());
+    }
+    FEATURED.with(|m| { let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
+    let total = active.saturating_add(pending);
+    let mut seeded = 0u64;
+    for i in 0..total {
+        let listing_id = listing_ids[(i as usize) % listing_ids.len()];
+        let id = next_featured_id();
+        let is_active = i < active;
+        let days = 30;
+        FEATURED.with(|m| {
+            m.borrow_mut().insert(id, FeaturedDapp {
+                id, listing_id, applicant: caller,
+                status: if is_active { FeaturedStatus::Active } else { FeaturedStatus::Pending },
+                token: Some(ExplorerToken::ICP), amount_paid: 0, usd_total_e8s: 0, days,
+                created_at: now,
+                approved_at: if is_active { Some(now) } else { None },
+                expires_at: if is_active { Some(now.saturating_add(days * DAY_NANOS)) } else { None },
+                payment_block: None,
+            });
+        });
+        seeded += 1;
+    }
+    Ok(seeded)
+}
+
+#[ic_cdk::update]
+fn dev_clear_featured_dapps() -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    FEATURED.with(|m| { let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
     Ok(())
 }
 
@@ -19079,7 +19498,7 @@ mod tests {
         seed_default_dapps();
         seed_default_dapps(); // re-run inserts nothing new
         let listed = list_dapps();
-        assert_eq!(listed.len(), 11);
+        assert_eq!(listed.len(), 13);
         assert_eq!(listed[0].name, "idGeek 2.0");
         assert_eq!(listed[1].name, "Liquidium");
         assert_eq!(listed[2].name, "ICPSwap");
@@ -19090,7 +19509,9 @@ mod tests {
         assert_eq!(listed[7].name, "onicai");
         assert_eq!(listed[8].name, "DGDG");
         assert_eq!(listed[9].name, "IC Terminal");
-        assert_eq!(listed[10].name, "Taggr");
+        assert_eq!(listed[10].name, "ICP Index");
+        assert_eq!(listed[11].name, "Taggr");
+        assert_eq!(listed[12].name, "Menese Protocol");
         assert!(listed.iter().all(|d| !d.community && d.expires_at.is_none()));
     }
 
@@ -19101,10 +19522,10 @@ mod tests {
         // Simulate a directory seeded before the newer curated entries existed.
         let icpswap_id = list_dapps().iter().find(|d| d.name == "ICPSwap").unwrap().id;
         DAPPS.with(|m| { m.borrow_mut().remove(&icpswap_id); });
-        assert_eq!(list_dapps().len(), 10);
+        assert_eq!(list_dapps().len(), 12);
         seed_default_dapps();
         let listed = list_dapps();
-        assert_eq!(listed.len(), 11, "missing curated entry is backfilled");
+        assert_eq!(listed.len(), 13, "missing curated entry is backfilled");
         assert_eq!(listed.iter().filter(|d| d.name == "ICPSwap").count(), 1, "no duplicates");
     }
 
@@ -19236,6 +19657,158 @@ mod tests {
         set_mock_ledger_transfer(Ok(2));
         admin_reject_dapp(id).await.unwrap();
         assert!(DAPPS.with(|m| m.borrow().get(&id)).is_none());
+        clear_dapps();
+    }
+
+    fn clear_featured() {
+        let ids: Vec<u64> = FEATURED.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        FEATURED.with(|m| { let mut m = m.borrow_mut(); for id in ids { m.remove(&id); } });
+        FEATURED_QUOTES.with(|m| {
+            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+    }
+
+    /// Insert an Approved listing owned by `owner` directly (skips the paid flow).
+    fn seed_approved_listing(owner: Principal, name: &str) -> u64 {
+        let id = next_dapp_id();
+        let now = current_time();
+        DAPPS.with(|m| {
+            m.borrow_mut().insert(id, DappListing {
+                id, submitter: owner, name: name.into(), url: "https://d.app".into(),
+                description: "desc".into(), community: true, status: DappStatus::Approved,
+                created_at: now, approved_at: Some(now), expires_at: None, days: 30,
+                token: Some(ExplorerToken::ICP), amount_paid: 0, categories: vec![],
+                is_vibe_coded: false, twitter: None,
+            });
+        });
+        id
+    }
+
+    #[tokio::test]
+    async fn test_featured_apply_approve_and_slot_cap() {
+        clear_dapps();
+        clear_featured();
+        let user = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
+        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
+        let mut cfg = test_config(true);
+        cfg.admins = vec![admin];
+        CONFIG.with(|c| { c.borrow_mut().set(cfg); });
+        set_mock_caller(user);
+
+        let listing = seed_approved_listing(user, "Featurable");
+
+        // No quote → refused.
+        assert_eq!(
+            apply_featured(listing, ExplorerToken::ICP, 30).await.unwrap_err(),
+            "NO_QUOTE"
+        );
+
+        // Quote 30 days featured in ICP: $10/day × 30 = $300 → 60 ICP at $5/ICP.
+        let quote = get_featured_quote(ExplorerToken::ICP, 30).await.unwrap();
+        assert_eq!(quote.usd_total_e8s, 30_000_000_000); // $300
+        assert_eq!(quote.amount, 6_000_000_000);         // 60 ICP
+
+        // Below the day floor is rejected at quote time.
+        assert_eq!(get_featured_quote(ExplorerToken::ICP, 3).await.unwrap_err(), "INVALID_DAYS");
+
+        // Underfunded escrow refused, then funded apply succeeds.
+        set_mock_ledger_balance(quote.amount); // missing fee
+        assert_eq!(
+            apply_featured(listing, ExplorerToken::ICP, 30).await.unwrap_err(),
+            "INSUFFICIENT_DEPOSIT"
+        );
+        set_mock_ledger_balance(quote.amount + 10_000);
+        set_mock_ledger_transfer(Ok(42));
+        let fid = apply_featured(listing, ExplorerToken::ICP, 30).await.unwrap();
+
+        // Pending: not in the active hero set, but in the admin queue & mine.
+        assert_eq!(get_featured_dapps().active.len(), 0);
+        set_mock_caller(admin);
+        assert_eq!(list_pending_featured().len(), 1);
+        set_mock_caller(user);
+        assert_eq!(get_my_featured().len(), 1);
+
+        // A second application for the same listing is refused while pending.
+        let _ = get_featured_quote(ExplorerToken::ICP, 30).await.unwrap();
+        assert_eq!(
+            apply_featured(listing, ExplorerToken::ICP, 30).await.unwrap_err(),
+            "ALREADY_FEATURED"
+        );
+
+        // Approve → live in the hero with the paid window.
+        set_mock_caller(admin);
+        admin_approve_featured(fid).unwrap();
+        let info = get_featured_dapps();
+        assert_eq!(info.active.len(), 1);
+        assert_eq!(info.slots_open, 2);
+        assert_eq!(info.active[0].listing.id, listing);
+        assert_eq!(admin_approve_featured(fid).unwrap_err(), "NOT_PENDING");
+
+        // Slot cap: fill the remaining 2 slots, then a 4th approval is refused.
+        clear_featured();
+        let mut ids = vec![];
+        for i in 0..4 {
+            let l = seed_approved_listing(user, &format!("L{}", i));
+            let id = next_featured_id();
+            FEATURED.with(|m| {
+                m.borrow_mut().insert(id, FeaturedDapp {
+                    id, listing_id: l, applicant: user, status: FeaturedStatus::Pending,
+                    token: Some(ExplorerToken::ICP), amount_paid: 0, usd_total_e8s: 0, days: 30,
+                    created_at: current_time(), approved_at: None, expires_at: None, payment_block: None,
+                });
+            });
+            ids.push(id);
+        }
+        admin_approve_featured(ids[0]).unwrap();
+        admin_approve_featured(ids[1]).unwrap();
+        admin_approve_featured(ids[2]).unwrap();
+        assert_eq!(get_featured_dapps().active.len(), 3);
+        assert_eq!(admin_approve_featured(ids[3]).unwrap_err(), "FEATURED_SLOTS_FULL");
+
+        // Removing one frees a slot so the 4th can go live.
+        admin_remove_featured(ids[0]).unwrap();
+        assert_eq!(get_featured_dapps().active.len(), 2);
+        admin_approve_featured(ids[3]).unwrap();
+        assert_eq!(get_featured_dapps().active.len(), 3);
+
+        clear_featured();
+        clear_dapps();
+    }
+
+    #[tokio::test]
+    async fn test_featured_reject_refunds() {
+        clear_dapps();
+        clear_featured();
+        let user = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
+        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
+        let mut cfg = test_config(true);
+        cfg.admins = vec![admin];
+        CONFIG.with(|c| { c.borrow_mut().set(cfg); });
+        set_mock_caller(user);
+
+        let listing = seed_approved_listing(user, "Featurable");
+        let quote = get_featured_quote(ExplorerToken::CkUSDC, 7).await.unwrap();
+        assert_eq!(quote.usd_total_e8s, 7_000_000_000); // $70
+        set_mock_ledger_balance(quote.amount + 10_000);
+        set_mock_ledger_transfer(Ok(1));
+        let fid = apply_featured(listing, ExplorerToken::CkUSDC, 7).await.unwrap();
+
+        // Failed refund keeps it pending for a retry.
+        set_mock_caller(admin);
+        set_mock_ledger_transfer(Err("ledger down".into()));
+        assert!(admin_reject_featured(fid).await.is_err());
+        assert_eq!(list_pending_featured().len(), 1);
+
+        // Successful refund marks it Rejected (dropped from the queue & mine).
+        set_mock_ledger_transfer(Ok(2));
+        admin_reject_featured(fid).await.unwrap();
+        assert_eq!(list_pending_featured().len(), 0);
+        set_mock_caller(user);
+        assert_eq!(get_my_featured().len(), 0);
+
+        clear_featured();
         clear_dapps();
     }
 

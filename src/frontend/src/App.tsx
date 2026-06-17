@@ -2309,6 +2309,7 @@ export default function App() {
               host={host}
               rootKey={env?.IC_ROOT_KEY}
               isAdmin={isAdmin}
+              isLocal={isLocal}
               onSignIn={handleLogin}
             />
           ) : page === 'arcade' && arcadeEnabled ? (
