@@ -538,12 +538,17 @@ export default function Staking({
           {TIER_ORDER.map(t => {
             const tp = tierPool(t);
             const ready = tp?.bootstrap === StakingBootstrap.Ready;
+            const sel = t === tier && !boosterSel;
             return (
-              <div key={t} className="col" style={{
-                gap: 10, padding: '14px 16px', borderRadius: 10,
+              <div key={t}
+                role="button" tabIndex={0}
+                onClick={() => { setTier(t); setBoosterSel(false); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { setTier(t); setBoosterSel(false); } }}
+                className="col" style={{
+                gap: 10, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
                 flex: '1 1 240px', minWidth: 0,
-                border: `1px solid ${t === tier ? 'var(--border-hi)' : 'var(--border)'}`,
-                background: t === tier ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
+                border: `1px solid ${sel ? 'var(--burn)' : 'var(--border)'}`,
+                background: sel ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
               }}>
                 <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
                   <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>{TIER_META[t].label}</b>
@@ -604,7 +609,7 @@ export default function Staking({
               className="col" style={{
                 gap: 10, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
                 flex: '1 1 240px', minWidth: 0,
-                border: `1px solid ${boosterSel ? 'var(--burn)' : 'var(--border-hi)'}`,
+                border: `1px solid ${boosterSel ? 'var(--burn)' : 'var(--border)'}`,
                 background: boosterSel ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
               }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
