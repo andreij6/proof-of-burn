@@ -10170,8 +10170,8 @@ fn seed_default_dapps() {
         (
             "Dyvr",
             "https://dyvr.me/",
-            "Emerging Internet Computer dapp — visit the site for the latest on what Dyvr is building on ICP.",
-            &["Infrastructure"],
+            "A platform of connected apps for the on-chain internet, powered by the $DEEP token: explore the network, lend and borrow, and optimize canister infrastructure — a suite of integrated products built on the Internet Computer.",
+            &["Infrastructure", "DeFi"],
         ),
         (
             "onicai",
@@ -10219,18 +10219,18 @@ fn seed_default_dapps() {
         });
         if let Some((existing_id, mut d)) = existing {
             let mut changed = false;
-            if !d.community && d.categories.is_empty() {
-                d.categories = categories.iter().map(|c| c.to_string()).collect();
-                changed = true;
-            }
-            // The seed is the source of truth for curated dapps — keep the URL in
-            // sync if it changed (e.g. a domain move).
-            if !d.community && d.url != url {
-                d.url = url.to_string();
-                changed = true;
-            }
-            if !d.community && d.twitter.is_none() {
-                if let Some(h) = seed_twitter(name) { d.twitter = Some(h); changed = true; }
+            // The seed is the source of truth for curated (non-community) dapps —
+            // keep url / description / categories / twitter in sync on upgrade
+            // (e.g. a domain move or a copy edit). Community listings are left
+            // untouched.
+            if !d.community {
+                let seed_cats: Vec<String> = categories.iter().map(|c| c.to_string()).collect();
+                if d.url != url { d.url = url.to_string(); changed = true; }
+                if d.description != description { d.description = description.to_string(); changed = true; }
+                if d.categories != seed_cats { d.categories = seed_cats; changed = true; }
+                if let Some(h) = seed_twitter(name) {
+                    if d.twitter.as_deref() != Some(h.as_str()) { d.twitter = Some(h); changed = true; }
+                }
             }
             if changed {
                 DAPPS.with(|m| { m.borrow_mut().insert(existing_id, d); });
