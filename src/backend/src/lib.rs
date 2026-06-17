@@ -10110,7 +10110,7 @@ fn seed_default_dapps() {
         c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
     });
     let now = current_time();
-    let samples: [(&str, &str, &str, &[&str]); 12] = [
+    let samples: [(&str, &str, &str, &[&str]); 13] = [
         (
             "idGeek 2.0",
             "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
@@ -10182,6 +10182,12 @@ fn seed_default_dapps() {
             "https://taggr.link/",
             "Fully on-chain SocialFi network — a decentralized blog, forum and social platform where users truly own their content. The community governs every code change through on-chain voting, and the network self-funds its own cycles from user activity, aiming to run perpetually and censorship-resistant on the Internet Computer.",
             &["Social", "DAO"],
+        ),
+        (
+            "Menese Protocol",
+            "https://www.meneseprotocol.io/",
+            "A multichain operating system on the Internet Computer for cross-chain interoperability: ICP-native routers connect EVM chains and Solana for non-custodial token movement, with a Motoko backend, a developer SDK and a multichain launchpad.",
+            &["Infrastructure", "DeFi"],
         ),
     ];
     for (name, url, description, categories) in samples {
