@@ -3211,9 +3211,15 @@ async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), 
         return Err("COMMITMENT_CLOSED".to_string());
     }
 
-    // 4. Escrow balance check — no protocol fee on top-ups, only need
-    //    the additional amount deposited. The 30,000 e8s settlement fee
-    //    reserve was already deposited with the original commit.
+    // 4. Escrow balance check — ZERO-FEE model, identical to commit(): the
+    //    per-(caller,proposal) escrow holds EXACTLY the committed ICP, and the
+    //    treasury fronts every ledger fee at settlement/refund. So the escrow
+    //    only needs to hold the new committed total — there is NO 30,000 e8s
+    //    settlement reserve (the original commit never deposited one). Requiring
+    //    `new_amount + 30_000` here was a bug: top-ups landed in escrow but the
+    //    commitment never grew, returning INSUFFICIENT_DEPOSIT after the user's
+    //    ICP had already moved. Because the escrow is the source of truth, a
+    //    repeat call simply reconciles whatever balance is already deposited.
     let subaccount = commitment.subaccount;
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let ledger_id = config.ledger_canister_id;
@@ -3222,10 +3228,7 @@ async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), 
         subaccount: Some(subaccount),
     };
     let balance = call_ledger_balance(ledger_id, escrow_account).await?;
-    let required_balance = new_amount
-        .checked_add(30_000)
-        .ok_or("OVERFLOW")?;
-    if balance < required_balance {
+    if balance < new_amount {
         return Err("INSUFFICIENT_DEPOSIT".to_string());
     }
 
@@ -21800,10 +21803,12 @@ mod tests {
 
         assert_eq!(add_to_commitment(pid, 1).await.unwrap_err(), "BELOW_MINIMUM"); // 1 e8s ≪ $1 floor
 
-        // Escrow must cover the NEW total + the 30k settlement reserve.
+        // Zero-fee model: escrow must cover the NEW total exactly — NO 30k
+        // settlement reserve (the treasury fronts ledger fees at settlement).
         set_mock_ledger_balance(250_000_000);
         assert_eq!(add_to_commitment(pid, 100_000_000).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
-        set_mock_ledger_balance(300_030_000);
+        // Exactly the new total (300M) is enough — no reserve required.
+        set_mock_ledger_balance(300_000_000);
         add_to_commitment(pid, 100_000_000).await.unwrap();
 
         let key = CommitmentKey { proposal_id: pid, principal: alice };
@@ -21818,6 +21823,38 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         add_to_commitment(pid, 200_000_000).await.unwrap();
         assert_eq!(PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap().status, "met");
+    }
+
+    #[tokio::test]
+    async fn test_add_to_commitment_zero_fee_and_recovers_stranded_deposit() {
+        // Mainnet regression: add_to_commitment used to require escrow >=
+        // new_amount + 30_000, but the zero-fee deposit never included that
+        // reserve — so top-ups landed in escrow yet returned INSUFFICIENT_DEPOSIT
+        // (the user's ICP moved but the commitment never grew). The escrow is the
+        // source of truth, so the corrected check needs only `new_amount`, and a
+        // repeat call reconciles whatever is already deposited (recovery).
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        let pid = 700_021u64;
+        open_proposal(pid, 500_000_000);
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+
+        // Simulate the bug's aftermath: a top-up of 100M landed in escrow
+        // (escrow = 300M) but the commitment is still 200M (never grew).
+        set_mock_ledger_balance(300_000_000);
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        assert_eq!(COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap().amount_e8s, 200_000_000);
+
+        // Recovery: a repeat add_to_commitment credits the already-deposited
+        // funds with NO new transfer — escrow (300M) == new total (300M).
+        add_to_commitment(pid, 100_000_000).await.unwrap();
+        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(c.amount_e8s, 300_000_000, "stranded top-up reconciled, no extra deposit");
+        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(prop.total_committed_e8s, 300_000_000);
     }
 
     #[test]

@@ -1590,48 +1590,61 @@ export default function App() {
       return;
     }
     const amountE8s = BigInt(Math.floor(amount * 100_000_000));
-    // Only charge 1 ledger fee for the deposit (no protocol fee on top-ups)
-    const requiredTotal = amountE8s + 10_000n;
-    if (requiredTotal > holdings) {
-      setAddMoreTxError(`Insufficient wallet balance — need at least ${fmtICP(requiredTotal)} ICP (amount + deposit fee).`);
-      return;
-    }
 
     setIsAddMoreTransacting(true);
     setAddMoreTxError(null);
 
     try {
-      // Step 1: Get deterministic escrow address (same subaccount)
-      setAddMoreTxStep("Deriving escrow subaccount...");
+      // Step 1: escrow address + what's ALREADY deposited there. The escrow
+      // holds exactly the committed ICP (zero-fee model), so we only deposit the
+      // SHORTFALL needed to reach the new total. This also reclaims any ICP a
+      // previously-failed top-up left stranded in escrow — in that case the
+      // shortfall is 0 and we just reconcile the commitment on-chain.
+      setAddMoreTxStep("Checking your escrow balance...");
       const depositAccount = await actor.get_deposit_address(addMoreProposalId);
-
-      // Step 2: Deposit additional ICP into escrow (only the additional amount)
-      setAddMoreTxStep("Step 1/2: Depositing additional ICP into escrow...");
       const ledgerActor = createLedgerActor(ledgerCanisterId, {
         agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
       });
-
-      const transferResult = await ledgerActor.icrc1_transfer({
-        to: {
-          owner: depositAccount.owner,
-          subaccount: depositAccount.subaccount ? depositAccount.subaccount : undefined
-        },
-        amount: amountE8s,
+      const escrowBalance: bigint = await ledgerActor.icrc1_balance_of({
+        owner: depositAccount.owner,
+        subaccount: depositAccount.subaccount ? depositAccount.subaccount : undefined,
       });
+      const existing = myCommitments.find(c => c.proposal_id === addMoreProposalId)?.amount_e8s ?? 0n;
+      const targetTotal = existing + amountE8s;
+      const shortfall = targetTotal > escrowBalance ? targetTotal - escrowBalance : 0n;
 
-      if (transferResult.__kind__ === "Err") {
-        const err = transferResult.Err;
-        const kind = err.__kind__;
-        const detail =
-          kind === "BadFee"        ? `expected fee ${fmtICP((err as any).BadFee.expected_fee)} ICP` :
-          kind === "InsufficientFunds" ? `balance is ${fmtICP((err as any).InsufficientFunds.balance)} ICP` :
-          kind === "TooOld"        ? "transaction window expired" :
-          kind === "CreatedInFuture" ? "clock skew — try again" :
-          kind === "Duplicate"     ? `duplicate of block ${(err as any).Duplicate.duplicate_of}` :
-          kind === "TemporarilyUnavailable" ? "ledger temporarily unavailable" :
-          kind === "GenericError"  ? (err as any).GenericError.message :
-          JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
-        throw new Error(`Ledger transfer failed (${kind}): ${detail}`);
+      // Step 2: deposit only the shortfall (if any). Wallet must cover it plus
+      // one ledger fee; when escrow already holds enough we skip the transfer.
+      if (shortfall > 0n) {
+        const need = shortfall + 10_000n;
+        if (need > holdings) {
+          throw new Error(`Insufficient wallet balance — need at least ${fmtICP(need)} ICP (top-up + deposit fee).`);
+        }
+        setAddMoreTxStep("Step 1/2: Depositing additional ICP into escrow...");
+        const transferResult = await ledgerActor.icrc1_transfer({
+          to: {
+            owner: depositAccount.owner,
+            subaccount: depositAccount.subaccount ? depositAccount.subaccount : undefined
+          },
+          amount: shortfall,
+        });
+
+        if (transferResult.__kind__ === "Err") {
+          const err = transferResult.Err;
+          const kind = err.__kind__;
+          const detail =
+            kind === "BadFee"        ? `expected fee ${fmtICP((err as any).BadFee.expected_fee)} ICP` :
+            kind === "InsufficientFunds" ? `balance is ${fmtICP((err as any).InsufficientFunds.balance)} ICP` :
+            kind === "TooOld"        ? "transaction window expired" :
+            kind === "CreatedInFuture" ? "clock skew — try again" :
+            kind === "Duplicate"     ? `duplicate of block ${(err as any).Duplicate.duplicate_of}` :
+            kind === "TemporarilyUnavailable" ? "ledger temporarily unavailable" :
+            kind === "GenericError"  ? (err as any).GenericError.message :
+            JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
+          throw new Error(`Ledger transfer failed (${kind}): ${detail}`);
+        }
+      } else {
+        setAddMoreTxStep("Step 1/2: Reclaiming ICP already in escrow...");
       }
 
       // Step 3: Finalize on backend
@@ -1640,7 +1653,8 @@ export default function App() {
 
       if (result.__kind__ === "Err") {
         const code = result.Err as string;
-        if (code === "BELOW_MINIMUM") throw new Error("Too small — top-ups start at $1 worth of ICP.");
+        if (code === "BELOW_MINIMUM") throw new Error(`Too small — top-ups start at $${MIN_COMMIT_USD} worth of ICP.`);
+        if (code === "INSUFFICIENT_DEPOSIT") throw new Error("Deposit didn't register — your ICP is safe in escrow; try again in a moment.");
         throw new Error(`Add-to-commitment failed: ${code}`);
       }
 
