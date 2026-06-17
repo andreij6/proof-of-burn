@@ -10169,7 +10169,7 @@ fn seed_default_dapps() {
         ),
         (
             "Dyvr",
-            "https://dyvr.com/",
+            "https://dyvr.me/",
             "Emerging Internet Computer dapp — visit the site for the latest on what Dyvr is building on ICP.",
             &["Infrastructure"],
         ),
@@ -10221,6 +10221,12 @@ fn seed_default_dapps() {
             let mut changed = false;
             if !d.community && d.categories.is_empty() {
                 d.categories = categories.iter().map(|c| c.to_string()).collect();
+                changed = true;
+            }
+            // The seed is the source of truth for curated dapps — keep the URL in
+            // sync if it changed (e.g. a domain move).
+            if !d.community && d.url != url {
+                d.url = url.to_string();
                 changed = true;
             }
             if !d.community && d.twitter.is_none() {
