@@ -10110,7 +10110,7 @@ fn seed_default_dapps() {
         c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
     });
     let now = current_time();
-    let samples: [(&str, &str, &str, &[&str]); 11] = [
+    let samples: [(&str, &str, &str, &[&str]); 12] = [
         (
             "idGeek 2.0",
             "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
@@ -10169,6 +10169,12 @@ fn seed_default_dapps() {
             "IC Terminal",
             "https://icterminal.com/metrics.php?m=active_addresses&r=1d&chartStyle=line",
             "On-chain analytics terminal for the Internet Computer: track active addresses, transaction volume, token metrics and network activity through customizable real-time charts — a data dashboard for monitoring the health of the IC ecosystem.",
+            &["Analytics"],
+        ),
+        (
+            "ICP Index",
+            "https://icpindex.app/",
+            "An index and analytics dashboard for the Internet Computer ecosystem — explore ICP market data and rankings. Visit the site for the latest.",
             &["Analytics"],
         ),
         (
