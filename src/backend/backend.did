@@ -533,13 +533,18 @@ type FlagState = variant { On; Off; AdminOn };
 // - `total_burned_e8s`: cumulative ICP burned through this app, summed over
 // every `VoteRecord` (the canonical burn ledger).
 // - `votes_cast`: count of distinct NNS proposals the app has voted on,
-// derived from `VOTES.len()`.
+// derived from `VOTES.len()` (includes always-adopt votes cast when the
+// threshold was missed — the canonical "NNS votes cast" count).
+// - `votes_threshold_met`: subset of `votes_cast` where the burn threshold was
+// actually met (`icp_burned_e8s > 0`) — i.e. votes the community's burns
+// actually steered. The public dashboard surfaces this, not `votes_cast`.
 type GlobalStats = record {
   votes_cast : nat64;
   tvl_e8s : nat64;
   total_burned_e8s : nat64;
   followers_count : nat64;
   pending_burn_e8s : nat64;
+  votes_threshold_met : nat64;
 };
 // An idea is implicitly Active while stored; the sweep DELETES ideas whose
 // 30-day no-upvote window has lapsed (no Expired state is kept around).

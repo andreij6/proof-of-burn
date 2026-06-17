@@ -601,13 +601,19 @@ pub struct InitPayload {
 /// - `total_burned_e8s`: cumulative ICP burned through this app, summed over
 ///   every `VoteRecord` (the canonical burn ledger).
 /// - `votes_cast`: count of distinct NNS proposals the app has voted on,
-///   derived from `VOTES.len()`.
+///   derived from `VOTES.len()` (includes always-adopt votes cast when the
+///   threshold was missed — the canonical "NNS votes cast" count).
+/// - `votes_threshold_met`: subset of `votes_cast` where the burn threshold was
+///   actually met (`icp_burned_e8s > 0`) — i.e. votes the community's burns
+///   actually steered. The public dashboard surfaces this, not `votes_cast`.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct GlobalStats {
     pub tvl_e8s: u64,
     pub total_burned_e8s: u64,
     pub pending_burn_e8s: u64,
     pub votes_cast: u64,
+    #[serde(default)]
+    pub votes_threshold_met: u64,
     pub followers_count: u64,
 }
 
@@ -4749,6 +4755,7 @@ fn get_global_stats() -> GlobalStats {
 
     let mut total_burned_e8s: u64 = 0;
     let mut votes_cast: u64 = 0;
+    let mut votes_threshold_met: u64 = 0;
     VOTES.with(|map| {
         for entry in map.borrow().iter() {
             let v = entry.value();
@@ -4758,6 +4765,13 @@ fn get_global_stats() -> GlobalStats {
             votes_cast = votes_cast
                 .checked_add(1)
                 .unwrap_or(u64::MAX);
+            // A vote only burned ICP when its proposal met the threshold; that's
+            // the subset the public dashboard counts.
+            if v.icp_burned_e8s > 0 {
+                votes_threshold_met = votes_threshold_met
+                    .checked_add(1)
+                    .unwrap_or(u64::MAX);
+            }
         }
     });
 
@@ -4776,6 +4790,7 @@ fn get_global_stats() -> GlobalStats {
         total_burned_e8s,
         pending_burn_e8s,
         votes_cast,
+        votes_threshold_met,
         followers_count,
     }
 }
@@ -18541,12 +18556,32 @@ mod tests {
             total_burned_e8s: 0,
             pending_burn_e8s: 0,
             votes_cast: 0,
+            votes_threshold_met: 0,
             followers_count: 0,
         };
         assert_eq!(stats.tvl_e8s, 0);
         assert_eq!(stats.total_burned_e8s, 0);
         assert_eq!(stats.votes_cast, 0);
+        assert_eq!(stats.votes_threshold_met, 0);
         assert_eq!(stats.followers_count, 0);
+    }
+
+    #[test]
+    fn test_global_stats_votes_threshold_met_excludes_unmet() {
+        // votes_threshold_met counts only VoteRecords that burned ICP (threshold
+        // met); always-adopt votes cast on missed proposals (icp_burned == 0)
+        // count toward votes_cast but NOT votes_threshold_met.
+        clear_votes();
+        VOTES.with(|m| {
+            let mut m = m.borrow_mut();
+            m.insert(1, VoteRecord { proposal_id: 1, vote: Vote::Yes, icp_burned_e8s: 100_000_000, decided_at: 0, nns_outcome: None });
+            m.insert(2, VoteRecord { proposal_id: 2, vote: Vote::Yes, icp_burned_e8s: 0,           decided_at: 0, nns_outcome: None });
+            m.insert(3, VoteRecord { proposal_id: 3, vote: Vote::No,  icp_burned_e8s: 50_000_000,  decided_at: 0, nns_outcome: None });
+        });
+        let stats = get_global_stats();
+        assert_eq!(stats.votes_cast, 3, "all NNS votes counted");
+        assert_eq!(stats.votes_threshold_met, 2, "only the two that burned ICP");
+        clear_votes();
     }
 
     #[test]
@@ -19658,6 +19693,11 @@ mod tests {
         admin_reject_dapp(id).await.unwrap();
         assert!(DAPPS.with(|m| m.borrow().get(&id)).is_none());
         clear_dapps();
+    }
+
+    fn clear_votes() {
+        let ids: Vec<u64> = VOTES.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        VOTES.with(|m| { let mut m = m.borrow_mut(); for id in ids { m.remove(&id); } });
     }
 
     fn clear_featured() {

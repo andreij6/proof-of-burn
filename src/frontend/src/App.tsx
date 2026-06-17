@@ -2521,7 +2521,7 @@ export default function App() {
                     <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
                       <span>Committed</span>
                       <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
-                        {globalStats ? globalStats.votes_cast.toString() : "…"}
+                        {globalStats ? globalStats.votes_threshold_met.toString() : "…"}
                       </span>
                     </span>
                   </div>

@@ -179,7 +179,7 @@ export default function Dashboard({
               {globalStats && (
                 <span className="row" style={{ gap: 16 }}>
                   <MiniStat label="ICP burned" value={fmtICP(globalStats.total_burned_e8s)} />
-                  <MiniStat label="Votes cast" value={globalStats.votes_cast.toString()} />
+                  <MiniStat label="Votes cast" value={globalStats.votes_threshold_met.toString()} />
                 </span>
               )}
             </div>
@@ -346,7 +346,7 @@ export default function Dashboard({
             <div className="row" style={{ gap: 20, flexWrap: 'wrap' }}>
               <MiniStat label="ICP burned" value={fmtICP(globalStats.total_burned_e8s)} />
               <MiniStat label="Pending" value={fmtICP(globalStats.pending_burn_e8s)} />
-              <MiniStat label="Committed" value={globalStats.votes_cast.toString()} />
+              <MiniStat label="Committed" value={globalStats.votes_threshold_met.toString()} />
               <MiniStat label="Syndicate" value={globalStats.followers_count.toString()} />
             </div>
           </HubCard>
