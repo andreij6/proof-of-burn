@@ -9384,6 +9384,10 @@ pub struct DappListing {
     /// curated/admin and default-seeded listings.
     #[serde(default)]
     pub is_vibe_coded: bool,
+    /// Optional X/Twitter handle (without the leading @), e.g. "ICPSwap".
+    /// Rendered as a link on the card. None = no handle shown.
+    #[serde(default)]
+    pub twitter: Option<String>,
 }
 
 /// A locked price for one caller: deposit `amount` (+ one ledger fee) on the
@@ -10105,6 +10109,22 @@ fn validate_dapp_categories(cats: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// X/Twitter handle (without @) for a curated default dapp. Verified handles
+/// only — returns None when the handle isn't known (no link shown). Used to set
+/// and backfill the card link in `seed_default_dapps`.
+fn seed_twitter(name: &str) -> Option<String> {
+    let h = match name {
+        "idGeek 2.0" => "theIDGEEK",
+        "ICPSwap" => "ICPSwap",
+        "OpenChat" => "OpenChat",
+        "onicai" => "onicaiHQ",
+        "DGDG" => "dgdg_app",
+        "Taggr" => "TAGGR_",
+        _ => return None,
+    };
+    Some(h.to_string())
+}
+
 fn seed_default_dapps() {
     let owner = CONFIG.with(|c| {
         c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
@@ -10198,8 +10218,15 @@ fn seed_default_dapps() {
             m.borrow().iter().find(|e| e.value().name == name).map(|e| (*e.key(), e.value()))
         });
         if let Some((existing_id, mut d)) = existing {
+            let mut changed = false;
             if !d.community && d.categories.is_empty() {
                 d.categories = categories.iter().map(|c| c.to_string()).collect();
+                changed = true;
+            }
+            if !d.community && d.twitter.is_none() {
+                if let Some(h) = seed_twitter(name) { d.twitter = Some(h); changed = true; }
+            }
+            if changed {
                 DAPPS.with(|m| { m.borrow_mut().insert(existing_id, d); });
             }
             continue;
@@ -10222,6 +10249,7 @@ fn seed_default_dapps() {
                 amount_paid: 0,
                 categories: categories.iter().map(|c| c.to_string()).collect(),
                 is_vibe_coded: false,
+                twitter: seed_twitter(name),
             });
         });
     }
@@ -10436,6 +10464,7 @@ async fn submit_dapp(
             amount_paid: quote.amount,
             categories,
             is_vibe_coded,
+            twitter: None,
         });
     });
     EXPLORER_QUOTES.with(|m| {
@@ -10537,6 +10566,7 @@ fn admin_add_dapp(name: String, url: String, description: String, categories: Ve
             amount_paid: 0,
             categories,
             is_vibe_coded: false,
+            twitter: None,
         });
     });
     log_dapp_event("dapp_admin_add", id, caller, 0);
@@ -19225,6 +19255,7 @@ mod tests {
                 amount_paid: 20_000_000,
                 categories: vec![],
                 is_vibe_coded: false,
+                twitter: None,
             });
         });
         assert!(list_dapps().is_empty(), "expired listings never render");

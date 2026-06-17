@@ -284,6 +284,7 @@ type DappListing = record {
   // True if the submitter flagged the dapp as "vibe coded" (badge above the
   // title). Always false for curated/default listings.
   is_vibe_coded : bool;
+  twitter : opt text;
 };
 type DappStatus = variant {
   Approved;

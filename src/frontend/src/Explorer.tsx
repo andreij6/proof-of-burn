@@ -55,10 +55,6 @@ function fmtUSD(usdE8s: bigint): string {
   return `$${(Number(usdE8s) / 100_000_000).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 }
 
-function fmtDate(ns: bigint): string {
-  return new Date(Number(ns / 1_000_000n)).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-}
-
 // Whole days of visibility remaining (ceil); null = permanent listing.
 export function dappDaysLeft(d: DappListing, nowMs: number): number | null {
   if (d.expires_at === undefined || d.expires_at === null) return null;
@@ -383,8 +379,16 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
           {d.description}
         </p>
         <div className="row" style={{ justifyContent: 'space-between', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
-          <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-            {adminQueue ? `${formatPrincipal(d.submitter)} · ${d.days.toString()}d paid` : fmtDate(d.created_at)}
+          <span className="mono row" style={{ gap: 3, fontSize: 10.5, color: 'var(--fg-3)', minWidth: 0, alignItems: 'center' }}>
+            {adminQueue ? (
+              `${formatPrincipal(d.submitter)} · ${d.days.toString()}d paid`
+            ) : d.twitter ? (
+              <a href={`https://x.com/${d.twitter}`} target="_blank" rel="noopener noreferrer"
+                title={`@${d.twitter} on X`}
+                style={{ color: 'var(--burn-ink)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 3, overflowWrap: 'anywhere' }}>
+                @{d.twitter} <Icon name="external" size={10} stroke="var(--burn-ink)" />
+              </a>
+            ) : null}
           </span>
           <span className="row" style={{ gap: 6 }}>
             {adminQueue ? (
