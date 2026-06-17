@@ -1542,6 +1542,7 @@ export default function App() {
         const code = commitResult.Err as string;
         throw new Error(
           code === "BELOW_MINIMUM" ? "Too small — votes start at $1 worth of ICP."
+          : code === "TREASURY_DEPLETED" ? "Voting is paused — the treasury can't currently cover the ledger fees this commitment needs. Your ICP is safe in escrow; try again shortly."
           : `Commit registration failed: ${code}`,
         );
       }
@@ -1655,6 +1656,7 @@ export default function App() {
         const code = result.Err as string;
         if (code === "BELOW_MINIMUM") throw new Error(`Too small — top-ups start at $${MIN_COMMIT_USD} worth of ICP.`);
         if (code === "INSUFFICIENT_DEPOSIT") throw new Error("Deposit didn't register — your ICP is safe in escrow; try again in a moment.");
+        if (code === "TREASURY_DEPLETED") throw new Error("Top-ups are paused — the treasury can't currently cover the ledger fees this commitment needs. Your ICP is safe in escrow; try again shortly.");
         throw new Error(`Add-to-commitment failed: ${code}`);
       }
 
@@ -2052,6 +2054,11 @@ export default function App() {
   }).sort(byNewest);
 
   const nonCommitVotes = tier >= 1 ? voteHistory.filter(r => !historyProposals.find(p => p.id === r.proposal_id)) : [];
+  // When the treasury can't front the ledger fees a commit/top-up needs at
+  // settlement/refund, the backend refuses those actions — so the UI hides them
+  // too. Fail-open while stats are still loading (the backend still enforces).
+  const treasuryCanFront = globalStats?.treasury_can_front_fees ?? true;
+
   // Past Proposals only lists proposals whose burn threshold was actually met.
   // Threshold-missed proposals returned every commitment and nothing was burned,
   // so they're omitted entirely (per observations.md).
@@ -2907,6 +2914,7 @@ export default function App() {
 
                             {tier >= 1 && (
                               <div className="col" style={{ gap: 10 }}>
+                                {treasuryCanFront ? (
                                 <div className="row" style={{ gap: 8 }}>
                                   <Btn
                                     variant="primary"
@@ -2925,6 +2933,12 @@ export default function App() {
                                     <Icon name="x" size={13} /> REJECT
                                   </Btn>
                                 </div>
+                                ) : (
+                                  <div className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--haze-ink)', padding: '6px 8px', borderRadius: 6, background: 'var(--haze-dim)', border: '1px solid var(--haze)' }}>
+                                    <Icon name="info" size={12} stroke="var(--haze-ink)" />
+                                    Voting is paused — the treasury can't currently cover the ledger fees a commitment needs. Try again shortly.
+                                  </div>
+                                )}
 
                                 {mineBadge && (
                                   <div className="row" style={{ justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
@@ -3060,7 +3074,8 @@ export default function App() {
                               )}
                               {!isRetrying && myCommitment?.status === CommitmentStatus.Pending
                                 && (p.status === 'open' || p.status === 'met')
-                                && remainingNs > 3_600_000_000_000 && (
+                                && remainingNs > 3_600_000_000_000
+                                && treasuryCanFront && (
                                 <button
                                   onClick={() => handleAddMoreClick(p.id)}
                                   style={{
@@ -4095,12 +4110,17 @@ export default function App() {
                   const hasAmount = isFinite(usd) && usd > 0 && needed > 0n;
                   const belowMin = hasAmount && usd < MIN_COMMIT_USD;
                   const insufficient = hasAmount && needed > bal;
-                  const canSubmit = tier >= 2 && hasAmount && !belowMin && !insufficient;
+                  const canSubmit = tier >= 2 && hasAmount && !belowMin && !insufficient && treasuryCanFront;
                   return (
                   <div className="col" style={{ gap: 8 }}>
                     {tier < 2 && (
                       <span style={{ fontSize: 11.5, color: 'var(--haze-ink)' }}>
                         Sign in to burn and cast your vote.
+                      </span>
+                    )}
+                    {!treasuryCanFront && tier >= 2 && (
+                      <span style={{ fontSize: 11.5, color: 'var(--haze-ink)' }}>
+                        Voting is paused — the treasury can't currently cover the ledger fees a commitment needs at settlement. Try again shortly.
                       </span>
                     )}
                     <div className="row" style={{ gap: 12 }}>
@@ -4113,7 +4133,7 @@ export default function App() {
                         disabled={!canSubmit}
                         onClick={() => { if (canSubmit) executeTransaction(); }}
                       >
-                        <Icon name="flame" size={14} stroke="var(--char-950)" /> {insufficient ? 'Not enough funds' : belowMin ? `Minimum is $${MIN_COMMIT_USD}` : 'Submit'}
+                        <Icon name="flame" size={14} stroke="var(--char-950)" /> {!treasuryCanFront ? 'Voting paused' : insufficient ? 'Not enough funds' : belowMin ? `Minimum is $${MIN_COMMIT_USD}` : 'Submit'}
                       </Btn>
                     </div>
                   </div>

@@ -615,6 +615,11 @@ pub struct GlobalStats {
     #[serde(default)]
     pub votes_threshold_met: u64,
     pub followers_count: u64,
+    /// Whether the treasury can currently front the ledger fees a new commitment
+    /// would need at settlement/refund (cached balance ≥ TREASURY_FRONT_MIN_E8S).
+    /// The UI hides commit / "Add More" when false. Defaulted on decode.
+    #[serde(default)]
+    pub treasury_can_front_fees: bool,
 }
 
 // ==========================================
@@ -894,6 +899,10 @@ fn init(payload: InitPayload) {
     seed_default_dapps();
     // Populate the leader-neuron stats (real on mainnet, mock on local).
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), async {
+        let config = CONFIG.with(|cell| cell.borrow().get().clone());
+        refresh_treasury_cache(&config).await;
+    });
     recompute_pool_info();
     setup_timers();
 }
@@ -917,6 +926,12 @@ fn post_upgrade() {
     }
     seed_default_dapps();
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
+    // Warm the treasury-balance cache right away so the commit/"Add More" gating
+    // isn't briefly "depleted" after an upgrade (it defaults to 0 = can't front).
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), async {
+        let config = CONFIG.with(|cell| cell.borrow().get().clone());
+        refresh_treasury_cache(&config).await;
+    });
     recompute_pool_info();
     setup_timers();
     // Re-arm the crash round loop from the persisted phase (timers don't survive
@@ -3089,7 +3104,11 @@ async fn commit_inner(
     } else {
         // Zero-fee commits: the user deposits EXACTLY the amount. No protocol
         // fee, and the treasury fronts every ledger fee at settlement or refund
-        // time, so a refunded commit returns the exact deposit.
+        // time, so a refunded commit returns the exact deposit. Because that
+        // refund/settlement depends on the treasury, refuse the commit up front
+        // if the treasury can't front the fees (mirrors the UI hiding the
+        // action) rather than escrowing ICP we couldn't move later.
+        require_treasury_can_front(&config).await?;
         let balance = call_ledger_balance(ledger_id, escrow_account).await?;
         if balance < target_e8s {
             return Err("INSUFFICIENT_DEPOSIT".to_string());
@@ -3227,6 +3246,9 @@ async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), 
         owner: get_canister_id(),
         subaccount: Some(subaccount),
     };
+    // The eventual settlement/refund of this top-up is treasury-fronted; refuse
+    // if the treasury can't cover it (the UI hides "Add More" in this case too).
+    require_treasury_can_front(&config).await?;
     let balance = call_ledger_balance(ledger_id, escrow_account).await?;
     if balance < new_amount {
         return Err("INSUFFICIENT_DEPOSIT".to_string());
@@ -3428,6 +3450,57 @@ async fn treasury_floor_check(
     let balance = call_ledger_balance(config.ledger_canister_id, treasury).await?;
     if balance.saturating_sub(outflow_e8s) < TREASURY_FLOOR_E8S {
         return Err("TREASURY_FLOOR".to_string());
+    }
+    Ok(())
+}
+
+/// Minimum treasury ICP for a freshly-placed commitment to be honourable
+/// end-to-end. The zero-fee model means the treasury fronts every ledger fee at
+/// settlement/refund: a burn settlement fronts up to three fees per commitment
+/// (treasury + backend-cycles + frontend-cycles legs) and a refund fronts one.
+/// Below this the treasury literally cannot move a settled/refunded commitment,
+/// so new ICP commits and top-ups are refused (and the UI hides them) rather
+/// than escrowing ICP we couldn't return.
+const TREASURY_FRONT_MIN_E8S: u64 = 3 * ICP_FEE_E8S; // 30,000 e8s
+
+thread_local! {
+    /// Cached treasury ICP balance (e8s). Refreshed by the timer, post_upgrade,
+    /// and every commit-fronting guard, so the public `get_global_stats` query
+    /// can expose `treasury_can_front_fees` without an inter-canister call
+    /// (queries can't call the ledger). MemoryId 53.
+    static CACHED_TREASURY_E8S: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(53)), 0u64))
+    });
+}
+
+fn cached_treasury_e8s() -> u64 {
+    CACHED_TREASURY_E8S.with(|c| *c.borrow().get())
+}
+
+fn set_cached_treasury_e8s(e8s: u64) {
+    CACHED_TREASURY_E8S.with(|c| { c.borrow_mut().set(e8s); });
+}
+
+/// Fetch the live treasury balance and refresh the cache. On a transient ledger
+/// error it returns the last cached value, so a blip never spuriously reports
+/// the treasury as depleted.
+async fn refresh_treasury_cache(config: &Config) -> u64 {
+    let treasury = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(TREASURY_SUBACCOUNT),
+    };
+    match call_ledger_balance(config.ledger_canister_id, treasury).await {
+        Ok(bal) => { set_cached_treasury_e8s(bal); bal }
+        Err(_) => cached_treasury_e8s(),
+    }
+}
+
+/// Gate a user-initiated ICP commit / top-up whose settlement or refund the
+/// treasury must front. Refreshes the cache and refuses when the treasury can't
+/// cover the fronting for even one commitment.
+async fn require_treasury_can_front(config: &Config) -> Result<(), String> {
+    if refresh_treasury_cache(config).await < TREASURY_FRONT_MIN_E8S {
+        return Err("TREASURY_DEPLETED".to_string());
     }
     Ok(())
 }
@@ -4649,6 +4722,9 @@ fn setup_timers() {
         early_adopter_settlement_check().await;
         casino_weekly_burn();
         sweep_play_sessions(); // PB-306: reap completed/expired play sessions.
+        // Keep the treasury-balance cache warm so the UI's commit/"Add More"
+        // gating reflects reality between commits.
+        refresh_treasury_cache(&CONFIG.with(|c| c.borrow().get().clone())).await;
     });
     // Short watchdog so the crash loop self-heals if a one-shot timer is ever
     // dropped (e.g. across an upgrade). Cheap: a couple of reads when idle.
@@ -4795,6 +4871,7 @@ fn get_global_stats() -> GlobalStats {
         votes_cast,
         votes_threshold_met,
         followers_count,
+        treasury_can_front_fees: cached_treasury_e8s() >= TREASURY_FRONT_MIN_E8S,
     }
 }
 
@@ -18561,6 +18638,7 @@ mod tests {
             votes_cast: 0,
             votes_threshold_met: 0,
             followers_count: 0,
+            treasury_can_front_fees: false,
         };
         assert_eq!(stats.tvl_e8s, 0);
         assert_eq!(stats.total_burned_e8s, 0);
@@ -21855,6 +21933,33 @@ mod tests {
         assert_eq!(c.amount_e8s, 300_000_000, "stranded top-up reconciled, no extra deposit");
         let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(prop.total_committed_e8s, 300_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_commit_and_topup_blocked_when_treasury_depleted() {
+        // If the treasury can't front the settlement/refund ledger fees, both a
+        // fresh commit and an "Add More" top-up are refused (the UI hides them),
+        // and get_global_stats.treasury_can_front_fees mirrors the condition.
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        follow_as(alice);
+        let pid = 700_023u64;
+        open_proposal(pid, 500_000_000);
+
+        // Treasury below the fronting floor → commit refused; flag reads false.
+        set_mock_ledger_balance(TREASURY_FRONT_MIN_E8S - 1);
+        assert_eq!(commit(pid, Stance::Adopt, 200_000_000).await.unwrap_err(), "TREASURY_DEPLETED");
+        assert!(!get_global_stats().treasury_can_front_fees);
+
+        // Fund the treasury → commit succeeds; flag flips true.
+        set_mock_ledger_balance(100_000_000_000);
+        commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
+        assert!(get_global_stats().treasury_can_front_fees);
+
+        // Treasury drains again → the top-up is refused too.
+        set_mock_ledger_balance(TREASURY_FRONT_MIN_E8S - 1);
+        assert_eq!(add_to_commitment(pid, 100_000_000).await.unwrap_err(), "TREASURY_DEPLETED");
+        assert!(!get_global_stats().treasury_can_front_fees);
     }
 
     #[test]

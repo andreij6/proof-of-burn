@@ -542,6 +542,10 @@ type GlobalStats = record {
   votes_cast : nat64;
   tvl_e8s : nat64;
   total_burned_e8s : nat64;
+  // Whether the treasury can currently front the ledger fees a new commitment
+  // would need at settlement/refund (cached balance ≥ TREASURY_FRONT_MIN_E8S).
+  // The UI hides commit / "Add More" when false. Defaulted on decode.
+  treasury_can_front_fees : bool;
   followers_count : nat64;
   pending_burn_e8s : nat64;
   votes_threshold_met : nat64;
