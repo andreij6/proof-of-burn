@@ -376,6 +376,26 @@ a:hover {
   animation: il-pulse 2s var(--ease-in-out) infinite;
 }
 
+/* Skeleton shimmer for loading placeholders (theme-aware) */
+@keyframes il-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.il-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--bg-alt) 25%,
+    color-mix(in srgb, var(--fg-3) 22%, var(--bg-alt)) 50%,
+    var(--bg-alt) 75%
+  );
+  background-size: 200% 100%;
+  animation: il-shimmer 1.4s var(--ease-in-out) infinite;
+  border-radius: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .il-skeleton { animation: none; }
+}
+
 /* Scrollbar customization */
 ::-webkit-scrollbar {
   width: 8px;

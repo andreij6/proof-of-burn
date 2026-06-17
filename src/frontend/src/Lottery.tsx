@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
 import { DrawStatus, ExplorerToken } from "./bindings/backend";
 import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 import { useErrorImpression } from "./analytics";
 
 // ==========================================
@@ -300,8 +300,21 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         </div>
       )}
 
-      {/* ── Next drawing + jackpot — one full-width card; details live in the
-            "How the lossless lottery works" dialog above. ── */}
+      {/* ── Next drawing + jackpot. A shimmer card stands in while the lottery
+            info is still loading. ── */}
+      {loading && !info ? (
+        <div className="col" style={{ ...card, gap: 14, width: '100%', alignItems: 'center' }} aria-busy="true" aria-label="Loading lottery info">
+          <Skeleton width={90} height={11} />
+          <Skeleton width={180} height={13} />
+          <Skeleton width={160} height={30} radius={8} />
+          <Skeleton width={70} height={11} style={{ marginTop: 6 }} />
+          <Skeleton width={150} height={30} radius={8} />
+          <Skeleton width={100} height={11} style={{ marginTop: 6 }} />
+          <Skeleton width={120} height={22} radius={8} />
+          <Skeleton width={90} height={11} style={{ marginTop: 6 }} />
+          <Skeleton width={60} height={22} radius={8} />
+        </div>
+      ) : (<>
       <div className="col" style={{ ...card, gap: 6, width: '100%', alignItems: 'center', textAlign: 'center' }}>
         <Eyebrow>Next drawing</Eyebrow>
         {/* Date */}
@@ -362,6 +375,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
           </span>
         </div>
       )}
+      </>)}
 
       <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
         {/* ── Your tickets ── */}

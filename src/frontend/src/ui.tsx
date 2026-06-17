@@ -245,6 +245,19 @@ export function LiveDot({ color = 'var(--burn)', size = 6, on = true, style }: {
   );
 }
 
+/** Shimmer placeholder for content that's still loading. Respects reduced-motion. */
+export function Skeleton({ width = '100%', height = 14, radius = 6, style }: {
+  width?: number | string; height?: number | string; radius?: number; style?: React.CSSProperties;
+}) {
+  return (
+    <span
+      className="il-skeleton"
+      aria-hidden="true"
+      style={{ display: 'block', width, height, borderRadius: radius, ...style }}
+    />
+  );
+}
+
 // Formatting helpers
 export function fmtICP(n: number | bigint) {
   return (Number(n) / 100_000_000).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 5 });
