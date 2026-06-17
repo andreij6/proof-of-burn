@@ -9160,6 +9160,48 @@ fn dev_seed_lottery_holders(count: u64) -> Result<u64, String> {
     Ok(lottery_unique_holders(state.round))
 }
 
+/// Local-dev: insert a finished winning-draw record with the CALLER as the winner
+/// so an admin can preview the "you won" banner UI. Cosmetic only — NO ICP is
+/// transferred (payout/cycle blocks are pre-set so the payout sweep treats it as
+/// already settled). Local only. Returns the synthetic draw id.
+#[ic_cdk::update]
+fn dev_simulate_lottery_win() -> Result<u64, String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let caller = get_caller();
+    let now = current_time();
+    let state = lottery_state();
+    let prize_e8s: u64 = 500_000_000; // 5 ICP
+    let id = NEXT_DRAW_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    let draw = LotteryDraw {
+        id,
+        round: state.round,
+        drawn_at: now,
+        total_tickets: state.total_tickets.max(1),
+        pot_e8s: prize_e8s.saturating_mul(100) / 65, // implied pot for a 65% prize
+        winning_ticket: Some(0),
+        winner: Some(caller),
+        prize_e8s,
+        cycle_burn_e8s: 0,
+        cycle_burn_block: Some(0),
+        payout_block: Some(0), // pre-marked settled — the sweep won't transfer
+        status: DrawStatus::Done,
+    };
+    LOTTERY_DRAWS.with(|m| {
+        m.borrow_mut().insert(id, draw);
+    });
+    // Reflect on the public last-winner stats too.
+    let mut s = lottery_state();
+    s.last_winner = Some(caller);
+    s.last_win_at = Some(now);
+    set_lottery_state(s);
+    Ok(id)
+}
+
 /// Local-dev: seed a varied set of mock payout records for the caller so the
 /// Profile page has realistic data. No-op if the caller already has payouts.
 #[ic_cdk::update]

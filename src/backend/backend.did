@@ -1247,6 +1247,7 @@ service : (InitPayload) -> {
   dev_grant_lottery_tickets : (nat64) -> (Result_1);
   dev_fund_lottery_pot : (nat64) -> (Result);
   dev_seed_lottery_holders : (nat64) -> (Result_1);
+  dev_simulate_lottery_win : () -> (Result_1);
   // Local-dev: run one staking sweep pass immediately (instead of waiting for
   // the 5-minute timer).
   dev_run_staking_sweep : () -> (Result);

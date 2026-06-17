@@ -150,6 +150,13 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
     await refresh();
   });
 
+  const handleDevSimWin = () => run('devsimwin', async () => {
+    const res = await actor.dev_simulate_lottery_win();
+    if (res.__kind__ === "Err") { setError(res.Err); return; }
+    setNotice("Simulated a win — reloading to show the banner…");
+    setTimeout(() => window.location.reload(), 700);
+  });
+
   const handleDevSeedHolders = () => run('devholders', async () => {
     const n = parseInt(devHolders, 10);
     if (!Number.isFinite(n) || n <= 0) { setError("Enter a positive count."); return; }
@@ -172,6 +179,9 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         </Btn>
         <Btn variant="secondary" sm onClick={() => handleDevDraw(true)} disabled={busy !== null}>
           {busy === 'devwin' ? <LiveDot size={7} /> : <Icon name="target" size={13} />} Draw (force win)
+        </Btn>
+        <Btn variant="secondary" sm onClick={handleDevSimWin} disabled={busy !== null}>
+          {busy === 'devsimwin' ? <LiveDot size={7} /> : <Icon name="spark" size={13} />} Simulate my win (banner)
         </Btn>
       </div>
       <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
