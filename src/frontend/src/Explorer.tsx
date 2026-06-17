@@ -55,6 +55,17 @@ function fmtUSD(usdE8s: bigint): string {
   return `$${(Number(usdE8s) / 100_000_000).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 }
 
+// Favicon for a dapp card via DuckDuckGo's icon service (allowed in CSP img-src).
+// Returns null when the URL can't be parsed; the <img> hides itself on error.
+function dappFavicon(url: string): string | null {
+  try {
+    const host = new URL(url).hostname;
+    return host ? `https://icons.duckduckgo.com/ip3/${host}.ico` : null;
+  } catch {
+    return null;
+  }
+}
+
 // Whole days of visibility remaining (ceil); null = permanent listing.
 export function dappDaysLeft(d: DappListing, nowMs: number): number | null {
   if (d.expires_at === undefined || d.expires_at === null) return null;
@@ -371,7 +382,23 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
             <Icon name="spark" size={10} /> Vibe coded
           </Chip>
         )}
-        <h6 style={{ margin: 0, fontSize: 15, lineHeight: 1.35, overflowWrap: 'anywhere' }}>{d.name}</h6>
+        <div className="row" style={{ justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
+          <h6 style={{ margin: 0, fontSize: 15, lineHeight: 1.35, overflowWrap: 'anywhere', flex: 1, minWidth: 0 }}>{d.name}</h6>
+          {dappFavicon(d.url) && (
+            <img
+              src={dappFavicon(d.url)!}
+              alt=""
+              width={34}
+              height={34}
+              loading="lazy"
+              onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }}
+              style={{
+                width: 34, height: 34, borderRadius: 999, objectFit: 'cover', flexShrink: 0,
+                border: '1px solid var(--border)', background: 'var(--bg-alt)',
+              }}
+            />
+          )}
+        </div>
         <p style={{
           fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0, flex: 1,
           display: '-webkit-box', WebkitLineClamp: 4, WebkitBoxOrient: 'vertical', overflow: 'hidden',
