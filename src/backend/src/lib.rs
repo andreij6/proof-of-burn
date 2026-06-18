@@ -3091,6 +3091,13 @@ async fn commit_inner(
         subaccount: Some(subaccount),
     };
 
+    // Every commit's lifecycle is treasury-fronted: a refund fronts the ledger
+    // fee, and a burn settlement fronts the ICP split fees (token commits swap
+    // to ICP first, so they need ICP fronting too). Refuse up front if the
+    // treasury can't cover it — mirrors the UI hiding the action — rather than
+    // escrowing funds we couldn't move at settlement/refund.
+    require_treasury_can_front(&config).await?;
+
     if let Some((token, token_amount)) = token_commit {
         // Token commitment: the TOKEN sits in this proposal's escrow on its
         // own ledger until settlement (swap on pass, in-kind refund on miss).
@@ -3104,11 +3111,7 @@ async fn commit_inner(
     } else {
         // Zero-fee commits: the user deposits EXACTLY the amount. No protocol
         // fee, and the treasury fronts every ledger fee at settlement or refund
-        // time, so a refunded commit returns the exact deposit. Because that
-        // refund/settlement depends on the treasury, refuse the commit up front
-        // if the treasury can't front the fees (mirrors the UI hiding the
-        // action) rather than escrowing ICP we couldn't move later.
-        require_treasury_can_front(&config).await?;
+        // time, so a refunded commit returns the exact deposit.
         let balance = call_ledger_balance(ledger_id, escrow_account).await?;
         if balance < target_e8s {
             return Err("INSUFFICIENT_DEPOSIT".to_string());
@@ -7536,6 +7539,10 @@ async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     if pool.total_staked_e8s.saturating_sub(amount_e8s) < ONE_ICP_E8S {
         return Err("POOL_FLOOR".to_string());
     }
+
+    // Unstaking is treasury-fronted (the split fee below). Refuse up front if the
+    // treasury can't cover it rather than failing partway through the split.
+    require_treasury_can_front(&config).await?;
 
     // Treasury fronts the split fee: inject one fee into the pool neuron,
     // then split amount+fee — the NNS charges its fee from the split, so the
@@ -22162,21 +22169,25 @@ mod tests {
         let pid = 770_020u64;
         open_proposal(pid, 100_000_000);
 
-        // $0.50 of USDC is under the $1 floor.
+        // $0.50 of USDC is under the $1 floor (checked before the treasury/escrow gates).
         assert_eq!(
             commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 500_000).await.unwrap_err(),
             "BELOW_MINIMUM"
         );
 
-        // Empty token escrow refuses.
-        set_mock_ledger_balance(0);
+        // Empty token escrow refuses. Use per-account mode so the treasury (ICP)
+        // is funded — the treasury fronting guard passes — while the token escrow
+        // is genuinely empty, isolating the INSUFFICIENT_DEPOSIT path.
+        acct_reset();
+        acct_set(get_canister_id(), Some(TREASURY_SUBACCOUNT), 10 * ICP_FEE_E8S);
         assert_eq!(
             commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap_err(),
             "INSUFFICIENT_DEPOSIT"
         );
+        acct_disable();
         set_mock_ledger_balance(100_000_000_000);
 
-        // Settled proposals refuse.
+        // Settled proposals refuse (status checked before the treasury/escrow gates).
         PROPOSALS.with(|m| {
             let mut p = m.borrow().get(&pid).unwrap();
             p.status = "settled".to_string();

@@ -2356,6 +2356,7 @@ export default function App() {
               isLocal={config?.is_local ?? false}
               stakingEnabled={losslessEnabled}
               boostersEnabled={earlyAdoptersEnabled}
+              treasuryCanFront={globalStats?.treasury_can_front_fees ?? true}
               onSignIn={handleLogin}
               onActivity={refreshAllData}
             />

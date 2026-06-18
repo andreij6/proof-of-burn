@@ -31,6 +31,8 @@ interface StakingProps {
   isLocal: boolean;
   /** Whether the permanent Booster neuron is enabled (adds a 4th tier tab). */
   boostersEnabled: boolean;
+  /** Treasury can front the ledger fee unstaking needs; false hides/blocks it. */
+  treasuryCanFront: boolean;
   onSignIn: () => void;
   /** Called after stake/unstake so the app shell can refresh balances. */
   onActivity: () => void;
@@ -75,7 +77,7 @@ function bootstrapChip(b: StakingBootstrap) {
 }
 
 export default function Staking({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, onSignIn, onActivity,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, treasuryCanFront, onSignIn, onActivity,
 }: StakingProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
@@ -227,7 +229,9 @@ export default function Staking({
           ? "The pool neuron must keep at least 1 ICP — try a smaller amount (the last share exits when others stake)."
           : res.Err === 'NO_STAKE'
             ? `You have no stake in the ${termLabel} tier.`
-            : `Unstake failed: ${res.Err}`
+            : res.Err === 'TREASURY_DEPLETED'
+              ? "Unstaking is paused — the treasury can't currently cover the network fee. Your stake is safe; try again shortly."
+              : `Unstake failed: ${res.Err}`
       );
       return;
     }
@@ -507,11 +511,17 @@ export default function Staking({
                     />
                     <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
                   </div>
-                  <Btn variant="secondary" sm onClick={handleUnstake} disabled={busy !== null || !unstakeInput || !selMine}>
+                  <Btn variant="secondary" sm onClick={handleUnstake} disabled={busy !== null || !unstakeInput || !selMine || !treasuryCanFront}>
                     {busy === 'unstake' ? <LiveDot size={7} /> : <Icon name="undo" size={13} />}
                     {busy === 'unstake' ? " Splitting…" : " Unstake"}
                   </Btn>
                 </div>
+                {!treasuryCanFront && (
+                  <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--haze-ink)' }}>
+                    <Icon name="info" size={12} stroke="var(--haze-ink)" />
+                    Unstaking is paused — the treasury can't currently cover the network fee it fronts. Your stake is safe; try again shortly.
+                  </span>
+                )}
                 <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
                   <Icon name="clock" size={12} stroke="var(--fg-3)" />
                   Splits the {termLabel} neuron and dissolves for the full term (~{Math.round(termDays)} days),

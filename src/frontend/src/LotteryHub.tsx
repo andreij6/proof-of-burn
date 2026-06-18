@@ -24,6 +24,8 @@ interface LotteryHubProps {
   stakingEnabled: boolean;
   /** Whether Boosters (permanent stake) is enabled (shown within staking). */
   boostersEnabled: boolean;
+  /** Treasury can front the unstake fee; false hides/blocks unstaking. */
+  treasuryCanFront: boolean;
   onSignIn: () => void;
   /** Called after stake/unstake so the app shell can refresh balances. */
   onActivity: () => void;
@@ -33,7 +35,7 @@ type Tab = 'lottery' | 'staking';
 
 export default function LotteryHub({
   actor, identity, principal, host, rootKey, ledgerCanisterId,
-  isLocal, stakingEnabled, boostersEnabled, onSignIn, onActivity,
+  isLocal, stakingEnabled, boostersEnabled, treasuryCanFront, onSignIn, onActivity,
 }: LotteryHubProps) {
   // Active tab lives in the hash (#/lottery, #/lottery/staking) so Back moves
   // between tabs instead of leaving the page.
@@ -136,6 +138,7 @@ export default function LotteryHub({
           ledgerCanisterId={ledgerCanisterId}
           isLocal={isLocal}
           boostersEnabled={boostersEnabled}
+          treasuryCanFront={treasuryCanFront}
           onSignIn={onSignIn}
           onActivity={onActivity}
         />
