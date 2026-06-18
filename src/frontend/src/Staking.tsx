@@ -539,10 +539,7 @@ export default function Staking({
       {/* ── Term pools — one public NNS neuron per term ── */}
       <div className="col" style={{ ...card, gap: 12 }}>
         <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <Eyebrow>Term pools · one neuron each</Eyebrow>
-          <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-            every pool neuron is public on the NNS
-          </span>
+          <Eyebrow>Term pools</Eyebrow>
         </span>
         <div className="row" style={{ gap: 12, alignItems: 'stretch', flexWrap: 'wrap' }}>
           {TIER_ORDER.map(t => {
@@ -565,8 +562,7 @@ export default function Staking({
                   {tp ? bootstrapChip(tp.bootstrap) : <Chip tone="muted">…</Chip>}
                 </div>
                 <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>1 VP / 10 ICP</Chip>
-                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].tickets} tickets / ICP / day</Chip>
+                  <Chip tone="gold" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].tickets} tickets / ICP / day</Chip>
                 </div>
                 <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
                   <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
@@ -632,7 +628,7 @@ export default function Staking({
               </div>
               <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                 <Chip tone="burn" style={{ height: 18, fontSize: 10.5 }}>permanent · no unstake</Chip>
-                <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>40 tickets / ICP / day</Chip>
+                <Chip tone="gold" style={{ height: 18, fontSize: 10.5 }}>40 tickets / ICP / day</Chip>
               </div>
               <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
                 <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
@@ -668,11 +664,6 @@ export default function Staking({
             </div>
           )}
         </div>
-        <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-          <Icon name="info" size={12} stroke="var(--fg-3)" />
-          Each canister-controlled neuron is made public the moment it's configured and follows
-          the community leader on every topic, so no voting reward is missed.
-        </span>
       </div>
 
       {/* ── Pending unstakes ── */}

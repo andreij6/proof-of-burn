@@ -120,6 +120,9 @@ export const CHIP_TONES = {
   ok:      { bg: 'color-mix(in srgb, var(--sprout) 18%, transparent)', bd: 'var(--sprout)',   fg: 'var(--sprout-ink)' },
   danger:  { bg: 'color-mix(in srgb, var(--ember) 16%, transparent)',  bd: 'var(--ember)',    fg: 'var(--ember-ink)' },
   pending: { bg: 'color-mix(in srgb, var(--haze) 20%, transparent)',   bd: 'var(--haze)',     fg: 'var(--haze-ink)' },
+  // The design system's yellow/gold (the --haze family — same as the treasury
+  // "warn" stat). Use for reward/ticket badges where gold reads as value.
+  gold:    { bg: 'color-mix(in srgb, var(--haze) 20%, transparent)',   bd: 'var(--haze)',     fg: 'var(--haze-ink)' },
   dashed:  { bg: 'transparent',                                        bd: 'var(--border-hi)', fg: 'var(--fg-3)' },
 };
 
