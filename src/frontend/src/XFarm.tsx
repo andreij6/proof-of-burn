@@ -507,7 +507,7 @@ export default function XFarm({
                     <div className="card col" style={{ gap: 6, padding: 12, background: 'var(--surface-2)' }}>
                       <div className="row" style={{ justifyContent: 'space-between' }}>
                         <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Persona</span>
-                        <span style={{ fontSize: 12.5, maxWidth: 320, textAlign: 'right' }}>{personaText}</span>
+                        <span style={{ fontSize: 12.5, maxWidth: 320, textAlign: 'right' }}>{PERSONA_PRESETS.find(p => p.id === personaPreset)?.label ?? 'Custom persona'}</span>
                       </div>
                       <div className="row" style={{ justifyContent: 'space-between' }}>
                         <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Tier</span>
@@ -522,14 +522,6 @@ export default function XFarm({
                           <div className="row" style={{ justifyContent: 'space-between' }}>
                             <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Price (≈ ${(Number(quote.usd_e8s) / 100_000_000).toFixed(2)} via XRC)</span>
                             <span style={{ fontSize: 13, fontWeight: 600 }}>{fmtICP(quote.price_e8s)} ICP</span>
-                          </div>
-                          <div className="row" style={{ justifyContent: 'space-between' }}>
-                            <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>└ 90% burned to your Farmer's cycles</span>
-                            <span style={{ fontSize: 12 }}>{fmtICP(quote.price_e8s * 9n / 10n)} ICP</span>
-                          </div>
-                          <div className="row" style={{ justifyContent: 'space-between' }}>
-                            <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>└ 10% to the treasury</span>
-                            <span style={{ fontSize: 12 }}>{fmtICP(quote.price_e8s / 10n)} ICP</span>
                           </div>
                           <div className="row" style={{ justifyContent: 'space-between' }}>
                             <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Network fees (2 outbound legs)</span>
