@@ -71,10 +71,19 @@ interface Props {
   proposalTitle: string;
   proposalUrl: string;
   onSignIn: () => void;
+  /** Hide the inline trigger button — caller drives opening via openNonce. */
+  hideButton?: boolean;
+  /** Bump to open the modal (e.g. from a parent page). */
+  openNonce?: number;
+  /** When opening, jump straight to this thread's detail. */
+  openThreadId?: bigint | null;
+  /** Fired after any mutating action (start/comment/vote/remove) so a parent can refresh. */
+  onActivity?: () => void;
 }
 
 export default function Discussions({
   actor, identity, principal, host, rootKey, explorerInfo, isAdmin, proposalId, proposalTitle, proposalUrl, onSignIn,
+  hideButton, openNonce, openThreadId, onActivity,
 }: Props) {
   const signedIn = !!(principal && !principal.isAnonymous());
   const [count, setCount] = useState<bigint>(0n);
@@ -98,15 +107,34 @@ export default function Discussions({
     actor.get_thread_count(proposalId).then(setCount).catch(() => {});
   }, [actor, proposalId]);
 
+  // Parent-driven open (full Discussions page): bump openNonce to open; jump to a
+  // specific thread when openThreadId is set.
+  useEffect(() => {
+    if (!openNonce || !actor) return;
+    (async () => {
+      setOpen(true); setError(null); setView('list');
+      try {
+        await refreshList();
+        if (openThreadId !== null && openThreadId !== undefined) {
+          const t = await actor.get_thread(openThreadId);
+          if (t) { setActive(t); setComments(await actor.list_comments(openThreadId)); setView('detail'); }
+        }
+      } catch (e: any) { setError(e.message || String(e)); }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openNonce]);
+
   const refreshList = async () => {
     const t = await actor.list_threads(proposalId);
     setThreads(t);
     setCount(BigInt(t.length));
+    onActivity?.();
   };
   const refreshDetail = async (id: bigint) => {
     const [t, cs] = await Promise.all([actor.get_thread(id), actor.list_comments(id)]);
     setActive(t ?? null);
     setComments(cs);
+    onActivity?.();
   };
 
   const openModal = async () => {
@@ -227,12 +255,14 @@ export default function Discussions({
 
   return (
     <>
-      <button onClick={() => signedIn || count > 0n ? openModal() : onSignIn()} title="Discuss this proposal" style={{
-        background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
-        display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, fontSize: 11,
-      }}>
-        <Icon name="list" size={12} /> {count > 0n ? `Discuss (${count})` : 'Start a conversation'}
-      </button>
+      {!hideButton && (
+        <button onClick={() => signedIn || count > 0n ? openModal() : onSignIn()} title="Discuss this proposal" style={{
+          background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
+          display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, fontSize: 11,
+        }}>
+          <Icon name="list" size={12} /> {count > 0n ? `Discuss (${count})` : 'Start a conversation'}
+        </button>
+      )}
 
       {open && (
         <div style={OVERLAY} onClick={() => !busy && setOpen(false)}>

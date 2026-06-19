@@ -5940,6 +5940,19 @@ fn list_my_threads() -> Vec<Thread> {
     THREADS.with(|m| m.borrow().iter().map(|e| e.value()).filter(|t| t.author == caller).collect())
 }
 
+/// Every thread across all proposals (for the full Discussions page; the client
+/// groups by `proposal_id`). Sorted by net score then newest; `my_vote` filled.
+#[ic_cdk::query]
+fn list_all_threads() -> Vec<Thread> {
+    let caller = get_caller();
+    let mut ts: Vec<Thread> = THREADS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
+    ts.sort_by(|a, b| thread_score(b).cmp(&thread_score(a)).then(b.created_at.cmp(&a.created_at)));
+    for t in ts.iter_mut() {
+        t.my_vote = caller_vote(0, t.id, caller);
+    }
+    ts
+}
+
 // ── Proposal Discussions: comments, votes, reward, delete-on-settle (Phase 2) ──
 
 const DISCUSSION_COMMENT_FEE_USD_E8S: u64 = 25_000_000; // $0.25
@@ -6330,6 +6343,19 @@ fn dev_seed_threads(proposal_id: u64, n_threads: u64, n_comments: u64) -> Result
         }
     }
     Ok(n_threads)
+}
+
+/// Local-dev: wipe all threads, comments, votes, and reward markers. Local only.
+#[ic_cdk::update]
+fn dev_clear_threads() -> Result<(), String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    THREADS.with(|m| { let ks: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+    COMMENTS.with(|m| { let ks: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+    DISCUSSION_QUOTES.with(|m| { let ks: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+    DISCUSSION_VOTES.with(|m| { let ks: Vec<DiscussionVoteKey> = m.borrow().iter().map(|e| e.key().clone()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+    DISCUSSION_REWARDED.with(|m| { let ks: Vec<DiscussionVoteKey> = m.borrow().iter().map(|e| e.key().clone()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+    Ok(())
 }
 
 /// The caller's deposit account for upvoting `idea_id`. The same subaccount

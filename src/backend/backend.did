@@ -1329,6 +1329,8 @@ service : (InitPayload) -> {
   // Local-dev: vacate the featured slot.
   dev_clear_featured : () -> (Result);
   dev_clear_featured_dapps : () -> (Result);
+  // Local-dev: wipe all threads, comments, votes, and reward markers. Local only.
+  dev_clear_threads : () -> (Result);
   // Local-dev: make a pending unstake disbursable right now (clears both the
   // record's ETA and the mock neuron's dissolve clock).
   dev_fast_forward_dissolve : (nat64) -> (Result);
@@ -1559,6 +1561,9 @@ service : (InitPayload) -> {
   is_favorite : (nat64) -> (bool) query;
   list_active_proposals : () -> (vec Proposal) query;
   list_all_proposals : () -> (vec Proposal) query;
+  // Every thread across all proposals (for the full Discussions page; the client
+  // groups by `proposal_id`). Sorted by net score then newest; `my_vote` filled.
+  list_all_threads : () -> (vec Thread) query;
   // Comments on a thread, newest first, with the caller's vote filled in.
   list_comments : (nat64) -> (vec Comment) query;
   // PB-307 A2/B3: put a (live-owned) course up for fixed-price sale. Sets

@@ -32,6 +32,7 @@ import IdeaBoard, { parseTokenAmount, fmtTokenAmount } from "./IdeaBoard";
 import LotteryHub from "./LotteryHub";
 import Explorer from "./Explorer";
 import Discussions from "./Discussions";
+import DiscussionsPage from "./DiscussionsPage";
 import Arcade from "./Arcade";
 import Casino from "./Casino";
 import Faucet from "./Faucet";
@@ -50,12 +51,13 @@ import { useErrorImpression } from "./analytics";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
   about: '/about',
   voting: '/voting',
+  discussions: '/discussions',
   ideas: '/community',
   earn: '/earn',
   staking: '/staking',
@@ -1207,6 +1209,9 @@ export default function App() {
     if (page === 'explorer' && featureFlags.length > 0 && !explorerEnabled) {
       redirect('dashboard');
     }
+    if (page === 'discussions' && featureFlags.length > 0 && !discussionsEnabled) {
+      redirect('voting');
+    }
     // The Course Marketplace lives inside the arcade — redirect its alias.
     if (page === 'course_market') {
       redirect('arcade');
@@ -1891,6 +1896,12 @@ export default function App() {
           <Icon name="flame" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
           Voting
         </Btn>
+        {discussionsEnabled && (
+          <Btn variant={page === 'discussions' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('discussions')}>
+            <Icon name="list" size={14} stroke={page === 'discussions' ? 'var(--char-950)' : 'currentColor'} />
+            Discussions
+          </Btn>
+        )}
         <Btn variant={onEarn ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('earn')}>
           <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
           Neuron Syndicate
@@ -2371,6 +2382,20 @@ export default function App() {
               rootKey={env?.IC_ROOT_KEY}
               isAdmin={isAdmin}
               isLocal={isLocal}
+              onSignIn={handleLogin}
+            />
+          ) : page === 'discussions' && discussionsEnabled ? (
+            <DiscussionsPage
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              explorerInfo={explorerInfo}
+              isAdmin={isAdmin}
+              isLocal={isLocal}
+              proposals={proposals}
+              proposalUrl={(id) => { const pp = proposals.find(x => x.id === id); return pp ? nnsProposalLink(pp) : ''; }}
               onSignIn={handleLogin}
             />
           ) : page === 'arcade' && arcadeEnabled ? (
@@ -2863,17 +2888,6 @@ export default function App() {
                                   }} title="View full proposal on the NNS">
                                     #{proposalIdStr}
                                   </a>
-                                  <button onClick={() => shareProposalOnX(p)} title="Share this proposal on X" style={{
-                                    background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
-                                    display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, fontSize: 11,
-                                  }}>
-                                    <Icon name="share" size={12} /> Share
-                                  </button>
-                                  {discussionsEnabled && (
-                                    <Discussions actor={actor} identity={identity} principal={principal} host={host}
-                                      rootKey={env?.IC_ROOT_KEY} explorerInfo={explorerInfo} isAdmin={isAdmin}
-                                      proposalId={p.id} proposalTitle={p.title} proposalUrl={nnsProposalLink(p)} onSignIn={handleLogin} />
-                                  )}
                                 </div>
                                 <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 600, textWrap: 'pretty', overflowWrap: 'anywhere' }}>
                                   {p.title}
@@ -2966,6 +2980,20 @@ export default function App() {
 
                               </div>
                             )}
+                            {/* Footer: Share (bottom-left) · Discussion (bottom-right) */}
+                            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 8, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+                              <button onClick={() => shareProposalOnX(p)} title="Share this proposal on X" style={{
+                                background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
+                                display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, fontSize: 11,
+                              }}>
+                                <Icon name="share" size={12} /> Share
+                              </button>
+                              {discussionsEnabled ? (
+                                <Discussions actor={actor} identity={identity} principal={principal} host={host}
+                                  rootKey={env?.IC_ROOT_KEY} explorerInfo={explorerInfo} isAdmin={isAdmin}
+                                  proposalId={p.id} proposalTitle={p.title} proposalUrl={nnsProposalLink(p)} onSignIn={handleLogin} />
+                              ) : <span />}
+                            </div>
                           </div>
                         </Reveal>
                       );
@@ -3031,17 +3059,6 @@ export default function App() {
                                   }} title="View full proposal on the NNS">
                                     #{p.id.toString()}
                                   </a>
-                                  <button onClick={() => shareProposalOnX(p)} title="Share this proposal (and your stance) on X" style={{
-                                    background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
-                                    display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, fontSize: 11,
-                                  }}>
-                                    <Icon name="share" size={12} /> Share
-                                  </button>
-                                  {discussionsEnabled && (
-                                    <Discussions actor={actor} identity={identity} principal={principal} host={host}
-                                      rootKey={env?.IC_ROOT_KEY} explorerInfo={explorerInfo} isAdmin={isAdmin}
-                                      proposalId={p.id} proposalTitle={p.title} proposalUrl={nnsProposalLink(p)} onSignIn={handleLogin} />
-                                  )}
                                 </div>
                                 <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--fg)', textWrap: 'pretty', overflowWrap: 'anywhere' }}>{p.title}</span>
                                 {p.summary && p.summary !== p.title && (
@@ -3104,6 +3121,20 @@ export default function App() {
                                 ? 'Threshold met — when the neuron votes, your committed ICP is burned.'
                                 : 'If the threshold misses, your committed ICP is returned.'}
                             </span>
+                            {/* Footer: Share (bottom-left) · Discussion (bottom-right) */}
+                            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 8, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+                              <button onClick={() => shareProposalOnX(p)} title="Share this proposal (and your stance) on X" style={{
+                                background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
+                                display: 'inline-flex', alignItems: 'center', gap: 4, padding: 0, fontSize: 11,
+                              }}>
+                                <Icon name="share" size={12} /> Share
+                              </button>
+                              {discussionsEnabled ? (
+                                <Discussions actor={actor} identity={identity} principal={principal} host={host}
+                                  rootKey={env?.IC_ROOT_KEY} explorerInfo={explorerInfo} isAdmin={isAdmin}
+                                  proposalId={p.id} proposalTitle={p.title} proposalUrl={nnsProposalLink(p)} onSignIn={handleLogin} />
+                              ) : <span />}
+                            </div>
                           </div>
                         </Reveal>
                       );
