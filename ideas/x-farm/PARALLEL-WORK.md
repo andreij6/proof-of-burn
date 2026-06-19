@@ -102,6 +102,37 @@ gated per-deploy by the owner**; commit to local freely; coordinate doc edits he
 
 ## Owner requirements (Stream B must implement)
 
+- **Generation is ON-DEMAND, max once per day (owner directive 2026-06-19 — SUPERSEDES
+  the autonomous daily-timer model in `05-architecture.md` Flow B and `02` §D).**
+  - Tweets are requested **only when the user views their Farmer**, not on an
+    autonomous schedule. **No per-Farmer generation timer.**
+  - **Throttle: at most one proxy call per Farmer per UTC day.** Store
+    `last_generated_at` on the Farmer. If a generation already happened today, the
+    view returns the **stored** drafts (bounded last 30) with NO new proxy call.
+  - **Only the Farmer's owner can trigger a generation** (caller == owner) — it spends
+    the budget, so non-owners viewing get read-only stored drafts, never a new call.
+  - On a real generation: pass `caller_id` = Farmer id to the proxy (the proxy's
+    per-caller 50/day cap is then a belt-and-suspenders backstop to the on-chain 1/day).
+  - Failed proxy call (502) = no drafts stored for today, no day consumed; the user
+    can retry (subject to the 1/day throttle — decide if a *failed* attempt counts;
+    recommend it does NOT, so a failure doesn't waste the day).
+- **Burn model = 7-CALENDAR-DAY burn timer, DECOUPLED from generation (owner decision
+  2026-06-19).**
+  - Each Farmer keeps a per-Farmer **burn-only** IC timer that deliberately spends
+    ~`budget/7` per day in steady chunks (R9), depleting to the floor over **7 calendar
+    days regardless of whether the user ever views** — preserves the literal "lasts 7
+    days" promise + guaranteed proof-of-burn.
+  - **The timer NO LONGER generates tweets** — it only burns. Generation is the
+    separate on-demand/lazy path above. (This splits the old combined daily tick into
+    two independent mechanisms.)
+  - At the floor (~day 7) the factory cleanup sweep `stop_canister` + `delete_canister`s
+    the Farmer (cycles ~0, nothing to reclaim).
+  - **⚠️ Timer re-arm gotcha:** IC timers live in the heap and are lost on upgrade —
+    the Farmer's `post_upgrade` MUST re-arm the burn timer (compute remaining days from
+    `created_at`/`expected_depleted_at`), or depletion silently stalls after any upgrade.
+  - Failed/depleted-budget guard: the burn tick checks `cycles > floor` before spending.
+
+
 - **Tier pricing MUST be admin-configurable at runtime** (owner directive 2026-06-19).
   - Tiers (name, USD price, drafts/day, duration) live in `XFARM_CONFIG` (stable
     `StableCell`), NOT hardcoded constants — survive upgrades, no redeploy to change.
@@ -120,6 +151,12 @@ gated per-deploy by the owner**; commit to local freely; coordinate doc edits he
 
 ## Status Log (both streams append; newest at top)
 
+- **2026-06-19 (A): Owner directive — generation model changed + burn model decided.**
+  Generation is now ON-DEMAND on view, max 1/day, owner-gated, NO generation timer
+  (supersedes Flow B autonomous tick). Burn model = **7-calendar-day burn-only timer,
+  decoupled from generation** (owner chose "keep timer" over burn-on-use). See Owner
+  requirements above. `05-architecture.md` Flow B + `02` §D are now partially
+  superseded — Stream B follows PARALLEL-WORK over those.
 - **2026-06-19 (A): Logged owner requirement** — tier pricing must be
   admin-configurable at runtime (see Owner requirements above) + pricing-math
   resolution. Stream B to implement in `XFARM_CONFIG` + admin setter.
