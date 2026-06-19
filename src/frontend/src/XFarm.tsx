@@ -51,7 +51,7 @@ const PERSONA_PRESETS: { id: string; label: string; description: string; text: s
     id: 'ai',
     label: 'AI Visionary',
     description: 'Latest AI trends through an ICP lens — dreams up on-chain AI use cases.',
-    text: 'An AI-focused Internet Computer enthusiast, fluent in the latest AI trends and how they intersect with ICP. Loves imagining on-chain AI use cases — autonomous agents, on-chain inference, verifiable models, data sovereignty — that only the Internet Computer can enable. Forward-looking, technical, and imaginative.',
+    text: 'An AI-focused Internet Computer enthusiast, fluent in the latest AI trends and how they intersect with ICP. Loves imagining on-chain AI use cases — autonomous agents, on-chain inference, verifiable models, data sovereignty — that only ICP can enable. Forward-looking and imaginative.',
   },
   {
     id: 'bull',
@@ -80,17 +80,20 @@ const PERSONA_PRESETS: { id: string; label: string; description: string; text: s
 ];
 const MAX_PERSONA = 300;
 
-// Lifespan pricing: $1.00/day, 7–30 days, with $3 off the full 30-day lifespan. The
-// final ICP price comes from the quote (the canister applies the same math).
-const PRICE_PER_DAY_USD = 1.0;
-const DISCOUNT_30DAY_USD = 3;
+// Lifespan pricing: per-tier USD/day (Sprout $1 · Grow $1.50 · Bloom $2), 7–30 days,
+// with 10% off the full 30-day lifespan. The final ICP price comes from the quote
+// (the canister applies the same math). perDayUsd = tier.price_usd_e8s / 1e8.
+const DISCOUNT_30DAY_PCT = 0.10;
 const MIN_DAYS = 7;
 const MAX_DAYS = 30;
-function lifespanUsd(days: number): number {
-  return days * PRICE_PER_DAY_USD - (days >= MAX_DAYS ? DISCOUNT_30DAY_USD : 0);
+function tierPerDayUsd(tier?: FarmerTier): number {
+  return tier ? Number(tier.price_usd_e8s) / 100_000_000 : 0;
+}
+function lifespanUsd(days: number, perDayUsd: number): number {
+  return days * perDayUsd * (days >= MAX_DAYS ? 1 - DISCOUNT_30DAY_PCT : 1);
 }
 
-function DaysPicker({ days, setDays }: { days: number; setDays: (n: number) => void }) {
+function DaysPicker({ days, setDays, perDayUsd }: { days: number; setDays: (n: number) => void; perDayUsd: number }) {
   return (
     <div className="col" style={{ gap: 8 }}>
       <input
@@ -101,19 +104,19 @@ function DaysPicker({ days, setDays }: { days: number; setDays: (n: number) => v
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
         <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>
           <b style={{ color: 'var(--fg-1)' }}>{days}</b> days
-          {days >= MAX_DAYS && <span style={{ color: 'var(--burn-ink)', fontWeight: 600 }}> · $3 off</span>}
+          {days >= MAX_DAYS && <span style={{ color: 'var(--burn-ink)', fontWeight: 600 }}> · 10% off</span>}
         </span>
         <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--burn-ink)' }}>
           {days >= MAX_DAYS && (
             <span style={{ fontSize: 12, color: 'var(--fg-3)', fontWeight: 400, textDecoration: 'line-through', marginRight: 6 }}>
-              ${(days * PRICE_PER_DAY_USD).toFixed(2)}
+              ${(days * perDayUsd).toFixed(2)}
             </span>
           )}
-          ${lifespanUsd(days).toFixed(2)}
+          ${lifespanUsd(days, perDayUsd).toFixed(2)}
         </span>
       </div>
       <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-        ${PRICE_PER_DAY_USD.toFixed(2)}/day · {MIN_DAYS}–{MAX_DAYS} days · $3 off at {MAX_DAYS} days · charged in ICP at the live XRC rate.
+        ${perDayUsd.toFixed(2)}/day · {MIN_DAYS}–{MAX_DAYS} days · 10% off at {MAX_DAYS} days · charged in ICP at the live XRC rate.
       </span>
     </div>
   );
@@ -357,7 +360,7 @@ export default function XFarm({
             <div className="col" style={{ gap: 6 }}>
               <Eyebrow accent>Tiers</Eyebrow>
               <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>Sprout</b> 5 drafts/day · <b>Grow</b> 10/day · <b>Bloom</b> 15/day. Pick a 7–30 day lifespan at $1/day ($3 off at 30 days).</li>
+                <li><b>Sprout</b> 5 drafts/day ($1/day) · <b>Grow</b> 10/day ($1.50/day) · <b>Bloom</b> 15/day ($2/day). Pick a 7–30 day lifespan; 10% off at 30 days.</li>
                 <li>USD-priced via the XRC oracle, paid in ICP. 90% → your Farmer's cycles, 10% → treasury.</li>
                 <li>Drafts are generated on demand — only when you ask, at most once per day per farm.</li>
               </ul>
@@ -465,7 +468,7 @@ export default function XFarm({
                           <button key={t.id} style={selectCardStyle(active)} onClick={() => setTierId(t.id)}>
                             <span style={{ fontSize: 13.5, fontWeight: 600, color: active ? 'var(--burn-ink)' : 'var(--fg-1)' }}>{t.name}</span>
                             <span style={{ fontSize: 12, color: 'var(--fg-3)', lineHeight: 1.4 }}>
-                              {t.drafts_per_day} draft{t.drafts_per_day === 1 ? '' : 's'}/day{t.includes_image ? ' + 1 image/day' : ''}
+                              {t.drafts_per_day} draft{t.drafts_per_day === 1 ? '' : 's'}/day · ${tierPerDayUsd(t).toFixed(2)}/day{t.includes_image ? ' + 1 image/day' : ''}
                             </span>
                           </button>
                         );
@@ -489,7 +492,7 @@ export default function XFarm({
                       over the lifespan you choose.
                     </p>
                     <div className="card col" style={{ gap: 8, padding: 12, background: 'var(--surface-2)' }}>
-                      <DaysPicker days={days} setDays={setDays} />
+                      <DaysPicker days={days} setDays={setDays} perDayUsd={tierPerDayUsd(tiers.find(t => t.id === tierId))} />
                     </div>
                     <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
                       <Btn variant="ghost" onClick={() => setStep('tier')}>Back</Btn>
@@ -512,7 +515,7 @@ export default function XFarm({
                       </div>
                       <div className="row" style={{ justifyContent: 'space-between' }}>
                         <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Lifespan</span>
-                        <span style={{ fontSize: 12.5 }}>{days} days · ${lifespanUsd(days).toFixed(2)}{days >= MAX_DAYS ? ' ($3 off)' : ''}</span>
+                        <span style={{ fontSize: 12.5 }}>{days} days · ${lifespanUsd(days, tierPerDayUsd(tiers.find(t => t.id === tierId))).toFixed(2)}{days >= MAX_DAYS ? ' (10% off)' : ''}</span>
                       </div>
                       {quote ? (
                         <>
@@ -745,7 +748,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
           <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-2)' }}>
             Pay again to extend <b>{tier ? tier.name : 'this farm'}</b> by another {renewDays} days.
           </p>
-          <DaysPicker days={renewDays} setDays={setRenewDays} />
+          <DaysPicker days={renewDays} setDays={setRenewDays} perDayUsd={tierPerDayUsd(tier)} />
           {renewQuote ? (
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Price (≈ ${(Number(renewQuote.usd_e8s) / 100_000_000).toFixed(2)} via XRC)</span>

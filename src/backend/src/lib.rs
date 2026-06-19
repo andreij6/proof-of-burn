@@ -18579,8 +18579,9 @@ const XFARM_DURATION_DAYS: u64 = 7;                   // default/min depletion w
 // Per-day pricing (owner-chosen lifespan): $0.50/day, 7..30 days. Mirrors the
 // Explorer per-day model (EXPLORER_PRICE_PER_DAY_USD_E8S). Tier = drafts/day only;
 // price is days × per-day (tier no longer affects price).
-const XFARM_PRICE_PER_DAY_USD_E8S: u64 = 100_000_000; // $1.00 (USD e8s)
-const XFARM_30DAY_DISCOUNT_USD_E8S: u64 = 300_000_000; // $3 off the full 30-day lifespan
+// Per-day USD price is PER TIER (FarmerTier.price_usd_e8s, USD e8s/day). The full
+// 30-day lifespan gets a 10% discount.
+const XFARM_30DAY_DISCOUNT_PCT: u128 = 10;
 const XFARM_MIN_DAYS: u32 = 7;
 const XFARM_MAX_DAYS: u32 = 30;
 const XFARM_MAX_TIERS: usize = 10;
@@ -18622,15 +18623,13 @@ impl Default for XFarmConfig {
     fn default() -> Self {
         XFarmConfig {
             tiers: vec![
-                // Tier = drafts/day ONLY. Price is days-based ($0.50/day, owner-chosen
-                // lifespan 7..30) — see XFARM_PRICE_PER_DAY_USD_E8S; tier.price_usd_e8s
-                // is unused (kept 0 for struct compat). duration_days field unused too
-                // (lifespan is per-farmer). Image "Harvest" tier removed (proxy serves
-                // no images yet, 07-premium-images is Phase-2). Admin can override via
-                // admin_set_xfarm_tiers.
-                FarmerTier { id: 1, name: "Sprout".into(),  drafts_per_day: 5,  duration_days: 7, price_usd_e8s: 0, includes_image: false },
-                FarmerTier { id: 2, name: "Grow".into(),    drafts_per_day: 10, duration_days: 7, price_usd_e8s: 0, includes_image: false },
-                FarmerTier { id: 3, name: "Bloom".into(),   drafts_per_day: 15, duration_days: 7, price_usd_e8s: 0, includes_image: false },
+                // price_usd_e8s = USD/DAY per tier. Final cost = days × rate, with a 10%
+                // discount at the full 30-day lifespan. duration_days field unused
+                // (lifespan is per-farmer, 7..30). Image "Harvest" tier removed (proxy
+                // serves no images yet — Phase-2). Admin can override via admin_set_xfarm_tiers.
+                FarmerTier { id: 1, name: "Sprout".into(),  drafts_per_day: 5,  duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false }, // $1.00/day
+                FarmerTier { id: 2, name: "Grow".into(),    drafts_per_day: 10, duration_days: 7, price_usd_e8s: 150_000_000, includes_image: false }, // $1.50/day
+                FarmerTier { id: 3, name: "Bloom".into(),   drafts_per_day: 15, duration_days: 7, price_usd_e8s: 200_000_000, includes_image: false }, // $2.00/day
             ],
             proxy: XFarmProxy { url: String::new(), bearer: String::new() },
             max_active_farmers: 0, // 0 = unlimited (no per-user cap; optional global brake only)
@@ -18674,7 +18673,7 @@ pub struct XFarmQuote {
     pub days: u32,         // owner-chosen lifespan (7..30); price = days × $0.50
     pub price_e8s: u64,    // ICP at the cached XRC rate for (days × per-day USD)
     pub fee_e8s: u64,     // 2 × ICP fee (two outbound escrow legs: treasury + CMC)
-    pub usd_e8s: u64,      // USD reference total (days × XFARM_PRICE_PER_DAY_USD_E8S)
+    pub usd_e8s: u64,      // USD reference total (days × tier USD/day, less any 30-day discount)
     pub rate_usd_e8s: u64, // cached ICP/USD rate used
     pub created_at: u64,
     pub expires_at: u64,
@@ -18906,17 +18905,17 @@ async fn get_xfarm_quote(tier_id: u32, days: u32) -> Result<XFarmQuote, String> 
     require_x_farm_enabled()?;
     let caller = get_caller();
     let cfg = xfarm_config();
-    // Tier must exist (selects drafts/day); price is days-based, not tier-based.
-    let _tier = cfg.tiers.iter().find(|t| t.id == tier_id)
+    // Tier sets both drafts/day AND the per-day price (price_usd_e8s = USD/day).
+    let tier = cfg.tiers.iter().find(|t| t.id == tier_id)
         .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
     if days < XFARM_MIN_DAYS || days > XFARM_MAX_DAYS { return Err("BAD_DAYS".to_string()); }
     let backend_cfg = CONFIG.with(|c| c.borrow().get().clone());
     let rate = explorer_usd_rate_e8s(ExplorerToken::ICP, &backend_cfg).await?; // USD e8s per 1 ICP
     if rate == 0 { return Err("RATE_UNAVAILABLE".to_string()); }
-    // $1.00/day, with a flat $3 discount at the full 30-day lifespan.
-    let mut usd_total = days as u128 * XFARM_PRICE_PER_DAY_USD_E8S as u128;
+    // days × per-tier USD/day, with a 10% discount at the full 30-day lifespan.
+    let mut usd_total = days as u128 * tier.price_usd_e8s as u128;
     if days >= XFARM_MAX_DAYS {
-        usd_total = usd_total.saturating_sub(XFARM_30DAY_DISCOUNT_USD_E8S as u128);
+        usd_total = usd_total * (100 - XFARM_30DAY_DISCOUNT_PCT) / 100;
     }
     let price = u64::try_from(usd_total * 100_000_000u128 / rate as u128)
         .map_err(|_| "PRICE_OVERFLOW".to_string())?;
@@ -28279,18 +28278,24 @@ mod tests {
         assert_eq!(q1.rate_usd_e8s, 500_000_000);
         assert!(q1.expires_at > q1.created_at);
 
-        // Full 30-day lifespan: $30 − $3 discount = $27 → 5.4 ICP at $5/ICP.
+        // Full 30-day lifespan gets 10% off: Sprout $30 × 0.90 = $27 → 5.4 ICP.
         let q30 = get_xfarm_quote(1, 30).await.unwrap();
-        assert_eq!(q30.usd_e8s, 2_700_000_000, "30 × $1.00 − $3 = $27");
+        assert_eq!(q30.usd_e8s, 2_700_000_000, "Sprout 30 × $1.00 × 0.90 = $27");
         assert_eq!(q30.price_e8s, 540_000_000, "$27 at $5/ICP = 5.4 ICP");
 
         // The discount applies only at the full 30 days: 29 days = $29 (no discount).
         let q29 = get_xfarm_quote(1, 29).await.unwrap();
         assert_eq!(q29.usd_e8s, 2_900_000_000, "29 × $1.00 = $29 (no discount)");
 
-        // Tier doesn't change price (tier = drafts/day only): tier 2 @ 7d == tier 1 @ 7d.
+        // Tier SETS the per-day price: Grow = $1.50/day. 7d = $10.50 → 2.1 ICP.
         let q2 = get_xfarm_quote(2, 7).await.unwrap();
-        assert_eq!(q2.price_e8s, q1.price_e8s);
+        assert_eq!(q2.usd_e8s, 1_050_000_000, "Grow 7 × $1.50 = $10.50");
+        assert_eq!(q2.price_e8s, 210_000_000, "$10.50 at $5/ICP = 2.1 ICP");
+        assert_ne!(q2.price_e8s, q1.price_e8s, "tier changes the price");
+
+        // Bloom = $2.00/day, 30-day 10% discount: $60 × 0.90 = $54.
+        let q3 = get_xfarm_quote(3, 30).await.unwrap();
+        assert_eq!(q3.usd_e8s, 5_400_000_000, "Bloom 30 × $2.00 × 0.90 = $54");
 
         // Days out of range [7, 30] → BAD_DAYS.
         assert_eq!(get_xfarm_quote(1, 6).await.unwrap_err(), "BAD_DAYS");
