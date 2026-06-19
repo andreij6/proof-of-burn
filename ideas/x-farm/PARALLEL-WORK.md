@@ -100,7 +100,29 @@ gated per-deploy by the owner**; commit to local freely; coordinate doc edits he
 
 ---
 
+## Owner requirements (Stream B must implement)
+
+- **Tier pricing MUST be admin-configurable at runtime** (owner directive 2026-06-19).
+  - Tiers (name, USD price, drafts/day, duration) live in `XFARM_CONFIG` (stable
+    `StableCell`), NOT hardcoded constants — survive upgrades, no redeploy to change.
+  - Add an admin-guarded setter, e.g. `admin_set_xfarm_tiers(vec Tier)` /
+    `admin_set_xfarm_config(...)`, behind the same admin check as other `admin_*`
+    methods. Ship sensible defaults (Sprout/Grow/Bloom) but they must be mutable.
+  - Prices are **USD-denominated** (XRC converts to ICP at purchase, D1/R0) — the
+    admin sets USD, not a fixed ICP amount.
+  - Expose current tiers via a query (e.g. `get_xfarm_tiers`) so the frontend renders
+    live prices.
+- **Pricing math (resolve explicitly):** recommend `price = creation_cost +
+  7day_budget`, then `+10% treasury on top`, so the advertised burned 7-day budget is
+  a clean number and the ~$0.683 per-user creation cost is covered by the buyer (the
+  treasury never fronts creation — `create_farmer` is an upfront burn, not
+  treasury-front-gated). Make `creation_cost` + `treasury_pct` config fields too.
+
 ## Status Log (both streams append; newest at top)
+
+- **2026-06-19 (A): Logged owner requirement** — tier pricing must be
+  admin-configurable at runtime (see Owner requirements above) + pricing-math
+  resolution. Stream B to implement in `XFARM_CONFIG` + admin setter.
 
 - **2026-06-19 (A): Proxy hardened (retry/backoff + rate caps + structured logs).**
   Gemini 429/5xx now retried w/ exponential backoff (env `GEMINI_MAX_RETRIES`=4).
