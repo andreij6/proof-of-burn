@@ -46,12 +46,55 @@ function pillStyle(active: boolean): React.CSSProperties {
   };
 }
 
-const PERSONA_PRESETS: { id: string; label: string; text: string }[] = [
-  { id: 'devadv', label: 'ICP developer advocate', text: 'ICP developer advocate — technical, builder-focused, cites concrete canister/SDK wins.' },
-  { id: 'degen', label: 'Degen ICP maxi', text: 'Degen ICP maxi — hype, price action, CT energy, bullish on $ICP.' },
-  { id: 'research', label: 'Objective IC researcher', text: 'Objective IC researcher — nuanced, cites sources, honest about trade-offs.' },
+const PERSONA_PRESETS: { id: string; label: string; description: string; text: string }[] = [
+  {
+    id: 'ai',
+    label: 'AI Visionary',
+    description: 'Latest AI trends through an ICP lens — dreams up on-chain AI use cases.',
+    text: 'An AI-focused Internet Computer enthusiast, fluent in the latest AI trends and how they intersect with ICP. Loves imagining on-chain AI use cases — autonomous agents, on-chain inference, verifiable models, data sovereignty — that only the Internet Computer can enable. Forward-looking, technical, and imaginative.',
+  },
+  {
+    id: 'bull',
+    label: 'Price Bull',
+    description: "Perma-bull on ICP's price potential and market upside.",
+    text: "An ICP markets perma-bull, relentlessly optimistic about $ICP's long-term price potential. Frames fundamentals, adoption, and news as reasons the market is undervaluing the Internet Computer. Confident and momentum-driven (not financial advice).",
+  },
+  {
+    id: 'tech',
+    label: 'Tech Maximalist',
+    description: "Compares other chains to ICP — champions ICP's technology.",
+    text: 'An Internet Computer technology maximalist who compares other blockchains to ICP and makes the case for ICP\'s technical edge — reverse-gas, fully on-chain frontends, chain-key cryptography, web-speed finality, and true decentralization. Direct, comparison-driven, and evidence-based.',
+  },
+  {
+    id: 'macro',
+    label: 'Macro Disruptor',
+    description: 'ICP as a disruptor reshaping tech, economics & sovereignty.',
+    text: 'A macro and big-tech thinker who sees the Internet Computer as a structural disruptor — reshaping cloud computing, big tech, economics, and digital sovereignty. Connects ICP to broad trends like AI, data ownership, and the shift away from centralized platforms. Big-picture and thesis-driven.',
+  },
+  {
+    id: 'funny',
+    label: 'Crypto Comedian',
+    description: 'Satire & jokes tying crypto, current events and sports to ICP.',
+    text: 'A crypto comedian who writes jokes and satire about crypto and the Internet Computer, often tying in current events, sports, and Crypto-Twitter culture. Lighthearted, witty, and meme-aware — but still unmistakably pro-ICP.',
+  },
 ];
 const MAX_PERSONA = 300;
+
+function personaCardStyle(active: boolean): React.CSSProperties {
+  return {
+    textAlign: 'left',
+    background: active ? 'color-mix(in srgb, var(--burn) 12%, transparent)' : 'var(--surface-2)',
+    border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
+    borderRadius: 10,
+    padding: '10px 12px',
+    cursor: 'pointer',
+    transition: 'all var(--dur-fast) var(--ease-out)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 3,
+    width: '100%',
+  };
+}
 
 interface XFarmProps {
   actor: any;
@@ -78,7 +121,7 @@ export default function XFarm({
 
   const [wizardOpen, setWizardOpen] = useState(false);
   const [step, setStep] = useState<WizardStep>('persona');
-  const [personaPreset, setPersonaPreset] = useState<string>('degen');
+  const [personaPreset, setPersonaPreset] = useState<string>('ai');
   const [customPersona, setCustomPersona] = useState('');
   const [tierId, setTierId] = useState<number>(2);
   const [quote, setQuote] = useState<XFarmQuote | null>(null);
@@ -296,14 +339,18 @@ export default function XFarm({
           </div>
         ) : (
           <>
-            {/* Start-a-farm CTA — always available; a user may own unlimited farms. */}
+            {/* Start-a-farm CTA — always available on mainnet; a user may own unlimited
+                farms. Disabled on the LOCAL replica, which can't fund canister cycles
+                (CMC notify fails — PB-148) so a real create would only burn test ICP. */}
             <div className="card row" style={{ gap: 12, justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
               <p style={{ margin: 0, fontSize: 13.5, color: 'var(--fg-2)' }}>
-                {farmers.length === 0
-                  ? "You don't have any farms yet — start one to grow pro-ICP content on autopilot."
-                  : `You have ${farmers.length} farm${farmers.length === 1 ? '' : 's'}. Start another any time.`}
+                {isLocal
+                  ? <>On the local replica, real farms can't be funded (CMC cycle mint fails — PB-148), so creation is disabled here. Use <b>“Post mock data”</b> in the dev panel to preview the UI. Real creation works on mainnet.</>
+                  : farmers.length === 0
+                    ? "You don't have any farms yet — start one to grow pro-ICP content on autopilot."
+                    : `You have ${farmers.length} farm${farmers.length === 1 ? '' : 's'}. Start another any time.`}
               </p>
-              <Btn variant="primary" onClick={openWizard}>Start a farm</Btn>
+              <Btn variant="primary" onClick={openWizard} disabled={isLocal}>Start a farm</Btn>
             </div>
 
             {/* One card per farm. */}
@@ -335,13 +382,18 @@ export default function XFarm({
                   <div className="col" style={{ gap: 10 }}>
                     <span style={LABEL_STYLE}>Pick a voice</span>
                     <div className="col" style={{ gap: 8 }}>
-                      {PERSONA_PRESETS.map(p => (
-                        <button key={p.id} style={pillStyle(personaPreset === p.id)} onClick={() => setPersonaPreset(p.id)}>
-                          {p.label}
-                        </button>
-                      ))}
-                      <button style={pillStyle(personaPreset === 'custom')} onClick={() => setPersonaPreset('custom')}>
-                        Custom persona
+                      {PERSONA_PRESETS.map(p => {
+                        const active = personaPreset === p.id;
+                        return (
+                          <button key={p.id} style={personaCardStyle(active)} onClick={() => setPersonaPreset(p.id)}>
+                            <span style={{ fontSize: 13.5, fontWeight: 600, color: active ? 'var(--burn-ink)' : 'var(--fg-1)' }}>{p.label}</span>
+                            <span style={{ fontSize: 12, color: 'var(--fg-3)', lineHeight: 1.4 }}>{p.description}</span>
+                          </button>
+                        );
+                      })}
+                      <button style={personaCardStyle(personaPreset === 'custom')} onClick={() => setPersonaPreset('custom')}>
+                        <span style={{ fontSize: 13.5, fontWeight: 600, color: personaPreset === 'custom' ? 'var(--burn-ink)' : 'var(--fg-1)' }}>Custom persona</span>
+                        <span style={{ fontSize: 12, color: 'var(--fg-3)', lineHeight: 1.4 }}>Write your own voice in your own words.</span>
                       </button>
                     </div>
                     {personaPreset === 'custom' && (
