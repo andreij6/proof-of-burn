@@ -64,35 +64,44 @@ an optional **Phase 2**. → *Open question Q1.*
    ([URL context GA](https://developers.googleblog.com/url-context-tool-for-gemini-api-now-generally-available/),
    [docs](https://ai.google.dev/gemini-api/docs/url-context))
 
-4. **vetKeys for the API key — CONFIRMED: it does NOT do what we hoped (Q4).**
-   The question was "does vetKeys let me add an API key directly to a canister
-   *safely*?" **Answer: no — not in the sense of node operators being unable to
-   read it.** DFINITY's own docs are explicit:
-   - *"vetKeys guarantees strong confidentiality **up to the point of
-     decryption**. Once the plaintext is handed off to a canister, it should no
-     longer be assumed private."*
-     ([vetKeys use cases](https://medium.com/dfinity/onchain-privacy-in-action-a-guide-to-vetkeys-use-cases-d733aa6f9da5))
-   - *"**If you decrypt it in the canister, then it's out in the open again.**"*
-     (same source; it names future **TEEs**, not vetKeys, as the eventual fix.)
+4. **On-chain API key — REVISED (Q4): doable today via confidential computing
+   (SEV-SNP), not via vetKeys alone.** *(Supersedes an earlier "confirmed no" —
+   that was based on the pre-TEE execution model and was wrong for SEV-SNP nodes.
+   The IC founder confirmed it's doable today;
+   [tweet](https://x.com/dominic_w/status/2067544176825184662) — paywalled, so
+   this is reconstructed from DFINITY's TEE docs.)*
 
-   Why: to put the key in the Gemini `x-goog-api-key` header the canister must
-   **decrypt it during a replicated update** — which executes on **all ~13
-   replicas**, so every node sees the plaintext at use time. (The non-replicated
-   outcall only changes which node *egresses* the HTTP request; it does **not**
-   confine the decryption — my earlier "single-node exposure" note was wrong.)
-   vetKeys' real benefit here is narrow: **encrypted at rest** (a controller state
-   dump sees ciphertext, not the key). It does **not** hide the key from a node
-   operator observing execution.
+   Two separate facts:
+   - **vetKeys alone is NOT enough.** vetKeys protects data only *up to
+     decryption* — *"if you decrypt it in the canister, it's out in the open
+     again"*
+     ([vetKeys use cases](https://medium.com/dfinity/onchain-privacy-in-action-a-guide-to-vetkeys-use-cases-d733aa6f9da5)).
+     It gives **encrypted-at-rest**, not in-use protection.
+   - **SEV-SNP gives the in-use protection.** The IC runs replicas in **AMD
+     SEV-SNP** confidential VMs: the GuestOS (replica) **RAM is hardware-encrypted
+     and isolated from the host — "even if the HostOS/hypervisor is compromised,
+     the confidentiality and integrity of the GuestOS is preserved."**
+     ([IC TEE overview](https://learn.internetcomputer.org/hc/en-us/articles/46124920595988-Trusted-Execution-Environments))
+     So a key decrypted and used in canister memory is shielded from the node
+     operator by the CPU. This is the mechanism that makes it "doable today."
 
-   **The correct framing:** *no secret placed in an outcall header is hidden from
-   node operators today.* So don't try to hide it — make the node-visible
-   credential **worthless to steal**. → **Decision D4: Cloud-Run proxy.** The
-   canister calls our proxy with a **narrowly-scoped, budget-capped, rotatable
-   bearer token**; the proxy holds the real Gemini key in its env and is the only
-   thing that token can reach. A node operator who captures the token can only hit
-   our rate/budget-limited proxy — not run up an unbounded Gemini bill. The real
-   Gemini key **never touches the IC**. (vetKeys stays the right tool for *user*
-   data, e.g. private per-user content — just not for a canister-used service key.)
+   **The clean on-chain pattern = vetKeys (at rest) + SEV-SNP (in use):** store the
+   Gemini key as ciphertext; decrypt only inside the enclave at call time; the host
+   can't read either the disk ciphertext or the in-RAM plaintext.
+
+   **CAVEATS (must verify before trusting):**
+   - **Rollout is early.** First SEV-SNP node deployed **Nov 2025**
+     ([forum](https://forum.dfinity.org/t/first-sev-snp-enabled-node-deployed/59499));
+     **not yet confirmed across all mainnet subnets**. → **Must confirm our
+     canister's subnet is fully SEV-SNP-enabled** before relying on this.
+   - **Trust shifts to AMD hardware + attestation**, and SEV-SNP has had breaks
+     (e.g. RMPocalypse, 2025). Hardware-enforced ≠ unbreakable like chain-key crypto.
+   - **Budget-cap + rotate the key regardless** (defense in depth).
+
+   → **Decision D4 is now a choice (see below).** The **Cloud-Run proxy** remains
+   the option that needs **zero trust in IC confidentiality** (key never on the
+   IC); the **SEV-SNP + vetKeys** option keeps the key on-chain as the user wants,
+   gated on confirming subnet SEV-SNP status.
 
 ---
 
@@ -127,10 +136,21 @@ See **[01-ux-spec.md](01-ux-spec.md)**, **[02-backend-and-tasks.md](02-backend-a
 - **D2 — Gating.** Button enabled when the user holds **any supported token with a
   balance ≥ the fee** (check all five token balances client-side, not just ICP).
 - **D3 — Fee = $0.25.** `AI_REVIEW_FEE_USD_E8S = 25_000_000`, USD-priced via XRC.
-- **D4 — Cloud-Run proxy (NOT vetKeys).** Confirmed above: vetKeys can't keep a
-  canister-used API key secret from node operators. The Gemini key lives in the
-  proxy, off-chain; the canister→proxy bearer token is scoped + budget-capped +
-  rotatable so it's worthless if a node captures it.
+- **D4 — Key custody: REOPENED (two viable paths; pick one).** Research revised
+  the earlier "proxy-only" call — an **on-chain** key *is* safe today on SEV-SNP
+  nodes (finding #4). Options:
+  - **D4a — On-chain (SEV-SNP + vetKeys):** the user's preference. Key stored
+    vetKeys-encrypted, decrypted/used inside the SEV-SNP enclave; never leaves the
+    IC. **Gated on confirming our subnet is fully SEV-SNP-enabled** + accepting the
+    AMD-hardware trust assumption. Direct Gemini call from the canister.
+  - **D4b — Cloud-Run proxy:** key off-chain in the proxy; canister→proxy bearer
+    token scoped/budget-capped/rotatable. Needs **zero trust in IC
+    confidentiality**, but adds a trusted off-chain hop.
+  - **Recommendation:** go **D4a** if the canister's subnet is verified SEV-SNP
+    (matches the user's intent + keeps it pure-ICP); otherwise **D4b** as the
+    no-confidentiality-assumption fallback. Either way: budget-cap + rotate. The
+    proxy also conveniently solves the `responseSchema`+`url_context` combo (it can
+    do the 2-call reformat off-chain) — under D4a that logic moves on-chain.
 - **D5 — Don't store reviews.** The proxy/Gemini returns two renderings — a
   **tweet-friendly** string and a **detailed** in-app breakdown. We render and
   (optionally) tweet; nothing is persisted on-chain. (No `AI_REVIEWS` store → one
@@ -144,6 +164,6 @@ See **[01-ux-spec.md](01-ux-spec.md)**, **[02-backend-and-tasks.md](02-backend-a
 ## MemoryId note (registry drifted)
 PB-510 reserved `94/95`, but **94 is now taken** (`FEATURED_QUOTES`, shipped) and
 `53` (treasury cache, shipped). Currently free: **26–33, 54–59, 73, 76, 95, 97+**.
-With **D5 (no review store)** this feature only needs **two** ids — claim **95**
-(`AI_REVIEW_QUOTES`) and **97** (`AI_LAST_REVIEW_AT` cooldown) and update the
-registry *before* building.
+With **D5 (no review store)** this feature needs **95** (`AI_REVIEW_QUOTES`) and
+**97** (`AI_LAST_REVIEW_AT` cooldown); **D4a** adds **98** (vetKeys-encrypted key
+cell). Claim and update the registry *before* building.

@@ -112,24 +112,30 @@ Add an `ic_cdk` management-canister `http_request` with:
   so the canister still receives clean JSON. Keeping this in the proxy is another
   reason D4 (proxy) beats a direct call.
 
-## E. Key custody — DECIDED: Cloud-Run proxy (D4)
+## E. Key custody — TWO PATHS (D4a / D4b; pick after subnet check)
 
-vetKeys was investigated and **rejected for the key** (README finding #4): it
-can't keep a canister-*used* key secret from node operators — *"if you decrypt it
-in the canister, it's out in the open again"* (DFINITY). Decision:
+Research revised the earlier proxy-only call: an **on-chain key is safe today on
+SEV-SNP nodes** (README finding #4). vetKeys alone is insufficient (protects only
+to decryption); **SEV-SNP** supplies the in-use protection (host can't read
+enclave RAM).
 
-- **Gemini key** lives only in the **proxy's env** (Cloud Run / equivalent) —
-  **never on the IC**.
-- The canister authenticates to the proxy with a **bearer token** that is
-  **narrowly scoped** (only reaches our proxy), **budget/rate-capped** at the
-  proxy, and **rotatable**. It's still node-visible in the outcall header (nothing
-  in a header is hidden today), but it's **worthless to steal** — it can't run up
-  a Gemini bill, only hit our capped proxy.
-- Admin sets it via `admin_set_ai_proxy(url, bearer_token)` (token hidden from
-  non-admin queries). Rotate on a schedule.
-- *(vetKeys remains the right tool for any future **user-data** privacy feature —
-  just not for this service key. The real future fix for canister-used secrets is
-  TEEs, per DFINITY.)*
+**D4a — On-chain (SEV-SNP + vetKeys)** *(user's preference; pure-ICP):*
+- Store the Gemini key **vetKeys-encrypted** in a `StableCell<Vec<u8>>` (one extra
+  MemoryId). Admin sets it via `admin_set_ai_key_encrypted(ciphertext)`.
+- At call time: `vetkd_derive_key` → decrypt **inside the enclave** → set
+  `x-goog-api-key` → **direct** non-replicated Gemini call.
+- The `responseSchema`+`url_context` 2-call fallback (if needed) runs **on-chain**.
+- **GATE: verify the canister's subnet is fully SEV-SNP-enabled** + accept AMD
+  hardware trust. Spike `vetkd_derive_key` round-trip first.
+
+**D4b — Cloud-Run proxy** *(fallback; zero trust in IC confidentiality):*
+- Gemini key in the proxy env, **never on the IC**; canister→proxy **bearer token**
+  scoped/budget-capped/rotatable via `admin_set_ai_proxy(url, bearer_token)`.
+- Proxy owns the Gemini call + the 2-call schema/URL-context reformat.
+
+**Both:** budget-cap + rotate the key. The non-replicated outcall is used either
+way (determinism + cost). Default to **D4a if subnet SEV-SNP is confirmed**, else
+**D4b**.
 
 ## F. Candid / methods
 
@@ -137,7 +143,9 @@ in the canister, it's out in the open again"* (DFINITY). Decision:
 - `get_ai_review_deposit_address() -> LedgerAccount` (query)
 - `request_ai_review(nat64, ExplorerToken) -> Result<AiReviewResult, String>` (update; result NOT stored, D5)
 - admin: `admin_set_ai_review_config(fee_usd_e8s, model, cooldown, daily_cap)`,
-  `admin_set_ai_proxy(url, bearer_token)`, `admin_set_feature_flag("ai_review", …)`
+  `admin_set_feature_flag("ai_review", …)`, plus **either**
+  `admin_set_ai_key_encrypted(ciphertext)` (D4a) **or**
+  `admin_set_ai_proxy(url, bearer_token)` (D4b)
 - dev: `dev_mock_ai_review(nat64, AiVerdict) -> AiReviewResult` (local-only; no outcall/fee)
 - Regenerate `backend.did` (candid-extractor) + `npm run gen:bindings`.
 - *(No `get_ai_review` / `list_my_ai_reviews` — D5 stores nothing.)*
@@ -149,13 +157,18 @@ it to the launch-policy lists in `scripts/deploy-prod.sh` (CORE_OFF until ready)
 
 ## H. Task list (phased)
 
-**Phase 0 — Infra spike**
-- [ ] 0.1 Build the **Cloud-Run proxy** (`POST /v1/review`, bearer auth, holds the
-  Gemini key, GitHub-URL extraction + URL-context, returns the two-rendering JSON;
-  does the 2-call fallback if `responseSchema` + `url_context` can't coexist). *Effort S–M.*
-- [ ] 0.2 Prove a **non-replicated** outcall from a throwaway local method to the
-  proxy (no HTTPS outcalls exist in the repo yet — hardest IC unknown). *Acc:* a
-  real `AiReviewResult` JSON returns locally. *Effort M.*
+**Phase 0 — Infra spike + key-custody fork (D4a/D4b)**
+- [ ] 0.0 **Verify the canister's subnet is fully SEV-SNP-enabled** (host can't read
+  enclave RAM). If yes → **D4a** (on-chain key); if not → **D4b** (proxy). *S.*
+- [ ] 0.1 Prove a **non-replicated** outcall from a throwaway local method (no HTTPS
+  outcalls exist in the repo yet — hardest IC unknown). Confirm
+  `responseSchema`+`url_context` coexist (else use the 2-call reformat). *M.*
+- [ ] 0.2a **(D4a)** Spike `vetkd_derive_key` encrypt/decrypt round-trip; direct
+  Gemini call from the canister with the decrypted key; on-chain GitHub-URL extract
+  + URL-context. *Acc:* a real `AiReviewResult` returns locally. *M–L.*
+- [ ] 0.2b **(D4b)** Build the **Cloud-Run proxy** (`POST /v1/review`, bearer auth,
+  holds the Gemini key, URL-context + 2-call reformat, returns the two-rendering
+  JSON). *S–M.*
 
 **Phase 1 — Money path (reuse)**
 - [ ] 1.1 Fee const ($0.25) + `get_ai_review_quote` + deposit address + `derive_ai_subaccount`. *S, reuses Explorer.*

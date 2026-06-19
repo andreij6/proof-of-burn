@@ -36,23 +36,25 @@ re-reviews the same proposal endlessly.
   **Cache** the review (Q5) so a re-view is free *and* doesn't re-call Gemini.
   (5) Tight `max_response_bytes` so a hostile/huge response can't over-bill cycles.
 
-## R4 — Key custody reality (RESOLVED → D4: proxy)
-The user asked whether vetKeys lets them put an API key in a canister *safely*.
-**Confirmed answer: no.** vetKeys protects data only **up to decryption**; DFINITY:
-*"if you decrypt it in the canister, then it's out in the open again"* (TEEs, not
-vetKeys, are the eventual fix). The canister must decrypt the key during a
-**replicated update** to set the `x-goog-api-key` header → **all ~13 nodes** see
-plaintext at use time. The non-replicated outcall does **not** confine this (it
-only changes which node egresses the HTTP request). vetKeys' only benefit here is
-encrypted-at-rest — marginal.
-- **Decision (D4): Cloud-Run proxy.** The real Gemini key never touches the IC.
-  The canister→proxy **bearer token** is still node-visible (nothing in a header
-  is hidden today), but it is **scoped to our proxy + budget/rate-capped +
-  rotatable**, so a captured token is **worthless** — it can't run up a Gemini
-  bill, only hit our throttled proxy. The mental model: *don't hide the
-  credential, make it not worth stealing.*
-- vetKeys stays the right tool for future **user-data** privacy, not this service
-  key. (PB-510 reached the same proxy conclusion.)
+## R4 — Key custody (REVISED; two viable paths → D4a/D4b)
+The user asked whether a key can live safely in a canister. **Revised answer:
+yes, today — via confidential computing (SEV-SNP), not via vetKeys alone.**
+- **vetKeys alone is insufficient** — protects only up to decryption (*"if you
+  decrypt it in the canister, it's out in the open again"*). Gives encrypted-at-
+  rest, not in-use protection.
+- **SEV-SNP supplies the in-use protection:** IC replicas run in AMD SEV-SNP
+  confidential VMs; GuestOS RAM is hardware-encrypted and isolated from the host,
+  so the node operator can't read the decrypted key in memory. *(My earlier
+  "all 13 nodes see it" was the pre-TEE model — wrong for SEV-SNP subnets.)*
+- **Clean on-chain pattern (D4a):** vetKeys-encrypted at rest + decrypt/use inside
+  the SEV-SNP enclave; direct Gemini call. **Gated on verifying our subnet is
+  fully SEV-SNP-enabled** (rollout is early — first node Nov 2025) and accepting
+  AMD-hardware trust (SEV-SNP has had CVEs, e.g. RMPocalypse 2025).
+- **Fallback (D4b): Cloud-Run proxy** — key never on the IC; canister→proxy bearer
+  token scoped/budget-capped/rotatable (worthless if captured). Needs zero trust
+  in IC confidentiality; adds a trusted off-chain hop.
+- **Either way:** budget-cap + rotate the key. vetKeys remains the right tool for
+  future **user-data** privacy regardless of which path is chosen for this key.
 
 ## R5 — Refund correctness (MED)
 Charge-then-outcall means a failed/garbled Gemini response must refund cleanly,
