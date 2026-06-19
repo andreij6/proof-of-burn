@@ -106,24 +106,14 @@ export default function DiscussionsPage({
           <Icon name="list" size={22} stroke="var(--burn-ink)" />
           <h4 style={{ margin: 0 }}>Discussions</h4>
         </span>
-        <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
+        <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 640, lineHeight: 1.55 }}>
           Open conversations on live proposals — start one for $1, weigh in for $0.25,
-          and up/down-vote the takes. Discussions close when the proposal is decided.
+          and up/down-vote the takes. Start a quality conversation and you earn{' '}
+          <b>1 lottery ticket for every upvote it gets</b> (while you're staked).{' '}
+          <b>Fees paid in ICP are burned 100%</b> (to backend-canister cycles); fees in
+          other tokens go to the treasury. Discussions close when the proposal is decided.
         </p>
       </div>
-
-      {liveProposals.length > 0 && (
-        <div className="card col" style={{ gap: 8 }}>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>Start a new conversation on an open proposal:</span>
-          <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-            {liveProposals.slice(0, 8).map(p => (
-              <Btn key={p.id.toString()} variant="ghost" sm onClick={() => openModal(p.id, null)}>
-                #{p.id.toString()} {p.title.length > 28 ? p.title.slice(0, 28) + '…' : p.title}
-              </Btn>
-            ))}
-          </div>
-        </div>
-      )}
 
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
@@ -132,7 +122,7 @@ export default function DiscussionsPage({
       ) : order.length === 0 ? (
         <div className="col" style={{ alignItems: 'center', gap: 10, padding: '48px 0', color: 'var(--fg-3)' }}>
           <Icon name="list" size={28} stroke="var(--fg-dim)" />
-          <span style={{ fontSize: 13 }}>No open discussions yet. Start one from a proposal above.</span>
+          <span style={{ fontSize: 13 }}>No open discussions yet. Start one from a proposal on the Voting page.</span>
         </div>
       ) : (
         order.map(pid => {
