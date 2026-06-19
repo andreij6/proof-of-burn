@@ -80,7 +80,7 @@ const PERSONA_PRESETS: { id: string; label: string; description: string; text: s
 ];
 const MAX_PERSONA = 300;
 
-function personaCardStyle(active: boolean): React.CSSProperties {
+function selectCardStyle(active: boolean): React.CSSProperties {
   return {
     textAlign: 'left',
     background: active ? 'color-mix(in srgb, var(--burn) 12%, transparent)' : 'var(--surface-2)',
@@ -383,13 +383,13 @@ export default function XFarm({
                       {PERSONA_PRESETS.map(p => {
                         const active = personaPreset === p.id;
                         return (
-                          <button key={p.id} style={personaCardStyle(active)} onClick={() => setPersonaPreset(p.id)}>
+                          <button key={p.id} style={selectCardStyle(active)} onClick={() => setPersonaPreset(p.id)}>
                             <span style={{ fontSize: 13.5, fontWeight: 600, color: active ? 'var(--burn-ink)' : 'var(--fg-1)' }}>{p.label}</span>
                             <span style={{ fontSize: 12, color: 'var(--fg-3)', lineHeight: 1.4 }}>{p.description}</span>
                           </button>
                         );
                       })}
-                      <button style={personaCardStyle(personaPreset === 'custom')} onClick={() => setPersonaPreset('custom')}>
+                      <button style={selectCardStyle(personaPreset === 'custom')} onClick={() => setPersonaPreset('custom')}>
                         <span style={{ fontSize: 13.5, fontWeight: 600, color: personaPreset === 'custom' ? 'var(--burn-ink)' : 'var(--fg-1)' }}>Custom persona</span>
                         <span style={{ fontSize: 12, color: 'var(--fg-3)', lineHeight: 1.4 }}>Write your own voice in your own words.</span>
                       </button>
@@ -414,11 +414,17 @@ export default function XFarm({
                   <div className="col" style={{ gap: 10 }}>
                     <span style={LABEL_STYLE}>Choose a tier</span>
                     <div className="col" style={{ gap: 8 }}>
-                      {tiers.map(t => (
-                        <button key={t.id} style={pillStyle(tierId === t.id)} onClick={() => setTierId(t.id)}>
-                          <b>{t.name}</b> · {t.drafts_per_day} draft{t.drafts_per_day === 1 ? '' : 's'}/day{t.includes_image ? ' + 1 image/day' : ''} · {t.duration_days}d
-                        </button>
-                      ))}
+                      {tiers.map(t => {
+                        const active = tierId === t.id;
+                        return (
+                          <button key={t.id} style={selectCardStyle(active)} onClick={() => setTierId(t.id)}>
+                            <span style={{ fontSize: 13.5, fontWeight: 600, color: active ? 'var(--burn-ink)' : 'var(--fg-1)' }}>{t.name}</span>
+                            <span style={{ fontSize: 12, color: 'var(--fg-3)', lineHeight: 1.4 }}>
+                              {t.drafts_per_day} draft{t.drafts_per_day === 1 ? '' : 's'}/day{t.includes_image ? ' + 1 image/day' : ''} · {t.duration_days} days
+                            </span>
+                          </button>
+                        );
+                      })}
                     </div>
                     <p style={{ fontSize: 11.5, color: 'var(--fg-3)', margin: 0 }}>
                       USD-priced via the XRC oracle, paid in ICP. Admin can edit tiers.
