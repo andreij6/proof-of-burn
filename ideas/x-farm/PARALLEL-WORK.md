@@ -102,6 +102,26 @@ gated per-deploy by the owner**; commit to local freely; coordinate doc edits he
 
 ## Owner requirements (Stream B must implement)
 
+- **Renew (pay again to extend a Farmer's lifespan) + mock-data buttons (owner
+  directive 2026-06-19).** Added AFTER the 3-fork refactor — integrator layers these
+  on once the forks land (additive). Contract:
+  - Backend `renew_farmer(farmer_id: u64) -> Result<Farmer>` (update): owner-check;
+    require `status == Active` and `canister_id.is_some()` (a depleted+swept Farmer
+    has no canister → renew rejects, user creates a new one). Use a fresh locked quote
+    for the Farmer's existing tier (frontend calls `get_xfarm_quote(tier_id)` first);
+    escrow holds price+fee; **10% → treasury, 90% → CMC topup to the EXISTING Farmer
+    canister** (reuse create_farmer's money path); then call the Farmer canister
+    `extend(add_budget_cycles, add_days)`. Bump `budget_cycles +=` and
+    `expected_depleted_at += tier.duration_days*DAY_NS`; keep Active. Audit.
+  - Farmer wasm `extend(add_budget_cycles: u64, add_days: u32) -> Result<()>`
+    (backend-only): set `depleted=false`; `budget_cycles +=`; `duration_days += add_days`;
+    re-arm the burn timer if it was cleared at depletion; put_config.
+  - Frontend: per-Farm **"Renew"** button → quote → deposit shortfall → `renew_farmer(id)`.
+  - Frontend dev controls: explicit **"Post mock data"** (dev_seed_farmer +
+    dev_seed_drafts) and **"Clear mock data"** (dev_clear_farmers) buttons.
+
+
+
 - **Generation is ON-DEMAND, max once per day (owner directive 2026-06-19 — SUPERSEDES
   the autonomous daily-timer model in `05-architecture.md` Flow B and `02` §D).**
   - Tweets are requested **only when the user views their Farmer**, not on an
@@ -158,6 +178,16 @@ gated per-deploy by the owner**; commit to local freely; coordinate doc edits he
 
 ## Status Log (both streams append; newest at top)
 
+- **2026-06-19 (A): INTEGRATION — 3 forks merged + revised-model finish.** All three
+  forks landed on disjoint files (Farmer wasm = burn-only timer + on-demand
+  `request_generation` + caller_id; backend = unlimited farms / `list_my_farmers` /
+  on-demand `get_farmer_drafts` / global-cap-off-by-default; frontend = multi-farm UI).
+  Integrator then layered: **Renew** (`renew_farmer` backend + `extend` farmer wasm,
+  re-arms burn timer + per-farm Renew button), **Post/Clear mock-data buttons**, and
+  **removed the Harvest image tier** (proxy has no image endpoint yet). Builds: both
+  wasms compile; `cargo test -p xfarm_farmer` 4/4, `cargo test -p backend xfarm` 6/6;
+  candid regenerated (both .did); `npm run gen:bindings` + frontend `tsc --noEmit`
+  CLEAN. Local deploy + smoke next.
 - **2026-06-19 (A): Owner directive — generation model changed + burn model decided.**
   Generation is now ON-DEMAND on view, max 1/day, owner-gated, NO generation timer
   (supersedes Flow B autonomous tick). Burn model = **7-calendar-day burn-only timer,

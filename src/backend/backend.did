@@ -440,6 +440,41 @@ type ExplorerQuote = record {
   expires_at : nat64;
 };
 type ExplorerToken = variant { ICP; CkUSDC; CkUSDT; CkBTC; CkETH };
+type Farmer = record {
+  id : nat64;
+  status : FarmerStatus;
+  owner : principal;
+  // Reported by the Farmer via report_depleted (R9: surfaced in the dashboard).
+  burned_cycles : nat64;
+  tier_id : nat32;
+  // Display only — the cycle balance is the real 7-day timer (D2).
+  expected_depleted_at : nat64;
+  // None under the dev-seed mock path; Some for a real per-user canister.
+  canister_id : opt principal;
+  last_burn_tick_at : nat64;
+  created_at : nat64;
+  last_generation_at : nat64;
+  persona : text;
+  // ICP e8s directed to cycles (the 90% leg, net of the CMC leg fee). A
+  // record of what was burned; the Farmer's own cycle balance is authoritative.
+  budget_cycles : nat64;
+  // Idempotency for the 90% CMC leg (PB-148 class); reset to None on CMC_REFUNDED.
+  burn_block_index : opt nat64;
+  cmc_notified : bool;
+  treasury_block : opt nat64;
+  install_done : bool;
+};
+type FarmerStatus = variant { Failed; Active; Disabled; Depleted };
+type FarmerTier = record {
+  id : nat32;
+  // USD reference price (D1); XRC-quoted to ICP at payment time.
+  price_usd_e8s : nat64;
+  name : text;
+  duration_days : nat32;
+  // D9 premium — tier gets 1 Nano-Banana image/day via the proxy.
+  includes_image : bool;
+  drafts_per_day : nat32;
+};
 // Structured eligibility result — a developer's CLI/agent can render exactly
 // which gate is blocking and when they're next eligible (review optimization).
 type FaucetGate = variant {
@@ -907,15 +942,19 @@ type RecordHoleOk = record {
 };
 type Result = variant { Ok; Err : text };
 type Result_1 = variant { Ok : nat64; Err : text };
-type Result_10 = variant { Ok : CrashVerifyView; Err : text };
+type Result_10 = variant { Ok : nat64; Err : MintError };
+type Result_11 = variant { Ok : RecordHoleOk; Err : text };
+type Result_12 = variant { Ok : StartSessionOk; Err : text };
+type Result_13 = variant { Ok : bool; Err : text };
+type Result_14 = variant { Ok : CrashVerifyView; Err : text };
 type Result_2 = variant { Ok : text; Err : text };
 type Result_3 = variant { Ok : CompleteRoundOk; Err : text };
-type Result_4 = variant { Ok : nat32; Err : text };
-type Result_5 = variant { Ok : ExplorerQuote; Err : text };
-type Result_6 = variant { Ok : nat64; Err : MintError };
-type Result_7 = variant { Ok : RecordHoleOk; Err : text };
-type Result_8 = variant { Ok : StartSessionOk; Err : text };
-type Result_9 = variant { Ok : bool; Err : text };
+type Result_4 = variant { Ok : Farmer; Err : text };
+type Result_5 = variant { Ok : nat32; Err : text };
+type Result_6 = variant { Ok : ExplorerQuote; Err : text };
+type Result_7 = variant { Ok : vec XFarmDraft; Err : text };
+type Result_8 = variant { Ok : record { Farmer; nat64; nat64 }; Err : text };
+type Result_9 = variant { Ok : XFarmQuote; Err : text };
 // Fixed staking terms. The 6-month minimum matches the NNS minimum dissolve
 // delay for voting eligibility, so no Mission 70 gate applies. Voting weight
 // and the daily lottery-ticket grant both scale with the same multiplier,
@@ -1040,6 +1079,30 @@ type VoteRecord = record {
   decided_at : nat64;
   icp_burned_e8s : nat64;
 };
+type XFarmDraft = record {
+  id : nat64;
+  cited_url : opt text;
+  image_url : opt text;
+  "text" : text;
+  created_at : nat64;
+};
+type XFarmInfo = record {
+  wasm_uploaded : bool;
+  tiers : vec FarmerTier;
+  active_count : nat64;
+  enabled : bool;
+  proxy_set : bool;
+  max_active_farmers : nat64;
+};
+type XFarmQuote = record {
+  tier_id : nat32;
+  fee_e8s : nat64;
+  created_at : nat64;
+  rate_usd_e8s : nat64;
+  price_e8s : nat64;
+  usd_e8s : nat64;
+  expires_at : nat64;
+};
 // Saga journal for one yield distribution: the shared yield inbox (fed by
 // all three tier neurons) is drained 50% to the lottery prize pot / 50% to
 // the treasury. Persisted per-leg block indices make a retry skip completed
@@ -1088,6 +1151,7 @@ service : (InitPayload) -> {
   admin_check_neuron_following : () -> (vec NeuronFollowStatus);
   admin_clear_featured_slot : () -> (Result);
   admin_delete_chat : (nat64) -> (Result);
+  admin_disable_farmer : (nat64) -> (Result);
   // Admin: allocate treasury ICP into the early-adopter neuron (compounds the
   // program's yield; distributed by the normal monthly bands).
   admin_fund_early_adopter_neuron : (nat64, bool) -> (Result);
@@ -1208,6 +1272,12 @@ service : (InitPayload) -> {
   // network has no XRC so this is the only knob there; on mainnet it acts as
   // an emergency seed that the next successful XRC refresh overwrites.
   admin_set_usd_rate : (IdeaToken, nat64) -> (Result);
+  admin_set_xfarm_config : (nat64) -> (Result);
+  admin_set_xfarm_proxy : (text, text) -> (Result);
+  admin_set_xfarm_tiers : (vec FarmerTier) -> (Result);
+  // Upload the Farmer wasm the factory installs (heap-cached; re-upload after an
+  // upgrade). Records the sha256 audit hash. Rotatable by re-calling.
+  admin_set_xfarm_wasm : (blob) -> (Result);
   admin_trigger_sweep : () -> (Result);
   admin_unhide_course : (nat64) -> (Result);
   // Admin: update a project's details and its single USD funding goal.
@@ -1304,6 +1374,11 @@ service : (InitPayload) -> {
   // flow — same machinery as the explorer/idea-board fees: the caller must have
   // pre-approved the canister via icrc2_approve). ≤ 20 per author, ≤ 4 KB.
   create_crash_strategy : (CrashStrategyInput, IdeaToken) -> (Result_1);
+  // Create a Farmer: escrow → 10% treasury → create+install the Farmer canister →
+  // 90% burn-to-cycles funding it (CMC topup, journaled). Reuses settle_burn_split's
+  // CMC leg + submit_dapp's escrow ordering. Per R5 the order is create→install→top-up;
+  // a partial failure leaves a persisted Farmer the sweep can resume or clean up.
+  create_farmer : (nat32, text) -> (Result_4);
   create_pool_draft : (nat64) -> (Result);
   // Change the golfer's look (palette indices) for $1, paid in any supported
   // token (ICP / ckBTC / ckETH / ckUSDC / ckUSDT) at the quoted rate.
@@ -1326,6 +1401,7 @@ service : (InitPayload) -> {
   // favourites referencing removed tokens, so the marketplace shows its empty
   // state. Returns how many listings were removed.
   dev_clear_courses : () -> (Result_1);
+  dev_clear_farmers : () -> (Result);
   // Local-dev: vacate the featured slot.
   dev_clear_featured : () -> (Result);
   dev_clear_featured_dapps : () -> (Result);
@@ -1374,7 +1450,9 @@ service : (InitPayload) -> {
   // little opening chatter. Bots react to outcomes via `crash_bot_chatter`.
   dev_seed_casino_play : () -> (Result_2);
   // Local-dev: mint up to `count` varied courses (tops up toward `count`, bounded).
-  dev_seed_courses : (nat32) -> (Result_4);
+  dev_seed_courses : (nat32) -> (Result_5);
+  dev_seed_drafts : (nat64, nat32) -> (Result);
+  dev_seed_farmer : (nat32, text) -> (Result_4);
   // Local-dev: insert mock faucet grants so the "Recent grants" list renders.
   dev_seed_faucet_grants : (nat32) -> (Result);
   // Local-dev: replace all featured rows with `active` live + `pending` pending
@@ -1431,7 +1509,7 @@ service : (InitPayload) -> {
   get_arcade_course : () -> (vec ArcadeCourseEntry) query;
   // Price the $1 customization in `token` at the live oracle rate and lock
   // it for the caller for 15 minutes (same pattern as Explorer quotes).
-  get_arcade_customize_quote : (IdeaToken) -> (Result_5);
+  get_arcade_customize_quote : (IdeaToken) -> (Result_6);
   // The caller's deposit account for arcade fees. Fund it on the ICP ledger
   // with `customize_fee + 0.0001 ICP`, then call `customize_character`.
   get_arcade_deposit_address : () -> (LedgerAccount) query;
@@ -1447,7 +1525,7 @@ service : (InitPayload) -> {
   get_casino_stats : () -> (CasinoStatsView) query;
   // Quote the comment fee ($0.25 USD) in `token`. Shares DISCUSSION_QUOTES with
   // the thread quote; the op-specific `usd_total_e8s` distinguishes them.
-  get_comment_quote : (IdeaToken) -> (Result_5);
+  get_comment_quote : (IdeaToken) -> (Result_6);
   get_config : () -> (Config) query;
   get_course : (nat64) -> (opt CourseCard) query;
   get_course_data : (nat64) -> (opt blob);
@@ -1479,7 +1557,14 @@ service : (InitPayload) -> {
   // Price `days` of visibility in `token` at the live USD rate and lock that
   // price for the caller for 15 minutes. An update (not a query) because the
   // mainnet path may refresh the rate via the XRC.
-  get_explorer_quote : (IdeaToken, nat64) -> (Result_5);
+  get_explorer_quote : (IdeaToken, nat64) -> (Result_6);
+  // On-demand generation: the owner viewing a Farmer triggers (throttled to max
+  // 1/day inside the Farmer) a fresh generation, then returns its retained drafts.
+  // Dev-seed Farmers (no canister) just return the seeded mock drafts so the UI works.
+  get_farmer_drafts : (nat64, nat64) -> (Result_7);
+  // The owner's live Farmer status: cycles remaining, days of budget left, next
+  // generation. Proxies to the Farmer canister for the live cycle balance.
+  get_farmer_status : (nat64) -> (Result_8);
   get_faucet_stats : () -> (FaucetStats) query;
   // Public faucet status for `(caller, canister_id)`. `canister_id == None` gives
   // flag + params + the caller's G2/G3 standing (no canister-specific gate).
@@ -1490,7 +1575,7 @@ service : (InitPayload) -> {
   get_featured_deposit_address : () -> (LedgerAccount) query;
   // Quote `days` of featured placement in `token` at the live USD rate; locks the
   // price for the caller for 15 minutes (separate from the listing quote).
-  get_featured_quote : (IdeaToken, nat64) -> (Result_5);
+  get_featured_quote : (IdeaToken, nat64) -> (Result_6);
   get_featured_slot : () -> (opt FeaturedSlot) query;
   // App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
   // cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
@@ -1548,7 +1633,7 @@ service : (InitPayload) -> {
   get_thread_count : (nat64) -> (nat64) query;
   // Quote the thread-start fee ($1 USD) in `token` at the live rate; locks the
   // price for the caller for 15 minutes.
-  get_thread_quote : (IdeaToken) -> (Result_5);
+  get_thread_quote : (IdeaToken) -> (Result_6);
   get_treasury_balance : () -> (BalanceResult);
   // The treasury's ledger account — deposit ICP here to fund it directly
   // (admin top-ups, external donations). Not secret: it's just the backend
@@ -1558,6 +1643,13 @@ service : (InitPayload) -> {
   // dollar thresholds and conversion previews. Same source the canister uses
   // for valuations (XRC-cached on mainnet, admin/static locally).
   get_usd_rates : () -> (vec TokenUsdRate) query;
+  get_xfarm_deposit_address : () -> (LedgerAccount) query;
+  get_xfarm_info : () -> (XFarmInfo) query;
+  // USD tier price → ICP at the cached XRC rate; lock the quote for the caller
+  // for 15 minutes (mirrors get_explorer_quote). An update (not a query) because
+  // the mainnet path may refresh the rate via the XRC.
+  get_xfarm_quote : (nat32) -> (Result_9);
+  get_xfarm_tiers : () -> (vec FarmerTier) query;
   is_favorite : (nat64) -> (bool) query;
   list_active_proposals : () -> (vec Proposal) query;
   list_all_proposals : () -> (vec Proposal) query;
@@ -1596,6 +1688,7 @@ service : (InitPayload) -> {
   // The caller's own submissions in every state — lets the UI show "pending
   // admin approval" and time remaining.
   list_my_dapp_submissions : () -> (vec DappListing) query;
+  list_my_farmers : () -> (vec Farmer) query;
   list_my_favorite_courses : () -> (vec CourseCard) query;
   list_my_pending_unstakes : () -> (vec PendingUnstake) query;
   list_my_threads : () -> (vec Thread) query;
@@ -1624,7 +1717,7 @@ service : (InitPayload) -> {
   // source must be a child tracked in PENDING_UNSTAKES, and is additionally
   // checked against every platform neuron id before any governance call.
   merge_unstake : (nat64, StakeTier) -> (Result);
-  mint_course_nft : (blob, text) -> (Result_6);
+  mint_course_nft : (blob, text) -> (Result_10);
   my_favorite_ids : () -> (vec nat64) query;
   notify_top_up : (NotifyTopUpArgs) -> (NotifyTopUpResult);
   // Post to the global casino chat (signed-in only, 200 chars, 1 msg/5 s).
@@ -1643,7 +1736,7 @@ service : (InitPayload) -> {
   // Deliberately NOT feature-flag-gated: stranded funds must stay recoverable
   // even after a kill switch.
   reclaim_escrow : (EscrowKind, IdeaToken) -> (BalanceResult);
-  record_hole_event : (nat64, nat8) -> (Result_7);
+  record_hole_event : (nat64, nat8) -> (Result_11);
   // Count a detail-view open (signed-in users only — anonymous ingress is
   // already rejected by inspect_message). Drives "most viewed" sorting.
   record_idea_view : (nat64) -> (Result);
@@ -1654,6 +1747,18 @@ service : (InitPayload) -> {
   // register. Cheap, network-free rejects for obviously-bad principals.
   register_faucet_canister : (principal) -> (Result);
   remove_admin : (principal) -> (Result);
+  // RENEW: pay again to extend an existing (Active) Farmer's lifespan. Reuses the
+  // create money path — 10% → treasury, 90% → CMC topup to the EXISTING Farmer
+  // canister — then calls the Farmer's `extend(add_budget_cycles, add_days)` to bump
+  // the budget + duration and re-arm the burn timer. The owner gets a fresh quote for
+  // the Farmer's tier first (frontend calls get_xfarm_quote). A depleted/swept Farmer
+  // (no canister) can't be renewed → create a new one. Like create_farmer the
+  // multi-leg path isn't fully idempotent on partial failure; the locked quote is only
+  // consumed on full success.
+  renew_farmer : (nat64) -> (Result_4);
+  // Called by a Farmer canister when its cycle balance hits the stop-floor (D2).
+  // Only the Farmer's own canister may report. Sets Depleted so the sweep reaps it.
+  report_depleted : (nat64, nat64) -> (Result);
   // Set (or clear, with an empty string) the caller's X handle. A leading @
   // is stripped; X's own rules apply (1–15 chars, [A-Za-z0-9_]).
   set_twitter_handle : (text) -> (Result);
@@ -1661,7 +1766,7 @@ service : (InitPayload) -> {
   // Start auto-pilot with a strategy the caller may use (builtin / owned / licensed).
   start_autopilot : (nat64) -> (Result);
   // Pure synchronous update — no `raw_rand`, no inter-canister await (PB-306 A2).
-  start_play_session : (nat64) -> (Result_8);
+  start_play_session : (nat64) -> (Result_12);
   // Start a discussion thread on `proposal_id` for the $1 fee (deposited on
   // get_discussion_deposit_address, quoted via get_thread_quote). ICP burns to
   // backend cycles; non-ICP goes to the treasury.
@@ -1670,7 +1775,7 @@ service : (InitPayload) -> {
   // Submit a finished round. Requires full access (the hole-1 preview can't
   // produce a 9-hole score). Insert-if-better per (game, player); returns the
   // caller's resulting 1-based rank on that game's board.
-  submit_arcade_score : (text, nat64, blob) -> (Result_4);
+  submit_arcade_score : (text, nat64, blob) -> (Result_5);
   // Submit a community listing. Requires a fresh quote for the same token +
   // days (get_explorer_quote) and the quoted amount (+ one ledger fee)
   // deposited on get_explorer_deposit_address. The payment moves to the
@@ -1682,7 +1787,7 @@ service : (InitPayload) -> {
   // Toggle a course in the caller's favorites. Returns the NEW state
   // (`Ok(true)` = now favorited, `Ok(false)` = now removed) so the frontend can
   // reconcile its optimistic flip without a follow-up read (PB-311 B2).
-  toggle_favorite_course : (nat64) -> (Result_9);
+  toggle_favorite_course : (nat64) -> (Result_13);
   unregister_leader_neuron : (nat64) -> (Result);
   // Split `amount_e8s` off the tier's pool neuron and start dissolving it; the
   // sweep disburses to the caller's wallet once the tier's full term passes.
@@ -1695,7 +1800,7 @@ service : (InitPayload) -> {
   upvote_idea : (nat64) -> (Result);
   // Provably-fair verification for a finished round (C14): returns the seed, the
   // recomputed crash point, and the chain-link proof back to the genesis terminal.
-  verify_crash_round : (nat64) -> (Result_10) query;
+  verify_crash_round : (nat64) -> (Result_14) query;
   // Up/down vote a comment (free, toggle). Comment votes earn NO reward.
   vote_comment : (nat64, VoteDir) -> (Result);
   // Up/down vote a thread (free, toggle). A NEW upvote may mint the author a

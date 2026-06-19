@@ -33,6 +33,7 @@ import LotteryHub from "./LotteryHub";
 import Explorer from "./Explorer";
 import Discussions from "./Discussions";
 import DiscussionsPage from "./DiscussionsPage";
+import XFarm from "./XFarm";
 import Arcade from "./Arcade";
 import Casino from "./Casino";
 import Faucet from "./Faucet";
@@ -51,7 +52,7 @@ import { useErrorImpression } from "./analytics";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -70,6 +71,7 @@ export const PAGE_PATH: Record<AppPage, string> = {
   casino: '/casino',
   faucet: '/faucet',
   early_adopters: '/early_adopters',
+  xfarm: '/xfarm',
   payouts: '/profile',
   admin: '/admin',
 };
@@ -616,6 +618,7 @@ export default function App() {
   const faucetEnabled = featureFlags.find(f => f.key === 'cycles_faucet')?.enabled ?? false;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
   const discussionsEnabled = featureFlags.find(f => f.key === 'discussions')?.enabled ?? false;
+  const xFarmEnabled = featureFlags.find(f => f.key === 'x_farm')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (earns lottery tickets only).
   const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
@@ -1212,6 +1215,9 @@ export default function App() {
     if (page === 'discussions' && featureFlags.length > 0 && !discussionsEnabled) {
       redirect('voting');
     }
+    if (page === 'xfarm' && featureFlags.length > 0 && !xFarmEnabled) {
+      redirect('dashboard');
+    }
     // The Course Marketplace lives inside the arcade — redirect its alias.
     if (page === 'course_market') {
       redirect('arcade');
@@ -1237,7 +1243,7 @@ export default function App() {
     if (page === 'payouts' && principal && principal.isAnonymous()) {
       redirect('dashboard');
     }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1902,6 +1908,12 @@ export default function App() {
             Discussions
           </Btn>
         )}
+        {xFarmEnabled && (
+          <Btn variant={page === 'xfarm' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('xfarm')}>
+            <Icon name="spark" size={14} stroke={page === 'xfarm' ? 'var(--char-950)' : 'currentColor'} />
+            X-Farm
+          </Btn>
+        )}
         <Btn variant={onEarn ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('earn')}>
           <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
           Neuron Syndicate
@@ -2400,6 +2412,17 @@ export default function App() {
               isLocal={isLocal}
               proposals={proposals}
               proposalUrl={(id) => { const pp = proposals.find(x => x.id === id); return pp ? nnsProposalLink(pp) : ''; }}
+              onSignIn={handleLogin}
+            />
+          ) : page === 'xfarm' && xFarmEnabled ? (
+            <XFarm
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              isLocal={isLocal}
+              ledgerCanisterId={ledgerCanisterId}
               onSignIn={handleLogin}
             />
           ) : page === 'arcade' && arcadeEnabled ? (

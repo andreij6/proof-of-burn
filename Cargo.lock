@@ -2924,6 +2924,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04a2ecdf2cc4d33a6a93d71bcfbc00bb1f635cdb8029a2cc0709204a045ec7a3"
 
 [[package]]
+name = "xfarm_farmer"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ciborium",
+ "ic-cdk",
+ "ic-cdk-timers",
+ "ic-stable-structures 0.7.2",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "yoke"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

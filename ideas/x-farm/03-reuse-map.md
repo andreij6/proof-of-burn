@@ -17,7 +17,7 @@ Line numbers approximate (2026-06-19) — verify before building.
 | **Non-replicated HTTPS outcall** design | ai-proposal-review Part D (`is_replicated:false`, `max_response_bytes` cap, cycle math) | `ideas/ai-proposal-review/02-backend-and-tasks.md` §D |
 | **Cloud-Run proxy → Gemini** (key off-chain, bearer auth, budget-cap/rotate) | ai-proposal-review D4b | `ideas/ai-proposal-review/README.md` D4 |
 | Gemini `generateContent` + `responseSchema` + URL/Google-Search grounding | ai-proposal-review findings #2/#3 | `ideas/ai-proposal-review/README.md` §findings |
-| 2-call schema+tool reformat (if they can't coexist) | ai-proposal-review Phase 0.1 fallback | `ideas/ai-proposal-review/02-backend-and-tasks.md` §D |
+| 2-call schema+tool reformat (fallback only) | Not needed on Gemini 3 (grounding + structured output coexist in one call); keep as a fallback if forced back to 2.5 | `ideas/ai-proposal-review/02-backend-and-tasks.md` §D, [06-cloud-run-proxy-build.md](06-cloud-run-proxy-build.md) |
 | **Prompt-injection defense** (server-grounded; untrusted-data framing) | ai-proposal-review §C ("never trust a client prompt") | `ideas/ai-proposal-review/02-backend-and-tasks.md` §C |
 
 > **Build the Cloud-Run proxy once; x-farm adds `/v1/tweets`, ai-proposal-review

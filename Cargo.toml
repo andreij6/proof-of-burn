@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "src/backend",
-    "src/course_nft"
+    "src/course_nft",
+    "src/xfarm_farmer"
 ]
 resolver = "2"
 

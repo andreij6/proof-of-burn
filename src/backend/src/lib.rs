@@ -4729,6 +4729,7 @@ fn setup_timers() {
         early_adopter_settlement_check().await;
         casino_weekly_burn();
         sweep_play_sessions(); // PB-306: reap completed/expired play sessions.
+        xfarm_sweep().await; // X-Farm: reap depleted Farmers + re-notify pending CMC legs.
         // Keep the treasury-balance cache warm so the UI's commit/"Add More"
         // gating reflects reality between commits.
         refresh_treasury_cache(&CONFIG.with(|c| c.borrow().get().clone())).await;
@@ -4930,11 +4931,15 @@ pub const FLAG_CYCLES_FAUCET: &str = "cycles_faucet";
 /// Proposal Discussions: forum-style threads on proposals (PB-DISC). Ships dark
 /// (default OFF) until the owner enables it.
 pub const FLAG_DISCUSSIONS: &str = "discussions";
-const KNOWN_FEATURE_FLAGS: [&str; 11] = [
+/// X-Farm: autonomous per-user Farmer canisters burn ICP→cycles to run Gemini
+/// (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X. Ships
+/// dark (default OFF) until the owner enables it after a playtest.
+pub const FLAG_X_FARM: &str = "x_farm";
+const KNOWN_FEATURE_FLAGS: [&str; 12] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL,
-    FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS,
+    FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS, FLAG_X_FARM,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -5201,6 +5206,7 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE => false,
         FLAG_ARCADE_MINIGOLF => false,
         FLAG_ARCADE_FIELDGOAL => false,
+        FLAG_X_FARM => false,
         // Every other SHIPPED feature (Idea Board, Lossless Voting/Lottery,
         // Explorer, Early Adopters) defaults ON; unknown keys stay OFF.
         k => KNOWN_FEATURE_FLAGS.contains(&k),
@@ -18539,6 +18545,799 @@ fn admin_set_faucet_treasury_floor(floor_e8s: u64) -> Result<(), String> {
     Ok(())
 }
 
+// ====================================================================
+// X-Farm — autonomous per-user Farmer canisters that burn ICP→cycles to run
+// Gemini (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X.
+// Spec: ideas/x-farm/{README,01,02,03,05}.md. Ship dark behind FLAG_X_FARM
+// (default OFF). LOCAL deploys only — mainnet gated per-deploy by the owner.
+//
+// Reuse (do NOT re-clone — docs/duplication-review-2026-06-19.md): the money path
+// is settle_burn_split's CMC leg (call_cmc_topup_transfer + notify_cmc_topup,
+// journaled burn_block_index, CMC_REFUNDED→drop block, PB-148 class); the 10%
+// treasury leg is call_ledger_transfer to TREASURY_SUBACCOUNT; the escrow
+// subaccount is the derive_*_subaccount family; USD→ICP is the cached XRC via
+// explorer_usd_rate_e8s / usd_e8s_to_icp_e8s. Net-new: a factory that calls the
+// management canister's create_canister/install_code (none exist in the repo
+// yet) + a 2nd canister wasm (src/xfarm_farmer/) the factory installs.
+// ====================================================================
+
+/// CMC canister id (duplication-review B7 — first canonical definition; the
+/// ~10 other call sites still inline the literal and can migrate later).
+const CMC_ID: &str = "rkp4c-7iaaa-aaaaa-aaaca-cai";
+fn cmc_principal() -> Principal {
+    Principal::from_text(CMC_ID).unwrap()
+}
+
+// ── Tunables ─────────────────────────────────────────────────────────
+const XFARM_MAX_PERSONA: usize = 300;
+const XFARM_QUOTE_TTL_NANOS: u64 = 15 * 60 * 1_000_000_000;
+const XFARM_CREATION_CYCLES: u128 = 500_000_000_000; // 500B ≈ $0.683 (13-node) day-0 chunk
+const XFARM_DURATION_DAYS: u64 = 7;                   // the depletion window (D2)
+const XFARM_MAX_TIERS: usize = 10;
+const XFARM_MAX_DRAFTS_PER_DAY: u32 = 10;
+const XFARM_DRAFT_RETENTION_DAYS: u64 = 30;
+const XFARM_SWEEP_BATCH: usize = 25;
+const DAY_NS: u64 = 86_400 * 1_000_000_000;
+
+// ── Types ────────────────────────────────────────────────────────────
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FarmerStatus { Active, Depleted, Disabled, Failed }
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FarmerTier {
+    pub id: u32,
+    pub name: String,
+    pub drafts_per_day: u32,
+    pub duration_days: u32,
+    /// USD reference price (D1); XRC-quoted to ICP at payment time.
+    pub price_usd_e8s: u64,
+    /// D9 premium — tier gets 1 Nano-Banana image/day via the proxy.
+    pub includes_image: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct XFarmProxy {
+    pub url: String,
+    pub bearer: String,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct XFarmConfig {
+    pub tiers: Vec<FarmerTier>,
+    pub proxy: XFarmProxy,
+    pub max_active_farmers: usize,
+}
+
+impl Default for XFarmConfig {
+    fn default() -> Self {
+        XFarmConfig {
+            tiers: vec![
+                // USD e8s (8 decimals): $2.40 = 240_000_000. Priced to ICP at the
+                // cached XRC rate at payment time. At $2.40/ICP these are ~1.0 /
+                // 1.5 / 2.0 ICP (UX spec); admin can override via admin_set_xfarm_tiers
+                // before going live. NOTE: the image-bearing "Harvest" tier is removed
+                // for now — the Cloud Run proxy doesn't serve images yet (Nano Banana
+                // / 07-premium-images is Phase-2). Re-add with includes_image:true once
+                // the proxy has an image endpoint.
+                FarmerTier { id: 1, name: "Sprout".into(),  drafts_per_day: 1,  duration_days: 7, price_usd_e8s: 240_000_000, includes_image: false },
+                FarmerTier { id: 2, name: "Grow".into(),    drafts_per_day: 5,  duration_days: 7, price_usd_e8s: 360_000_000, includes_image: false },
+                FarmerTier { id: 3, name: "Bloom".into(),   drafts_per_day: 10, duration_days: 7, price_usd_e8s: 480_000_000, includes_image: false },
+            ],
+            proxy: XFarmProxy { url: String::new(), bearer: String::new() },
+            max_active_farmers: 0, // 0 = unlimited (no per-user cap; optional global brake only)
+        }
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Farmer {
+    pub id: u64,
+    pub owner: Principal,
+    /// None under the dev-seed mock path; Some for a real per-user canister.
+    pub canister_id: Option<Principal>,
+    pub tier_id: u32,
+    pub persona: String,
+    pub created_at: u64,
+    /// Display only — the cycle balance is the real 7-day timer (D2).
+    pub expected_depleted_at: u64,
+    /// ICP e8s directed to cycles (the 90% leg, net of the CMC leg fee). A
+    /// record of what was burned; the Farmer's own cycle balance is authoritative.
+    pub budget_cycles: u64,
+    /// Reported by the Farmer via report_depleted (R9: surfaced in the dashboard).
+    pub burned_cycles: u64,
+    pub last_generation_at: u64,
+    pub last_burn_tick_at: u64,
+    pub status: FarmerStatus,
+    #[serde(default)]
+    pub treasury_block: Option<u64>,
+    /// Idempotency for the 90% CMC leg (PB-148 class); reset to None on CMC_REFUNDED.
+    #[serde(default)]
+    pub burn_block_index: Option<u64>,
+    #[serde(default)]
+    pub install_done: bool,
+    #[serde(default)]
+    pub cmc_notified: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct XFarmQuote {
+    pub tier_id: u32,
+    pub price_e8s: u64,    // ICP for the tier at the cached XRC rate
+    pub fee_e8s: u64,     // 2 × ICP fee (two outbound escrow legs: treasury + CMC)
+    pub usd_e8s: u64,      // tier USD reference price
+    pub rate_usd_e8s: u64, // cached ICP/USD rate used
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct XFarmInfo {
+    pub enabled: bool,
+    pub tiers: Vec<FarmerTier>,
+    pub proxy_set: bool,
+    pub wasm_uploaded: bool,
+    pub max_active_farmers: usize,
+    pub active_count: usize,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct XFarmDraft {
+    pub id: u64,
+    pub text: String,
+    pub created_at: u64,
+    pub cited_url: Option<String>,
+    pub image_url: Option<String>,
+}
+
+/// Init args the factory passes to install_code on the Farmer wasm.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct FarmerInitArgs {
+    pub farmer_id: u64,
+    pub owner: Principal,
+    /// The backend (factory) canister — the Farmer calls it back to report
+    /// depletion so the sweep can reap it. Sole controller of the Farmer.
+    pub backend_canister_id: Principal,
+    pub tier_id: u32,
+    pub persona: String,
+    pub drafts_per_day: u32,
+    pub duration_days: u32,
+    pub budget_cycles: u64,
+    pub proxy_url: String,
+    pub proxy_bearer: String,
+}
+
+// ── Management-canister arg structs (net-new; inline like CanisterIdRecord) ──
+#[derive(CandidType, Serialize, Clone)]
+struct XFarmCanisterSettings {
+    controllers: Option<Vec<Principal>>,
+    compute_allocation: Option<u64>,
+    memory_allocation: Option<u64>,
+    freezing_threshold: Option<u64>,
+}
+#[derive(CandidType, Serialize)]
+struct CreateCanisterArgs {
+    settings: Option<XFarmCanisterSettings>,
+    cycles: Option<u128>,
+}
+#[derive(CandidType, Deserialize)]
+struct CreateCanisterResult {
+    canister_id: Principal,
+}
+#[derive(CandidType, Serialize, Clone, Copy)]
+enum XFarmInstallMode { install, reinstall, upgrade }
+#[derive(CandidType, Serialize)]
+struct InstallCodeArgs {
+    mode: XFarmInstallMode,
+    canister_id: Principal,
+    wasm_module: Vec<u8>,
+    arg: Vec<u8>,
+}
+
+// ── Stable storage (MemoryIds 54–56; 57/58 held in reserve) ──────────
+thread_local! {
+    static XFARM_FARMERS: RefCell<StableBTreeMap<u64, Farmer, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(54)))));
+    static XFARM_NEXT_ID: RefCell<StableCell<u64, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(55)), 1u64)));
+    static XFARM_CONFIG: RefCell<StableCell<XFarmConfig, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(56)), XFarmConfig::default())));
+
+    // Heap-only (lost on upgrade; admin re-uploads): the Farmer wasm bytes + audit hash.
+    static XFARM_WASM: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+    static XFARM_WASM_HASH: RefCell<Option<[u8; 32]>> = const { RefCell::new(None) };
+    // Heap-only 15-min locked quotes per caller (mirrors EXPLORER_QUOTES but ephemeral).
+    static XFARM_QUOTES: RefCell<std::collections::HashMap<Principal, XFarmQuote>> =
+        RefCell::new(std::collections::HashMap::new());
+    // Heap-only dev-seed drafts so the local UI works with no Farmer canister.
+    static XFARM_MOCK_DRAFTS: RefCell<std::collections::HashMap<u64, Vec<XFarmDraft>>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+impl_storable!(Farmer);
+impl_storable!(XFarmConfig);
+
+// ── Guards + accessors ───────────────────────────────────────────────
+fn require_x_farm_enabled() -> Result<(), String> {
+    if !feature_visible(FLAG_X_FARM, get_caller()) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+fn xfarm_config() -> XFarmConfig {
+    XFARM_CONFIG.with(|c| c.borrow().get().clone())
+}
+fn put_xfarm_config(cfg: XFarmConfig) {
+    XFARM_CONFIG.with(|c| c.borrow_mut().set(cfg));
+}
+fn xfarm_put_farmer(f: &Farmer) {
+    XFARM_FARMERS.with(|m| m.borrow_mut().insert(f.id, f.clone()));
+}
+fn next_farmer_id() -> u64 {
+    XFARM_NEXT_ID.with(|c| {
+        let v = *c.borrow().get();
+        c.borrow_mut().set(v + 1);
+        v
+    })
+}
+fn xfarm_farmers_by_owner(owner: &Principal) -> Vec<Farmer> {
+    XFARM_FARMERS.with(|m| {
+        m.borrow().iter().filter(|e| e.value().owner == *owner).map(|e| e.value().clone()).collect()
+    })
+}
+fn xfarm_active_count() -> usize {
+    XFARM_FARMERS.with(|m| {
+        m.borrow().iter().filter(|e| e.value().status == FarmerStatus::Active).count()
+    })
+}
+fn derive_xfarm_subaccount(user: &Principal) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_xfarm_v1");
+    hasher.update(user.as_slice());
+    let result = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&result);
+    sub
+}
+
+// ── Factory primitives (net-new management-canister calls) ───────────
+#[cfg(target_arch = "wasm32")]
+async fn xfarm_create_canister(creation_cycles: u128) -> Result<Principal, String> {
+    // Factory = sole controller (R5: factory owns the lifecycle of every Farmer).
+    let args = CreateCanisterArgs {
+        settings: Some(XFarmCanisterSettings {
+            controllers: Some(vec![get_canister_id()]),
+            compute_allocation: None,
+            memory_allocation: None,
+            freezing_threshold: Some(0),
+        }),
+        cycles: Some(creation_cycles),
+    };
+    let res: Result<(CreateCanisterResult,), _> =
+        ic_cdk::call(Principal::management_canister(), "create_canister", (args,)).await;
+    res.map(|(r,)| r.canister_id)
+        .map_err(|(c, m)| format!("CREATE_CANISTER_FAILED ({:?}): {}", c, m))
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn xfarm_create_canister(_creation_cycles: u128) -> Result<Principal, String> {
+    // Host mock: a stable, non-anonymous stand-in principal for unit tests
+    // (a self-authenticating id over a fixed pubkey). Real create_canister only
+    // runs on wasm; tests use dev_seed_farmer (canister_id None) instead.
+    Ok(Principal::self_authenticating(&[1u8; 29]))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn xfarm_install_code(canister_id: Principal, wasm: Vec<u8>, arg: Vec<u8>) -> Result<(), String> {
+    let args = InstallCodeArgs { mode: XFarmInstallMode::install, canister_id, wasm_module: wasm, arg };
+    let res: Result<(), _> = ic_cdk::call(Principal::management_canister(), "install_code", (args,)).await;
+    res.map_err(|(c, m)| format!("INSTALL_CODE_FAILED ({:?}): {}", c, m))
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn xfarm_install_code(_canister_id: Principal, _wasm: Vec<u8>, _arg: Vec<u8>) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn xfarm_stop_canister(cid: Principal) -> Result<(), String> {
+    ic_cdk::call(Principal::management_canister(), "stop_canister", (CanisterIdRecord { canister_id: cid },))
+        .await.map_err(|(c, m)| format!("STOP_FAILED ({:?}): {}", c, m))
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn xfarm_stop_canister(_cid: Principal) -> Result<(), String> { Ok(()) }
+
+#[cfg(target_arch = "wasm32")]
+async fn xfarm_delete_canister(cid: Principal) -> Result<(), String> {
+    ic_cdk::call(Principal::management_canister(), "delete_canister", (CanisterIdRecord { canister_id: cid },))
+        .await.map_err(|(c, m)| format!("DELETE_FAILED ({:?}): {}", c, m))
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn xfarm_delete_canister(_cid: Principal) -> Result<(), String> { Ok(()) }
+
+// ── Public query/update API ─────────────────────────────────────────
+
+#[ic_cdk::query]
+fn get_xfarm_tiers() -> Vec<FarmerTier> {
+    xfarm_config().tiers
+}
+
+#[ic_cdk::query]
+fn get_xfarm_info() -> XFarmInfo {
+    let cfg = xfarm_config();
+    XFarmInfo {
+        enabled: feature_visible(FLAG_X_FARM, get_caller()),
+        tiers: cfg.tiers,
+        proxy_set: !cfg.proxy.url.is_empty(),
+        wasm_uploaded: XFARM_WASM.with(|w| w.borrow().is_some()),
+        max_active_farmers: cfg.max_active_farmers,
+        active_count: xfarm_active_count(),
+    }
+}
+
+#[ic_cdk::query]
+fn get_xfarm_deposit_address() -> LedgerAccount {
+    let caller = get_caller();
+    LedgerAccount { owner: get_canister_id(), subaccount: Some(derive_xfarm_subaccount(&caller)) }
+}
+
+#[ic_cdk::query]
+fn list_my_farmers() -> Vec<Farmer> {
+    xfarm_farmers_by_owner(&get_caller())
+}
+
+/// USD tier price → ICP at the cached XRC rate; lock the quote for the caller
+/// for 15 minutes (mirrors get_explorer_quote). An update (not a query) because
+/// the mainnet path may refresh the rate via the XRC.
+#[ic_cdk::update]
+async fn get_xfarm_quote(tier_id: u32) -> Result<XFarmQuote, String> {
+    require_authenticated()?;
+    require_x_farm_enabled()?;
+    let caller = get_caller();
+    let cfg = xfarm_config();
+    let tier = cfg.tiers.iter().find(|t| t.id == tier_id).cloned()
+        .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
+    let backend_cfg = CONFIG.with(|c| c.borrow().get().clone());
+    let rate = explorer_usd_rate_e8s(ExplorerToken::ICP, &backend_cfg).await?; // USD e8s per 1 ICP
+    if rate == 0 { return Err("RATE_UNAVAILABLE".to_string()); }
+    let price = u64::try_from(tier.price_usd_e8s as u128 * 100_000_000u128 / rate as u128)
+        .map_err(|_| "PRICE_OVERFLOW".to_string())?;
+    if price == 0 { return Err("PRICE_TOO_LOW".to_string()); }
+    let now = current_time();
+    let q = XFarmQuote {
+        tier_id, price_e8s: price, fee_e8s: ICP_FEE_E8S * 2,
+        usd_e8s: tier.price_usd_e8s, rate_usd_e8s: rate,
+        created_at: now, expires_at: now + XFARM_QUOTE_TTL_NANOS,
+    };
+    XFARM_QUOTES.with(|qq| qq.borrow_mut().insert(caller, q.clone()));
+    Ok(q)
+}
+
+/// Create a Farmer: escrow → 10% treasury → create+install the Farmer canister →
+/// 90% burn-to-cycles funding it (CMC topup, journaled). Reuses settle_burn_split's
+/// CMC leg + submit_dapp's escrow ordering. Per R5 the order is create→install→top-up;
+/// a partial failure leaves a persisted Farmer the sweep can resume or clean up.
+#[ic_cdk::update]
+async fn create_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> {
+    require_authenticated()?;
+    require_x_farm_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let cfg = xfarm_config();
+    let tier = cfg.tiers.iter().find(|t| t.id == tier_id).cloned()
+        .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
+    let persona = persona.trim().to_string();
+    if persona.is_empty() || persona.chars().count() > XFARM_MAX_PERSONA {
+        return Err(format!("BAD_PERSONA: 1..{} chars", XFARM_MAX_PERSONA));
+    }
+    // Unlimited Farmers per owner (more farms = more ICP burned, on-theme). The
+    // only limiter is an optional global brake: 0 = off / unlimited.
+    if cfg.max_active_farmers > 0 && xfarm_active_count() >= cfg.max_active_farmers {
+        return Err("MAX_FARMERS_REACHED".to_string());
+    }
+    // Fail fast: the factory cannot install the Farmer without its wasm uploaded.
+    // Checked after the cheap input validations but before any money moves, so a
+    // missing upload can't strand a half-created Farmer (escrow paid / canister
+    // created / install_done=false) the sweep never reaps and that blocks the
+    // owner from retrying with FARMER_EXISTS.
+    if XFARM_WASM.with(|w| w.borrow().is_none()) {
+        return Err("WASM_NOT_UPLOADED".to_string());
+    }
+
+    // Locked quote (price locked 15 min, like EXPLORER_QUOTES).
+    let quote = XFARM_QUOTES.with(|q| q.borrow().get(&caller).cloned())
+        .ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.tier_id != tier_id { return Err("QUOTE_MISMATCH".to_string()); }
+    if current_time() > quote.expires_at { return Err("QUOTE_EXPIRED".to_string()); }
+
+    let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+    let fee = ICP_FEE_E8S;
+    let sub = derive_xfarm_subaccount(&caller);
+    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
+    let balance = call_ledger_balance(ledger_id, escrow.clone()).await
+        .map_err(|e| format!("ESCROW_BALANCE: {}", e))?;
+    // Two outbound escrow legs (treasury + CMC) ⇒ escrow must hold price + 2 fees.
+    if balance < quote.price_e8s.saturating_add(quote.fee_e8s) {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+
+    // Allocate + persist the Farmer first so a retry sweep can resume.
+    let id = next_farmer_id();
+    let now = current_time();
+    let treasury_amt = quote.price_e8s / 10; // 10% → treasury
+    let burn_amt = quote.price_e8s.saturating_sub(treasury_amt); // 90% → cycles
+    let mut farmer = Farmer {
+        id, owner: caller, canister_id: None, tier_id, persona: persona.clone(),
+        created_at: now,
+        expected_depleted_at: now + XFARM_DURATION_DAYS * DAY_NS,
+        budget_cycles: 0, burned_cycles: 0,
+        last_generation_at: 0, last_burn_tick_at: 0,
+        status: FarmerStatus::Active,
+        treasury_block: None, burn_block_index: None, install_done: false, cmc_notified: false,
+    };
+    xfarm_put_farmer(&farmer);
+
+    // 10% → treasury (idempotent via treasury_block; clone submit_dapp's single transfer).
+    if farmer.treasury_block.is_none() {
+        let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
+        let b = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, treasury_amt, Some(fee))
+            .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
+        farmer.treasury_block = Some(b);
+        xfarm_put_farmer(&farmer);
+    }
+
+    // Factory: create the Farmer canister (sole controller = this backend, R5).
+    if farmer.canister_id.is_none() {
+        let cid = xfarm_create_canister(XFARM_CREATION_CYCLES).await?;
+        farmer.canister_id = Some(cid);
+        xfarm_put_farmer(&farmer);
+    }
+    let farmer_cid = farmer.canister_id.unwrap();
+
+    // Install the Farmer wasm (net-new 2nd canister).
+    if !farmer.install_done {
+        let wasm = XFARM_WASM.with(|w| w.borrow().clone())
+            .ok_or_else(|| "WASM_NOT_UPLOADED".to_string())?;
+        let init = FarmerInitArgs {
+            farmer_id: id, owner: caller, backend_canister_id: get_canister_id(),
+            tier_id, persona: persona.clone(),
+            drafts_per_day: tier.drafts_per_day, duration_days: tier.duration_days,
+            budget_cycles: burn_amt.saturating_sub(fee), // 90% net of the CMC leg fee
+            proxy_url: cfg.proxy.url.clone(), proxy_bearer: cfg.proxy.bearer.clone(),
+        };
+        let arg = candid::encode_args((init,)).map_err(|e| format!("ENCODE_INIT: {}", e))?;
+        // R5: if install fails, delete the orphan canister so it can't accumulate.
+        if let Err(e) = xfarm_install_code(farmer_cid, wasm, arg).await {
+            let _ = xfarm_delete_canister(farmer_cid).await;
+            XFARM_FARMERS.with(|m| m.borrow_mut().remove(&id));
+            return Err(e);
+        }
+        farmer.install_done = true;
+        xfarm_put_farmer(&farmer);
+    }
+
+    // 90% → burn to cycles funding the Farmer (CMC topup to the Farmer canister;
+    // idempotent via burn_block_index + notify — PB-148 class, mirrors settle_burn_split).
+    if farmer.burn_block_index.is_none() {
+        let b = call_cmc_topup_transfer(ledger_id, Some(sub), farmer_cid, burn_amt, fee)
+            .await.map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
+        farmer.burn_block_index = Some(b);
+        farmer.budget_cycles = burn_amt.saturating_sub(fee);
+        xfarm_put_farmer(&farmer);
+    }
+    if let Err(e) = notify_cmc_topup(cmc_principal(), farmer_cid, farmer.burn_block_index.unwrap(), false).await {
+        if e.starts_with("CMC_REFUNDED") {
+            farmer.burn_block_index = None; // drop the block so the sweep re-transfers
+            xfarm_put_farmer(&farmer);
+        }
+        return Err(format!("BACKEND_CMC_NOTIFY: {}", e));
+    }
+    farmer.cmc_notified = true;
+    xfarm_put_farmer(&farmer);
+
+    XFARM_QUOTES.with(|q| q.borrow_mut().remove(&caller));
+    staking_audit("xfarm_create", caller, quote.price_e8s, id);
+    Ok(farmer)
+}
+
+/// RENEW: pay again to extend an existing (Active) Farmer's lifespan. Reuses the
+/// create money path — 10% → treasury, 90% → CMC topup to the EXISTING Farmer
+/// canister — then calls the Farmer's `extend(add_budget_cycles, add_days)` to bump
+/// the budget + duration and re-arm the burn timer. The owner gets a fresh quote for
+/// the Farmer's tier first (frontend calls get_xfarm_quote). A depleted/swept Farmer
+/// (no canister) can't be renewed → create a new one. Like create_farmer the
+/// multi-leg path isn't fully idempotent on partial failure; the locked quote is only
+/// consumed on full success.
+#[ic_cdk::update]
+async fn renew_farmer(farmer_id: u64) -> Result<Farmer, String> {
+    require_authenticated()?;
+    require_x_farm_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let mut farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
+        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
+    if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
+    if farmer.status != FarmerStatus::Active { return Err("CANNOT_RENEW".to_string()); }
+    let farmer_cid = farmer.canister_id.ok_or_else(|| "NO_CANISTER".to_string())?;
+
+    let cfg = xfarm_config();
+    let tier = cfg.tiers.iter().find(|t| t.id == farmer.tier_id).cloned()
+        .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
+
+    // Fresh locked quote for the Farmer's existing tier.
+    let quote = XFARM_QUOTES.with(|q| q.borrow().get(&caller).cloned())
+        .ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.tier_id != farmer.tier_id { return Err("QUOTE_MISMATCH".to_string()); }
+    if current_time() > quote.expires_at { return Err("QUOTE_EXPIRED".to_string()); }
+
+    let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+    let fee = ICP_FEE_E8S;
+    let sub = derive_xfarm_subaccount(&caller);
+    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
+    let balance = call_ledger_balance(ledger_id, escrow.clone()).await
+        .map_err(|e| format!("ESCROW_BALANCE: {}", e))?;
+    if balance < quote.price_e8s.saturating_add(quote.fee_e8s) {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+
+    let treasury_amt = quote.price_e8s / 10;            // 10% → treasury
+    let burn_amt = quote.price_e8s.saturating_sub(treasury_amt); // 90% → cycles
+    let add_budget = burn_amt.saturating_sub(fee);
+
+    let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
+    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, treasury_amt, Some(fee))
+        .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
+
+    // 90% → CMC topup to the EXISTING Farmer canister (funds the extension).
+    let block = call_cmc_topup_transfer(ledger_id, Some(sub), farmer_cid, burn_amt, fee)
+        .await.map_err(|e| format!("RENEW_CMC_XFER: {}", e))?;
+    notify_cmc_topup(cmc_principal(), farmer_cid, block, false).await
+        .map_err(|e| format!("RENEW_CMC_NOTIFY: {}", e))?;
+
+    // Tell the Farmer to extend its budget + duration + re-arm the burn timer.
+    let res: Result<(Result<(), String>,), _> =
+        ic_cdk::call(farmer_cid, "extend", (add_budget, tier.duration_days)).await;
+    match res {
+        Ok((Ok(()),)) => {}
+        Ok((Err(e),)) => return Err(format!("EXTEND_FAILED: {}", e)),
+        Err((c, m)) => return Err(format!("EXTEND_CALL ({:?}): {}", c, m)),
+    }
+
+    farmer.budget_cycles = farmer.budget_cycles.saturating_add(add_budget);
+    farmer.expected_depleted_at = farmer.expected_depleted_at
+        .saturating_add(tier.duration_days as u64 * DAY_NS);
+    farmer.status = FarmerStatus::Active;
+    xfarm_put_farmer(&farmer);
+
+    XFARM_QUOTES.with(|q| q.borrow_mut().remove(&caller));
+    staking_audit("xfarm_renew", caller, quote.price_e8s, farmer_id);
+    Ok(farmer)
+}
+
+/// Called by a Farmer canister when its cycle balance hits the stop-floor (D2).
+/// Only the Farmer's own canister may report. Sets Depleted so the sweep reaps it.
+#[ic_cdk::update]
+fn report_depleted(farmer_id: u64, burned_cycles: u64) -> Result<(), String> {
+    let caller = get_caller();
+    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
+        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
+    if farmer.canister_id != Some(caller) {
+        return Err("NOT_FARMER_CANISTER".to_string());
+    }
+    XFARM_FARMERS.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some(mut f) = map.get(&farmer_id) {
+            f.burned_cycles = burned_cycles;
+            f.status = FarmerStatus::Depleted;
+            map.insert(farmer_id, f);
+        }
+    });
+    Ok(())
+}
+
+/// On-demand generation: the owner viewing a Farmer triggers (throttled to max
+/// 1/day inside the Farmer) a fresh generation, then returns its retained drafts.
+/// Dev-seed Farmers (no canister) just return the seeded mock drafts so the UI works.
+#[ic_cdk::update]
+async fn get_farmer_drafts(farmer_id: u64, since: u64) -> Result<Vec<XFarmDraft>, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
+        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
+    if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
+    match farmer.canister_id {
+        None => Ok(XFARM_MOCK_DRAFTS.with(|d| d.borrow().get(&farmer.id).cloned()).unwrap_or_default()
+            .into_iter().filter(|x| x.created_at >= since).collect()),
+        Some(cid) => {
+            // request_generation triggers the throttled (1/day) on-demand outcall in
+            // the Farmer and returns its retained drafts (Result<vec Draft, text>).
+            let res: Result<(Result<Vec<XFarmDraft>, String>,), _> =
+                ic_cdk::call(cid, "request_generation", (farmer_id,)).await;
+            match res {
+                Ok((Ok(drafts),)) => Ok(drafts.into_iter().filter(|x| x.created_at >= since).collect()),
+                Ok((Err(e),)) => Err(format!("GENERATION_FAILED: {}", e)),
+                Err((c, m)) => Err(format!("DRAFTS_FAILED ({:?}): {}", c, m)),
+            }
+        }
+    }
+}
+
+/// The owner's live Farmer status: cycles remaining, days of budget left, next
+/// generation. Proxies to the Farmer canister for the live cycle balance.
+#[ic_cdk::update]
+async fn get_farmer_status(farmer_id: u64) -> Result<(Farmer, u64, u64), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
+        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
+    if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
+    let (cycles_remaining, next_gen) = match farmer.canister_id {
+        None => (farmer.budget_cycles.saturating_sub(farmer.burned_cycles), farmer.last_generation_at.saturating_add(DAY_NS)),
+        Some(cid) => {
+            // get_status(since) -> (cycles_remaining, next_generation_at); Farmer canister owns these.
+            let res: Result<((u64, u64),), _> = ic_cdk::call(cid, "get_status", (farmer.id,)).await;
+            match res {
+                Ok(((cr, ng),)) => (cr, ng),
+                Err((c, m)) => return Err(format!("STATUS_FAILED ({:?}): {}", c, m)),
+            }
+        }
+    };
+    Ok((farmer, cycles_remaining, next_gen))
+}
+
+// ── Sweep (added to setup_timers; bounded per pass like sweep_play_sessions) ──
+async fn xfarm_sweep() {
+    if !feature_active(FLAG_X_FARM) { return; }
+    // (a) reap Depleted Farmers (stop+delete the canister; nothing to reclaim —
+    //     cycles are ~0 by design, D2/finding #7), (b) re-notify pending CMC legs.
+    let mut to_clean: Vec<(u64, Principal)> = Vec::new();
+    let mut to_renotify: Vec<(u64, Principal, u64)> = Vec::new();
+    XFARM_FARMERS.with(|m| {
+        for entry in m.borrow().iter() {
+            let f = entry.value();
+            if f.status == FarmerStatus::Depleted {
+                if let Some(cid) = f.canister_id {
+                    to_clean.push((f.id, cid));
+                    if to_clean.len() >= XFARM_SWEEP_BATCH { break; }
+                }
+            } else if f.status == FarmerStatus::Active && f.burn_block_index.is_some() && !f.cmc_notified {
+                to_renotify.push((f.id, f.canister_id.unwrap(), f.burn_block_index.unwrap()));
+            }
+        }
+    });
+    for (id, cid) in to_clean {
+        let _ = xfarm_stop_canister(cid).await;
+        if let Err(e) = xfarm_delete_canister(cid).await {
+            canister_print(&format!("xfarm sweep: delete farmer {} failed: {}", id, e));
+            continue;
+        }
+        XFARM_FARMERS.with(|m| m.borrow_mut().remove(&id));
+    }
+    for (id, cid, block) in to_renotify {
+        match notify_cmc_topup(cmc_principal(), cid, block, false).await {
+            Ok(_) => XFARM_FARMERS.with(|m| {
+                let mut map = m.borrow_mut();
+                if let Some(mut f) = map.get(&id) { f.cmc_notified = true; map.insert(id, f); }
+            }),
+            Err(e) => canister_print(&format!("xfarm sweep: renotify farmer {} failed: {}", id, e)),
+        }
+    }
+}
+
+// ── Admin ───────────────────────────────────────────────────────────
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_xfarm_proxy(url: String, bearer: String) -> Result<(), String> {
+    let url = url.trim().to_string();
+    if url.is_empty() { return Err("INVALID_URL".to_string()); }
+    let mut cfg = xfarm_config();
+    cfg.proxy = XFarmProxy { url, bearer: bearer.trim().to_string() };
+    put_xfarm_config(cfg);
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_xfarm_tiers(tiers: Vec<FarmerTier>) -> Result<(), String> {
+    if tiers.is_empty() || tiers.len() > XFARM_MAX_TIERS { return Err("BAD_TIERS".to_string()); }
+    let mut seen = std::collections::HashSet::new();
+    for t in &tiers {
+        if t.drafts_per_day == 0 || t.drafts_per_day > XFARM_MAX_DRAFTS_PER_DAY {
+            return Err("BAD_DRAFTS_PER_DAY".to_string());
+        }
+        if t.duration_days == 0 { return Err("BAD_DURATION".to_string()); }
+        if !seen.insert(t.id) { return Err("DUP_TIER_ID".to_string()); }
+    }
+    let mut cfg = xfarm_config();
+    cfg.tiers = tiers;
+    put_xfarm_config(cfg);
+    Ok(())
+}
+
+/// Upload the Farmer wasm the factory installs (heap-cached; re-upload after an
+/// upgrade). Records the sha256 audit hash. Rotatable by re-calling.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_xfarm_wasm(wasm: Vec<u8>) -> Result<(), String> {
+    if wasm.is_empty() { return Err("EMPTY_WASM".to_string()); }
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(&wasm);
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&h.finalize());
+    XFARM_WASM_HASH.with(|c| *c.borrow_mut() = Some(hash));
+    XFARM_WASM.with(|w| *w.borrow_mut() = Some(wasm));
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_set_xfarm_config(max_active_farmers: usize) -> Result<(), String> {
+    // 0 = unlimited (no per-user cap; optional global brake only).
+    let mut cfg = xfarm_config();
+    cfg.max_active_farmers = max_active_farmers;
+    put_xfarm_config(cfg);
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_disable_farmer(id: u64) -> Result<(), String> {
+    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&id))
+        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
+    if let Some(cid) = farmer.canister_id {
+        let _ = xfarm_stop_canister(cid).await;
+    }
+    XFARM_FARMERS.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some(mut f) = map.get(&id) { f.status = FarmerStatus::Disabled; map.insert(id, f); }
+    });
+    Ok(())
+}
+
+// ── Dev seeds (require_local_dev; offline UI states with no real canister/burn) ──
+#[ic_cdk::update(guard = "require_local_dev")]
+fn dev_seed_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> {
+    let caller = get_caller();
+    let cfg = xfarm_config();
+    let tier = cfg.tiers.iter().find(|t| t.id == tier_id).cloned()
+        .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
+    // Local: usd_e8s_to_icp_e8s returns 0 if no admin-set rate; floor at 1 ICP.
+    let price = usd_e8s_to_icp_e8s(tier.price_usd_e8s).max(100_000_000);
+    let id = next_farmer_id();
+    let now = current_time();
+    let farmer = Farmer {
+        id, owner: caller, canister_id: None, tier_id, persona: persona.trim().to_string(),
+        created_at: now, expected_depleted_at: now + XFARM_DURATION_DAYS * DAY_NS,
+        budget_cycles: price * 9 / 10, burned_cycles: price / 20,
+        last_generation_at: now, last_burn_tick_at: now,
+        status: FarmerStatus::Active,
+        treasury_block: None, burn_block_index: None, install_done: true, cmc_notified: true,
+    };
+    xfarm_put_farmer(&farmer);
+    Ok(farmer)
+}
+
+#[ic_cdk::update(guard = "require_local_dev")]
+fn dev_seed_drafts(farmer_id: u64, n: u32) -> Result<(), String> {
+    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
+        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
+    if farmer.owner != get_caller() { return Err("NOT_OWNER".to_string()); }
+    let now = current_time();
+    let drafts: Vec<XFarmDraft> = (0..n).map(|i| XFarmDraft {
+        id: i as u64, created_at: now,
+        text: format!("Draft #{} — ICP just processed its Nth tx; the AI-agent-economy thesis holds.", i + 1),
+        cited_url: Some("https://dashboard.internetcomputer.org/".to_string()),
+        image_url: None,
+    }).collect();
+    XFARM_MOCK_DRAFTS.with(|d| d.borrow_mut().insert(farmer_id, drafts));
+    Ok(())
+}
+
+#[ic_cdk::update(guard = "require_local_dev")]
+fn dev_clear_farmers() -> Result<(), String> {
+    let ids: Vec<u64> = XFARM_FARMERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    XFARM_FARMERS.with(|m| { let mut map = m.borrow_mut(); for id in ids { map.remove(&id); } });
+    XFARM_MOCK_DRAFTS.with(|d| d.borrow_mut().clear());
+    Ok(())
+}
+
 ic_cdk::export_candid!();
 
 #[cfg(test)]
@@ -27352,5 +28151,293 @@ mod tests {
         assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "FAUCET_DISABLED");
         // get_faucet_status reflects the disabled flag.
         assert!(!get_faucet_status(Some(faucet_canister())).enabled);
+    }
+
+    // ── X-Farm (Stream B) ────────────────────────────────────────────────────
+    //
+    // Covers: tier validation, XRC quote pricing + lock, the create_farmer money
+    // split (10% treasury / 90% burn-to-cycles) + every guard, and the
+    // report_depleted → sweep reap lifecycle. The factory's create/install/
+    // stop/delete are no-ops on host (cfg(not(wasm32)) stubs); the CMC notify is
+    // a no-op Ok. The Farmer canister's own burn-tick / outcall / Failed-day skip
+    // live in src/xfarm_farmer and are exercised by that crate's unit tests
+    // (the daily_tick inter-canister http_request path is a PocketIC concern).
+
+    fn xfarm_reset() {
+        let ids: Vec<u64> = XFARM_FARMERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        XFARM_FARMERS.with(|m| { let mut m = m.borrow_mut(); for id in ids { m.remove(&id); } });
+        XFARM_NEXT_ID.with(|c| c.borrow_mut().set(1));
+        put_xfarm_config(XFarmConfig::default());
+        XFARM_WASM.with(|w| *w.borrow_mut() = None);
+        XFARM_WASM_HASH.with(|c| *c.borrow_mut() = None);
+        XFARM_QUOTES.with(|q| q.borrow_mut().clear());
+        XFARM_MOCK_DRAFTS.with(|d| d.borrow_mut().clear());
+        FEATURE_FLAGS.with(|m| m.borrow_mut().remove(&FLAG_X_FARM.to_string()));
+        // Pin the ICP rate at $5 for deterministic quote math.
+        admin_set_usd_rate(ExplorerToken::ICP, 500_000_000).unwrap();
+    }
+
+    fn xfarm_enable() {
+        FEATURE_FLAGS.with(|m| m.borrow_mut().insert(FLAG_X_FARM.to_string(), 1u8));
+    }
+
+    fn xfarm_set_admins(admin: Principal) {
+        let mut cfg = CONFIG.with(|c| c.borrow().get().clone());
+        cfg.admins = vec![admin];
+        CONFIG.with(|c| c.borrow_mut().set(cfg));
+    }
+
+    #[test]
+    fn test_xfarm_tier_validation() {
+        install_staking_test_config();
+        xfarm_reset();
+        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
+        xfarm_set_admins(admin);
+        set_mock_caller(admin);
+
+        // Good tiers accepted.
+        admin_set_xfarm_tiers(vec![
+            FarmerTier { id: 1, name: "Sprout".into(), drafts_per_day: 1, duration_days: 7, price_usd_e8s: 240_000_000, includes_image: false },
+            FarmerTier { id: 2, name: "Bloom".into(),  drafts_per_day: 10, duration_days: 7, price_usd_e8s: 480_000_000, includes_image: true },
+        ]).unwrap();
+        assert_eq!(get_xfarm_tiers().len(), 2);
+
+        // Empty / too many / duplicate ids / bad drafts / bad duration rejected.
+        assert_eq!(admin_set_xfarm_tiers(vec![]).unwrap_err(), "BAD_TIERS");
+        let too_many: Vec<FarmerTier> = (1..=11).map(|i| FarmerTier {
+            id: i, name: format!("T{}", i), drafts_per_day: 1, duration_days: 7,
+            price_usd_e8s: 100_000_000, includes_image: false,
+        }).collect();
+        assert_eq!(admin_set_xfarm_tiers(too_many).unwrap_err(), "BAD_TIERS");
+        assert_eq!(admin_set_xfarm_tiers(vec![
+            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 1, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
+            FarmerTier { id: 1, name: "B".into(), drafts_per_day: 1, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
+        ]).unwrap_err(), "DUP_TIER_ID");
+        assert_eq!(admin_set_xfarm_tiers(vec![
+            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 0, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
+        ]).unwrap_err(), "BAD_DRAFTS_PER_DAY");
+        assert_eq!(admin_set_xfarm_tiers(vec![
+            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 11, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
+        ]).unwrap_err(), "BAD_DRAFTS_PER_DAY");
+        assert_eq!(admin_set_xfarm_tiers(vec![
+            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 1, duration_days: 0, price_usd_e8s: 100_000_000, includes_image: false },
+        ]).unwrap_err(), "BAD_DURATION");
+
+        // The admin guard (`guard = "require_admin"`) is an ic_cdk macro that
+        // only runs in the canister runtime, not on host — so it isn't exercised
+        // by a direct host call. require_admin() itself is unit-tested elsewhere.
+        assert!(require_admin().is_ok(), "admin caller passes the guard fn");
+        set_mock_caller(p("rrkah-fqaaa-aaaaa-aaaaq-cai"));
+        assert_eq!(require_admin().unwrap_err(), "Caller is not an admin");
+    }
+
+    #[tokio::test]
+    async fn test_xfarm_quote_pricing_and_lock() {
+        install_staking_test_config();
+        xfarm_reset();
+        xfarm_enable();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+
+        // $2.40 / $5 = 0.48 ICP = 48_000_000 e8s; fee = 2× the ICP ledger fee.
+        let q1 = get_xfarm_quote(1).await.unwrap();
+        assert_eq!(q1.tier_id, 1);
+        assert_eq!(q1.price_e8s, 48_000_000, "$2.40 at $5/ICP = 0.48 ICP");
+        assert_eq!(q1.fee_e8s, ICP_FEE_E8S * 2);
+        assert_eq!(q1.usd_e8s, 240_000_000);
+        assert_eq!(q1.rate_usd_e8s, 500_000_000);
+        assert!(q1.expires_at > q1.created_at);
+
+        // $3.60 / $5 = 0.72 ICP (Grow tier).
+        let q2 = get_xfarm_quote(2).await.unwrap();
+        assert_eq!(q2.price_e8s, 72_000_000, "$3.60 at $5/ICP = 0.72 ICP");
+
+        // Unknown tier.
+        assert_eq!(get_xfarm_quote(99).await.unwrap_err(), "TIER_NOT_FOUND");
+
+        // Flag off → quote refused.
+        FEATURE_FLAGS.with(|m| m.borrow_mut().insert(FLAG_X_FARM.to_string(), 0u8));
+        assert_eq!(get_xfarm_quote(1).await.unwrap_err(), "FEATURE_DISABLED");
+        xfarm_enable();
+    }
+
+    #[tokio::test]
+    async fn test_xfarm_create_farmer_happy_path_and_money_split() {
+        install_staking_test_config();
+        xfarm_reset();
+        xfarm_enable();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        xfarm_set_admins(alice);
+        set_mock_caller(alice);
+
+        // Admin uploads the Farmer wasm the factory installs.
+        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+        assert!(get_xfarm_info().wasm_uploaded);
+
+        // Quote + fund escrow (price + 2 fees) + create.
+        let q = get_xfarm_quote(1).await.unwrap();
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+        set_mock_ledger_transfer(Ok(42));
+        let f = create_farmer(1, "degen maxis, gm".into()).await.unwrap();
+        assert_eq!(f.tier_id, 1);
+        assert_eq!(f.status, FarmerStatus::Active);
+        assert_eq!(f.persona, "degen maxis, gm");
+        assert!(f.canister_id.is_some(), "host factory stub mints a stand-in id");
+        assert!(f.install_done, "Farmer wasm installed (no-op on host)");
+        assert!(f.cmc_notified, "CMC notify leg completed (no-op on host)");
+        assert_eq!(f.treasury_block, Some(42), "10% treasury leg journaled");
+        assert_eq!(f.burn_block_index, Some(42), "90% CMC leg journaled");
+
+        // Money split: 10% treasury / 90% burn; budget_cycles = 90% net of the
+        // single CMC-leg fee. At $5, tier 1 = 0.48 ICP.
+        let treasury_amt = q.price_e8s / 10;                 // 4_800_000
+        let burn_amt = q.price_e8s - treasury_amt;           // 43_200_000
+        let stored = xfarm_farmers_by_owner(&alice).pop().unwrap();
+        assert_eq!(stored.budget_cycles, burn_amt - ICP_FEE_E8S, "90% net of the CMC leg fee");
+        let _ = treasury_amt; // documented for the reader
+        assert_eq!(xfarm_active_count(), 1);
+
+        // Quote is consumed after a successful create.
+        assert!(XFARM_QUOTES.with(|qq| qq.borrow().get(&alice).is_none()));
+
+        // Unlimited farms per owner: a SECOND create for the same owner now SUCCEEDS
+        // (was FARMER_EXISTS). Needs a fresh quote + escrow.
+        let q2 = get_xfarm_quote(1).await.unwrap();
+        set_mock_ledger_balance(q2.price_e8s + q2.fee_e8s);
+        set_mock_ledger_transfer(Ok(43));
+        let f2 = create_farmer(1, "another persona".into()).await.unwrap();
+        assert_ne!(f2.id, f.id, "second farmer gets a fresh id");
+        assert_eq!(xfarm_farmers_by_owner(&alice).len(), 2, "owner can hold multiple farmers");
+        assert_eq!(xfarm_active_count(), 2);
+        assert_eq!(list_my_farmers().len(), 2, "list_my_farmers returns all the owner's farmers");
+
+        // BAD_PERSONA: empty or over the 300-char cap.
+        xfarm_reset();
+        xfarm_enable();
+        set_mock_caller(alice);
+        assert_eq!(create_farmer(1, "".into()).await.unwrap_err().starts_with("BAD_PERSONA"), true);
+        let long = "x".repeat(301);
+        assert_eq!(create_farmer(1, long).await.unwrap_err().starts_with("BAD_PERSONA"), true);
+    }
+
+    #[tokio::test]
+    async fn test_xfarm_create_farmer_guards() {
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let bob = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
+        let mk_admin = || { xfarm_set_admins(alice); };
+
+        // NO_QUOTE: no locked quote for the caller.
+        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
+        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
+        set_mock_caller(alice);
+        assert_eq!(create_farmer(1, "valid persona".into()).await.unwrap_err(), "NO_QUOTE");
+
+        // QUOTE_MISMATCH: locked a tier-1 quote, asked for tier 2.
+        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
+        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
+        set_mock_caller(alice);
+        let _ = get_xfarm_quote(1).await.unwrap();
+        assert_eq!(create_farmer(2, "valid persona".into()).await.unwrap_err(), "QUOTE_MISMATCH");
+
+        // INSUFFICIENT_DEPOSIT: funded below price + 2 fees.
+        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
+        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
+        set_mock_caller(alice);
+        let q = get_xfarm_quote(1).await.unwrap();
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s - 1); // one e8 short
+        set_mock_ledger_transfer(Ok(7));
+        assert_eq!(create_farmer(1, "valid persona".into()).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
+
+        // WASM_NOT_UPLOADED: escrow + create succeed, install fails → farmer removed.
+        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
+        set_mock_caller(alice);
+        let q = get_xfarm_quote(1).await.unwrap();
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+        set_mock_ledger_transfer(Ok(7));
+        // (wasm is empty after reset → install step fails)
+        assert_eq!(create_farmer(1, "valid persona".into()).await.unwrap_err(), "WASM_NOT_UPLOADED");
+        assert!(xfarm_farmers_by_owner(&alice).is_empty(), "failed install removes the farmer");
+
+        // FEATURE_DISABLED: flag off → refused before any state work.
+        install_staking_test_config(); xfarm_reset(); mk_admin();
+        set_mock_caller(alice);
+        FEATURE_FLAGS.with(|m| m.borrow_mut().insert(FLAG_X_FARM.to_string(), 0u8));
+        assert_eq!(create_farmer(1, "valid persona".into()).await.unwrap_err(), "FEATURE_DISABLED");
+
+        // MAX_FARMERS_REACHED: cap = 1, alice is active, bob is blocked.
+        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
+        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
+        admin_set_xfarm_config(1).unwrap(); // cap active Farmers at 1
+        set_mock_caller(alice);
+        let q = get_xfarm_quote(1).await.unwrap();
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+        set_mock_ledger_transfer(Ok(7));
+        create_farmer(1, "alice persona".into()).await.unwrap();
+        set_mock_caller(bob);
+        let qb = get_xfarm_quote(1).await.unwrap();
+        set_mock_ledger_balance(qb.price_e8s + qb.fee_e8s);
+        set_mock_ledger_transfer(Ok(8));
+        assert_eq!(create_farmer(1, "bob persona".into()).await.unwrap_err(), "MAX_FARMERS_REACHED");
+    }
+
+    #[tokio::test]
+    async fn test_xfarm_report_depleted_and_sweep_reap() {
+        install_staking_test_config();
+        xfarm_reset();
+        xfarm_enable();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        xfarm_set_admins(alice);
+        set_mock_caller(alice);
+        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
+        let q = get_xfarm_quote(1).await.unwrap();
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+        set_mock_ledger_transfer(Ok(42));
+        let f = create_farmer(1, "persona".into()).await.unwrap();
+        let farmer_cid = f.canister_id.unwrap();
+        let id = f.id;
+
+        // A random caller may not report depletion — only the Farmer's own canister.
+        set_mock_caller(p("rrkah-fqaaa-aaaaa-aaaaq-cai")); // alice, not the farmer cid
+        assert_eq!(report_depleted(id, 1_000).unwrap_err(), "NOT_FARMER_CANISTER");
+
+        // The Farmer canister reports → status becomes Depleted + burned_cycles recorded.
+        set_mock_caller(farmer_cid);
+        report_depleted(id, 99_000_000_000).unwrap();
+        let stored = XFARM_FARMERS.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(stored.status, FarmerStatus::Depleted);
+        assert_eq!(stored.burned_cycles, 99_000_000_000);
+
+        // The sweep reaps Depleted Farmers (stop+delete are no-ops on host).
+        xfarm_sweep().await;
+        assert!(XFARM_FARMERS.with(|m| m.borrow().get(&id).is_none()), "depleted farmer reaped");
+        assert_eq!(xfarm_active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_xfarm_unlimited_and_global_cap() {
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+
+        // cap = 0 (the default) ⇒ unlimited: one owner creates 3 farmers.
+        install_staking_test_config(); xfarm_reset(); xfarm_enable(); xfarm_set_admins(alice);
+        set_mock_caller(alice);
+        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
+        assert_eq!(xfarm_config().max_active_farmers, 0, "default cap is 0 = unlimited");
+        for i in 0..3u64 {
+            let q = get_xfarm_quote(1).await.unwrap();
+            set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+            set_mock_ledger_transfer(Ok(100 + i));
+            create_farmer(1, format!("persona {}", i)).await.unwrap();
+        }
+        assert_eq!(list_my_farmers().len(), 3, "unlimited farms per owner under cap=0");
+        assert_eq!(xfarm_active_count(), 3);
+
+        // admin can set cap = 0 explicitly (no longer BAD_CAP), and a positive cap
+        // becomes a global brake: a further create is blocked.
+        admin_set_xfarm_config(0).unwrap();
+        admin_set_xfarm_config(2).unwrap();
+        let q = get_xfarm_quote(1).await.unwrap();
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+        set_mock_ledger_transfer(Ok(200));
+        assert_eq!(create_farmer(1, "blocked".into()).await.unwrap_err(), "MAX_FARMERS_REACHED");
     }
 }
