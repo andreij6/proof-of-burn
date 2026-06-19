@@ -665,8 +665,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
         <div className="card col" style={{ gap: 8, padding: 12, background: 'var(--surface-2)', borderColor: 'var(--burn)' }}>
           <span style={LABEL_STYLE}>Renew this farm</span>
           <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-2)' }}>
-            Pay again to extend <b>{tier ? tier.name : 'this farm'}</b> by another {tier?.duration_days ?? 7} days —
-            90% burns to more cycles, 10% to the treasury.
+            Pay again to extend <b>{tier ? tier.name : 'this farm'}</b> by another {tier?.duration_days ?? 7} days.
           </p>
           {renewQuote ? (
             <div className="row" style={{ justifyContent: 'space-between' }}>
