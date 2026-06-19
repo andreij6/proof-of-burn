@@ -110,8 +110,7 @@ export default function DiscussionsPage({
           Open conversations on live proposals — start one for $1, weigh in for $0.25,
           and up/down-vote the takes. Start a quality conversation and you earn{' '}
           <b>1 lottery ticket for every upvote it gets</b> (while you're staked).{' '}
-          <b>Fees paid in ICP are burned 100%</b> (to backend-canister cycles); fees in
-          other tokens go to the treasury. Discussions close when the proposal is decided.
+          <b>Fees paid in ICP are burned 100%</b>.
         </p>
       </div>
 
