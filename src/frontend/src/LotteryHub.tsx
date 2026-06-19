@@ -61,7 +61,7 @@ export default function LotteryHub({
             <Chip tone="pending"><LiveDot size={6} /> 3× weekly</Chip>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
-            Earn a free ticket every day just by staking. Every draw is a chance to win, and your ICP is never at risk.{' '}
+            Earn a free ticket every day just by staking. Every draw is a chance to win, and your ICP is never at risk. The only requirement is staking ICP into a neuron — lock it forever for the most tickets, or unstake and wait for it to dissolve to get your ICP back.{' '}
             <MoreInfo title="How the lossless lottery works">
               <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
                 <Eyebrow accent>The gist</Eyebrow>
