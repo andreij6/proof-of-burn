@@ -1891,7 +1891,7 @@ export default function App() {
           About Us
         </Btn>
 
-        <Eyebrow style={{ margin: '14px 0 4px' }}>Participate</Eyebrow>
+        <Eyebrow style={{ margin: '14px 0 4px' }}>Governance</Eyebrow>
         <Btn variant={page === 'voting' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('voting')}>
           <Icon name="flame" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
           Voting
@@ -1906,22 +1906,26 @@ export default function App() {
           <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
           Neuron Syndicate
         </Btn>
+        {faucetEnabled && (
+          <Btn variant={page === 'faucet' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('faucet')}>
+            <Icon name="zap" size={14} stroke={page === 'faucet' ? 'var(--char-950)' : 'currentColor'} />
+            Cycles Faucet
+          </Btn>
+        )}
+
+        {(ideaBoardEnabled || explorerEnabled) && (
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Community</Eyebrow>
+        )}
         {ideaBoardEnabled && (
           <Btn variant={page === 'ideas' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ideas')}>
             <Icon name="bulb" size={14} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
-            Community R&D
+            Roadmap &amp; Development
           </Btn>
         )}
         {explorerEnabled && (
           <Btn variant={page === 'explorer' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('explorer')}>
             <Icon name="compass" size={14} stroke={page === 'explorer' ? 'var(--char-950)' : 'currentColor'} />
             Explorer
-          </Btn>
-        )}
-        {faucetEnabled && (
-          <Btn variant={page === 'faucet' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('faucet')}>
-            <Icon name="zap" size={14} stroke={page === 'faucet' ? 'var(--char-950)' : 'currentColor'} />
-            Cycles Faucet
           </Btn>
         )}
 

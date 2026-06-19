@@ -597,7 +597,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
           <Eyebrow accent>Burn more ICP</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
             <Icon name="bulb" size={22} stroke="var(--burn-ink)" />
-            <h4 style={{ margin: 0 }}>Community R&amp;D</h4>
+            <h4 style={{ margin: 0 }}>Roadmap &amp; Development</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
             Pitch ways to burn more ICP, back the best ideas, and fund official projects.{' '}
