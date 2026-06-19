@@ -60,7 +60,7 @@ export default function DiscussionsPage({
   const vote = async (id: bigint, dir: VoteDir) => {
     if (!signedIn) { onSignIn(); return; }
     try { const r = await actor.vote_thread(id, dir); if (r.__kind__ === 'Err') throw new Error(r.Err); await refresh(); }
-    catch { /* noop */ }
+    catch (e: any) { console.error('vote_thread failed:', e); alert(`Vote failed: ${e.message || e}`); }
   };
 
   // Live proposals you could start a fresh discussion on (open/met).

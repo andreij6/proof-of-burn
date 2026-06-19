@@ -6327,7 +6327,7 @@ fn dev_seed_threads(proposal_id: u64, n_threads: u64, n_comments: u64) -> Result
                 title: format!("Sample thread {}", i + 1),
                 body: "Seeded discussion thread for local UI testing.".to_string(),
                 created_at: now, last_activity_at: now,
-                comment_count: n_comments, upvote_count: i, downvote_count: 0,
+                comment_count: n_comments, upvote_count: 0, downvote_count: 0,
                 tickets_awarded: 0, my_vote: None,
             });
         });
@@ -22489,6 +22489,53 @@ mod tests {
 
     fn ticket_count(user: Principal) -> u64 {
         LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).map(|e| e.count).unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn test_vote_counts_net_and_toggle() {
+        // Exact semantics: fresh upvote → up 1 / down 0 (net +1); fresh downvote
+        // → up 0 / down 1 (net -1); switching flips both; re-voting the same way
+        // toggles off.
+        install_staking_test_config();
+        clear_threads();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");                                    // author
+        let bob = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");  // voter
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_DISCUSSIONS.to_string(), 1u8); });
+        let now = current_time();
+        let mk = |id: u64| Thread {
+            id, proposal_id: 1, author: alice, title: "t".into(), body: "b".into(),
+            created_at: now, last_activity_at: now, comment_count: 0,
+            upvote_count: 0, downvote_count: 0, tickets_awarded: 0, my_vote: None,
+        };
+        THREADS.with(|m| { let mut m = m.borrow_mut(); m.insert(1, mk(1)); m.insert(2, mk(2)); });
+        let net = |id: u64| { let t = THREADS.with(|m| m.borrow().get(&id)).unwrap(); (t.upvote_count as i128) - (t.downvote_count as i128) };
+        let counts = |id: u64| { let t = THREADS.with(|m| m.borrow().get(&id)).unwrap(); (t.upvote_count, t.downvote_count) };
+
+        set_mock_caller(bob);
+        // fresh UPVOTE on thread 1 → (1, 0), net +1
+        vote_thread(1, VoteDir::Up).unwrap();
+        assert_eq!(counts(1), (1, 0));
+        assert_eq!(net(1), 1);
+        // fresh DOWNVOTE on thread 2 → (0, 1), net -1
+        vote_thread(2, VoteDir::Down).unwrap();
+        assert_eq!(counts(2), (0, 1));
+        assert_eq!(net(2), -1);
+
+        // switch thread 2 Down → Up → (1, 0), net +1
+        vote_thread(2, VoteDir::Up).unwrap();
+        assert_eq!(counts(2), (1, 0));
+        assert_eq!(net(2), 1);
+        // re-upvote thread 1 (was Up) toggles OFF → (0, 0), net 0
+        vote_thread(1, VoteDir::Up).unwrap();
+        assert_eq!(counts(1), (0, 0));
+        assert_eq!(net(1), 0);
+        // my_vote reflects bob's current vote on thread 2
+        assert_eq!(get_thread(2).unwrap().my_vote, Some(VoteDir::Up));
+        // and is cleared on thread 1 after toggle-off
+        assert_eq!(get_thread(1).unwrap().my_vote, None);
+
+        clear_threads();
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_DISCUSSIONS.to_string()); });
     }
 
     #[tokio::test]
