@@ -144,7 +144,9 @@ export default function DiscussionsPage({
                     <button onClick={() => vote(t.id, VoteDir.Up)} title="Upvote" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: t.my_vote === VoteDir.Up ? 'var(--sprout-ink)' : 'var(--fg-3)' }}>
                       <Icon name="arrowUp" size={15} stroke="currentColor" />
                     </button>
-                    <b className="mono" style={{ fontSize: 12 }}>{(t.upvote_count - t.downvote_count).toString()}</b>
+                    {(() => { const s = t.upvote_count - t.downvote_count; return (
+                      <b className="mono" style={{ fontSize: 12, color: s < 0n ? 'var(--ember)' : s > 0n ? 'var(--sprout-ink)' : 'var(--fg-2)' }}>{s.toString()}</b>
+                    ); })()}
                     <button onClick={() => vote(t.id, VoteDir.Down)} title="Downvote" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, transform: 'rotate(180deg)', color: t.my_vote === VoteDir.Down ? 'var(--ember)' : 'var(--fg-3)' }}>
                       <Icon name="arrowUp" size={15} stroke="currentColor" />
                     </button>

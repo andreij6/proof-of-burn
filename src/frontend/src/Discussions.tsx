@@ -230,7 +230,9 @@ export default function Discussions({
       <button onClick={onUp} title="Upvote" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: mine === VoteDir.Up ? 'var(--sprout-ink)' : 'var(--fg-3)' }}>
         <Icon name="arrowUp" size={15} stroke="currentColor" />
       </button>
-      <b className="mono" style={{ fontSize: 12 }}>{score(up, down).toString()}</b>
+      {(() => { const s = score(up, down); return (
+        <b className="mono" style={{ fontSize: 12, color: s < 0n ? 'var(--ember)' : s > 0n ? 'var(--sprout-ink)' : 'var(--fg-2)' }}>{s.toString()}</b>
+      ); })()}
       <button onClick={onDown} title="Downvote" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, transform: 'rotate(180deg)', color: mine === VoteDir.Down ? 'var(--ember)' : 'var(--fg-3)' }}>
         <Icon name="arrowUp" size={15} stroke="currentColor" />
       </button>
