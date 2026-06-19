@@ -73,7 +73,7 @@ export default function AboutUs({ signedIn, onSignIn, go }: AboutUsProps) {
             Stakers collect free tickets and the jackpot pays out in ICP.
           </Pillar>
           <Pillar icon="list" title="Proposal discussions">
-            Start a conversation on any proposal for $1, weigh in for $0.25, and up/down-vote the takes.
+            Start a conversation on any proposal, weigh in with comments, and up/down-vote the takes.
             Conversation-starters earn lottery tickets for every upvote, and ICP spent here is burned 100% —
             so the community debate itself tightens supply.
           </Pillar>
