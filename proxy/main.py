@@ -56,8 +56,10 @@ def _check_auth(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="bad bearer")
 
 
-@app.get("/healthz")
-def healthz():
+# NB: "/healthz" is intercepted by Google Front End on Cloud Run (never reaches the
+# container), so use "/health".
+@app.get("/health")
+def health():
     return {"ok": True, "tweets_model": TWEETS_MODEL, "location": LOCATION}
 
 

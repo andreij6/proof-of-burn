@@ -31,7 +31,7 @@ In another shell:
 
 ```bash
 # health
-curl -s localhost:8080/healthz
+curl -s localhost:8080/health
 
 # tweets (note the bearer)
 curl -s localhost:8080/v1/tweets \
