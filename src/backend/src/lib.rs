@@ -5782,14 +5782,22 @@ async fn collect_discussion_fee(
         return Err("INSUFFICIENT_DEPOSIT".to_string());
     }
     if token == ExplorerToken::ICP {
-        // Burn to backend-canister cycles via the CMC (proof-of-burn).
+        // Burn to backend-canister cycles via the CMC (proof-of-burn). The
+        // escrow→CMC TRANSFER is the charge — once it lands, the user has paid.
+        // `notify_top_up` (mint-to-cycles) is BEST-EFFORT: a failure leaves the
+        // ICP at the CMC (recoverable / pending mint), and must not block the
+        // post or strand the user's intent. (This also sidesteps the PB-148
+        // local quirk where the local CMC rejects the local ledger's block.)
         let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
         let block = call_cmc_topup_transfer(ledger_id, Some(escrow_sub), get_canister_id(), amount, fee)
             .await
             .map_err(|e| format!("BURN_XFER_FAILED: {}", e))?;
-        notify_cmc_topup(cmc, get_canister_id(), block, true)
-            .await
-            .map_err(|e| format!("BURN_NOTIFY_FAILED: {}", e))?;
+        if let Err(e) = notify_cmc_topup(cmc, get_canister_id(), block, true).await {
+            canister_print(&format!(
+                "discussion burn: notify_top_up failed for block {} (ICP at CMC, mint pending): {}",
+                block, e
+            ));
+        }
     } else {
         // Non-ICP → 100% to the treasury (held as the token).
         let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
