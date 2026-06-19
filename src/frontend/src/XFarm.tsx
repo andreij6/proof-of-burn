@@ -259,16 +259,20 @@ export default function XFarm({
   usePageDevControls(isLocal && signedIn, () => (
     <div className="col" style={{ gap: 6 }}>
       <Eyebrow accent>X-Farm mock data</Eyebrow>
-      {/* Post mock data: seed a Farmer + 5 drafts in one click so the multi-farm UI has content. */}
+      {/* Post mock data: seed one Farmer per tier (+ 5 drafts each) so the multi-farm UI
+          shows every tier, with a varied persona on each. */}
       <Btn variant="ghost" onClick={async () => {
         try {
-          const r = await actor.dev_seed_farmer(tierId, personaText || PERSONA_PRESETS[0].text);
-          if (r.__kind__ === 'Ok') {
+          for (let i = 0; i < tiers.length; i++) {
+            const t = tiers[i];
+            const persona = PERSONA_PRESETS[i % PERSONA_PRESETS.length].text;
+            const r = await actor.dev_seed_farmer(t.id, persona);
+            if (r.__kind__ === 'Err') { alert(r.Err); break; }
             await actor.dev_seed_drafts(r.Ok.id, 5);
-            await refresh();
-          } else alert(r.Err);
+          }
+          await refresh();
         } catch (e: any) { alert(e.message || String(e)); }
-      }}>Post mock data</Btn>
+      }}>Post mock data (1 per tier)</Btn>
       <Btn variant="ghost" onClick={async () => {
         if (farmers.length === 0) { alert('No farm to seed drafts for — Post mock data first.'); return; }
         try {
