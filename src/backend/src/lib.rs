@@ -18941,6 +18941,12 @@ async fn create_farmer(tier_id: u32, persona: String, days: u32) -> Result<Farme
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
 
+    // Run the whole create flow; on ANY failure auto-refund the escrow deposit so a
+    // failed create never strands the owner's ICP (e.g. WASM_NOT_UPLOADED). The
+    // frontend deposits BEFORE calling, so the deposit is in escrow on entry. Pre-money
+    // failures (the common case) refund in full; a post-treasury failure finds the
+    // escrow already drained → refund no-ops, leaving the half-Farmer to the sweep.
+    let result: Result<Farmer, String> = async move {
     let cfg = xfarm_config();
     let tier = cfg.tiers.iter().find(|t| t.id == tier_id).cloned()
         .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
@@ -19065,6 +19071,49 @@ async fn create_farmer(tier_id: u32, persona: String, days: u32) -> Result<Farme
     XFARM_QUOTES.with(|q| q.borrow_mut().remove(&caller));
     staking_audit("xfarm_create", caller, quote.price_e8s, id);
     Ok(farmer)
+    }.await;
+
+    if result.is_err() {
+        if let Ok(amt) = xfarm_refund_escrow(caller).await {
+            if amt > 0 {
+                canister_print(&format!("xfarm: refunded {} e8s to {} after failed create", amt, caller.to_text()));
+            }
+        }
+    }
+    result
+}
+
+/// Refund a caller's x-farm escrow deposit (balance − fee) back to their main account.
+/// Recovers funds when create_farmer aborts after the frontend has already deposited
+/// (it deposits before calling). Returns 0 when there's nothing above the fee.
+async fn xfarm_refund_escrow(caller: Principal) -> Result<u64, String> {
+    let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+    let fee = ICP_FEE_E8S;
+    let sub = derive_xfarm_subaccount(&caller);
+    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
+    let bal = call_ledger_balance(ledger_id, escrow).await
+        .map_err(|e| format!("REFUND_BALANCE: {}", e))?;
+    if bal <= fee { return Ok(0); }
+    let amt = bal - fee;
+    let dest = LedgerAccount { owner: caller, subaccount: None };
+    call_ledger_transfer(ledger_id, Some(sub), dest, amt, Some(fee)).await
+        .map_err(|e| format!("REFUND_XFER: {}", e))?;
+    Ok(amt)
+}
+
+/// Self-service: refund my own stranded x-farm escrow deposit.
+#[ic_cdk::update]
+async fn refund_xfarm_escrow() -> Result<u64, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    xfarm_refund_escrow(caller).await
+}
+
+/// Admin recovery: refund a specific user's stranded x-farm escrow deposit.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_refund_xfarm_escrow(user: Principal) -> Result<u64, String> {
+    xfarm_refund_escrow(user).await
 }
 
 /// RENEW: pay again to extend an existing (Active) Farmer's lifespan. Reuses the

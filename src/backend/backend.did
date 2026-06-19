@@ -1178,6 +1178,8 @@ service : (InitPayload) -> {
   // Pause/unpause the round loop. The current round still settles; no new
   // betting window opens while paused.
   admin_pause_crash : (bool) -> (Result);
+  // Admin recovery: refund a specific user's stranded x-farm escrow deposit.
+  admin_refund_xfarm_escrow : (principal) -> (Result_1);
   // Admin: reject a pending community listing. The payment is refunded from
   // the treasury (minus one ledger fee), then the listing is deleted.
   // The listing is REMOVED before the refund transfer (and restored if it
@@ -1743,6 +1745,8 @@ service : (InitPayload) -> {
   record_idea_view : (nat64) -> (Result);
   refresh_course_listing : (nat64) -> (Result);
   refund_registration : () -> (Result);
+  // Self-service: refund my own stranded x-farm escrow deposit.
+  refund_xfarm_escrow : () -> (BalanceResult);
   // Proof-of-control registration. The TARGET canister calls this on itself, so
   // `get_caller()` (the message's authenticated caller) IS the canister to
   // register. Cheap, network-free rejects for obviously-bad principals.

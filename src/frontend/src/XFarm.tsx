@@ -261,7 +261,8 @@ export default function XFarm({
       }
       setPayStep("Step 2/2: Deploying your Farmer canister…");
       const res = await actor.create_farmer(tierId, persona, days);
-      if (res.__kind__ === "Err") throw new Error(res.Err);
+      // The backend auto-refunds the escrow deposit if create fails, so tell the user.
+      if (res.__kind__ === "Err") throw new Error(`${res.Err} — your ICP deposit has been refunded.`);
       setPaySuccess(true);
       setPayStep("Your Farmer is running! Open it and tap “Generate today's drafts” when you want tweets.");
       await refresh();
