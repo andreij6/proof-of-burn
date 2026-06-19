@@ -3,30 +3,53 @@
 This feature publishes **arbitrary user text on-chain under our brand** — a bigger
 content-risk surface than any prior feature here. Ranked by severity.
 
+## R0 — Sybil lottery-ticket farming via free upvotes (HIGH; the new headline)
+The D-reward (1 lottery ticket to the thread author **per upvote**) pays out into a
+**real-ICP lottery**, but **upvotes are free and principals are free to mint**. So
+an author can spin up N Internet Identities, upvote their own thread N times, and
+**farm N lottery tickets** — diluting honest players and draining EV from the pot.
+This is the single most dangerous interaction in the design.
+- **Mitigate (baked into D-reward):** (1) **Sybil gate** — only an upvote from a
+  principal with **participation history** (`USER_AGGREGATES.proposals_joined > 0`,
+  i.e. has committed/voted real ICP before) mints a ticket; minting a qualifying
+  sybil now costs a real commitment each. (2) **Never** reward the author's own
+  principal. (3) **Per-thread ticket cap** (`TICKETS_PER_THREAD_CAP`, e.g. 50) caps
+  the blast radius. (4) Tickets are **not** clawed back on un-upvote/downvote, but
+  each principal can only upvote once, so the cap + gate bound total mint.
+- **Residual:** a determined attacker with many funded, participating principals can
+  still earn up to the cap. Tune the cap low; monitor; consider requiring a *minimum
+  upvoter balance* or only counting upvotes from **distinct prior-round lottery
+  participants** if farming appears. → owner should confirm the gate + cap.
+
 ## R1 — Harmful / illegal content + on-chain permanence (HIGH)
 User-generated posts can contain harassment, hate, doxxing, CSAM links, defamation,
 or illegal material — and **on-chain data is effectively permanent and globally
 public**. "Delete" only removes it from the canister's *current* state; it may
 persist in snapshots, node state history, and anything already indexed/scraped.
 This collides with takedown obligations and "right to be forgotten" (GDPR-style).
-- **Mitigate:** (1) **Admin takedown** (`admin_remove_thread/_comment`) + the
-  existing moderation queue. (2) A **word/pattern filter** on submit to block the
-  worst categories pre-publication. (3) Clear **content guidelines + a public
-  notice** that posts are permanent/public. (4) Consider storing only a **hash +
-  off-chain body** if hard-delete is a legal must (heavier; flag to owner). (5)
-  The **$1 thread fee + auth** raises the cost of spam-flooding illegal content.
-- **Owner decision (Q4):** how aggressive is moderation, and is true hard-delete a
-  requirement? This gates the storage design.
+- **Decided posture (D3/D4):** **no moderation pipeline, no word filter** — so
+  illegal/harmful content **can appear and stay until** (a) an admin deletes the
+  thread (`admin_remove_thread`, the only lever), or (b) the proposal settles and
+  the thread **auto-deletes (D3)**. Delete-on-settle bounds *lifespan* and current-
+  state growth, but **does not solve permanence** — removed bytes may persist in
+  snapshots / node state history / scrapes.
+- **Mitigate within that posture:** (1) keep admin takedown fast + obvious. (2)
+  Render plain-text only (R7). (3) The **content notice** sets expectations. (4)
+  *If* legal hard-delete ever becomes a requirement, revisit storing **hash +
+  off-chain body** — flag now, out of MVP scope.
+- **Owner aware:** D4 trades moderation cost for legal exposure on user content;
+  acceptable for launch given delete-on-settle + admin takedown, but revisit if the
+  surface gets abused.
 
-## R2 — Spam / sybil flooding (HIGH)
-Comments are **free** (user spec). A sybil can flood a thread with comments or
-upvotes to drown dissent or fake consensus, cheaply.
-- **Mitigate:** (1) **Per-caller comment rate-limit** (N/min). (2) **Upvote dedupe**
-  (one per principal per item) — but principals are free to mint, so dedupe ≠ sybil
-  resistance. (3) **Q6 gate:** require commenters to **hold a token / have voted**
-  (cost to sybil). (4) The **$1 thread fee** gates thread spam well; comment spam is
-  the soft spot → consider an **optional comment micro-fee** (Q1) if abuse appears.
-  (5) Length caps + max comments/thread bound blast radius.
+## R2 — Spam flooding (MED; mitigated by paid comments)
+Per D1, **comments cost $0.25** and threads $1 — so flooding now costs real money
+per item, a strong spam gate (much better than the originally-floated free
+comments). Residual: a funded attacker can still post, and **votes are free**
+(see R0 for the ticket-farming angle; here it's drowning dissent / fake consensus).
+- **Mitigate:** (1) **Per-caller comment rate-limit** even though paid (burst
+  control). (2) **Vote dedupe** (one per principal per item, toggle). (3) caps on
+  comments/thread + threads/proposal. (4) the $0.25/$1 fees make sustained spam
+  expensive.
 
 ## R3 — Vote manipulation / astroturfing (MED–HIGH; product-specific)
 This app **routes burns into NNS votes**. A manufactured "top thread" arguing a
@@ -39,23 +62,24 @@ stance — amplified by sybil upvotes and shared on X under our brand — could
   reach. (5) Consider showing **whether a poster actually committed/voted** on the
   proposal (skin-in-the-game signal) rather than anonymous opinion.
 
-## R4 — Moderation burden & centralization (MED)
-Admin-only takedown means the team is on the hook to police content 24/7, and
-"admin can delete posts" is a centralization vector (censoring dissent).
-- **Mitigate:** publish a **moderation policy**; log removals (audit log) for
-  transparency; consider **community flagging** feeding the moderation queue;
-  keep removal scoped + reviewable. Don't let one key silently rewrite discourse.
+## R4 — Admin-delete centralization (MED; accepted via D4)
+D4 = **no moderation queue, no filter; admin can delete any thread.** Low ops
+burden, but "one key can delete any discussion" is a **censorship/centralization
+vector** (silently removing dissent).
+- **Mitigate:** **log every admin removal to the audit log** (transparency); keep
+  the removal scoped to spam/illegal; delete-on-settle means most content ages out
+  on its own. Consider community-flagging later if abuse outpaces admins.
 
-## R5 — Cost / state growth (MED)
-Unbounded threads+comments grow canister state (cycles) indefinitely; the $1 fee
-covers thread spam but **free comments don't pay for their storage**.
-- **Mitigate:** hard caps (comments/thread, threads/proposal, body length);
-  **lock/expire** old threads (Q3) so dead discussions stop growing; monitor state
-  size; the comment micro-fee (Q1) as a release valve.
+## R5 — Cost / state growth (LOW–MED; mitigated)
+Both levers now help: **comments are paid ($0.25)** so they pay toward their own
+storage, and **delete-on-settle (D3)** purges a proposal's whole discussion when it
+resolves — so state can't grow unbounded across closed proposals.
+- **Also:** hard caps (comments/thread, threads/proposal, body length); monitor
+  total state size.
 
 ## R6 — Payment edge cases (LOW–MED)
-The thread fee uses the escrow→treasury path; a charge that succeeds while the
-insert fails would take $1 with no thread.
+Both the $1 thread fee and the $0.25 comment fee use the escrow→treasury path; a
+charge that succeeds while the insert fails would take money with no post.
 - **Mitigate:** clone `submit_dapp`'s ordering (validate + escrow check before the
   transfer; insert immediately after) and its **claim-before-await refund** if any
   await sits between charge and insert. Unit-test the failure path. Note: **no
@@ -77,9 +101,12 @@ claims.
 
 ---
 ### Verdict
-**Buildable and high-engagement, but it's the team's first foray into hosting
-arbitrary public user content** — the dominant risks are **content moderation +
-on-chain permanence (R1)** and **free-comment spam/sybil + astroturfing governance
-(R2/R3)**, not anything technical (the money path and storage are pure reuse).
-Resolve **Q4 (moderation/permanence)** and **Q1/Q6 (comment cost / sybil gate)**
-before building — they shape both the storage model and the legal posture.
+**Buildable and high-engagement** — money path and storage are pure reuse. The
+decisions resolved most spam/cost concerns (paid comments + delete-on-settle), so
+the dominant residual risks are now **R0 (sybil farming of the lottery reward via
+free upvotes)** and **R1/R4 (no-moderation posture: illegal content can appear
+until admin/settle deletes it, and on-chain permanence)**. R0 is the one to nail
+before shipping — confirm the **sybil gate + per-thread ticket cap**, and watch it
+in production. The astroturfing-governance angle (R3) persists: keep the
+"community opinion, not advice" framing and consider showing posters' actual
+skin-in-the-game (did they commit/vote).

@@ -35,47 +35,51 @@ are the genuinely new structure.
 
 ## What ships (MVP)
 
-- **"Start a conversation"** button on each proposal card. Opens a compose dialog
-  (title + opening opinion) and a **$1 fee** confirm (USD-priced, any supported
-  token → treasury — clone of the Explorer listing flow).
-- **"See open threads (N)"** entry on the card when `N > 0` → a thread list for
-  that proposal (sorted by activity/upvotes).
-- **Thread view:** the opening opinion + a flat/one-level comment list. Anyone
-  signed in can **upvote** the thread/comments and **post a comment** (free).
-- **Share on X** on a thread → deep-links to the thread (threads are stored, so a
-  permalink works — unlike the ephemeral AI review).
-- **Moderation:** admin remove thread/comment; reuse the existing
-  moderation-candidate tooling; length/rate caps; content guidelines notice.
+- **"Start a conversation"** on each proposal card → compose (title + opening
+  opinion) + a **$1 fee** confirm (USD-priced, any supported token → treasury;
+  clone of the Explorer listing flow).
+- **"See open threads (N)"** when `N > 0` → a thread list, sorted by **net score
+  (upvotes − downvotes)** / new / active.
+- **Thread view:** the opening opinion + one-level comments. Signed-in users can
+  **upvote / downvote** the thread and comments, and **post a comment for $0.25**.
+- **Quality reward (NEW):** the **thread author earns 1 lottery ticket per upvote**
+  on their thread (comment votes are *not* rewarded) — to incentivize good
+  conversation-starters. Reward upvotes are **gated for sybil resistance** (see
+  Decisions D-reward).
+- **Delete on settle:** when the proposal is decided (settled/voted/abstained), its
+  threads + comments + votes are **deleted** — discussions are about a *live*
+  decision; earned lottery tickets are kept.
+- **Share on X** on a thread → deep-links to the thread (works until settle/delete).
+- **Admin delete** any thread (no moderation queue / no word filter — D4).
 
 See **[01-ux-spec.md](01-ux-spec.md)**, **[02-backend-and-tasks.md](02-backend-and-tasks.md)**,
 **[03-reuse-map.md](03-reuse-map.md)**, **[04-adversarial-review.md](04-adversarial-review.md)**.
 
 ---
 
-## Open questions (need owner input)
+## Decisions (locked 2026-06-19)
 
-- **Q1 — Comment fee.** User spec: only the **thread starter** pays $1; comments &
-  upvotes are **free**. Free comments invite spam. Default: **free comments**, with
-  rate-limits + length caps + the $1 thread fee as the main anti-spam gate. Add an
-  optional **micro-fee** (e.g. $0.10) for comments later if abuse appears?
-- **Q2 — Nesting depth.** "Counter with comments" → **flat** comments, **one-level**
-  replies (comment → replies), or a **full tree**? Recommend **one-level**
-  (comment + replies-to-comment) — readable, bounds depth, simple storage.
-- **Q3 — Thread lifecycle.** Persist forever, **expire** on inactivity like ideas
-  (30 days), or **lock to read-only** once the proposal settles/expires? Recommend
-  **lock on proposal settle** (discussion is about a live decision) + keep readable.
-- **Q4 — Moderation & permanence.** On-chain content is effectively permanent and
-  public — harassment / illegal content / "right to be forgotten" are real. What's
-  the policy (admin takedown only? user delete-own? word filter)? See
-  [04](04-adversarial-review.md) R1/R2.
-- **Q5 — Upvote scope.** Upvote **threads only**, or **threads + comments**?
-  Recommend **both** (comment upvotes drive "best counter" sorting).
-- **Q6 — Who can comment.** Any authenticated user, or **must hold a token / have
-  voted** (sybil resistance)? Recommend **authenticated + holds any supported
-  token** (cheap client check; consistent with the AI-review gating) — or just
-  authenticated for max participation. → owner call.
+- **D1 — Comment fee $0.25** (USD-priced, any token → treasury). Threads $1.
+- **D2 — One-level** comments (comment + replies-to-comment).
+- **D3 — Delete on settle.** Threads/comments/votes for a proposal are removed when
+  it settles (not locked/persisted). Bounds state growth; shortens content lifespan.
+- **D4 — No moderation, but admin can delete any thread** (`admin_remove_thread`,
+  removes its comments too). No pre-publication filter, no moderation queue.
+- **D5 — Upvotes AND downvotes** on both threads and comments. Score = up − down
+  drives sorting.
+- **D6 — Signed-in users can comment** (auth only; they still pay the $0.25 fee, so
+  funds are the practical gate).
+- **D-reward — 1 lottery ticket to the thread author per upvote on the thread.**
+  Comment upvotes earn nothing; downvotes never subtract tickets. ⚠️ **Sybil risk:**
+  upvotes are free + principals are free → an author could mint principals to
+  upvote their own thread and farm real-ICP lottery tickets. **Mitigation (default,
+  needs your nod):** only an upvote from a principal **with participation history**
+  (has committed/voted before — cheap `USER_AGGREGATES` check) mints a ticket;
+  **never** the author's own principal; **cap N tickets/thread**. See
+  [04](04-adversarial-review.md) R0.
 
 ## MemoryId note
-Free ids (verify at build): **26–33, 54–59, 73, 76, 95, 97+** (94 is taken). This
-feature needs ~3: `THREADS`, `NEXT_THREAD_ID`/`COMMENTS`, `THREAD_UPVOTES`
-(+ comment upvotes). Update the registry before claiming.
+Free ids (verify at build): **26–33, 54–59, 73, 76, 95, 97+** (94 taken). Needs ~4:
+`THREADS`(+`NEXT_THREAD_ID`), `COMMENTS`(+`NEXT_COMMENT_ID`), and a `VOTES` map
+keyed `(kind, item_id, principal) → Up|Down` (one map covers thread+comment votes).
+Update the registry before claiming.

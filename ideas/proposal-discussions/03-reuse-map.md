@@ -18,11 +18,11 @@ numbers approximate (2026-06-19) — verify before building.
 |---|---|---|
 | Text validation + caps | `validate_idea_text`, `MAX_IDEA_*` consts | `lib.rs:5468` |
 | Free upvotes + per-caller `has_upvoted` | `IDEA_UPVOTES` + `Idea.has_upvoted` (computed at query) | `lib.rs:5138` |
-| Inactivity expiry sweep | `idea_is_expired` + `delete_expired_ideas` (timer) | `lib.rs:5450` |
 | Admin removal | `admin_remove_idea` | `lib.rs:5434` |
-| Moderation queue | `admin_list_moderation_candidates` | `lib.rs:15709` |
-| Lock on proposal settle | hook the existing settlement sweep / read proposal `status` | `lib.rs` settle path |
+| **Delete on settle** | hook the settlement path (`process_proposal_cutoff` / settle sweep) → delete this proposal's threads/comments/votes | `lib.rs` settle path |
 | Per-caller dedupe key | `IdeaViewKey` / `IDEA_VIEWS` pattern | `lib.rs:5168` |
+| **Lottery ticket grant (the reward)** | factor a `grant_lottery_tickets(user, n)` helper from `dev_grant_lottery_tickets` (bump `TicketEntry.count` for current round + `state.total_tickets`); `LOTTERY_TICKETS` map | `lib.rs:9187`, `8413` |
+| Sybil gate for the reward | `USER_AGGREGATES.get(upvoter).proposals_joined > 0` (cheap, no outcall) | `lib.rs` |
 
 ## Frontend
 | Need | Reuse | Where |
