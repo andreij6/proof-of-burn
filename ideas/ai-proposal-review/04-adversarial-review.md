@@ -36,18 +36,23 @@ re-reviews the same proposal endlessly.
   **Cache** the review (Q5) so a re-view is free *and* doesn't re-call Gemini.
   (5) Tight `max_response_bytes` so a hostile/huge response can't over-bill cycles.
 
-## R4 — Key custody reality (MED; shapes Q4)
-The user's instinct is vetKeys, but **canister state is not secret from node
-providers**, and the canister needs *plaintext* in memory to set the
-`x-goog-api-key` header.
-- **Truth:** vetKeys gives **encrypted-at-rest + single-node exposure** (paired
-  with the non-replicated call) — real hardening, **not zero-exposure**. The
-  **Cloud-Run proxy** keeps the key **fully off-chain** (never on the IC) at the
-  cost of a trusted off-chain hop.
-- **Recommend:** MVP = **proxy** (lowest blast radius, key never on-chain);
-  promote vetKeys as a "pure-ICP" follow-up if on-chain custody is a hard
-  requirement. **Either way budget-cap + rotate** — the key must never be able to
-  run an unbounded Gemini bill. (PB-510 reached the same conclusion.)
+## R4 — Key custody reality (RESOLVED → D4: proxy)
+The user asked whether vetKeys lets them put an API key in a canister *safely*.
+**Confirmed answer: no.** vetKeys protects data only **up to decryption**; DFINITY:
+*"if you decrypt it in the canister, then it's out in the open again"* (TEEs, not
+vetKeys, are the eventual fix). The canister must decrypt the key during a
+**replicated update** to set the `x-goog-api-key` header → **all ~13 nodes** see
+plaintext at use time. The non-replicated outcall does **not** confine this (it
+only changes which node egresses the HTTP request). vetKeys' only benefit here is
+encrypted-at-rest — marginal.
+- **Decision (D4): Cloud-Run proxy.** The real Gemini key never touches the IC.
+  The canister→proxy **bearer token** is still node-visible (nothing in a header
+  is hidden today), but it is **scoped to our proxy + budget/rate-capped +
+  rotatable**, so a captured token is **worthless** — it can't run up a Gemini
+  bill, only hit our throttled proxy. The mental model: *don't hide the
+  credential, make it not worth stealing.*
+- vetKeys stays the right tool for future **user-data** privacy, not this service
+  key. (PB-510 reached the same proxy conclusion.)
 
 ## R5 — Refund correctness (MED)
 Charge-then-outcall means a failed/garbled Gemini response must refund cleanly,
@@ -88,8 +93,9 @@ cyc-spend path.
 
 ---
 ### Verdict
-**Buildable and differentiated**, with two hard dependencies to de-risk first
-(Phase 0): the **non-replicated Gemini outcall** (R2/R8) and the **key-custody
-decision** (R4). The money path, UI, and X-share are near-pure reuse. The
-**prompt-injection + advisory-framing** discipline (R1/R6) is non-negotiable
+**Buildable and differentiated.** Key custody is now decided (R4 → proxy), so the
+one remaining hard dependency to de-risk first (Phase 0) is the **non-replicated
+outcall** — the first HTTPS outcall in this codebase (R2/R8) — plus standing up
+the proxy. The money path, UI, and X-share are near-pure reuse. The
+**prompt-injection + advisory-framing** discipline (R1/R6/D6) is non-negotiable
 given the output is published under our brand.

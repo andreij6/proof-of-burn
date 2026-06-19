@@ -7,13 +7,15 @@ modals) with shared primitives from `ui.tsx`.
 
 - Added to each proposal card's action row (Open / Committed / Past), next to the
   existing **Share** button (`App.tsx` ~2864 / ~3027).
-- **Enabled** when `signedIn && holdings > 0n` (user holds ICP — `holdings` is
-  already in scope). Otherwise rendered **disabled** with a tooltip:
+- **Enabled** when signed in **and the user holds any supported token with a
+  balance ≥ the fee** (D2): check `holdings` (ICP) plus `tokenBalances.{ckbtc,
+  cketh,ckusdc,ckusdt}` against the per-token quoted fee. Otherwise **disabled**
+  with a tooltip:
   - not signed in → "Sign in to use AI Review"
-  - signed in, no ICP → "Hold ICP to unlock AI Review"
+  - signed in, no payable balance → "Add ICP or a ck-token to use AI Review"
 - Icon: `bulb` or `spark` (both in `iconPaths`). Label: **"AI Review"**.
-- If a stored review already exists for this proposal+caller (see Q5), the button
-  reads **"View AI Review"** and opens the result directly (no charge).
+- **No "View AI Review"** state — reviews aren't stored (D5); every click is a
+  fresh paid review.
 
 ## 2. The confirm dialog (clone of the Explorer listing modal)
 
@@ -79,15 +81,15 @@ A stepper while the outcall runs (input disabled):
 
 ## 4. Share on X
 
-Reuse `shareProposalOnX`'s pattern (`twitter.com/intent/tweet`). Compose:
+Reuse `shareProposalOnX`'s pattern (`twitter.com/intent/tweet`). **The tweet body
+is the AI-produced `tweet_text`** (D5) — Gemini returns a ready, ≤~270-char,
+verdict-leading rendering, so the client doesn't compose it. The client appends:
+- `url` = the proposal deep-link (`nnsProposalLink(p)`), and
+- ensures the **"AI opinion, not advice"** framing is present (D6) — either Gemini
+  includes a short tag, or the client appends one within the char budget.
 
-```
-AI read on NNS proposal #12345 "<title>": <VERDICT> for the Internet Computer.
-<first rationale bullet, trimmed>
-🔥 via <app name>
-```
-+ `url` = the proposal deep-link (or the stored-review permalink if Q5 = store).
-Keep under ~270 chars; the verdict word is always included.
+(No stored-review permalink — D5 stores nothing; the text lives only in the tweet
+and the open app session.)
 
 ## 5. Empty / error states
 
