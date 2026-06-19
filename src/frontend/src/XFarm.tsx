@@ -339,18 +339,16 @@ export default function XFarm({
           </div>
         ) : (
           <>
-            {/* Start-a-farm CTA — always available on mainnet; a user may own unlimited
-                farms. Disabled on the LOCAL replica, which can't fund canister cycles
-                (CMC notify fails — PB-148) so a real create would only burn test ICP. */}
+            {/* Start-a-farm CTA — always available; a user may own unlimited farms.
+                (On the LOCAL replica the final pay step is disabled instead, since
+                local can't fund canister cycles — PB-148.) */}
             <div className="card row" style={{ gap: 12, justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
               <p style={{ margin: 0, fontSize: 13.5, color: 'var(--fg-2)' }}>
-                {isLocal
-                  ? <>On the local replica, real farms can't be funded (CMC cycle mint fails — PB-148), so creation is disabled here. Use <b>“Post mock data”</b> in the dev panel to preview the UI. Real creation works on mainnet.</>
-                  : farmers.length === 0
-                    ? "You don't have any farms yet — start one to grow pro-ICP content on autopilot."
-                    : `You have ${farmers.length} farm${farmers.length === 1 ? '' : 's'}. Start another any time.`}
+                {farmers.length === 0
+                  ? "You don't have any farms yet — start one to grow pro-ICP content on autopilot."
+                  : `You have ${farmers.length} farm${farmers.length === 1 ? '' : 's'}. Start another any time.`}
               </p>
-              <Btn variant="primary" onClick={openWizard} disabled={isLocal}>Start a farm</Btn>
+              <Btn variant="primary" onClick={openWizard}>Start a farm</Btn>
             </div>
 
             {/* One card per farm. */}
@@ -479,12 +477,17 @@ export default function XFarm({
                       ICP is burned to fund your Farmer's 7-day cycle budget. Drafts are generated on demand,
                       at most once per day. The ICP is non-refundable.
                     </p>
+                    {isLocal && (
+                      <div className="card" style={{ padding: 10, borderColor: 'var(--burn)', color: 'var(--fg-2)', fontSize: 12.5 }}>
+                        Local replica can't fund canister cycles (CMC mint fails — PB-148), so paying is disabled here. Use <b>Post mock data</b> in the dev panel to preview farms. Real creation works on mainnet.
+                      </div>
+                    )}
                     {error && <div className="card" style={{ padding: 10, borderColor: 'var(--bad)', color: 'var(--bad)', fontSize: 12.5 }}>{error}</div>}
                     {payStep && !error && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>{payStep}</span>}
                     <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
                       <Btn variant="ghost" onClick={() => setStep('tier')} disabled={busy}>Back</Btn>
-                      <Btn variant="primary" onClick={executePay} disabled={busy || !quote}>
-                        {busy ? 'Working…' : `Pay & deploy Farmer`}
+                      <Btn variant="primary" onClick={executePay} disabled={busy || !quote || isLocal}>
+                        {busy ? 'Working…' : isLocal ? 'Disabled on local' : `Pay & deploy Farmer`}
                       </Btn>
                     </div>
                   </div>
