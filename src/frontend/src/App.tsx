@@ -31,6 +31,7 @@ import type {
 import IdeaBoard, { parseTokenAmount, fmtTokenAmount } from "./IdeaBoard";
 import LotteryHub from "./LotteryHub";
 import Explorer from "./Explorer";
+import Discussions from "./Discussions";
 import Arcade from "./Arcade";
 import Casino from "./Casino";
 import Faucet from "./Faucet";
@@ -612,6 +613,7 @@ export default function App() {
   const casinoEnabled = crashEnabled;
   const faucetEnabled = featureFlags.find(f => f.key === 'cycles_faucet')?.enabled ?? false;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
+  const discussionsEnabled = featureFlags.find(f => f.key === 'discussions')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (earns lottery tickets only).
   const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
@@ -2867,6 +2869,11 @@ export default function App() {
                                   }}>
                                     <Icon name="share" size={12} /> Share
                                   </button>
+                                  {discussionsEnabled && (
+                                    <Discussions actor={actor} identity={identity} principal={principal} host={host}
+                                      rootKey={env?.IC_ROOT_KEY} explorerInfo={explorerInfo} isAdmin={isAdmin}
+                                      proposalId={p.id} proposalTitle={p.title} proposalUrl={nnsProposalLink(p)} onSignIn={handleLogin} />
+                                  )}
                                 </div>
                                 <span style={{ fontSize: 14, lineHeight: 1.35, color: 'var(--fg)', fontWeight: 600, textWrap: 'pretty', overflowWrap: 'anywhere' }}>
                                   {p.title}
@@ -2957,10 +2964,6 @@ export default function App() {
                                   />
                                 )}
 
-                                {/* No-burn safety note */}
-                                <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                                  <Icon name="info" size={12} stroke="var(--fg-3)" /> No conversion if threshold misses — committed ICP is returned.
-                                </span>
                               </div>
                             )}
                           </div>
@@ -3034,6 +3037,11 @@ export default function App() {
                                   }}>
                                     <Icon name="share" size={12} /> Share
                                   </button>
+                                  {discussionsEnabled && (
+                                    <Discussions actor={actor} identity={identity} principal={principal} host={host}
+                                      rootKey={env?.IC_ROOT_KEY} explorerInfo={explorerInfo} isAdmin={isAdmin}
+                                      proposalId={p.id} proposalTitle={p.title} proposalUrl={nnsProposalLink(p)} onSignIn={handleLogin} />
+                                  )}
                                 </div>
                                 <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--fg)', textWrap: 'pretty', overflowWrap: 'anywhere' }}>{p.title}</span>
                                 {p.summary && p.summary !== p.title && (
