@@ -1908,12 +1908,6 @@ export default function App() {
             Discussions
           </Btn>
         )}
-        {xFarmEnabled && (
-          <Btn variant={page === 'xfarm' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('xfarm')}>
-            <Icon name="spark" size={14} stroke={page === 'xfarm' ? 'var(--char-950)' : 'currentColor'} />
-            X-Farm
-          </Btn>
-        )}
         <Btn variant={onEarn ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('earn')}>
           <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
           Neuron Syndicate
@@ -1925,7 +1919,7 @@ export default function App() {
           </Btn>
         )}
 
-        {(ideaBoardEnabled || explorerEnabled) && (
+        {(ideaBoardEnabled || explorerEnabled || xFarmEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Community</Eyebrow>
         )}
         {ideaBoardEnabled && (
@@ -1938,6 +1932,12 @@ export default function App() {
           <Btn variant={page === 'explorer' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('explorer')}>
             <Icon name="compass" size={14} stroke={page === 'explorer' ? 'var(--char-950)' : 'currentColor'} />
             Explorer
+          </Btn>
+        )}
+        {xFarmEnabled && (
+          <Btn variant={page === 'xfarm' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('xfarm')}>
+            <Icon name="spark" size={14} stroke={page === 'xfarm' ? 'var(--char-950)' : 'currentColor'} />
+            X-Farm
           </Btn>
         )}
 

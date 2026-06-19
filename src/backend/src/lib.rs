@@ -18571,7 +18571,10 @@ fn cmc_principal() -> Principal {
 // ── Tunables ─────────────────────────────────────────────────────────
 const XFARM_MAX_PERSONA: usize = 300;
 const XFARM_QUOTE_TTL_NANOS: u64 = 15 * 60 * 1_000_000_000;
-const XFARM_CREATION_CYCLES: u128 = 500_000_000_000; // 500B ≈ $0.683 (13-node) day-0 chunk
+// Attached to create_canister: 500B is the creation FEE (deducted on create); the
+// remainder is the new Farmer's initial balance, which must cover install_code until
+// the 90% CMC top-up funds the 7-day budget. 1.5T → ~1T left after the fee.
+const XFARM_CREATION_CYCLES: u128 = 1_500_000_000_000;
 const XFARM_DURATION_DAYS: u64 = 7;                   // the depletion window (D2)
 const XFARM_MAX_TIERS: usize = 10;
 const XFARM_MAX_DRAFTS_PER_DAY: u32 = 10;
@@ -18717,7 +18720,6 @@ struct XFarmCanisterSettings {
 #[derive(CandidType, Serialize)]
 struct CreateCanisterArgs {
     settings: Option<XFarmCanisterSettings>,
-    cycles: Option<u128>,
 }
 #[derive(CandidType, Deserialize)]
 struct CreateCanisterResult {
@@ -18812,10 +18814,13 @@ async fn xfarm_create_canister(creation_cycles: u128) -> Result<Principal, Strin
             memory_allocation: None,
             freezing_threshold: Some(0),
         }),
-        cycles: Some(creation_cycles),
     };
-    let res: Result<(CreateCanisterResult,), _> =
-        ic_cdk::call(Principal::management_canister(), "create_canister", (args,)).await;
+    // Cycles are attached to the CALL (msg payment), not an arg field — the mgmt
+    // canister deducts the 500B creation fee from them and credits the rest to the
+    // new canister. Passing them in the struct (the old bug) sent 0 → reject.
+    let res: Result<(CreateCanisterResult,), _> = ic_cdk::api::call::call_with_payment128(
+        Principal::management_canister(), "create_canister", (args,), creation_cycles,
+    ).await;
     res.map(|(r,)| r.canister_id)
         .map_err(|(c, m)| format!("CREATE_CANISTER_FAILED ({:?}): {}", c, m))
 }
@@ -18977,18 +18982,17 @@ async fn create_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> 
     };
     xfarm_put_farmer(&farmer);
 
-    // 10% → treasury (idempotent via treasury_block; clone submit_dapp's single transfer).
-    if farmer.treasury_block.is_none() {
-        let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-        let b = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, treasury_amt, Some(fee))
-            .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
-        farmer.treasury_block = Some(b);
-        xfarm_put_farmer(&farmer);
-    }
+    // Order: create + install the Farmer canister FIRST (paid from the backend's own
+    // cycles), and only AFTER it exists move the owner's ICP. So a create/install
+    // failure strands NO user ICP — it just removes the persisted Farmer and returns
+    // an error with the deposit untouched in escrow ("ICP not returned" fix + R5).
 
     // Factory: create the Farmer canister (sole controller = this backend, R5).
     if farmer.canister_id.is_none() {
-        let cid = xfarm_create_canister(XFARM_CREATION_CYCLES).await?;
+        let cid = match xfarm_create_canister(XFARM_CREATION_CYCLES).await {
+            Ok(cid) => cid,
+            Err(e) => { XFARM_FARMERS.with(|m| m.borrow_mut().remove(&id)); return Err(e); }
+        };
         farmer.canister_id = Some(cid);
         xfarm_put_farmer(&farmer);
     }
@@ -19013,6 +19017,15 @@ async fn create_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> 
             return Err(e);
         }
         farmer.install_done = true;
+        xfarm_put_farmer(&farmer);
+    }
+
+    // 10% → treasury (only now that the canister exists; idempotent via treasury_block).
+    if farmer.treasury_block.is_none() {
+        let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
+        let b = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, treasury_amt, Some(fee))
+            .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
+        farmer.treasury_block = Some(b);
         xfarm_put_farmer(&farmer);
     }
 

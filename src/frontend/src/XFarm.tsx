@@ -570,9 +570,6 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
       : `?text=${encodeURIComponent(d.text)}`;
     window.open(`https://twitter.com/intent/tweet${q}`, '_blank', 'noopener,noreferrer');
   };
-  const copyDraft = async (d: XFarmDraft) => {
-    try { await navigator.clipboard.writeText(d.text); } catch { /* clipboard best-effort */ }
-  };
 
   const cyclesRemaining = statusTuple ? Number(statusTuple[1]) : null;
   const daysLeft = statusTuple ? Number(statusTuple[1]) / 1_000_000_000_000 / 86_400 : null;
@@ -649,7 +646,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
         )}
         {loadingDrafts && <Skeleton width={'100%'} height={48} />}
         {today.map(d => (
-          <DraftRow key={Number(d.id)} d={d} onShare={shareDraftOnX} onCopy={copyDraft} />
+          <DraftRow key={Number(d.id)} d={d} onShare={shareDraftOnX} />
         ))}
       </div>
 
@@ -659,7 +656,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
           <summary style={{ cursor: 'pointer', fontSize: 12.5, color: 'var(--fg-3)' }}>Archive (last 30 days, {archive.length})</summary>
           <div className="col" style={{ gap: 8, marginTop: 8 }}>
             {archive.slice(0, 30).map(d => (
-              <DraftRow key={Number(d.id)} d={d} onShare={shareDraftOnX} onCopy={copyDraft} />
+              <DraftRow key={Number(d.id)} d={d} onShare={shareDraftOnX} />
             ))}
           </div>
         </details>
@@ -672,8 +669,8 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   );
 }
 
-function DraftRow({ d, onShare, onCopy }: {
-  d: XFarmDraft; onShare: (d: XFarmDraft) => void; onCopy: (d: XFarmDraft) => void;
+function DraftRow({ d, onShare }: {
+  d: XFarmDraft; onShare: (d: XFarmDraft) => void;
 }) {
   return (
     <div className="card col" style={{ gap: 8, padding: 10, background: 'var(--surface-2)' }}>
@@ -686,7 +683,6 @@ function DraftRow({ d, onShare, onCopy }: {
         </a>
       )}
       <div className="row" style={{ gap: 8 }}>
-        <button onClick={() => onCopy(d)} style={pillStyle(false)}>📋 Copy</button>
         <button onClick={() => onShare(d)} style={pillStyle(true)}>✕ Share on X</button>
       </div>
     </div>
