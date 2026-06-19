@@ -27,9 +27,10 @@ LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "us")  # multi-region avoids 
 BEARER = os.environ["XFARM_BEARER"]                        # from Secret Manager; rotatable via admin_set_xfarm_proxy
 TWEETS_MODEL = os.environ.get("TWEETS_MODEL", "gemini-3.5-flash")
 MAX_DRAFTS = int(os.environ.get("MAX_DRAFTS_PER_CALL", "10"))
-# Grounding (Google Search + URL context) is ~20s slower → exceeds the IC outcall
-# deadline. Off by default; only enable for callers that can wait.
-GROUNDING_ENABLED = os.environ.get("GROUNDING_ENABLED", "false").lower() == "true"
+# Grounding (Google Search + URL context) adds ~20s. The Farmer now makes a 180s
+# bounded-wait outcall, so grounded calls (~30-45s) fit → on by default. Set
+# GROUNDING_ENABLED=false to force fast, ungrounded drafts for latency-sensitive callers.
+GROUNDING_ENABLED = os.environ.get("GROUNDING_ENABLED", "true").lower() == "true"
 
 # Retry/backoff for transient Gemini errors (rate limits / blips).
 GEMINI_MAX_RETRIES = int(os.environ.get("GEMINI_MAX_RETRIES", "4"))

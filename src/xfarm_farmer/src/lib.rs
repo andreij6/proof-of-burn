@@ -59,6 +59,9 @@ const MAX_STORED_DRAFTS: usize = 400;
 const OUTCALL_CYCLES: u128 = 100_000_000_000;
 /// Cap the proxy response we accept (drafts JSON is small).
 const MAX_RESPONSE_BYTES: u64 = 2048;
+/// Bounded-wait deadline for the proxy outcall (s). The non-replicated outcall inherits
+/// it; 180s covers slow grounded Gemini calls without hitting the short default.
+const OUTCALL_TIMEOUT_SECS: u32 = 180;
 
 // ==========================================
 // 1. Data Models
@@ -344,6 +347,7 @@ struct HttpReqArg {
 
 async fn generate_drafts(cfg: &FarmerConfig) -> Result<TweetResponse, String> {
     use ic_cdk::api::management_canister::http_request::{HttpHeader, HttpMethod, HttpResponse};
+    use ic_cdk::call::Call;
     if cfg.proxy_url.is_empty() {
         return Err("PROXY_NOT_CONFIGURED".to_string());
     }
@@ -367,16 +371,21 @@ async fn generate_drafts(cfg: &FarmerConfig) -> Result<TweetResponse, String> {
         transform: None,
         is_replicated: Some(false), // non-replicated: no consensus over LLM output
     };
-    let res: Result<(HttpResponse,), _> = ic_cdk::api::call::call_with_payment128(
-        Principal::management_canister(), "http_request", (arg,), OUTCALL_CYCLES,
-    ).await;
-    match res {
-        Ok((resp,)) => {
-            let status: u64 = resp.status.to_string().parse().unwrap_or(0);
-            parse_proxy_response(status, &resp.body)
-        }
-        Err((code, msg)) => Err(format!("OUTCALL ({:?}): {}", code, msg)),
-    }
+    // Bounded-wait (best-effort) call: a non-replicated outcall inherits this deadline.
+    // 180s lets grounded Gemini (~30-45s) finish instead of hitting the short default
+    // deadline that caused "Timeout expired".
+    let response = match Call::bounded_wait(Principal::management_canister(), "http_request")
+        .with_arg(arg)
+        .with_cycles(OUTCALL_CYCLES)
+        .change_timeout(OUTCALL_TIMEOUT_SECS)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return Err(format!("OUTCALL ({:?})", e)),
+    };
+    let resp: HttpResponse = response.candid().map_err(|e| format!("OUTCALL_DECODE ({:?})", e))?;
+    let status: u64 = resp.status.to_string().parse().unwrap_or(0);
+    parse_proxy_response(status, &resp.body)
 }
 
 /// Pure: map a proxy HTTP response (status + body) to drafts, or a Failed-day
