@@ -6,7 +6,9 @@ numbers approximate (2026-06-19) — verify before building.
 ## Posting, fees & escrow
 | Need | Reuse | Where |
 |---|---|---|
-| Paid post → 100% treasury | `submit_idea` (escrow→treasury, `IDEA_POST_SEED` subaccount) | `lib.rs` |
+| Paid post (escrow flow) | `submit_idea` (escrow + `IDEA_POST_SEED` subaccount) — but route the fee to **burn**, not treasury (D7) | `lib.rs` |
+| **Burn fee → backend cycles (D7)** | backend-cycles leg of `settle_burn_split`: `call_cmc_topup_transfer(ledger, escrow_sub, get_canister_id(), amt−fee, fee)` + `notify_top_up`; journal the CMC block for retry-safety | `lib.rs:2250` (`call_cmc_topup_transfer`), `2466` (`settle_burn_split`) |
+| Non-ICP fee → ICP before burn | commit-token settlement swap (`ensure_commitment_swapped`) — or accept ICP-only for MVP | `lib.rs` |
 | Post-fee deposit address | `get_idea_post_deposit_address` | `lib.rs:5560` |
 | Per-poster escrow subaccount | `derive_idea_subaccount` (clone → `derive_thread_subaccount`) | `lib.rs:5456` |
 | **$1 USD** pricing (any token) | `explorer_usd_rate_e8s` + `explorer_quote_amount` + `ExplorerQuote` | `lib.rs` (Explorer path) |

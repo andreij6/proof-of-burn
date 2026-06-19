@@ -29,18 +29,17 @@ live quote):
 │  Pay with:  [ICP] ckBTC ckETH ckUSDC ckUSDT  │
 │  Fee:  0.21 ICP  = $1.00   (locked 15 min)   │
 │  Your balance: 1.20 ICP                      │
-│  ⓘ One-time fee to open a thread (anti-spam, │
-│    100% to treasury). Each upvote = a lottery ticket. Comments cost $0.25.     │
 │            [ Cancel ]  [ Pay & post ]        │
 └──────────────────────────────────────────────┘
 ```
 
+- **No explanatory fee/anti-spam/reward blurb in the dialog** (per owner) — just
+  the token picker, the priced fee, balance, and the buttons.
 - Commenting opens the **same dialog with a $0.25 fee** (D1) — body only, no title.
 - Two-step pay (deposit → `start_thread` / `add_comment`), like `submit_dapp` / `submit_idea`.
-- Treasury-gate aware: if `globalStats.treasury_can_front_fees` is false… *posting
-  doesn't need fronting* (fee flows escrow→treasury, no refund-fronting), so this
-  feature is **not** gated by the treasury check. (Unlike commit/AI-review, there's
-  no later treasury-fronted payout — the $1 just goes to treasury.)
+- **Fees are 100% burned to cycles for the backend canister (D7)** — there's no
+  treasury payout/refund-fronting, so this feature is **not** gated by the
+  treasury-can-front check.
 
 ## 3. Thread list (per proposal)
 

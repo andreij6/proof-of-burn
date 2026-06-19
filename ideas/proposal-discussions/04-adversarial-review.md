@@ -77,14 +77,18 @@ resolves — so state can't grow unbounded across closed proposals.
 - **Also:** hard caps (comments/thread, threads/proposal, body length); monitor
   total state size.
 
-## R6 — Payment edge cases (LOW–MED)
-Both the $1 thread fee and the $0.25 comment fee use the escrow→treasury path; a
-charge that succeeds while the insert fails would take money with no post.
-- **Mitigate:** clone `submit_dapp`'s ordering (validate + escrow check before the
-  transfer; insert immediately after) and its **claim-before-await refund** if any
-  await sits between charge and insert. Unit-test the failure path. Note: **no
-  treasury-fronting** is involved (fee flows *into* treasury), so this feature is
-  **not** subject to the `require_treasury_can_front` gate.
+## R6 — Payment / burn edge cases (LOW–MED)
+Both fees are **burned to backend cycles via the CMC (D7)** — a two-step
+ledger-transfer-then-`notify_top_up` that can fail/partially-complete mid-way (the
+PB-148 class of bug), so a charge could leave no post, or an ICP transfer to the
+CMC could land without the cycles minting.
+- **Mitigate:** reuse `settle_burn_split`'s **idempotent journaling** (store the CMC
+  block index; a retry skips the completed transfer and re-notifies — the CMC
+  memoizes per-block, so re-notify is safe). Insert the thread/comment only after a
+  confirmed burn, or journal so a sweep can finish it. Unit-test the partial-failure
+  path. **No treasury involvement** ⇒ not subject to `require_treasury_can_front`,
+  and burning is **on-theme** (proof-of-burn) and **self-funds** the backend's
+  compute. Non-ICP fees must **swap→ICP before the CMC top-up** (or MVP = ICP-only).
 
 ## R7 — XSS / injection via rendered content (MED)
 User text rendered in the app (and pulled into tweets) can carry HTML/script or

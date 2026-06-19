@@ -36,8 +36,8 @@ are the genuinely new structure.
 ## What ships (MVP)
 
 - **"Start a conversation"** on each proposal card → compose (title + opening
-  opinion) + a **$1 fee** confirm (USD-priced, any supported token → treasury;
-  clone of the Explorer listing flow).
+  opinion) + a **$1 fee** confirm (USD-priced, any supported token; **100% burned
+  to backend-canister cycles** — D7); clone of the Explorer listing flow.
 - **"See open threads (N)"** when `N > 0` → a thread list, sorted by **net score
   (upvotes − downvotes)** / new / active.
 - **Thread view:** the opening opinion + one-level comments. Signed-in users can
@@ -59,7 +59,12 @@ See **[01-ux-spec.md](01-ux-spec.md)**, **[02-backend-and-tasks.md](02-backend-a
 
 ## Decisions (locked 2026-06-19)
 
-- **D1 — Comment fee $0.25** (USD-priced, any token → treasury). Threads $1.
+- **D1 — Comment fee $0.25** (USD-priced, any token). Threads $1.
+- **D7 — Fees are 100% burned to backend-canister cycles** (via the CMC), NOT sent
+  to the treasury. On-theme ("proof of burn"); the fee self-funds the backend's
+  compute. Reuses the backend-cycles leg of `settle_burn_split` (CMC top-up +
+  `notify_top_up`), target = the backend's own canister id. No treasury payout ⇒
+  not subject to `require_treasury_can_front`.
 - **D2 — One-level** comments (comment + replies-to-comment).
 - **D3 — Delete on settle.** Threads/comments/votes for a proposal are removed when
   it settles (not locked/persisted). Bounds state growth; shortens content lifespan.
