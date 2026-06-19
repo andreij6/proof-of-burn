@@ -78,17 +78,18 @@ resolves — so state can't grow unbounded across closed proposals.
   total state size.
 
 ## R6 — Payment / burn edge cases (LOW–MED)
-Both fees are **burned to backend cycles via the CMC (D7)** — a two-step
-ledger-transfer-then-`notify_top_up` that can fail/partially-complete mid-way (the
-PB-148 class of bug), so a charge could leave no post, or an ICP transfer to the
-CMC could land without the cycles minting.
-- **Mitigate:** reuse `settle_burn_split`'s **idempotent journaling** (store the CMC
-  block index; a retry skips the completed transfer and re-notifies — the CMC
-  memoizes per-block, so re-notify is safe). Insert the thread/comment only after a
-  confirmed burn, or journal so a sweep can finish it. Unit-test the partial-failure
-  path. **No treasury involvement** ⇒ not subject to `require_treasury_can_front`,
-  and burning is **on-theme** (proof-of-burn) and **self-funds** the backend's
-  compute. Non-ICP fees must **swap→ICP before the CMC top-up** (or MVP = ICP-only).
+Fee routing is by token (D7): **ICP → burned** to backend cycles (CMC two-step:
+ledger-transfer-then-`notify_top_up`, the PB-148 class — can partially complete);
+**non-ICP → treasury** (a plain escrow→`TREASURY_SUBACCOUNT` transfer, no swap).
+Either way a charge that succeeds while the insert fails would take money with no
+post.
+- **Mitigate:** for the **ICP/burn** path reuse `settle_burn_split`'s **idempotent
+  journaling** (store the CMC block; a retry skips the done transfer and re-notifies
+  — CMC memoizes per-block). For the **token/treasury** path clone `submit_dapp`'s
+  ordering + claim-before-await. Insert the post only after a confirmed charge (or
+  journal so a sweep finishes it). Unit-test both partial-failure paths. **No
+  treasury payout/refund** ⇒ not `require_treasury_can_front`-gated; the ICP burn is
+  on-theme (proof-of-burn) and self-funds compute.
 
 ## R7 — XSS / injection via rendered content (MED)
 User text rendered in the app (and pulled into tweets) can carry HTML/script or

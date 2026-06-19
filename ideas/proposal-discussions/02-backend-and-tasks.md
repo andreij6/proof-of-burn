@@ -68,16 +68,17 @@ Stores (claim fresh ids — **94 taken**; verify registry):
   (D1/D7); thread exists & proposal not settled; one-level (`parent_id` must be a
   top-level comment in this thread, D2); per-caller **rate-limit**; bumps
   `comment_count` + `last_activity_at`.
-- **Burn = 100% to backend cycles (D7):** reuse the backend-cycles leg of
-  `settle_burn_split` — `call_cmc_topup_transfer(ledger, escrow_sub,
-  get_canister_id(), amount − fee, fee)` then `notify_top_up` (target = this
-  canister). The single CMC ledger fee nets out of the amount; everything else
-  mints into the backend's cycle balance. **Non-ICP fees** swap to ICP first (reuse
-  the commit-token settlement swap) before the CMC top-up, OR — simpler for MVP —
-  **accept the fee in ICP only** and revisit multi-token burn later (→ note).
-- **No treasury involvement ⇒ no `require_treasury_can_front` gate, no
-  refund-fronting.** Clone `submit_dapp` ordering so a charge can't succeed with a
-  failed insert (and journal the CMC block like `settle_burn_split` for retry-safety).
+- **Fee routing by token (D7) — same rule for every fee here:**
+  - **ICP** → **burn** to backend cycles: `call_cmc_topup_transfer(icp_ledger,
+    escrow_sub, get_canister_id(), amount − fee, fee)` then `notify_top_up`
+    (target = this canister). The single CMC ledger fee nets out; the rest mints
+    into the backend's cycle balance. **Journal the CMC block** (like
+    `settle_burn_split`) for retry-safety (PB-148 class).
+  - **Non-ICP** → **treasury**: `call_ledger_transfer(token_ledger, escrow_sub,
+    TREASURY_SUBACCOUNT, amount, fee)` — identical to `submit_dapp`. **No swap.**
+- **No treasury payout/refund either way ⇒ no `require_treasury_can_front` gate.**
+  Clone `submit_dapp` ordering so a charge can't succeed with a failed insert (and
+  for the ICP/burn path, journal so a partial CMC failure can be retried).
 
 ## C. Votes (up/down) + the lottery reward
 

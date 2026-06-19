@@ -37,9 +37,9 @@ live quote):
   the token picker, the priced fee, balance, and the buttons.
 - Commenting opens the **same dialog with a $0.25 fee** (D1) — body only, no title.
 - Two-step pay (deposit → `start_thread` / `add_comment`), like `submit_dapp` / `submit_idea`.
-- **Fees are 100% burned to cycles for the backend canister (D7)** — there's no
-  treasury payout/refund-fronting, so this feature is **not** gated by the
-  treasury-can-front check.
+- **Fee routing (D7):** an **ICP** fee is **100% burned** to backend cycles; a
+  **non-ICP** fee goes **100% to the treasury**. No treasury payout/refund either
+  way, so this feature is **not** gated by the treasury-can-front check.
 
 ## 3. Thread list (per proposal)
 

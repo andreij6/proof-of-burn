@@ -60,11 +60,15 @@ See **[01-ux-spec.md](01-ux-spec.md)**, **[02-backend-and-tasks.md](02-backend-a
 ## Decisions (locked 2026-06-19)
 
 - **D1 — Comment fee $0.25** (USD-priced, any token). Threads $1.
-- **D7 — Fees are 100% burned to backend-canister cycles** (via the CMC), NOT sent
-  to the treasury. On-theme ("proof of burn"); the fee self-funds the backend's
-  compute. Reuses the backend-cycles leg of `settle_burn_split` (CMC top-up +
-  `notify_top_up`), target = the backend's own canister id. No treasury payout ⇒
-  not subject to `require_treasury_can_front`.
+- **D7 — Fee routing by token (applies to EVERY fee in this feature — thread $1
+  and comment $0.25):**
+  - **ICP fee → 100% burned** to backend-canister cycles via the CMC (reuses the
+    backend-cycles leg of `settle_burn_split`: top-up + `notify_top_up`, target =
+    the backend's own canister id). On-theme ("proof of burn"); self-funds compute.
+  - **Non-ICP fee (ckBTC/ckETH/ckUSDC/ckUSDT) → 100% to the treasury** (escrow →
+    `TREASURY_SUBACCOUNT`, exactly like `submit_dapp`/`submit_idea`). No swap.
+  - Either way: no treasury payout/refund ⇒ **not** subject to
+    `require_treasury_can_front`.
 - **D2 — One-level** comments (comment + replies-to-comment).
 - **D3 — Delete on settle.** Threads/comments/votes for a proposal are removed when
   it settles (not locked/persisted). Bounds state growth; shortens content lifespan.
