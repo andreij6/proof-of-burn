@@ -36,15 +36,6 @@ const LABEL_STYLE: React.CSSProperties = {
   fontSize: 11, color: 'var(--fg-3)', fontFamily: 'var(--font-mono)',
   textTransform: 'uppercase', letterSpacing: '0.06em',
 };
-function pillStyle(active: boolean): React.CSSProperties {
-  return {
-    background: active ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
-    border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
-    color: active ? 'var(--burn-ink)' : 'var(--fg-3)',
-    borderRadius: 999, padding: '5px 10px', fontSize: 11.5, fontWeight: 500,
-    cursor: 'pointer', transition: 'all var(--dur-fast) var(--ease-out)',
-  };
-}
 
 const PERSONA_PRESETS: { id: string; label: string; description: string; text: string }[] = [
   {
@@ -605,6 +596,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   const [loadingDrafts, setLoadingDrafts] = useState(false);
   const [generatedToday, setGeneratedToday] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [nowTick, setNowTick] = useState<number>(Date.now()); // drives the next-round countdown
 
   // Renew (pay again to extend lifespan).
   const [renewOpen, setRenewOpen] = useState(false);
@@ -626,10 +618,12 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
     return () => { cancelled = true; };
   }, [actor, farmer.id]);
   useEffect(() => loadStatus(), [loadStatus]);
+  // Tick every second to drive the live "next round" countdown.
+  useEffect(() => { const t = setInterval(() => setNowTick(Date.now()), 1000); return () => clearInterval(t); }, []);
 
-  // ON-DEMAND generation: this is the only thing that asks the Farmer to draft
-  // tweets. The backend throttles to at most once per day per Farmer, so tapping
-  // again the same day just returns the already-generated drafts.
+  // ON-DEMAND generation: asks the Farmer to draft tweets. The backend throttles to at
+  // most once per day per Farmer, so a same-day call just returns the already-generated
+  // drafts (they persist); a new day auto-refreshes them.
   const generate = useCallback(async () => {
     setLoadingDrafts(true); setErr(null);
     try {
@@ -642,6 +636,10 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
       setLoadingDrafts(false);
     }
   }, [actor, farmer.id, since]);
+
+  // Persist + auto-refresh: load drafts on mount (and once per day the throttle lets it
+  // regenerate), so they stay visible across page loads until the next round.
+  useEffect(() => { if (farmer.status === FarmerStatus.Active) generate(); }, [generate, farmer.status]);
 
   // RENEW: pay again to extend this farm. Quote the farm's existing tier, deposit
   // price+fees into escrow, then call renew_farmer (10% treasury, 90% → more cycles,
@@ -710,6 +708,8 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   const daysLeft = statusTuple ? Number(statusTuple[1]) / 1_000_000_000_000 / 86_400 : null;
   const nextGen = statusTuple ? Number(statusTuple[2]) : null;
   const nextGenPassed = nextGen !== null && nextGen <= Date.now() * 1_000_000;
+  const nextGenMs = nextGen !== null ? nextGen / 1_000_000 : null;
+  const countdownMs = nextGenMs !== null ? nextGenMs - nowTick : null;
 
   const nowMs = Date.now();
   const today = drafts.filter(d => Number(d.created_at) / 1_000_000 >= nowMs - 24 * 3_600_000);
@@ -729,10 +729,12 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
         </span>
         {active && (
           <span className="row" style={{ gap: 8 }}>
-            <Btn variant="ghost" onClick={openRenew} disabled={renewBusy || renewOpen}>Renew</Btn>
-            <Btn variant="primary" onClick={generate} disabled={loadingDrafts}>
-              {loadingDrafts ? 'Generating…' : generatedToday ? "Refresh today's drafts" : "Generate today's drafts"}
-            </Btn>
+            <Btn variant="secondary" onClick={openRenew} disabled={renewBusy || renewOpen}>Renew</Btn>
+            {today.length === 0 && (
+              <Btn variant="primary" onClick={generate} disabled={loadingDrafts}>
+                {loadingDrafts ? 'Generating…' : "Generate today's drafts"}
+              </Btn>
+            )}
           </span>
         )}
       </div>
@@ -777,9 +779,18 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
         </span>
       </div>
 
-      {/* On-demand generation hint + today's drafts */}
+      {/* Today's drafts + next-round countdown */}
       <div className="col" style={{ gap: 8 }}>
-        <span style={LABEL_STYLE}>Today's drafts ({today.length})</span>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 6 }}>
+          <span style={LABEL_STYLE}>Today's drafts ({today.length})</span>
+          {active && countdownMs !== null && (
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              {countdownMs > 0
+                ? <>next round in <b style={{ color: 'var(--fg-1)', fontFamily: 'var(--font-mono)' }}>{fmtCountdown(countdownMs)}</b></>
+                : <b style={{ color: 'var(--burn-ink)' }}>next round ready</b>}
+            </span>
+          )}
+        </div>
         {err && <div className="card" style={{ padding: 10, borderColor: 'var(--bad)', color: 'var(--bad)', fontSize: 12.5 }}>{err}</div>}
         {!generatedToday && drafts.length === 0 && !loadingDrafts && !err && (
           <p style={{ fontSize: 12.5, color: 'var(--fg-3)', margin: 0 }}>
@@ -813,21 +824,40 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   );
 }
 
+// HH:MM:SS-style countdown to the next drafting round.
+function fmtCountdown(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return `${h}h ${String(m).padStart(2, '0')}m ${String(sec).padStart(2, '0')}s`;
+}
+
+const TWITTER_BLUE = '#1DA1F2';
+
 function DraftRow({ d, onShare }: {
   d: XFarmDraft; onShare: (d: XFarmDraft) => void;
 }) {
   return (
-    <div className="card col" style={{ gap: 8, padding: 10, background: 'var(--surface-2)' }}>
-      <p style={{ margin: 0, fontSize: 13, lineHeight: 1.5, color: 'var(--fg-1)', whiteSpace: 'pre-wrap' }}>
+    <div className="col" style={{
+      gap: 10, padding: '13px 15px', background: 'var(--surface)',
+      border: '1px solid var(--border)', borderLeft: `3px solid ${TWITTER_BLUE}`, borderRadius: 10,
+    }}>
+      <p style={{ margin: 0, fontSize: 14, lineHeight: 1.6, color: 'var(--fg-1)', whiteSpace: 'pre-wrap' }}>
         {d.text}
       </p>
-      {d.cited_url && (
-        <a href={d.cited_url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 11.5, color: 'var(--burn)' }}>
-          {d.cited_url}
-        </a>
-      )}
-      <div className="row" style={{ gap: 8 }}>
-        <button onClick={() => onShare(d)} style={pillStyle(true)}>✕ Share on X</button>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        {d.cited_url ? (
+          <a href={d.cited_url} target="_blank" rel="noopener noreferrer"
+             style={{ fontSize: 11, color: 'var(--fg-3)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <Icon name="external" size={11} /> source
+          </a>
+        ) : <span />}
+        <button onClick={() => onShare(d)} title="Share on X" style={{
+          background: TWITTER_BLUE, color: '#fff', border: 'none', borderRadius: 8,
+          padding: '7px 14px', display: 'inline-flex', alignItems: 'center', gap: 6,
+          cursor: 'pointer', fontSize: 12.5, fontWeight: 600,
+        }}>
+          <Icon name="share" size={13} stroke="#fff" /> Share on X
+        </button>
       </div>
     </div>
   );
