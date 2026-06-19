@@ -324,15 +324,26 @@ struct TweetResponse {
     drafts: Vec<TweetItem>,
 }
 
+// http_request arg with `is_replicated` (ic-cdk 0.19's CanisterHttpRequestArgument
+// lacks it). We REUSE ic-cdk's correct field types (HttpMethod = lowercase
+// variant { get; post; head }, opt body, etc.) so there's no candid regression, and
+// only add `is_replicated`. Set false → a SINGLE replica makes the call, so the IC
+// does NOT run consensus over the proxy's non-deterministic LLM output (a replicated
+// outcall fails with "No consensus could be reached" because each replica gets
+// different drafts). Candid record fields are name-keyed, so order is irrelevant.
+#[derive(candid::CandidType)]
+struct HttpReqArg {
+    url: String,
+    max_response_bytes: Option<u64>,
+    method: ic_cdk::api::management_canister::http_request::HttpMethod,
+    headers: Vec<ic_cdk::api::management_canister::http_request::HttpHeader>,
+    body: Option<Vec<u8>>,
+    transform: Option<ic_cdk::api::management_canister::http_request::TransformContext>,
+    is_replicated: Option<bool>,
+}
+
 async fn generate_drafts(cfg: &FarmerConfig) -> Result<TweetResponse, String> {
-    // Use ic-cdk's management http_request helper: correct candid types (method =
-    // variant { get; post; head } LOWERCASE, body = opt blob, status = nat) AND it
-    // attaches the required cycles via call_with_payment128 (HTTPS outcalls must pay;
-    // unused cycles are refunded). The earlier hand-rolled structs sent "POST"
-    // (uppercase) with no cycles → CanisterReject "Unknown variant field 891112544".
-    use ic_cdk::api::management_canister::http_request::{
-        http_request, CanisterHttpRequestArgument, HttpHeader, HttpMethod,
-    };
+    use ic_cdk::api::management_canister::http_request::{HttpHeader, HttpMethod, HttpResponse};
     if cfg.proxy_url.is_empty() {
         return Err("PROXY_NOT_CONFIGURED".to_string());
     }
@@ -344,7 +355,7 @@ async fn generate_drafts(cfg: &FarmerConfig) -> Result<TweetResponse, String> {
         caller_id: format!("farmer-{}", cfg.farmer_id),
     };
     let body = serde_json::to_vec(&req).map_err(|e| format!("ENCODE_REQ: {}", e))?;
-    let arg = CanisterHttpRequestArgument {
+    let arg = HttpReqArg {
         url: format!("{}/v1/tweets", cfg.proxy_url.trim_end_matches('/')),
         max_response_bytes: Some(MAX_RESPONSE_BYTES),
         method: HttpMethod::POST,
@@ -354,10 +365,13 @@ async fn generate_drafts(cfg: &FarmerConfig) -> Result<TweetResponse, String> {
         ],
         body: Some(body),
         transform: None,
+        is_replicated: Some(false), // non-replicated: no consensus over LLM output
     };
-    match http_request(arg, OUTCALL_CYCLES).await {
+    let res: Result<(HttpResponse,), _> = ic_cdk::api::call::call_with_payment128(
+        Principal::management_canister(), "http_request", (arg,), OUTCALL_CYCLES,
+    ).await;
+    match res {
         Ok((resp,)) => {
-            // status is candid Nat; parse to u64 for the pure response handler.
             let status: u64 = resp.status.to_string().parse().unwrap_or(0);
             parse_proxy_response(status, &resp.body)
         }
