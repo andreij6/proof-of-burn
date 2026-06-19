@@ -111,10 +111,21 @@ The service URL is stable across redeploys. Each deploy = a new revision
 ## Frozen API contract (what the canister depends on)
 
 `POST /v1/tweets`, `Authorization: Bearer <bearer>`:
-- in: `{"drafts_per_day": int(1..10), "persona": str(required), "history": [str]}`
+- in: `{"drafts_per_day": int(1..10), "persona": str(required), "history": [str], "caller_id": str(optional)}`
 - out 200: `{"drafts": [{"text": "<=270 chars", "cited_url": "url|null"}]}`
-- errors: `401` bad/missing bearer · `422` bad input · `502` generation failed
-  (canister marks a Failed day, skips burn tick) · `501` `/v1/review` not built.
+- errors: `401` bad/missing bearer · `422` bad input · `429` daily cap reached ·
+  `502` generation failed (canister marks a Failed day, skips burn tick) ·
+  `501` `/v1/review` not built.
+
+## Hardening / tuning env vars (set via --set-env-vars at deploy)
+
+- `GEMINI_MAX_RETRIES` (default 4) — exponential backoff retries on Gemini 429/500/503.
+- `MAX_CALLS_PER_DAY` (1000) / `MAX_CALLS_PER_CALLER_PER_DAY` (50) — daily rate caps.
+  **In-memory / per-instance** (reset on cold start, not shared across instances) →
+  the **$10 budget is the true hard cap**; these only catch a runaway loop on a warm
+  instance. Per-caller cap is keyed on the optional `caller_id` body field.
+- `MAX_DRAFTS_PER_CALL` (10), `TWEETS_MODEL` (gemini-3.5-flash).
+- Logs are structured JSON (severity/message/fields) → Cloud Logging jsonPayload.
 
 Do not change this shape without updating `ideas/x-farm/PARALLEL-WORK.md` and the
 canister side. Wiring: owner sets URL + bearer via `admin_set_xfarm_proxy`.

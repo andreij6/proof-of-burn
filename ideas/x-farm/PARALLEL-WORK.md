@@ -33,12 +33,17 @@ is deployed, by mocking this. The shape will not change.
 {
   "drafts_per_day": 3,
   "persona": "free-text persona string (UNTRUSTED — treated as data by the proxy)",
-  "history": ["prior draft text 1", "prior draft text 2"]
+  "history": ["prior draft text 1", "prior draft text 2"],
+  "caller_id": "<optional> farmer canister id / owner principal"
 }
 ```
 - `drafts_per_day`: int, clamped 1..10 server-side.
 - `persona`: required non-empty string.
 - `history`: array of strings (prior drafts not to repeat); may be `[]`.
+- `caller_id`: **optional, additive** (does not break the contract). If passed, the
+  proxy enforces a per-caller daily cap (default 50/day) and tags logs with it.
+  Stream B should pass the Farmer's canister id (or owner principal) so the cap +
+  log attribution work per-Farmer. Omitting it = global cap only.
 
 **Response 200:**
 ```json
@@ -97,6 +102,13 @@ gated per-deploy by the owner**; commit to local freely; coordinate doc edits he
 
 ## Status Log (both streams append; newest at top)
 
+- **2026-06-19 (A): Proxy hardened (retry/backoff + rate caps + structured logs).**
+  Gemini 429/5xx now retried w/ exponential backoff (env `GEMINI_MAX_RETRIES`=4).
+  Best-effort daily caps (env `MAX_CALLS_PER_DAY`=1000, `MAX_CALLS_PER_CALLER_PER_DAY`=50;
+  in-memory/per-instance → $10 budget is still the true hard cap). New **optional**
+  `caller_id` request field (see contract above) — Stream B: pass the Farmer id to
+  get per-Farmer caps + log attribution. Structured JSON logs to Cloud Logging.
+  Verified locally; redeployed to Cloud Run.
 - **2026-06-19 (A): PROXY DEPLOYED TO CLOUD RUN — live + verified.**
   - **`PROXY_URL` = `https://xfarm-proxy-1032507435523.us-central1.run.app`**
   - Endpoint `POST /v1/tweets` (bearer-authed) returns grounded + schema-typed
