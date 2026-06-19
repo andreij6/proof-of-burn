@@ -4923,11 +4923,14 @@ pub const FLAG_CRASH: &str = "crash";
 /// Cycles Faucet (PB-400): recycles a slice of treasury ICP into cycles grants
 /// for eligible pool members. Ships dark (default OFF) — owner kill switch.
 pub const FLAG_CYCLES_FAUCET: &str = "cycles_faucet";
-const KNOWN_FEATURE_FLAGS: [&str; 10] = [
+/// Proposal Discussions: forum-style threads on proposals (PB-DISC). Ships dark
+/// (default OFF) until the owner enables it.
+pub const FLAG_DISCUSSIONS: &str = "discussions";
+const KNOWN_FEATURE_FLAGS: [&str; 11] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL,
-    FLAG_CRASH, FLAG_CYCLES_FAUCET,
+    FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -5657,6 +5660,264 @@ async fn post_idea(title: String, description: String, detail: String) -> Result
     });
 
     Ok(id)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Proposal Discussions (PB-DISC) — forum-style threads on proposals.
+// A signed-in user starts a thread on a proposal for $1; others comment ($0.25)
+// and up/down-vote (free). Fees route BY TOKEN: ICP is burned to backend cycles
+// (proof-of-burn, self-funds compute); non-ICP goes 100% to the treasury. The
+// thread author earns 1 lottery ticket per qualifying upvote (Phase 2). Threads
+// auto-delete when the proposal settles (Phase 2). Ships dark behind the
+// `discussions` flag. MemoryIds: THREADS 95, NEXT_THREAD_ID 97, DISCUSSION_QUOTES
+// 98 (Phase-2 adds comments/votes 99/100/101).
+// ════════════════════════════════════════════════════════════════════════════
+
+const DISCUSSION_THREAD_FEE_USD_E8S: u64 = 100_000_000; // $1.00
+const MAX_THREAD_TITLE_LEN: usize = 100;
+const MAX_THREAD_BODY_LEN: usize = 1000;
+const MAX_THREADS_PER_PROPOSAL: u64 = 200;
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VoteDir { Up, Down }
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Thread {
+    pub id: u64,
+    pub proposal_id: u64,
+    pub author: Principal,
+    pub title: String,
+    pub body: String,
+    pub created_at: u64,
+    pub last_activity_at: u64,
+    pub comment_count: u64,
+    pub upvote_count: u64,
+    pub downvote_count: u64,
+    /// Lottery tickets minted to the author so far (per-thread reward cap).
+    pub tickets_awarded: u64,
+    /// Filled per-caller at query time (the caller's vote on this thread); not stored.
+    #[serde(default)]
+    pub my_vote: Option<VoteDir>,
+}
+impl_storable!(Thread);
+
+thread_local! {
+    static THREADS: RefCell<StableBTreeMap<u64, Thread, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(95))))
+    });
+    static NEXT_THREAD_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(97)), 1u64))
+    });
+    static DISCUSSION_QUOTES: RefCell<StableBTreeMap<Principal, ExplorerQuote, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(98))))
+    });
+}
+
+fn next_thread_id() -> u64 {
+    NEXT_THREAD_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    })
+}
+
+/// Per-caller escrow subaccount for discussion fees (distinct domain tag).
+fn derive_discussion_subaccount(user: &Principal) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_discussion_v1");
+    hasher.update(user.as_slice());
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&hasher.finalize());
+    sub
+}
+
+fn require_discussions_enabled() -> Result<(), String> {
+    if !feature_visible(FLAG_DISCUSSIONS, get_caller()) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    Ok(())
+}
+
+/// Token-amount for a flat USD fee at the live rate: `fee_usd * 10^decimals / rate`.
+fn discussion_quote_amount(fee_usd_e8s: u64, rate_usd_e8s: u64, decimals: u32) -> Result<u64, String> {
+    if rate_usd_e8s == 0 {
+        return Err("RATE_UNAVAILABLE".to_string());
+    }
+    let scale = 10u128.pow(decimals);
+    let amount = u64::try_from((fee_usd_e8s as u128).saturating_mul(scale) / (rate_usd_e8s as u128))
+        .map_err(|_| "AMOUNT_OVERFLOW".to_string())?;
+    if amount == 0 {
+        return Err("AMOUNT_TOO_SMALL".to_string());
+    }
+    Ok(amount)
+}
+
+/// A proposal accepts new discussion while it's still live (open or met). Once it
+/// settles/votes/abstains/fails, threads are deleted (Phase 2 sweep).
+fn proposal_open_for_discussion(proposal_id: u64) -> bool {
+    PROPOSALS.with(|m| m.borrow().get(&proposal_id))
+        .map(|p| p.status == "open" || p.status == "met")
+        .unwrap_or(false)
+}
+
+/// Route a paid discussion fee held in `escrow_sub`: ICP is burned to backend
+/// cycles (CMC); any other token goes 100% to the treasury. Charged before the
+/// content is stored (a failure leaves nothing).
+async fn collect_discussion_fee(
+    token: ExplorerToken,
+    escrow_sub: [u8; 32],
+    amount: u64,
+    config: &Config,
+) -> Result<(), String> {
+    let ledger_id = explorer_token_ledger(token, config);
+    let fee = explorer_token_fee(token, config);
+    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(escrow_sub) };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    if balance < amount.saturating_add(fee) {
+        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    }
+    if token == ExplorerToken::ICP {
+        // Burn to backend-canister cycles via the CMC (proof-of-burn).
+        let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+        let block = call_cmc_topup_transfer(ledger_id, Some(escrow_sub), get_canister_id(), amount, fee)
+            .await
+            .map_err(|e| format!("BURN_XFER_FAILED: {}", e))?;
+        notify_cmc_topup(cmc, get_canister_id(), block, true)
+            .await
+            .map_err(|e| format!("BURN_NOTIFY_FAILED: {}", e))?;
+    } else {
+        // Non-ICP → 100% to the treasury (held as the token).
+        let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
+        call_ledger_transfer(ledger_id, Some(escrow_sub), treasury_dest, amount, Some(fee))
+            .await
+            .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
+    }
+    Ok(())
+}
+
+fn validate_thread_text(title: &str, body: &str) -> Result<(), String> {
+    if title.is_empty() || title.chars().count() > MAX_THREAD_TITLE_LEN {
+        return Err("INVALID_TITLE".to_string());
+    }
+    if body.is_empty() || body.chars().count() > MAX_THREAD_BODY_LEN {
+        return Err("INVALID_BODY".to_string());
+    }
+    Ok(())
+}
+
+/// The caller's per-proposal-independent discussion fee escrow account. Fund it
+/// on the chosen token's ledger, then call `start_thread` / `add_comment`.
+#[ic_cdk::query]
+fn get_discussion_deposit_address() -> LedgerAccount {
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(derive_discussion_subaccount(&get_caller())),
+    }
+}
+
+/// Quote the thread-start fee ($1 USD) in `token` at the live rate; locks the
+/// price for the caller for 15 minutes.
+#[ic_cdk::update]
+async fn get_thread_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
+    require_authenticated()?;
+    require_discussions_enabled()?;
+    let caller = get_caller();
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let rate = explorer_usd_rate_e8s(token, &config).await?;
+    let amount = discussion_quote_amount(DISCUSSION_THREAD_FEE_USD_E8S, rate, explorer_token_decimals(token))?;
+    let now = current_time();
+    let quote = ExplorerQuote {
+        token, days: 0, amount, rate_usd_e8s: rate,
+        usd_total_e8s: DISCUSSION_THREAD_FEE_USD_E8S,
+        created_at: now, expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
+    };
+    DISCUSSION_QUOTES.with(|m| { m.borrow_mut().insert(caller, quote.clone()); });
+    Ok(quote)
+}
+
+/// Start a discussion thread on `proposal_id` for the $1 fee (deposited on
+/// get_discussion_deposit_address, quoted via get_thread_quote). ICP burns to
+/// backend cycles; non-ICP goes to the treasury.
+#[ic_cdk::update]
+async fn start_thread(proposal_id: u64, title: String, body: String, token: ExplorerToken) -> Result<u64, String> {
+    require_authenticated()?;
+    require_discussions_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let title = title.trim().to_string();
+    let body = body.trim().to_string();
+    validate_thread_text(&title, &body)?;
+
+    if !proposal_open_for_discussion(proposal_id) {
+        return Err("PROPOSAL_NOT_OPEN".to_string());
+    }
+    let count = THREADS.with(|m| m.borrow().iter().filter(|e| e.value().proposal_id == proposal_id).count());
+    if count as u64 >= MAX_THREADS_PER_PROPOSAL {
+        return Err("THREAD_QUOTA_REACHED".to_string());
+    }
+
+    let now = current_time();
+    let quote = DISCUSSION_QUOTES.with(|m| m.borrow().get(&caller)).ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.token != token {
+        return Err("QUOTE_MISMATCH".to_string());
+    }
+    if now > quote.expires_at {
+        return Err("QUOTE_EXPIRED".to_string());
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let sub = derive_discussion_subaccount(&caller);
+    collect_discussion_fee(token, sub, quote.amount, &config).await?;
+    DISCUSSION_QUOTES.with(|m| { m.borrow_mut().remove(&caller); });
+
+    let id = next_thread_id();
+    THREADS.with(|m| {
+        m.borrow_mut().insert(id, Thread {
+            id, proposal_id, author: caller, title, body,
+            created_at: now, last_activity_at: now,
+            comment_count: 0, upvote_count: 0, downvote_count: 0,
+            tickets_awarded: 0, my_vote: None,
+        });
+    });
+    log_dapp_event("thread_start", id, caller, quote.amount);
+    Ok(id)
+}
+
+fn thread_score(t: &Thread) -> i128 {
+    (t.upvote_count as i128) - (t.downvote_count as i128)
+}
+
+/// Threads on a proposal, sorted by net score (upvotes − downvotes), then newest.
+/// `my_vote` is filled in Phase 2 (currently None).
+#[ic_cdk::query]
+fn list_threads(proposal_id: u64) -> Vec<Thread> {
+    let mut threads: Vec<Thread> = THREADS.with(|m| {
+        m.borrow().iter().map(|e| e.value()).filter(|t| t.proposal_id == proposal_id).collect()
+    });
+    threads.sort_by(|a, b| thread_score(b).cmp(&thread_score(a)).then(b.created_at.cmp(&a.created_at)));
+    threads
+}
+
+#[ic_cdk::query]
+fn get_thread(thread_id: u64) -> Option<Thread> {
+    THREADS.with(|m| m.borrow().get(&thread_id))
+}
+
+/// Cheap count for the proposal card badge ("See open threads (N)").
+#[ic_cdk::query]
+fn get_thread_count(proposal_id: u64) -> u64 {
+    THREADS.with(|m| m.borrow().iter().filter(|e| e.value().proposal_id == proposal_id).count() as u64)
+}
+
+#[ic_cdk::query]
+fn list_my_threads() -> Vec<Thread> {
+    let caller = get_caller();
+    if caller == Principal::anonymous() {
+        return vec![];
+    }
+    THREADS.with(|m| m.borrow().iter().map(|e| e.value()).filter(|t| t.author == caller).collect())
 }
 
 /// The caller's deposit account for upvoting `idea_id`. The same subaccount
@@ -21778,6 +22039,74 @@ mod tests {
             p.first_stance = None;
             m.borrow_mut().insert(pid, p);
         });
+    }
+
+    fn clear_threads() {
+        THREADS.with(|m| { let ks: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+        DISCUSSION_QUOTES.with(|m| { let ks: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+    }
+
+    #[tokio::test]
+    async fn test_start_thread_fee_routing() {
+        install_staking_test_config();
+        clear_threads();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_DISCUSSIONS.to_string(), 1u8); });
+        open_proposal(700_900, 200_000_000);
+
+        // No quote → refused.
+        assert_eq!(
+            start_thread(700_900, "T".into(), "body".into(), ExplorerToken::ICP).await.unwrap_err(),
+            "NO_QUOTE"
+        );
+
+        // $1 in ICP at the $5 static rate = 0.2 ICP.
+        let q = get_thread_quote(ExplorerToken::ICP).await.unwrap();
+        assert_eq!(q.amount, 20_000_000);
+        assert_eq!(q.usd_total_e8s, 100_000_000);
+
+        // Underfunded escrow refused.
+        set_mock_ledger_balance(q.amount); // missing the ledger fee
+        assert_eq!(
+            start_thread(700_900, "T".into(), "body".into(), ExplorerToken::ICP).await.unwrap_err(),
+            "INSUFFICIENT_DEPOSIT"
+        );
+
+        // Funded → ICP burn path (CMC top-up; notify is a host-test no-op).
+        set_mock_ledger_balance(q.amount + 10_000);
+        set_mock_ledger_transfer(Ok(7));
+        let id = start_thread(700_900, "Title".into(), "body".into(), ExplorerToken::ICP).await.unwrap();
+        let t = get_thread(id).unwrap();
+        assert_eq!(t.proposal_id, 700_900);
+        assert_eq!(t.author, alice);
+        assert_eq!(list_threads(700_900).len(), 1);
+        assert_eq!(get_thread_count(700_900), 1);
+        assert_eq!(list_my_threads().len(), 1);
+        // Quote consumed → second start needs a fresh quote.
+        assert_eq!(
+            start_thread(700_900, "T".into(), "b".into(), ExplorerToken::ICP).await.unwrap_err(),
+            "NO_QUOTE"
+        );
+
+        // Non-ICP token → treasury path ($1 of USDC = 1 USDC at $1).
+        let q2 = get_thread_quote(ExplorerToken::CkUSDC).await.unwrap();
+        assert_eq!(q2.amount, 1_000_000);
+        set_mock_ledger_balance(q2.amount + 10_000);
+        let id2 = start_thread(700_900, "T2".into(), "body2".into(), ExplorerToken::CkUSDC).await.unwrap();
+        assert!(get_thread(id2).is_some());
+        assert_eq!(get_thread_count(700_900), 2);
+
+        // A settled proposal refuses new threads.
+        PROPOSALS.with(|m| { let mut p = m.borrow().get(&700_900).unwrap(); p.status = "settled".into(); m.borrow_mut().insert(700_900, p); });
+        let _ = get_thread_quote(ExplorerToken::ICP).await.unwrap();
+        assert_eq!(
+            start_thread(700_900, "T".into(), "b".into(), ExplorerToken::ICP).await.unwrap_err(),
+            "PROPOSAL_NOT_OPEN"
+        );
+
+        clear_threads();
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_DISCUSSIONS.to_string()); });
     }
 
     #[tokio::test]

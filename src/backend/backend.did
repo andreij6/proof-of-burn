@@ -938,6 +938,22 @@ type StrategyStop = record {
   // +profit in VP-x1000 that ends the session (0 = none).
   take_profit_vp_x1000 : nat64;
 };
+type Thread = record {
+  id : nat64;
+  title : text;
+  // Filled per-caller at query time (the caller's vote on this thread); not stored.
+  my_vote : opt VoteDir;
+  upvote_count : nat64;
+  comment_count : nat64;
+  // Lottery tickets minted to the author so far (per-thread reward cap).
+  tickets_awarded : nat64;
+  body : text;
+  created_at : nat64;
+  last_activity_at : nat64;
+  author : principal;
+  proposal_id : nat64;
+  downvote_count : nat64;
+};
 // Public state of one tier's pooled neuron.
 type TierPoolInfo = record {
   pending_refresh_e8s : nat64;
@@ -1004,6 +1020,7 @@ type UserTierStake = record {
   last_action_at : nat64;
 };
 type Vote = variant { No; Yes; Abstain };
+type VoteDir = variant { Up; Down };
 type VoteRecord = record {
   vote : Vote;
   proposal_id : nat64;
@@ -1416,6 +1433,9 @@ service : (InitPayload) -> {
   get_crash_round : () -> (CrashRoundView) query;
   get_cycle_balance : () -> (nat64) query;
   get_deposit_address : (nat64) -> (LedgerAccount) query;
+  // The caller's per-proposal-independent discussion fee escrow account. Fund it
+  // on the chosen token's ledger, then call `start_thread` / `add_comment`.
+  get_discussion_deposit_address : () -> (LedgerAccount) query;
   // The caller's deposit account for becoming (or topping up as) a
   // early adopter. Fund it with `amount + 0.0001 ICP`, then call
   // `early_adopter_stake(amount)`.
@@ -1496,6 +1516,12 @@ service : (InitPayload) -> {
   // then call `stake(amount)`.
   get_stake_deposit_address : () -> (LedgerAccount) query;
   get_staking_pool_info : () -> (StakingPoolInfo) query;
+  get_thread : (nat64) -> (opt Thread) query;
+  // Cheap count for the proposal card badge ("See open threads (N)").
+  get_thread_count : (nat64) -> (nat64) query;
+  // Quote the thread-start fee ($1 USD) in `token` at the live rate; locks the
+  // price for the caller for 15 minutes.
+  get_thread_quote : (IdeaToken) -> (Result_5);
   get_treasury_balance : () -> (BalanceResult);
   // The treasury's ledger account — deposit ICP here to fund it directly
   // (admin top-ups, external donations). Not secret: it's just the backend
@@ -1540,6 +1566,7 @@ service : (InitPayload) -> {
   list_my_dapp_submissions : () -> (vec DappListing) query;
   list_my_favorite_courses : () -> (vec CourseCard) query;
   list_my_pending_unstakes : () -> (vec PendingUnstake) query;
+  list_my_threads : () -> (vec Thread) query;
   // Admin: the approval queue, oldest first.
   list_pending_dapps : () -> (vec DappListing) query;
   // Admin: pending featured applications awaiting review.
@@ -1551,6 +1578,9 @@ service : (InitPayload) -> {
   list_recent_winners : () -> (vec LotteryDraw) query;
   // List a crash strategy (you authored) on the shared marketplace. $1–$500.
   list_strategy : (nat64, nat64, text) -> (BalanceResult);
+  // Threads on a proposal, sorted by net score (upvotes − downvotes), then newest.
+  // `my_vote` is filled in Phase 2 (currently None).
+  list_threads : (nat64) -> (vec Thread) query;
   list_vote_history : () -> (vec VoteRecord) query;
   list_yield_distributions : () -> (vec YieldDistribution) query;
   // Merge a still-dissolving unstake neuron back into any tier pool — the
@@ -1600,6 +1630,10 @@ service : (InitPayload) -> {
   start_autopilot : (nat64) -> (Result);
   // Pure synchronous update — no `raw_rand`, no inter-canister await (PB-306 A2).
   start_play_session : (nat64) -> (Result_8);
+  // Start a discussion thread on `proposal_id` for the $1 fee (deposited on
+  // get_discussion_deposit_address, quoted via get_thread_quote). ICP burns to
+  // backend cycles; non-ICP goes to the treasury.
+  start_thread : (nat64, text, text, IdeaToken) -> (BalanceResult);
   stop_autopilot : () -> (Result);
   // Submit a finished round. Requires full access (the hole-1 preview can't
   // produce a 9-hole score). Insert-if-better per (game, player); returns the
