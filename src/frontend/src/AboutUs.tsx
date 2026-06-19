@@ -74,8 +74,13 @@ export default function AboutUs({ signedIn, onSignIn, go }: AboutUsProps) {
           </Pillar>
           <Pillar icon="list" title="Proposal discussions">
             Start a conversation on any proposal, weigh in with comments, and up/down-vote the takes.
-            Conversation-starters earn lottery tickets for every upvote, and ICP spent here is burned 100% —
-            so the community debate itself tightens supply.
+            Conversation-starters earn lottery tickets as their take gets upvoted, and ICP spent here is
+            burned 100% — so the community debate itself tightens supply.
+          </Pillar>
+          <Pillar icon="spark" title="X-Farm">
+            Spin up your own Farmer canister that burns ICP into cycles and drafts fresh, grounded
+            pro-ICP tweets — each ending with $ICP — for you to review and post. Proof-of-burn that
+            doubles as outreach.
           </Pillar>
         </div>
       </div>
