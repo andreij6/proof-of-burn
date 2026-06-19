@@ -1,4 +1,13 @@
 import { useEffect, useState } from 'react';
+// Deterministic per-(id, seed) hash used to shuffle the directory. Same seed →
+// same order (stable across re-renders / filtering / pagination); a fresh seed
+// each page load reshuffles. Well-distributed integer mix (xorshift-style).
+function shuffleHash(id: bigint, seed: number): number {
+  let h = ((Number(id % 2147483647n) >>> 0) ^ seed) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 2246822507) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 3266489909) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
 import { Principal } from "@icp-sdk/core/principal";
 import { ExplorerToken, DappStatus, FeaturedStatus } from "./bindings/backend";
 import type { DappListing, ExplorerInfo, ExplorerQuote, FeaturedInfo, FeaturedView } from "./bindings/backend";
@@ -120,6 +129,8 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [dapps, setDapps] = useState<DappListing[]>([]);
+  // Random directory order, fixed once per page load (re-seeds on remount).
+  const [shuffleSeed] = useState(() => (Math.random() * 0xffffffff) >>> 0);
   const [myDapps, setMyDapps] = useState<DappListing[]>([]);
   const [pendingDapps, setPendingDapps] = useState<DappListing[]>([]);
   const [info, setInfo] = useState<ExplorerInfo | null>(null);
@@ -555,9 +566,11 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
   };
   const setFilter = (c: string | null) => { setCatFilter(c); setGridPage(0); };
 
+  // Random directory order, stable for this page load (see shuffleSeed).
+  const shuffledDapps = [...dapps].sort((a, b) => shuffleHash(a.id, shuffleSeed) - shuffleHash(b.id, shuffleSeed));
   // Only offer filters for categories that actually have a live listing.
-  const presentCats = allCategories.filter(c => dapps.some(d => d.categories.includes(c)));
-  const filteredDapps = catFilter ? dapps.filter(d => d.categories.includes(catFilter)) : dapps;
+  const presentCats = allCategories.filter(c => shuffledDapps.some(d => d.categories.includes(c)));
+  const filteredDapps = catFilter ? shuffledDapps.filter(d => d.categories.includes(catFilter)) : shuffledDapps;
   const pageCount = Math.max(1, Math.ceil(filteredDapps.length / GRID_PAGE_SIZE));
   const safePage = Math.min(gridPage, pageCount - 1);
   const pageDapps = filteredDapps.slice(safePage * GRID_PAGE_SIZE, safePage * GRID_PAGE_SIZE + GRID_PAGE_SIZE);
