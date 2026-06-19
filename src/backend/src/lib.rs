@@ -4259,6 +4259,10 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
 
     settle_proposal_commitments(pid).await;
 
+    // The proposal is decided — discussion threads are about a live decision, so
+    // delete them (earned lottery tickets are kept). D3 of the discussions design.
+    delete_proposal_discussions(pid);
+
     Ok(())
 }
 
@@ -5860,7 +5864,7 @@ async fn start_thread(proposal_id: u64, title: String, body: String, token: Expl
 
     let now = current_time();
     let quote = DISCUSSION_QUOTES.with(|m| m.borrow().get(&caller)).ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.token != token {
+    if quote.token != token || quote.usd_total_e8s != DISCUSSION_THREAD_FEE_USD_E8S {
         return Err("QUOTE_MISMATCH".to_string());
     }
     if now > quote.expires_at {
@@ -5893,16 +5897,24 @@ fn thread_score(t: &Thread) -> i128 {
 /// `my_vote` is filled in Phase 2 (currently None).
 #[ic_cdk::query]
 fn list_threads(proposal_id: u64) -> Vec<Thread> {
+    let caller = get_caller();
     let mut threads: Vec<Thread> = THREADS.with(|m| {
         m.borrow().iter().map(|e| e.value()).filter(|t| t.proposal_id == proposal_id).collect()
     });
     threads.sort_by(|a, b| thread_score(b).cmp(&thread_score(a)).then(b.created_at.cmp(&a.created_at)));
+    for t in threads.iter_mut() {
+        t.my_vote = caller_vote(0, t.id, caller);
+    }
     threads
 }
 
 #[ic_cdk::query]
 fn get_thread(thread_id: u64) -> Option<Thread> {
-    THREADS.with(|m| m.borrow().get(&thread_id))
+    let caller = get_caller();
+    THREADS.with(|m| m.borrow().get(&thread_id)).map(|mut t| {
+        t.my_vote = caller_vote(0, t.id, caller);
+        t
+    })
 }
 
 /// Cheap count for the proposal card badge ("See open threads (N)").
@@ -5918,6 +5930,398 @@ fn list_my_threads() -> Vec<Thread> {
         return vec![];
     }
     THREADS.with(|m| m.borrow().iter().map(|e| e.value()).filter(|t| t.author == caller).collect())
+}
+
+// ── Proposal Discussions: comments, votes, reward, delete-on-settle (Phase 2) ──
+
+const DISCUSSION_COMMENT_FEE_USD_E8S: u64 = 25_000_000; // $0.25
+const MAX_COMMENTS_PER_THREAD: u64 = 1_000;
+/// Cap on lottery tickets a single thread can mint for its author (sybil bound).
+const TICKETS_PER_THREAD_CAP: u64 = 50;
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct Comment {
+    pub id: u64,
+    pub thread_id: u64,
+    /// None = top-level; Some(top_level_comment_id) = a one-level reply.
+    pub parent_id: Option<u64>,
+    pub author: Principal,
+    pub body: String,
+    pub created_at: u64,
+    pub upvote_count: u64,
+    pub downvote_count: u64,
+    #[serde(default)]
+    pub my_vote: Option<VoteDir>,
+}
+impl_storable!(Comment);
+impl_storable!(VoteDir);
+
+/// Vote dedupe key. `kind` 0 = thread, 1 = comment.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DiscussionVoteKey {
+    pub kind: u8,
+    pub item_id: u64,
+    pub voter: Principal,
+}
+impl_storable!(DiscussionVoteKey);
+
+thread_local! {
+    static COMMENTS: RefCell<StableBTreeMap<u64, Comment, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(99))))
+    });
+    static NEXT_COMMENT_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(100)), 1u64))
+    });
+    static DISCUSSION_VOTES: RefCell<StableBTreeMap<DiscussionVoteKey, VoteDir, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(101))))
+    });
+    // Marker set: (kind=2, thread_id, voter) once an upvoter has minted the
+    // author a ticket — so toggling upvote off/on can't farm repeat rewards.
+    static DISCUSSION_REWARDED: RefCell<StableBTreeMap<DiscussionVoteKey, (), Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(102))))
+    });
+}
+
+fn next_comment_id() -> u64 {
+    NEXT_COMMENT_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    })
+}
+
+fn caller_vote(kind: u8, item_id: u64, caller: Principal) -> Option<VoteDir> {
+    if caller == Principal::anonymous() {
+        return None;
+    }
+    DISCUSSION_VOTES.with(|m| m.borrow().get(&DiscussionVoteKey { kind, item_id, voter: caller }))
+}
+
+/// Grant `count` lottery tickets to `user` in the current round (caller-agnostic
+/// internal helper). Returns the user's new ticket count. No-op if count is 0.
+fn grant_lottery_tickets(user: Principal, count: u64) -> u64 {
+    if count == 0 {
+        return LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).map(|e| e.count).unwrap_or(0);
+    }
+    let now = current_time();
+    let mut state = lottery_state();
+    let mut entry = LOTTERY_TICKETS
+        .with(|m| m.borrow().get(&user))
+        .unwrap_or(TicketEntry { round: state.round, count: 0, last_claim_day: 0 });
+    if entry.round != state.round {
+        entry = TicketEntry { round: state.round, count: 0, last_claim_day: entry.last_claim_day };
+    }
+    entry.count = entry.count.saturating_add(count);
+    state.total_tickets = state.total_tickets.saturating_add(count);
+    if state.next_draw_at == 0 {
+        state.next_draw_at = next_draw_after(now);
+    }
+    let new_count = entry.count;
+    LOTTERY_TICKETS.with(|m| { m.borrow_mut().insert(user, entry); });
+    set_lottery_state(state);
+    new_count
+}
+
+/// Is `user` staked in any lottery-participating neuron (term tier or the
+/// permanent booster)? Only stakers can win the lottery, so only stakers earn
+/// the thread-upvote ticket reward.
+fn author_is_staked(user: Principal) -> bool {
+    let tier_staked = StakeTier::all().iter().any(|t| {
+        STAKES.with(|m| m.borrow().get(&stake_key(*t, user)))
+            .map(|s| s.amount_e8s > 0)
+            .unwrap_or(false)
+    });
+    tier_staked
+        || EARLY_ADOPTERS.with(|m| m.borrow().get(&user)).map(|e| e.staked_e8s > 0).unwrap_or(false)
+}
+
+/// The reward (D-reward): on a NEW upvote of a thread, mint the AUTHOR 1 lottery
+/// ticket — gated: the lottery is live; not the author's own upvote; the AUTHOR
+/// is staked (only stakers play the lottery); the upvoter has participation
+/// history (committed/voted before — sybil cost); this upvoter hasn't already
+/// rewarded this thread (toggle-farming guard); under the per-thread cap.
+fn maybe_award_thread_upvote(thread: &mut Thread, voter: Principal) {
+    if !feature_active(FLAG_LOSSLESS_LOTTERY) { return; }
+    if voter == thread.author { return; }
+    if thread.tickets_awarded >= TICKETS_PER_THREAD_CAP { return; }
+    if !author_is_staked(thread.author) { return; }
+    let has_history = USER_AGGREGATES
+        .with(|m| m.borrow().get(&voter))
+        .map(|a| a.proposals_joined > 0)
+        .unwrap_or(false);
+    if !has_history { return; }
+    let rkey = DiscussionVoteKey { kind: 2, item_id: thread.id, voter };
+    if DISCUSSION_REWARDED.with(|m| m.borrow().get(&rkey)).is_some() { return; }
+    grant_lottery_tickets(thread.author, 1);
+    thread.tickets_awarded = thread.tickets_awarded.saturating_add(1);
+    DISCUSSION_REWARDED.with(|m| { m.borrow_mut().insert(rkey, ()); });
+}
+
+/// Quote the comment fee ($0.25 USD) in `token`. Shares DISCUSSION_QUOTES with
+/// the thread quote; the op-specific `usd_total_e8s` distinguishes them.
+#[ic_cdk::update]
+async fn get_comment_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
+    require_authenticated()?;
+    require_discussions_enabled()?;
+    let caller = get_caller();
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let rate = explorer_usd_rate_e8s(token, &config).await?;
+    let amount = discussion_quote_amount(DISCUSSION_COMMENT_FEE_USD_E8S, rate, explorer_token_decimals(token))?;
+    let now = current_time();
+    let quote = ExplorerQuote {
+        token, days: 0, amount, rate_usd_e8s: rate,
+        usd_total_e8s: DISCUSSION_COMMENT_FEE_USD_E8S,
+        created_at: now, expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
+    };
+    DISCUSSION_QUOTES.with(|m| { m.borrow_mut().insert(caller, quote.clone()); });
+    Ok(quote)
+}
+
+/// Add a comment ($0.25) to a thread. `parent_id` = None for top-level, or a
+/// top-level comment id for a one-level reply. Fee routes by token (ICP burns,
+/// non-ICP → treasury), same as threads.
+#[ic_cdk::update]
+async fn add_comment(thread_id: u64, parent_id: Option<u64>, body: String, token: ExplorerToken) -> Result<u64, String> {
+    require_authenticated()?;
+    require_discussions_enabled()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+
+    let body = body.trim().to_string();
+    if body.is_empty() || body.chars().count() > MAX_THREAD_BODY_LEN {
+        return Err("INVALID_BODY".to_string());
+    }
+    let thread = THREADS.with(|m| m.borrow().get(&thread_id)).ok_or_else(|| "THREAD_NOT_FOUND".to_string())?;
+    if !proposal_open_for_discussion(thread.proposal_id) {
+        return Err("PROPOSAL_NOT_OPEN".to_string());
+    }
+    // One-level only: a reply's parent must be a top-level comment in this thread.
+    if let Some(pid) = parent_id {
+        let parent = COMMENTS.with(|m| m.borrow().get(&pid)).ok_or_else(|| "PARENT_NOT_FOUND".to_string())?;
+        if parent.thread_id != thread_id || parent.parent_id.is_some() {
+            return Err("INVALID_PARENT".to_string());
+        }
+    }
+    if thread.comment_count >= MAX_COMMENTS_PER_THREAD {
+        return Err("COMMENT_QUOTA_REACHED".to_string());
+    }
+
+    let now = current_time();
+    let quote = DISCUSSION_QUOTES.with(|m| m.borrow().get(&caller)).ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.token != token || quote.usd_total_e8s != DISCUSSION_COMMENT_FEE_USD_E8S {
+        return Err("QUOTE_MISMATCH".to_string());
+    }
+    if now > quote.expires_at {
+        return Err("QUOTE_EXPIRED".to_string());
+    }
+
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let sub = derive_discussion_subaccount(&caller);
+    collect_discussion_fee(token, sub, quote.amount, &config).await?;
+    DISCUSSION_QUOTES.with(|m| { m.borrow_mut().remove(&caller); });
+
+    let id = next_comment_id();
+    COMMENTS.with(|m| {
+        m.borrow_mut().insert(id, Comment {
+            id, thread_id, parent_id, author: caller, body,
+            created_at: now, upvote_count: 0, downvote_count: 0, my_vote: None,
+        });
+    });
+    THREADS.with(|m| {
+        let mut t = m.borrow().get(&thread_id).unwrap();
+        t.comment_count = t.comment_count.saturating_add(1);
+        t.last_activity_at = now;
+        m.borrow_mut().insert(thread_id, t);
+    });
+    log_dapp_event("thread_comment", id, caller, quote.amount);
+    Ok(id)
+}
+
+/// Comments on a thread, newest first, with the caller's vote filled in.
+#[ic_cdk::query]
+fn list_comments(thread_id: u64) -> Vec<Comment> {
+    let caller = get_caller();
+    let mut cs: Vec<Comment> = COMMENTS.with(|m| {
+        m.borrow().iter().map(|e| e.value()).filter(|c| c.thread_id == thread_id).collect()
+    });
+    for c in cs.iter_mut() {
+        c.my_vote = caller_vote(1, c.id, caller);
+    }
+    cs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    cs
+}
+
+/// Up/down vote a thread (free, toggle). A NEW upvote may mint the author a
+/// lottery ticket (maybe_award_thread_upvote).
+#[ic_cdk::update]
+fn vote_thread(thread_id: u64, dir: VoteDir) -> Result<(), String> {
+    require_authenticated()?;
+    require_discussions_enabled()?;
+    let caller = get_caller();
+    let mut thread = THREADS.with(|m| m.borrow().get(&thread_id)).ok_or_else(|| "THREAD_NOT_FOUND".to_string())?;
+    let key = DiscussionVoteKey { kind: 0, item_id: thread_id, voter: caller };
+    let prev = DISCUSSION_VOTES.with(|m| m.borrow().get(&key));
+    let mut newly_up = false;
+    match prev {
+        Some(p) if p == dir => {
+            DISCUSSION_VOTES.with(|m| { m.borrow_mut().remove(&key); });
+            match dir {
+                VoteDir::Up => thread.upvote_count = thread.upvote_count.saturating_sub(1),
+                VoteDir::Down => thread.downvote_count = thread.downvote_count.saturating_sub(1),
+            }
+        }
+        Some(p) => {
+            DISCUSSION_VOTES.with(|m| { m.borrow_mut().insert(key, dir); });
+            match p {
+                VoteDir::Up => thread.upvote_count = thread.upvote_count.saturating_sub(1),
+                VoteDir::Down => thread.downvote_count = thread.downvote_count.saturating_sub(1),
+            }
+            match dir {
+                VoteDir::Up => { thread.upvote_count = thread.upvote_count.saturating_add(1); newly_up = true; }
+                VoteDir::Down => thread.downvote_count = thread.downvote_count.saturating_add(1),
+            }
+        }
+        None => {
+            DISCUSSION_VOTES.with(|m| { m.borrow_mut().insert(key, dir); });
+            match dir {
+                VoteDir::Up => { thread.upvote_count = thread.upvote_count.saturating_add(1); newly_up = true; }
+                VoteDir::Down => thread.downvote_count = thread.downvote_count.saturating_add(1),
+            }
+        }
+    }
+    if newly_up {
+        maybe_award_thread_upvote(&mut thread, caller);
+    }
+    THREADS.with(|m| { m.borrow_mut().insert(thread_id, thread); });
+    Ok(())
+}
+
+/// Up/down vote a comment (free, toggle). Comment votes earn NO reward.
+#[ic_cdk::update]
+fn vote_comment(comment_id: u64, dir: VoteDir) -> Result<(), String> {
+    require_authenticated()?;
+    require_discussions_enabled()?;
+    let caller = get_caller();
+    let mut comment = COMMENTS.with(|m| m.borrow().get(&comment_id)).ok_or_else(|| "COMMENT_NOT_FOUND".to_string())?;
+    let key = DiscussionVoteKey { kind: 1, item_id: comment_id, voter: caller };
+    let prev = DISCUSSION_VOTES.with(|m| m.borrow().get(&key));
+    match prev {
+        Some(p) if p == dir => {
+            DISCUSSION_VOTES.with(|m| { m.borrow_mut().remove(&key); });
+            match dir {
+                VoteDir::Up => comment.upvote_count = comment.upvote_count.saturating_sub(1),
+                VoteDir::Down => comment.downvote_count = comment.downvote_count.saturating_sub(1),
+            }
+        }
+        Some(p) => {
+            DISCUSSION_VOTES.with(|m| { m.borrow_mut().insert(key, dir); });
+            match p {
+                VoteDir::Up => comment.upvote_count = comment.upvote_count.saturating_sub(1),
+                VoteDir::Down => comment.downvote_count = comment.downvote_count.saturating_sub(1),
+            }
+            match dir {
+                VoteDir::Up => comment.upvote_count = comment.upvote_count.saturating_add(1),
+                VoteDir::Down => comment.downvote_count = comment.downvote_count.saturating_add(1),
+            }
+        }
+        None => {
+            DISCUSSION_VOTES.with(|m| { m.borrow_mut().insert(key, dir); });
+            match dir {
+                VoteDir::Up => comment.upvote_count = comment.upvote_count.saturating_add(1),
+                VoteDir::Down => comment.downvote_count = comment.downvote_count.saturating_add(1),
+            }
+        }
+    }
+    COMMENTS.with(|m| { m.borrow_mut().insert(comment_id, comment); });
+    Ok(())
+}
+
+/// Delete every thread, comment, and vote tied to a proposal (called on settle).
+/// Earned lottery tickets are NOT touched.
+fn delete_proposal_discussions(proposal_id: u64) {
+    let tids: Vec<u64> = THREADS.with(|m| {
+        m.borrow().iter().filter(|e| e.value().proposal_id == proposal_id).map(|e| *e.key()).collect()
+    });
+    if tids.is_empty() {
+        return;
+    }
+    let cids: Vec<u64> = COMMENTS.with(|m| {
+        m.borrow().iter().filter(|e| tids.contains(&e.value().thread_id)).map(|e| *e.key()).collect()
+    });
+    let vkeys: Vec<DiscussionVoteKey> = DISCUSSION_VOTES.with(|m| {
+        m.borrow().iter().filter(|e| {
+            let k = e.key();
+            (k.kind == 0 && tids.contains(&k.item_id)) || (k.kind == 1 && cids.contains(&k.item_id))
+        }).map(|e| e.key().clone()).collect()
+    });
+    let rkeys: Vec<DiscussionVoteKey> = DISCUSSION_REWARDED.with(|m| {
+        m.borrow().iter().filter(|e| tids.contains(&e.key().item_id)).map(|e| e.key().clone()).collect()
+    });
+    DISCUSSION_VOTES.with(|m| { let mut m = m.borrow_mut(); for k in vkeys { m.remove(&k); } });
+    DISCUSSION_REWARDED.with(|m| { let mut m = m.borrow_mut(); for k in rkeys { m.remove(&k); } });
+    COMMENTS.with(|m| { let mut m = m.borrow_mut(); for id in cids { m.remove(&id); } });
+    THREADS.with(|m| { let mut m = m.borrow_mut(); for id in tids { m.remove(&id); } });
+}
+
+/// Admin: delete a thread + its comments + their votes (the only moderation
+/// lever; D4 = no queue/filter).
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_remove_thread(thread_id: u64) -> Result<(), String> {
+    if THREADS.with(|m| m.borrow().get(&thread_id)).is_none() {
+        return Err("THREAD_NOT_FOUND".to_string());
+    }
+    let cids: Vec<u64> = COMMENTS.with(|m| {
+        m.borrow().iter().filter(|e| e.value().thread_id == thread_id).map(|e| *e.key()).collect()
+    });
+    let vkeys: Vec<DiscussionVoteKey> = DISCUSSION_VOTES.with(|m| {
+        m.borrow().iter().filter(|e| {
+            let k = e.key();
+            (k.kind == 0 && k.item_id == thread_id) || (k.kind == 1 && cids.contains(&k.item_id))
+        }).map(|e| e.key().clone()).collect()
+    });
+    let rkeys: Vec<DiscussionVoteKey> = DISCUSSION_REWARDED.with(|m| {
+        m.borrow().iter().filter(|e| e.key().item_id == thread_id).map(|e| e.key().clone()).collect()
+    });
+    DISCUSSION_VOTES.with(|m| { let mut m = m.borrow_mut(); for k in vkeys { m.remove(&k); } });
+    DISCUSSION_REWARDED.with(|m| { let mut m = m.borrow_mut(); for k in rkeys { m.remove(&k); } });
+    COMMENTS.with(|m| { let mut m = m.borrow_mut(); for id in cids { m.remove(&id); } });
+    THREADS.with(|m| { m.borrow_mut().remove(&thread_id); });
+    log_dapp_event("thread_remove", thread_id, get_caller(), 0);
+    Ok(())
+}
+
+/// Local-dev: seed `n_threads` threads (each with `n_comments` comments) on a
+/// proposal, no fee, for previewing the UI. Local only.
+#[ic_cdk::update]
+fn dev_seed_threads(proposal_id: u64, n_threads: u64, n_comments: u64) -> Result<u64, String> {
+    require_authenticated()?;
+    require_local_dev()?;
+    let caller = get_caller();
+    let now = current_time();
+    for i in 0..n_threads {
+        let id = next_thread_id();
+        THREADS.with(|m| {
+            m.borrow_mut().insert(id, Thread {
+                id, proposal_id, author: caller,
+                title: format!("Sample thread {}", i + 1),
+                body: "Seeded discussion thread for local UI testing.".to_string(),
+                created_at: now, last_activity_at: now,
+                comment_count: n_comments, upvote_count: i, downvote_count: 0,
+                tickets_awarded: 0, my_vote: None,
+            });
+        });
+        for j in 0..n_comments {
+            let cid = next_comment_id();
+            COMMENTS.with(|m| {
+                m.borrow_mut().insert(cid, Comment {
+                    id: cid, thread_id: id, parent_id: None, author: caller,
+                    body: format!("Seeded comment {}", j + 1),
+                    created_at: now, upvote_count: 0, downvote_count: 0, my_vote: None,
+                });
+            });
+        }
+    }
+    Ok(n_threads)
 }
 
 /// The caller's deposit account for upvoting `idea_id`. The same subaccount
@@ -22043,7 +22447,99 @@ mod tests {
 
     fn clear_threads() {
         THREADS.with(|m| { let ks: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+        COMMENTS.with(|m| { let ks: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
         DISCUSSION_QUOTES.with(|m| { let ks: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+        DISCUSSION_VOTES.with(|m| { let ks: Vec<DiscussionVoteKey> = m.borrow().iter().map(|e| e.key().clone()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+        DISCUSSION_REWARDED.with(|m| { let ks: Vec<DiscussionVoteKey> = m.borrow().iter().map(|e| e.key().clone()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
+    }
+
+    fn ticket_count(user: Principal) -> u64 {
+        LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).map(|e| e.count).unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn test_discussions_comments_votes_and_reward() {
+        install_staking_test_config();
+        clear_threads();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");                                   // author
+        let bob = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe"); // voter w/ history
+        let carol = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");// voter no history
+        FEATURE_FLAGS.with(|m| { let mut m = m.borrow_mut(); m.insert(FLAG_DISCUSSIONS.to_string(), 1u8); m.insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8); });
+        // bob has participation history; carol does not.
+        USER_AGGREGATES.with(|m| { m.borrow_mut().insert(bob, UserAggregates { total_committed_escrow: 0, total_burned: 0, proposals_joined: 1 }); });
+        open_proposal(700_901, 200_000_000);
+        set_mock_ledger_transfer(Ok(1));
+
+        // alice starts a thread.
+        set_mock_caller(alice);
+        let q = get_thread_quote(ExplorerToken::ICP).await.unwrap();
+        set_mock_ledger_balance(q.amount + 10_000);
+        let tid = start_thread(700_901, "Title".into(), "body".into(), ExplorerToken::ICP).await.unwrap();
+
+        // bob upvotes while alice is NOT staked → counts, but no ticket reward.
+        set_mock_caller(bob);
+        vote_thread(tid, VoteDir::Up).unwrap();
+        assert_eq!(get_thread(tid).unwrap().upvote_count, 1);
+        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 0, "author not staked → no reward");
+        assert_eq!(ticket_count(alice), 0);
+
+        // Stake alice → now she participates in the lottery.
+        STAKES.with(|m| { m.borrow_mut().insert(stake_key(StakeTier::SixMonths, alice), UserStake { amount_e8s: ONE_ICP_E8S, staked_at: 0, last_action_at: 0 }); });
+
+        // bob toggles off then re-upvotes → reward fires once.
+        vote_thread(tid, VoteDir::Up).unwrap(); // toggle off
+        assert_eq!(get_thread(tid).unwrap().upvote_count, 0);
+        vote_thread(tid, VoteDir::Up).unwrap(); // re-up → reward
+        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 1);
+        assert_eq!(ticket_count(alice), 1);
+
+        // bob toggle-farms (off/on) again → already-rewarded marker blocks a 2nd ticket.
+        vote_thread(tid, VoteDir::Up).unwrap(); // off
+        vote_thread(tid, VoteDir::Up).unwrap(); // on
+        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 1, "toggle cannot farm");
+        assert_eq!(ticket_count(alice), 1);
+
+        // carol (no history) upvotes → no reward.
+        set_mock_caller(carol);
+        vote_thread(tid, VoteDir::Up).unwrap();
+        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 1);
+        // alice self-upvote → no reward.
+        set_mock_caller(alice);
+        vote_thread(tid, VoteDir::Up).unwrap();
+        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 1);
+
+        // Comments ($0.25). bob comments; carol replies one level; reply-to-reply rejected.
+        set_mock_caller(bob);
+        let cq = get_comment_quote(ExplorerToken::ICP).await.unwrap();
+        assert_eq!(cq.amount, 5_000_000); // $0.25 / $5 = 0.05 ICP
+        set_mock_ledger_balance(cq.amount + 10_000);
+        let c1 = add_comment(tid, None, "good point".into(), ExplorerToken::ICP).await.unwrap();
+        set_mock_caller(carol);
+        let _ = get_comment_quote(ExplorerToken::ICP).await.unwrap();
+        set_mock_ledger_balance(cq.amount + 10_000);
+        let c2 = add_comment(tid, Some(c1), "reply".into(), ExplorerToken::ICP).await.unwrap();
+        let _ = get_comment_quote(ExplorerToken::ICP).await.unwrap();
+        set_mock_ledger_balance(cq.amount + 10_000);
+        assert_eq!(add_comment(tid, Some(c2), "nope".into(), ExplorerToken::ICP).await.unwrap_err(), "INVALID_PARENT");
+        assert_eq!(list_comments(tid).len(), 2);
+        assert_eq!(get_thread(tid).unwrap().comment_count, 2);
+
+        // Comment vote (no reward).
+        vote_comment(c1, VoteDir::Up).unwrap();
+        assert_eq!(list_comments(tid).iter().find(|c| c.id == c1).unwrap().upvote_count, 1);
+        assert_eq!(ticket_count(alice), 1, "comment votes don't reward");
+
+        // Delete-on-settle: threads + comments gone; earned tickets kept.
+        delete_proposal_discussions(700_901);
+        assert!(get_thread(tid).is_none());
+        assert_eq!(list_comments(tid).len(), 0);
+        assert_eq!(get_thread_count(700_901), 0);
+        assert_eq!(ticket_count(alice), 1, "tickets survive thread deletion");
+
+        clear_threads();
+        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice)); });
+        USER_AGGREGATES.with(|m| { m.borrow_mut().remove(&bob); });
+        FEATURE_FLAGS.with(|m| { let mut m = m.borrow_mut(); m.remove(&FLAG_DISCUSSIONS.to_string()); m.remove(&FLAG_LOSSLESS_LOTTERY.to_string()); });
     }
 
     #[tokio::test]
