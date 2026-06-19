@@ -18575,9 +18575,15 @@ const XFARM_QUOTE_TTL_NANOS: u64 = 15 * 60 * 1_000_000_000;
 // remainder is the new Farmer's initial balance, which must cover install_code until
 // the 90% CMC top-up funds the 7-day budget. 1.5T → ~1T left after the fee.
 const XFARM_CREATION_CYCLES: u128 = 1_500_000_000_000;
-const XFARM_DURATION_DAYS: u64 = 7;                   // the depletion window (D2)
+const XFARM_DURATION_DAYS: u64 = 7;                   // default/min depletion window (D2)
+// Per-day pricing (owner-chosen lifespan): $0.50/day, 7..30 days. Mirrors the
+// Explorer per-day model (EXPLORER_PRICE_PER_DAY_USD_E8S). Tier = drafts/day only;
+// price is days × per-day (tier no longer affects price).
+const XFARM_PRICE_PER_DAY_USD_E8S: u64 = 50_000_000; // $0.50 (USD e8s)
+const XFARM_MIN_DAYS: u32 = 7;
+const XFARM_MAX_DAYS: u32 = 30;
 const XFARM_MAX_TIERS: usize = 10;
-const XFARM_MAX_DRAFTS_PER_DAY: u32 = 10;
+const XFARM_MAX_DRAFTS_PER_DAY: u32 = 15;
 const XFARM_DRAFT_RETENTION_DAYS: u64 = 30;
 const XFARM_SWEEP_BATCH: usize = 25;
 const DAY_NS: u64 = 86_400 * 1_000_000_000;
@@ -18615,16 +18621,15 @@ impl Default for XFarmConfig {
     fn default() -> Self {
         XFarmConfig {
             tiers: vec![
-                // USD e8s (8 decimals): $2.40 = 240_000_000. Priced to ICP at the
-                // cached XRC rate at payment time. At $2.40/ICP these are ~1.0 /
-                // 1.5 / 2.0 ICP (UX spec); admin can override via admin_set_xfarm_tiers
-                // before going live. NOTE: the image-bearing "Harvest" tier is removed
-                // for now — the Cloud Run proxy doesn't serve images yet (Nano Banana
-                // / 07-premium-images is Phase-2). Re-add with includes_image:true once
-                // the proxy has an image endpoint.
-                FarmerTier { id: 1, name: "Sprout".into(),  drafts_per_day: 1,  duration_days: 7, price_usd_e8s: 240_000_000, includes_image: false },
-                FarmerTier { id: 2, name: "Grow".into(),    drafts_per_day: 5,  duration_days: 7, price_usd_e8s: 360_000_000, includes_image: false },
-                FarmerTier { id: 3, name: "Bloom".into(),   drafts_per_day: 10, duration_days: 7, price_usd_e8s: 480_000_000, includes_image: false },
+                // Tier = drafts/day ONLY. Price is days-based ($0.50/day, owner-chosen
+                // lifespan 7..30) — see XFARM_PRICE_PER_DAY_USD_E8S; tier.price_usd_e8s
+                // is unused (kept 0 for struct compat). duration_days field unused too
+                // (lifespan is per-farmer). Image "Harvest" tier removed (proxy serves
+                // no images yet, 07-premium-images is Phase-2). Admin can override via
+                // admin_set_xfarm_tiers.
+                FarmerTier { id: 1, name: "Sprout".into(),  drafts_per_day: 5,  duration_days: 7, price_usd_e8s: 0, includes_image: false },
+                FarmerTier { id: 2, name: "Grow".into(),    drafts_per_day: 10, duration_days: 7, price_usd_e8s: 0, includes_image: false },
+                FarmerTier { id: 3, name: "Bloom".into(),   drafts_per_day: 15, duration_days: 7, price_usd_e8s: 0, includes_image: false },
             ],
             proxy: XFarmProxy { url: String::new(), bearer: String::new() },
             max_active_farmers: 0, // 0 = unlimited (no per-user cap; optional global brake only)
@@ -18665,9 +18670,10 @@ pub struct Farmer {
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct XFarmQuote {
     pub tier_id: u32,
-    pub price_e8s: u64,    // ICP for the tier at the cached XRC rate
+    pub days: u32,         // owner-chosen lifespan (7..30); price = days × $0.50
+    pub price_e8s: u64,    // ICP at the cached XRC rate for (days × per-day USD)
     pub fee_e8s: u64,     // 2 × ICP fee (two outbound escrow legs: treasury + CMC)
-    pub usd_e8s: u64,      // tier USD reference price
+    pub usd_e8s: u64,      // USD reference total (days × XFARM_PRICE_PER_DAY_USD_E8S)
     pub rate_usd_e8s: u64, // cached ICP/USD rate used
     pub created_at: u64,
     pub expires_at: u64,
@@ -18894,23 +18900,26 @@ fn list_my_farmers() -> Vec<Farmer> {
 /// for 15 minutes (mirrors get_explorer_quote). An update (not a query) because
 /// the mainnet path may refresh the rate via the XRC.
 #[ic_cdk::update]
-async fn get_xfarm_quote(tier_id: u32) -> Result<XFarmQuote, String> {
+async fn get_xfarm_quote(tier_id: u32, days: u32) -> Result<XFarmQuote, String> {
     require_authenticated()?;
     require_x_farm_enabled()?;
     let caller = get_caller();
     let cfg = xfarm_config();
-    let tier = cfg.tiers.iter().find(|t| t.id == tier_id).cloned()
+    // Tier must exist (selects drafts/day); price is days-based, not tier-based.
+    let _tier = cfg.tiers.iter().find(|t| t.id == tier_id)
         .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
+    if days < XFARM_MIN_DAYS || days > XFARM_MAX_DAYS { return Err("BAD_DAYS".to_string()); }
     let backend_cfg = CONFIG.with(|c| c.borrow().get().clone());
     let rate = explorer_usd_rate_e8s(ExplorerToken::ICP, &backend_cfg).await?; // USD e8s per 1 ICP
     if rate == 0 { return Err("RATE_UNAVAILABLE".to_string()); }
-    let price = u64::try_from(tier.price_usd_e8s as u128 * 100_000_000u128 / rate as u128)
+    let usd_total = days as u128 * XFARM_PRICE_PER_DAY_USD_E8S as u128; // $0.50/day
+    let price = u64::try_from(usd_total * 100_000_000u128 / rate as u128)
         .map_err(|_| "PRICE_OVERFLOW".to_string())?;
     if price == 0 { return Err("PRICE_TOO_LOW".to_string()); }
     let now = current_time();
     let q = XFarmQuote {
-        tier_id, price_e8s: price, fee_e8s: ICP_FEE_E8S * 2,
-        usd_e8s: tier.price_usd_e8s, rate_usd_e8s: rate,
+        tier_id, days, price_e8s: price, fee_e8s: ICP_FEE_E8S * 2,
+        usd_e8s: u64::try_from(usd_total).unwrap_or(u64::MAX), rate_usd_e8s: rate,
         created_at: now, expires_at: now + XFARM_QUOTE_TTL_NANOS,
     };
     XFARM_QUOTES.with(|qq| qq.borrow_mut().insert(caller, q.clone()));
@@ -18922,7 +18931,7 @@ async fn get_xfarm_quote(tier_id: u32) -> Result<XFarmQuote, String> {
 /// CMC leg + submit_dapp's escrow ordering. Per R5 the order is create→install→top-up;
 /// a partial failure leaves a persisted Farmer the sweep can resume or clean up.
 #[ic_cdk::update]
-async fn create_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> {
+async fn create_farmer(tier_id: u32, persona: String, days: u32) -> Result<Farmer, String> {
     require_authenticated()?;
     require_x_farm_enabled()?;
     let caller = get_caller();
@@ -18931,6 +18940,7 @@ async fn create_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> 
     let cfg = xfarm_config();
     let tier = cfg.tiers.iter().find(|t| t.id == tier_id).cloned()
         .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
+    if days < XFARM_MIN_DAYS || days > XFARM_MAX_DAYS { return Err("BAD_DAYS".to_string()); }
     let persona = persona.trim().to_string();
     if persona.is_empty() || persona.chars().count() > XFARM_MAX_PERSONA {
         return Err(format!("BAD_PERSONA: 1..{} chars", XFARM_MAX_PERSONA));
@@ -18952,7 +18962,7 @@ async fn create_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> 
     // Locked quote (price locked 15 min, like EXPLORER_QUOTES).
     let quote = XFARM_QUOTES.with(|q| q.borrow().get(&caller).cloned())
         .ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.tier_id != tier_id { return Err("QUOTE_MISMATCH".to_string()); }
+    if quote.tier_id != tier_id || quote.days != days { return Err("QUOTE_MISMATCH".to_string()); }
     if current_time() > quote.expires_at { return Err("QUOTE_EXPIRED".to_string()); }
 
     let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
@@ -18974,7 +18984,7 @@ async fn create_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> 
     let mut farmer = Farmer {
         id, owner: caller, canister_id: None, tier_id, persona: persona.clone(),
         created_at: now,
-        expected_depleted_at: now + XFARM_DURATION_DAYS * DAY_NS,
+        expected_depleted_at: now + (days as u64) * DAY_NS,
         budget_cycles: 0, burned_cycles: 0,
         last_generation_at: 0, last_burn_tick_at: 0,
         status: FarmerStatus::Active,
@@ -19005,7 +19015,7 @@ async fn create_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> 
         let init = FarmerInitArgs {
             farmer_id: id, owner: caller, backend_canister_id: get_canister_id(),
             tier_id, persona: persona.clone(),
-            drafts_per_day: tier.drafts_per_day, duration_days: tier.duration_days,
+            drafts_per_day: tier.drafts_per_day, duration_days: days,
             budget_cycles: burn_amt.saturating_sub(fee), // 90% net of the CMC leg fee
             proxy_url: cfg.proxy.url.clone(), proxy_bearer: cfg.proxy.bearer.clone(),
         };
@@ -19062,7 +19072,7 @@ async fn create_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> 
 /// multi-leg path isn't fully idempotent on partial failure; the locked quote is only
 /// consumed on full success.
 #[ic_cdk::update]
-async fn renew_farmer(farmer_id: u64) -> Result<Farmer, String> {
+async fn renew_farmer(farmer_id: u64, days: u32) -> Result<Farmer, String> {
     require_authenticated()?;
     require_x_farm_enabled()?;
     let caller = get_caller();
@@ -19072,16 +19082,18 @@ async fn renew_farmer(farmer_id: u64) -> Result<Farmer, String> {
         .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
     if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
     if farmer.status != FarmerStatus::Active { return Err("CANNOT_RENEW".to_string()); }
+    if days < XFARM_MIN_DAYS || days > XFARM_MAX_DAYS { return Err("BAD_DAYS".to_string()); }
     let farmer_cid = farmer.canister_id.ok_or_else(|| "NO_CANISTER".to_string())?;
 
     let cfg = xfarm_config();
-    let tier = cfg.tiers.iter().find(|t| t.id == farmer.tier_id).cloned()
+    // Tier must still exist (selects drafts/day); price is days-based.
+    let _tier = cfg.tiers.iter().find(|t| t.id == farmer.tier_id)
         .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
 
-    // Fresh locked quote for the Farmer's existing tier.
+    // Fresh locked quote for the Farmer's tier + chosen extension days.
     let quote = XFARM_QUOTES.with(|q| q.borrow().get(&caller).cloned())
         .ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.tier_id != farmer.tier_id { return Err("QUOTE_MISMATCH".to_string()); }
+    if quote.tier_id != farmer.tier_id || quote.days != days { return Err("QUOTE_MISMATCH".to_string()); }
     if current_time() > quote.expires_at { return Err("QUOTE_EXPIRED".to_string()); }
 
     let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
@@ -19110,7 +19122,7 @@ async fn renew_farmer(farmer_id: u64) -> Result<Farmer, String> {
 
     // Tell the Farmer to extend its budget + duration + re-arm the burn timer.
     let res: Result<(Result<(), String>,), _> =
-        ic_cdk::call(farmer_cid, "extend", (add_budget, tier.duration_days)).await;
+        ic_cdk::call(farmer_cid, "extend", (add_budget, days)).await;
     match res {
         Ok((Ok(()),)) => {}
         Ok((Err(e),)) => return Err(format!("EXTEND_FAILED: {}", e)),
@@ -19119,7 +19131,7 @@ async fn renew_farmer(farmer_id: u64) -> Result<Farmer, String> {
 
     farmer.budget_cycles = farmer.budget_cycles.saturating_add(add_budget);
     farmer.expected_depleted_at = farmer.expected_depleted_at
-        .saturating_add(tier.duration_days as u64 * DAY_NS);
+        .saturating_add((days as u64) * DAY_NS);
     farmer.status = FarmerStatus::Active;
     xfarm_put_farmer(&farmer);
 
@@ -28230,7 +28242,7 @@ mod tests {
             FarmerTier { id: 1, name: "A".into(), drafts_per_day: 0, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
         ]).unwrap_err(), "BAD_DRAFTS_PER_DAY");
         assert_eq!(admin_set_xfarm_tiers(vec![
-            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 11, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
+            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 16, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
         ]).unwrap_err(), "BAD_DRAFTS_PER_DAY");
         assert_eq!(admin_set_xfarm_tiers(vec![
             FarmerTier { id: 1, name: "A".into(), drafts_per_day: 1, duration_days: 0, price_usd_e8s: 100_000_000, includes_image: false },
@@ -28252,25 +28264,35 @@ mod tests {
         let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         set_mock_caller(alice);
 
-        // $2.40 / $5 = 0.48 ICP = 48_000_000 e8s; fee = 2× the ICP ledger fee.
-        let q1 = get_xfarm_quote(1).await.unwrap();
+        // Days-based pricing: $0.50/day. 7 days = $3.50; at $5/ICP = 0.70 ICP.
+        let q1 = get_xfarm_quote(1, 7).await.unwrap();
         assert_eq!(q1.tier_id, 1);
-        assert_eq!(q1.price_e8s, 48_000_000, "$2.40 at $5/ICP = 0.48 ICP");
+        assert_eq!(q1.days, 7);
+        assert_eq!(q1.usd_e8s, 350_000_000, "7 × $0.50 = $3.50");
+        assert_eq!(q1.price_e8s, 70_000_000, "$3.50 at $5/ICP = 0.70 ICP");
         assert_eq!(q1.fee_e8s, ICP_FEE_E8S * 2);
-        assert_eq!(q1.usd_e8s, 240_000_000);
         assert_eq!(q1.rate_usd_e8s, 500_000_000);
         assert!(q1.expires_at > q1.created_at);
 
-        // $3.60 / $5 = 0.72 ICP (Grow tier).
-        let q2 = get_xfarm_quote(2).await.unwrap();
-        assert_eq!(q2.price_e8s, 72_000_000, "$3.60 at $5/ICP = 0.72 ICP");
+        // Price scales with days, not tier: 30 days = $15 → 3.0 ICP.
+        let q30 = get_xfarm_quote(1, 30).await.unwrap();
+        assert_eq!(q30.usd_e8s, 1_500_000_000);
+        assert_eq!(q30.price_e8s, 300_000_000, "$15 at $5/ICP = 3.0 ICP");
+
+        // Tier doesn't change price (tier = drafts/day only): tier 2 @ 7d == tier 1 @ 7d.
+        let q2 = get_xfarm_quote(2, 7).await.unwrap();
+        assert_eq!(q2.price_e8s, q1.price_e8s);
+
+        // Days out of range [7, 30] → BAD_DAYS.
+        assert_eq!(get_xfarm_quote(1, 6).await.unwrap_err(), "BAD_DAYS");
+        assert_eq!(get_xfarm_quote(1, 31).await.unwrap_err(), "BAD_DAYS");
 
         // Unknown tier.
-        assert_eq!(get_xfarm_quote(99).await.unwrap_err(), "TIER_NOT_FOUND");
+        assert_eq!(get_xfarm_quote(99, 7).await.unwrap_err(), "TIER_NOT_FOUND");
 
         // Flag off → quote refused.
         FEATURE_FLAGS.with(|m| m.borrow_mut().insert(FLAG_X_FARM.to_string(), 0u8));
-        assert_eq!(get_xfarm_quote(1).await.unwrap_err(), "FEATURE_DISABLED");
+        assert_eq!(get_xfarm_quote(1, 7).await.unwrap_err(), "FEATURE_DISABLED");
         xfarm_enable();
     }
 
@@ -28288,10 +28310,10 @@ mod tests {
         assert!(get_xfarm_info().wasm_uploaded);
 
         // Quote + fund escrow (price + 2 fees) + create.
-        let q = get_xfarm_quote(1).await.unwrap();
+        let q = get_xfarm_quote(1, 7).await.unwrap();
         set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
         set_mock_ledger_transfer(Ok(42));
-        let f = create_farmer(1, "degen maxis, gm".into()).await.unwrap();
+        let f = create_farmer(1, "degen maxis, gm".into(), 7).await.unwrap();
         assert_eq!(f.tier_id, 1);
         assert_eq!(f.status, FarmerStatus::Active);
         assert_eq!(f.persona, "degen maxis, gm");
@@ -28315,10 +28337,10 @@ mod tests {
 
         // Unlimited farms per owner: a SECOND create for the same owner now SUCCEEDS
         // (was FARMER_EXISTS). Needs a fresh quote + escrow.
-        let q2 = get_xfarm_quote(1).await.unwrap();
+        let q2 = get_xfarm_quote(1, 7).await.unwrap();
         set_mock_ledger_balance(q2.price_e8s + q2.fee_e8s);
         set_mock_ledger_transfer(Ok(43));
-        let f2 = create_farmer(1, "another persona".into()).await.unwrap();
+        let f2 = create_farmer(1, "another persona".into(), 7).await.unwrap();
         assert_ne!(f2.id, f.id, "second farmer gets a fresh id");
         assert_eq!(xfarm_farmers_by_owner(&alice).len(), 2, "owner can hold multiple farmers");
         assert_eq!(xfarm_active_count(), 2);
@@ -28328,9 +28350,9 @@ mod tests {
         xfarm_reset();
         xfarm_enable();
         set_mock_caller(alice);
-        assert_eq!(create_farmer(1, "".into()).await.unwrap_err().starts_with("BAD_PERSONA"), true);
+        assert_eq!(create_farmer(1, "".into(), 7).await.unwrap_err().starts_with("BAD_PERSONA"), true);
         let long = "x".repeat(301);
-        assert_eq!(create_farmer(1, long).await.unwrap_err().starts_with("BAD_PERSONA"), true);
+        assert_eq!(create_farmer(1, long, 7).await.unwrap_err().starts_with("BAD_PERSONA"), true);
     }
 
     #[tokio::test]
@@ -28343,54 +28365,54 @@ mod tests {
         install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
         admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
         set_mock_caller(alice);
-        assert_eq!(create_farmer(1, "valid persona".into()).await.unwrap_err(), "NO_QUOTE");
+        assert_eq!(create_farmer(1, "valid persona".into(), 7).await.unwrap_err(), "NO_QUOTE");
 
         // QUOTE_MISMATCH: locked a tier-1 quote, asked for tier 2.
         install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
         admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
         set_mock_caller(alice);
-        let _ = get_xfarm_quote(1).await.unwrap();
-        assert_eq!(create_farmer(2, "valid persona".into()).await.unwrap_err(), "QUOTE_MISMATCH");
+        let _ = get_xfarm_quote(1, 7).await.unwrap();
+        assert_eq!(create_farmer(2, "valid persona".into(), 7).await.unwrap_err(), "QUOTE_MISMATCH");
 
         // INSUFFICIENT_DEPOSIT: funded below price + 2 fees.
         install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
         admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
         set_mock_caller(alice);
-        let q = get_xfarm_quote(1).await.unwrap();
+        let q = get_xfarm_quote(1, 7).await.unwrap();
         set_mock_ledger_balance(q.price_e8s + q.fee_e8s - 1); // one e8 short
         set_mock_ledger_transfer(Ok(7));
-        assert_eq!(create_farmer(1, "valid persona".into()).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
+        assert_eq!(create_farmer(1, "valid persona".into(), 7).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
 
         // WASM_NOT_UPLOADED: escrow + create succeed, install fails → farmer removed.
         install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
         set_mock_caller(alice);
-        let q = get_xfarm_quote(1).await.unwrap();
+        let q = get_xfarm_quote(1, 7).await.unwrap();
         set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
         set_mock_ledger_transfer(Ok(7));
         // (wasm is empty after reset → install step fails)
-        assert_eq!(create_farmer(1, "valid persona".into()).await.unwrap_err(), "WASM_NOT_UPLOADED");
+        assert_eq!(create_farmer(1, "valid persona".into(), 7).await.unwrap_err(), "WASM_NOT_UPLOADED");
         assert!(xfarm_farmers_by_owner(&alice).is_empty(), "failed install removes the farmer");
 
         // FEATURE_DISABLED: flag off → refused before any state work.
         install_staking_test_config(); xfarm_reset(); mk_admin();
         set_mock_caller(alice);
         FEATURE_FLAGS.with(|m| m.borrow_mut().insert(FLAG_X_FARM.to_string(), 0u8));
-        assert_eq!(create_farmer(1, "valid persona".into()).await.unwrap_err(), "FEATURE_DISABLED");
+        assert_eq!(create_farmer(1, "valid persona".into(), 7).await.unwrap_err(), "FEATURE_DISABLED");
 
         // MAX_FARMERS_REACHED: cap = 1, alice is active, bob is blocked.
         install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
         admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
         admin_set_xfarm_config(1).unwrap(); // cap active Farmers at 1
         set_mock_caller(alice);
-        let q = get_xfarm_quote(1).await.unwrap();
+        let q = get_xfarm_quote(1, 7).await.unwrap();
         set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
         set_mock_ledger_transfer(Ok(7));
-        create_farmer(1, "alice persona".into()).await.unwrap();
+        create_farmer(1, "alice persona".into(), 7).await.unwrap();
         set_mock_caller(bob);
-        let qb = get_xfarm_quote(1).await.unwrap();
+        let qb = get_xfarm_quote(1, 7).await.unwrap();
         set_mock_ledger_balance(qb.price_e8s + qb.fee_e8s);
         set_mock_ledger_transfer(Ok(8));
-        assert_eq!(create_farmer(1, "bob persona".into()).await.unwrap_err(), "MAX_FARMERS_REACHED");
+        assert_eq!(create_farmer(1, "bob persona".into(), 7).await.unwrap_err(), "MAX_FARMERS_REACHED");
     }
 
     #[tokio::test]
@@ -28402,10 +28424,10 @@ mod tests {
         xfarm_set_admins(alice);
         set_mock_caller(alice);
         admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
-        let q = get_xfarm_quote(1).await.unwrap();
+        let q = get_xfarm_quote(1, 7).await.unwrap();
         set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
         set_mock_ledger_transfer(Ok(42));
-        let f = create_farmer(1, "persona".into()).await.unwrap();
+        let f = create_farmer(1, "persona".into(), 7).await.unwrap();
         let farmer_cid = f.canister_id.unwrap();
         let id = f.id;
 
@@ -28436,10 +28458,10 @@ mod tests {
         admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
         assert_eq!(xfarm_config().max_active_farmers, 0, "default cap is 0 = unlimited");
         for i in 0..3u64 {
-            let q = get_xfarm_quote(1).await.unwrap();
+            let q = get_xfarm_quote(1, 7).await.unwrap();
             set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
             set_mock_ledger_transfer(Ok(100 + i));
-            create_farmer(1, format!("persona {}", i)).await.unwrap();
+            create_farmer(1, format!("persona {}", i), 7).await.unwrap();
         }
         assert_eq!(list_my_farmers().len(), 3, "unlimited farms per owner under cap=0");
         assert_eq!(xfarm_active_count(), 3);
@@ -28448,9 +28470,9 @@ mod tests {
         // becomes a global brake: a further create is blocked.
         admin_set_xfarm_config(0).unwrap();
         admin_set_xfarm_config(2).unwrap();
-        let q = get_xfarm_quote(1).await.unwrap();
+        let q = get_xfarm_quote(1, 7).await.unwrap();
         set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
         set_mock_ledger_transfer(Ok(200));
-        assert_eq!(create_farmer(1, "blocked".into()).await.unwrap_err(), "MAX_FARMERS_REACHED");
+        assert_eq!(create_farmer(1, "blocked".into(), 7).await.unwrap_err(), "MAX_FARMERS_REACHED");
     }
 }

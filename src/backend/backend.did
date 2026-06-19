@@ -1095,6 +1095,7 @@ type XFarmInfo = record {
   max_active_farmers : nat64;
 };
 type XFarmQuote = record {
+  days : nat32;
   tier_id : nat32;
   fee_e8s : nat64;
   created_at : nat64;
@@ -1378,7 +1379,7 @@ service : (InitPayload) -> {
   // 90% burn-to-cycles funding it (CMC topup, journaled). Reuses settle_burn_split's
   // CMC leg + submit_dapp's escrow ordering. Per R5 the order is create→install→top-up;
   // a partial failure leaves a persisted Farmer the sweep can resume or clean up.
-  create_farmer : (nat32, text) -> (Result_4);
+  create_farmer : (nat32, text, nat32) -> (Result_4);
   create_pool_draft : (nat64) -> (Result);
   // Change the golfer's look (palette indices) for $1, paid in any supported
   // token (ICP / ckBTC / ckETH / ckUSDC / ckUSDT) at the quoted rate.
@@ -1648,7 +1649,7 @@ service : (InitPayload) -> {
   // USD tier price → ICP at the cached XRC rate; lock the quote for the caller
   // for 15 minutes (mirrors get_explorer_quote). An update (not a query) because
   // the mainnet path may refresh the rate via the XRC.
-  get_xfarm_quote : (nat32) -> (Result_9);
+  get_xfarm_quote : (nat32, nat32) -> (Result_9);
   get_xfarm_tiers : () -> (vec FarmerTier) query;
   is_favorite : (nat64) -> (bool) query;
   list_active_proposals : () -> (vec Proposal) query;
@@ -1755,7 +1756,7 @@ service : (InitPayload) -> {
   // (no canister) can't be renewed → create a new one. Like create_farmer the
   // multi-leg path isn't fully idempotent on partial failure; the locked quote is only
   // consumed on full success.
-  renew_farmer : (nat64) -> (Result_4);
+  renew_farmer : (nat64, nat32) -> (Result_4);
   // Called by a Farmer canister when its cycle balance hits the stop-floor (D2).
   // Only the Farmer's own canister may report. Sets Depleted so the sweep reaps it.
   report_depleted : (nat64, nat64) -> (Result);

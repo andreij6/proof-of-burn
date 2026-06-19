@@ -3,7 +3,7 @@ import { Principal } from "@icp-sdk/core/principal";
 import { FarmerStatus } from "./bindings/backend";
 import type { Farmer, FarmerTier, XFarmQuote, XFarmDraft, XFarmInfo } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, Skeleton, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, Skeleton, fmtICP, usePageDevControls } from "./ui";
 
 // ==========================================
 // X-Farm — per-user Farmer canisters that burn ICP→cycles to run Gemini drafting
@@ -80,6 +80,30 @@ const PERSONA_PRESETS: { id: string; label: string; description: string; text: s
 ];
 const MAX_PERSONA = 300;
 
+// Lifespan pricing: $0.50/day, 7–30 days. Final ICP price comes from the quote.
+const PRICE_PER_DAY_USD = 0.5;
+const MIN_DAYS = 7;
+const MAX_DAYS = 30;
+
+function DaysPicker({ days, setDays }: { days: number; setDays: (n: number) => void }) {
+  return (
+    <div className="col" style={{ gap: 8 }}>
+      <input
+        type="range" min={MIN_DAYS} max={MAX_DAYS} step={1} value={days}
+        onChange={(e) => setDays(Number(e.target.value))}
+        style={{ width: '100%', accentColor: 'var(--burn)' }}
+      />
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <span style={{ fontSize: 13, color: 'var(--fg-2)' }}><b style={{ color: 'var(--fg-1)' }}>{days}</b> days</span>
+        <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--burn-ink)' }}>${(days * PRICE_PER_DAY_USD).toFixed(2)}</span>
+      </div>
+      <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+        ${PRICE_PER_DAY_USD.toFixed(2)}/day · {MIN_DAYS}–{MAX_DAYS} days · charged in ICP at the live XRC rate.
+      </span>
+    </div>
+  );
+}
+
 function selectCardStyle(active: boolean): React.CSSProperties {
   return {
     textAlign: 'left',
@@ -107,7 +131,7 @@ interface XFarmProps {
   onSignIn: () => void;
 }
 
-type WizardStep = 'persona' | 'tier' | 'pay';
+type WizardStep = 'persona' | 'tier' | 'lifespan' | 'pay';
 
 export default function XFarm({
   actor, identity, principal, host, rootKey, isLocal, ledgerCanisterId, onSignIn,
@@ -124,6 +148,7 @@ export default function XFarm({
   const [personaPreset, setPersonaPreset] = useState<string>('ai');
   const [customPersona, setCustomPersona] = useState('');
   const [tierId, setTierId] = useState<number>(2);
+  const [days, setDays] = useState<number>(MIN_DAYS);
   const [quote, setQuote] = useState<XFarmQuote | null>(null);
   const [quoting, setQuoting] = useState(false);
   const [balance, setBalance] = useState<bigint | null>(null);
@@ -162,7 +187,7 @@ export default function XFarm({
     let cancelled = false;
     setQuoting(true); setQuote(null);
     const t = setTimeout(() => {
-      actor.get_xfarm_quote(tierId)
+      actor.get_xfarm_quote(tierId, days)
         .then((res: any) => {
           if (cancelled) return;
           if (res.__kind__ === 'Ok') { setQuote(res.Ok); setError(null); }
@@ -172,7 +197,7 @@ export default function XFarm({
         .finally(() => { if (!cancelled) setQuoting(false); });
     }, 350);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [wizardOpen, step, tierId, signedIn, actor]);
+  }, [wizardOpen, step, tierId, days, signedIn, actor]);
 
   // Wallet balance while the pay step is open.
   useEffect(() => {
@@ -217,7 +242,7 @@ export default function XFarm({
         throw new Error(`Payment failed: ${detail}`);
       }
       setPayStep("Step 2/2: Deploying your Farmer canister…");
-      const res = await actor.create_farmer(tierId, persona);
+      const res = await actor.create_farmer(tierId, persona, days);
       if (res.__kind__ === "Err") throw new Error(res.Err);
       setPaySuccess(true);
       setPayStep("Your Farmer is running! Open it and tap “Generate today's drafts” when you want tweets.");
@@ -305,14 +330,15 @@ export default function XFarm({
                 You pay a tier price; a factory spins up a <b>per-user Farmer canister</b>, burns 90% of
                 the ICP into cycles, and tops it up. When you open a farm and tap <b>Generate today's
                 drafts</b>, it calls a Gemini proxy to draft pro-ICP tweets (at most once a day); you review
-                and post them on X. The cycle budget is a deliberate 7-day burn — honest proof-of-burn on a
-                schedule. Create as many farms as you want; each is its own canister and its own burn.
+                and post them on X. The cycle budget is a deliberate burn over the lifespan you choose —
+                honest proof-of-burn on a schedule. Create as many farms as you want; each is its own
+                canister and its own burn.
               </p>
             </div>
             <div className="col" style={{ gap: 6 }}>
               <Eyebrow accent>Tiers</Eyebrow>
               <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>Sprout</b> 1 draft/day · <b>Grow</b> 5/day · <b>Bloom</b> 10/day (7 days each).</li>
+                <li><b>Sprout</b> 5 drafts/day · <b>Grow</b> 10/day · <b>Bloom</b> 15/day. Pick a 7–30 day lifespan at $0.50/day.</li>
                 <li>USD-priced via the XRC oracle, paid in ICP. 90% → your Farmer's cycles, 10% → treasury.</li>
                 <li>Drafts are generated on demand — only when you ask, at most once per day per farm.</li>
               </ul>
@@ -374,7 +400,7 @@ export default function XFarm({
               </div>
             ) : (
               <div className="col" style={{ gap: 14 }}>
-                <Eyebrow accent>Start a Farmer · step {step === 'persona' ? 1 : step === 'tier' ? 2 : 3} of 3</Eyebrow>
+                <Eyebrow accent>Start a Farmer · step {step === 'persona' ? 1 : step === 'tier' ? 2 : step === 'lifespan' ? 3 : 4} of 4</Eyebrow>
 
                 {step === 'persona' && (
                   <div className="col" style={{ gap: 10 }}>
@@ -420,17 +446,34 @@ export default function XFarm({
                           <button key={t.id} style={selectCardStyle(active)} onClick={() => setTierId(t.id)}>
                             <span style={{ fontSize: 13.5, fontWeight: 600, color: active ? 'var(--burn-ink)' : 'var(--fg-1)' }}>{t.name}</span>
                             <span style={{ fontSize: 12, color: 'var(--fg-3)', lineHeight: 1.4 }}>
-                              {t.drafts_per_day} draft{t.drafts_per_day === 1 ? '' : 's'}/day{t.includes_image ? ' + 1 image/day' : ''} · {t.duration_days} days
+                              {t.drafts_per_day} draft{t.drafts_per_day === 1 ? '' : 's'}/day{t.includes_image ? ' + 1 image/day' : ''}
                             </span>
                           </button>
                         );
                       })}
                     </div>
                     <p style={{ fontSize: 11.5, color: 'var(--fg-3)', margin: 0 }}>
-                      USD-priced via the XRC oracle, paid in ICP. Admin can edit tiers.
+                      The tier sets how many drafts you get per day. You'll pick the lifespan next.
                     </p>
                     <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
                       <Btn variant="ghost" onClick={() => setStep('persona')}>Back</Btn>
+                      <Btn variant="primary" onClick={() => { setError(null); setStep('lifespan'); }}>Next</Btn>
+                    </div>
+                  </div>
+                )}
+
+                {step === 'lifespan' && (
+                  <div className="col" style={{ gap: 10 }}>
+                    <span style={LABEL_STYLE}>Choose a lifespan</span>
+                    <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0 }}>
+                      How long should this farm run? Its ICP is burned into a cycle budget that depletes
+                      over the lifespan you choose.
+                    </p>
+                    <div className="card col" style={{ gap: 8, padding: 12, background: 'var(--surface-2)' }}>
+                      <DaysPicker days={days} setDays={setDays} />
+                    </div>
+                    <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
+                      <Btn variant="ghost" onClick={() => setStep('tier')}>Back</Btn>
                       <Btn variant="primary" onClick={() => { setError(null); setStep('pay'); }}>Next</Btn>
                     </div>
                   </div>
@@ -446,7 +489,11 @@ export default function XFarm({
                       </div>
                       <div className="row" style={{ justifyContent: 'space-between' }}>
                         <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Tier</span>
-                        <span style={{ fontSize: 12.5 }}>{tiers.find(t => t.id === tierId)?.name} — {tiers.find(t => t.id === tierId)?.drafts_per_day} drafts/day · {tiers.find(t => t.id === tierId)?.duration_days}d</span>
+                        <span style={{ fontSize: 12.5 }}>{tiers.find(t => t.id === tierId)?.name} — {tiers.find(t => t.id === tierId)?.drafts_per_day} drafts/day</span>
+                      </div>
+                      <div className="row" style={{ justifyContent: 'space-between' }}>
+                        <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Lifespan</span>
+                        <span style={{ fontSize: 12.5 }}>{days} days · ${(days * PRICE_PER_DAY_USD).toFixed(2)}</span>
                       </div>
                       {quote ? (
                         <>
@@ -480,7 +527,7 @@ export default function XFarm({
                       )}
                     </div>
                     <p style={{ fontSize: 11.5, color: 'var(--fg-3)', margin: 0 }}>
-                      ICP is burned to fund your Farmer's 7-day cycle budget. Drafts are generated on demand,
+                      ICP is burned to fund your Farmer's {days}-day cycle budget. Drafts are generated on demand,
                       at most once per day. The ICP is non-refundable.
                     </p>
                     {isLocal && (
@@ -491,7 +538,7 @@ export default function XFarm({
                     {error && <div className="card" style={{ padding: 10, borderColor: 'var(--bad)', color: 'var(--bad)', fontSize: 12.5 }}>{error}</div>}
                     {payStep && !error && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>{payStep}</span>}
                     <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
-                      <Btn variant="ghost" onClick={() => setStep('tier')} disabled={busy}>Back</Btn>
+                      <Btn variant="ghost" onClick={() => setStep('lifespan')} disabled={busy}>Back</Btn>
                       <Btn variant="primary" onClick={executePay} disabled={busy || !quote || isLocal}>
                         {busy ? 'Working…' : isLocal ? 'Disabled on local' : `Pay & deploy Farmer`}
                       </Btn>
@@ -550,6 +597,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   const [renewBusy, setRenewBusy] = useState(false);
   const [renewErr, setRenewErr] = useState<string | null>(null);
   const [renewStep, setRenewStep] = useState('');
+  const [renewDays, setRenewDays] = useState<number>(MIN_DAYS);
 
   // 30-day lookback in NANOSECONDS (Farmer.created_at / draft.created_at are ns).
   const since = useMemo(() => (BigInt(Date.now()) - BigInt(30 * 86_400_000)) * 1_000_000n, []);
@@ -583,14 +631,26 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   // RENEW: pay again to extend this farm. Quote the farm's existing tier, deposit
   // price+fees into escrow, then call renew_farmer (10% treasury, 90% → more cycles,
   // backend re-arms the burn timer).
-  const openRenew = useCallback(async () => {
-    setRenewOpen(true); setRenewErr(null); setRenewQuote(null); setRenewStep('');
-    try {
-      const res = await actor.get_xfarm_quote(farmer.tier_id);
-      if (res.__kind__ === 'Ok') setRenewQuote(res.Ok);
-      else setRenewErr(`Quote failed: ${res.Err}`);
-    } catch (e: any) { setRenewErr(e.message || String(e)); }
-  }, [actor, farmer.tier_id]);
+  const openRenew = useCallback(() => {
+    setRenewErr(null); setRenewStep(''); setRenewDays(MIN_DAYS); setRenewOpen(true);
+  }, []);
+
+  // Re-quote whenever the renew panel is open or the chosen lifespan changes.
+  useEffect(() => {
+    if (!renewOpen) { setRenewQuote(null); return; }
+    let cancelled = false;
+    setRenewQuote(null);
+    const t = setTimeout(() => {
+      actor.get_xfarm_quote(farmer.tier_id, renewDays)
+        .then((res: any) => {
+          if (cancelled) return;
+          if (res.__kind__ === 'Ok') { setRenewQuote(res.Ok); setRenewErr(null); }
+          else setRenewErr(`Quote failed: ${res.Err}`);
+        })
+        .catch((e: any) => { if (!cancelled) setRenewErr(e.message || String(e)); });
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [renewOpen, renewDays, actor, farmer.tier_id]);
 
   const confirmRenew = useCallback(async () => {
     if (!renewQuote || renewBusy || !identity) return;
@@ -612,7 +672,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
         throw new Error(`Payment failed: ${detail}`);
       }
       setRenewStep('Step 2/2: Extending your Farmer…');
-      const res = await actor.renew_farmer(farmer.id);
+      const res = await actor.renew_farmer(farmer.id, renewDays);
       if (res.__kind__ === 'Err') throw new Error(res.Err);
       setRenewOpen(false);
       onChanged();
@@ -622,7 +682,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
     } finally {
       setRenewBusy(false);
     }
-  }, [actor, farmer.id, renewQuote, renewBusy, identity, host, rootKey, ledgerCanisterId, onChanged, loadStatus]);
+  }, [actor, farmer.id, renewDays, renewQuote, renewBusy, identity, host, rootKey, ledgerCanisterId, onChanged, loadStatus]);
 
   const shareDraftOnX = (d: XFarmDraft) => {
     const url = d.cited_url || '';
@@ -632,7 +692,6 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
     window.open(`https://twitter.com/intent/tweet${q}`, '_blank', 'noopener,noreferrer');
   };
 
-  const cyclesRemaining = statusTuple ? Number(statusTuple[1]) : null;
   const daysLeft = statusTuple ? Number(statusTuple[1]) / 1_000_000_000_000 / 86_400 : null;
   const nextGen = statusTuple ? Number(statusTuple[2]) : null;
   const nextGenPassed = nextGen !== null && nextGen <= Date.now() * 1_000_000;
@@ -665,8 +724,9 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
         <div className="card col" style={{ gap: 8, padding: 12, background: 'var(--surface-2)', borderColor: 'var(--burn)' }}>
           <span style={LABEL_STYLE}>Renew this farm</span>
           <p style={{ margin: 0, fontSize: 12.5, color: 'var(--fg-2)' }}>
-            Pay again to extend <b>{tier ? tier.name : 'this farm'}</b> by another {tier?.duration_days ?? 7} days.
+            Pay again to extend <b>{tier ? tier.name : 'this farm'}</b> by another {renewDays} days.
           </p>
+          <DaysPicker days={renewDays} setDays={setRenewDays} />
           {renewQuote ? (
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Price (≈ ${(Number(renewQuote.usd_e8s) / 100_000_000).toFixed(2)} via XRC)</span>
@@ -685,12 +745,12 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
       )}
 
       {/* Status row */}
-      <div className="row" style={{ gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--fg-2)' }}>
-        <span>persona: <span style={{ color: 'var(--fg-1)' }}>{farmer.persona.length > 60 ? farmer.persona.slice(0, 60) + '…' : farmer.persona}</span></span>
-        <span>canister: <code style={{ fontSize: 11.5 }}>{farmer.canister_id ? formatPrincipal(farmer.canister_id) : 'local mock'}</code></span>
-        {cyclesRemaining !== null && <span>cycles: <b>{(cyclesRemaining / 1_000_000_000_000).toFixed(2)}T</b></span>}
-        {daysLeft !== null && <span>budget left: <b>~{Math.max(0, daysLeft).toFixed(1)}d of {tier?.duration_days ?? 7}d</b></span>}
-        <span>burned: <b>{(Number(farmer.burned_cycles) / 1_000_000_000_000).toFixed(2)}T cycles</b></span>
+      <div className="col" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)' }}>
+        <span>persona: <span style={{ color: 'var(--fg-1)' }}>{farmer.persona}</span></span>
+        <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
+          {daysLeft !== null && <span>budget left: <b>~{Math.max(0, daysLeft).toFixed(1)} days</b></span>}
+          <span>burned: <b>{(Number(farmer.burned_cycles) / 1_000_000_000_000).toFixed(2)}T cycles</b></span>
+        </div>
       </div>
 
       {/* On-demand generation hint + today's drafts */}
