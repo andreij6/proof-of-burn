@@ -54,6 +54,11 @@ const BURN_ITERATIONS_PER_TICK: u32 = 200_000;
 const DRAFT_RETENTION_NS: u64 = 30 * DAY_NS;
 /// Cap drafts stored per canister (last-30-days × drafts_per_day ceiling).
 const MAX_STORED_DRAFTS: usize = 400;
+/// Cycles attached to each HTTPS outcall to the proxy (unused is refunded by the IC).
+/// Generous to never under-pay a small 2KB-response call on a 13-node subnet.
+const OUTCALL_CYCLES: u128 = 100_000_000_000;
+/// Cap the proxy response we accept (drafts JSON is small).
+const MAX_RESPONSE_BYTES: u64 = 2048;
 
 // ==========================================
 // 1. Data Models
@@ -319,38 +324,18 @@ struct TweetResponse {
     drafts: Vec<TweetItem>,
 }
 
-// Management-canister `http_request` arg structs (inline, like the backend's
-// CanisterIdRecord pattern — no vendored ic-management crate).
-#[derive(CandidType, Serialize, Deserialize, Clone)]
-struct HttpHeader { name: String, value: String }
-#[derive(CandidType, Serialize, Clone)]
-enum HttpMethod { GET, POST, PUT, DELETE }
-#[derive(CandidType, Serialize)]
-struct HttpRequestArgs {
-    url: String,
-    max_response_bytes: Option<u64>,
-    headers: Vec<HttpHeader>,
-    body: Vec<u8>,
-    method: HttpMethod,
-    transform: Option<TransformArgs>,
-}
-#[derive(CandidType, Serialize, Clone)]
-struct TransformArgs {
-    function: (Principal, String),
-    context: Vec<u8>,
-}
-#[derive(CandidType, Deserialize)]
-struct HttpResponse {
-    status: u64,
-    headers: Vec<HttpHeader>,
-    body: Vec<u8>,
-}
-
 async fn generate_drafts(cfg: &FarmerConfig) -> Result<TweetResponse, String> {
+    // Use ic-cdk's management http_request helper: correct candid types (method =
+    // variant { get; post; head } LOWERCASE, body = opt blob, status = nat) AND it
+    // attaches the required cycles via call_with_payment128 (HTTPS outcalls must pay;
+    // unused cycles are refunded). The earlier hand-rolled structs sent "POST"
+    // (uppercase) with no cycles → CanisterReject "Unknown variant field 891112544".
+    use ic_cdk::api::management_canister::http_request::{
+        http_request, CanisterHttpRequestArgument, HttpHeader, HttpMethod,
+    };
     if cfg.proxy_url.is_empty() {
         return Err("PROXY_NOT_CONFIGURED".to_string());
     }
-    // history = last N draft texts (don't repeat).
     let history: Vec<String> = recent_draft_texts(cfg.drafts_per_day as usize);
     let req = TweetRequest {
         drafts_per_day: cfg.drafts_per_day,
@@ -359,21 +344,23 @@ async fn generate_drafts(cfg: &FarmerConfig) -> Result<TweetResponse, String> {
         caller_id: format!("farmer-{}", cfg.farmer_id),
     };
     let body = serde_json::to_vec(&req).map_err(|e| format!("ENCODE_REQ: {}", e))?;
-    let args = HttpRequestArgs {
+    let arg = CanisterHttpRequestArgument {
         url: format!("{}/v1/tweets", cfg.proxy_url.trim_end_matches('/')),
-        max_response_bytes: Some(2048),
+        max_response_bytes: Some(MAX_RESPONSE_BYTES),
+        method: HttpMethod::POST,
         headers: vec![
             HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
             HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", cfg.proxy_bearer) },
         ],
-        body,
-        method: HttpMethod::POST,
+        body: Some(body),
         transform: None,
     };
-    let res: Result<(HttpResponse,), _> =
-        ic_cdk::call(Principal::management_canister(), "http_request", (args,)).await;
-    match res {
-        Ok((resp,)) => parse_proxy_response(resp.status, &resp.body),
+    match http_request(arg, OUTCALL_CYCLES).await {
+        Ok((resp,)) => {
+            // status is candid Nat; parse to u64 for the pure response handler.
+            let status: u64 = resp.status.to_string().parse().unwrap_or(0);
+            parse_proxy_response(status, &resp.body)
+        }
         Err((code, msg)) => Err(format!("OUTCALL ({:?}): {}", code, msg)),
     }
 }

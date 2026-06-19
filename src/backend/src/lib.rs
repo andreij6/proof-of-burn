@@ -18849,6 +18849,21 @@ async fn xfarm_install_code(_canister_id: Principal, _wasm: Vec<u8>, _arg: Vec<u
     Ok(())
 }
 
+// Upgrade an EXISTING Farmer canister's code (preserves stable state via post_upgrade).
+// Used to roll out a Farmer-wasm fix to already-created Farmers. Empty arg: the
+// Farmer's post_upgrade takes no args.
+#[cfg(target_arch = "wasm32")]
+async fn xfarm_upgrade_code(canister_id: Principal, wasm: Vec<u8>) -> Result<(), String> {
+    let args = InstallCodeArgs {
+        mode: XFarmInstallMode::upgrade, canister_id, wasm_module: wasm,
+        arg: candid::encode_args(()).unwrap_or_default(),
+    };
+    let res: Result<(), _> = ic_cdk::call(Principal::management_canister(), "install_code", (args,)).await;
+    res.map_err(|(c, m)| format!("UPGRADE_CODE_FAILED ({:?}): {}", c, m))
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn xfarm_upgrade_code(_canister_id: Principal, _wasm: Vec<u8>) -> Result<(), String> { Ok(()) }
+
 #[cfg(target_arch = "wasm32")]
 async fn xfarm_stop_canister(cid: Principal) -> Result<(), String> {
     ic_cdk::call(Principal::management_canister(), "stop_canister", (CanisterIdRecord { canister_id: cid },))
@@ -19344,6 +19359,25 @@ fn admin_set_xfarm_wasm(wasm: Vec<u8>) -> Result<(), String> {
     XFARM_WASM_HASH.with(|c| *c.borrow_mut() = Some(hash));
     XFARM_WASM.with(|w| *w.borrow_mut() = Some(wasm));
     Ok(())
+}
+
+/// Admin: upgrade every existing Farmer canister to the currently-uploaded wasm
+/// (preserves each Farmer's stable state via post_upgrade). Rolls out a Farmer-wasm
+/// fix to already-created Farmers. Returns the count upgraded; bounded by live Farmers.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_reinstall_all_farmers() -> Result<u64, String> {
+    let wasm = XFARM_WASM.with(|w| w.borrow().clone()).ok_or_else(|| "WASM_NOT_UPLOADED".to_string())?;
+    let targets: Vec<(u64, Principal)> = XFARM_FARMERS.with(|m| {
+        m.borrow().iter().filter_map(|e| e.value().canister_id.map(|c| (e.value().id, c))).collect()
+    });
+    let mut upgraded = 0u64;
+    for (id, cid) in targets {
+        match xfarm_upgrade_code(cid, wasm.clone()).await {
+            Ok(()) => upgraded += 1,
+            Err(e) => canister_print(&format!("xfarm reinstall: farmer {} ({}) failed: {}", id, cid.to_text(), e)),
+        }
+    }
+    Ok(upgraded)
 }
 
 #[ic_cdk::update(guard = "require_admin")]

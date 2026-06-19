@@ -715,6 +715,9 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   const today = drafts.filter(d => Number(d.created_at) / 1_000_000 >= nowMs - 24 * 3_600_000);
   const archive = drafts.filter(d => Number(d.created_at) / 1_000_000 < nowMs - 24 * 3_600_000);
   const active = farmer.status === FarmerStatus.Active;
+  // Scheduled expiry (when the cycle budget should run out) so the owner knows when to renew.
+  const expiresAtMs = Number(farmer.expected_depleted_at) / 1_000_000;
+  const expired = expiresAtMs <= nowMs;
 
   return (
     <div className="card col" style={{ gap: 14 }}>
@@ -766,6 +769,12 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
           {daysLeft !== null && <span>budget left: <b>~{Math.max(0, daysLeft).toFixed(1)} days</b></span>}
           <span>burned: <b>{(Number(farmer.burned_cycles) / 1_000_000_000_000).toFixed(2)}T cycles</b></span>
         </div>
+        <span>
+          {expired ? 'expired: ' : 'expires: '}
+          <b style={expired ? { color: 'var(--bad)' } : undefined}>
+            {expired ? `${new Date(expiresAtMs).toLocaleString()} — renew to keep it running` : new Date(expiresAtMs).toLocaleString()}
+          </b>
+        </span>
       </div>
 
       {/* On-demand generation hint + today's drafts */}

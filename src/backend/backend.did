@@ -1180,6 +1180,10 @@ service : (InitPayload) -> {
   admin_pause_crash : (bool) -> (Result);
   // Admin recovery: refund a specific user's stranded x-farm escrow deposit.
   admin_refund_xfarm_escrow : (principal) -> (Result_1);
+  // Admin: upgrade every existing Farmer canister to the currently-uploaded wasm
+  // (preserves each Farmer's stable state via post_upgrade). Rolls out a Farmer-wasm
+  // fix to already-created Farmers. Returns the count upgraded; bounded by live Farmers.
+  admin_reinstall_all_farmers : () -> (Result_1);
   // Admin: reject a pending community listing. The payment is refunded from
   // the treasury (minus one ledger fee), then the listing is deleted.
   // The listing is REMOVED before the refund transfer (and restored if it
