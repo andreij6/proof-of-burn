@@ -109,7 +109,9 @@ export default function DiscussionsPage({
         <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 640, lineHeight: 1.55 }}>
           Open conversations on live proposals — start one for $1, weigh in for $0.25,
           and up/down-vote the takes. Start a quality conversation and you earn{' '}
-          <b>1 lottery ticket for every upvote it gets</b> (while you're staked).{' '}
+          <b>1 lottery ticket for every upvote it gets</b> (
+          <a href="#/lottery/staking" style={{ color: 'var(--burn-ink)', textDecoration: 'underline' }}>while you're staked</a>
+          ).{' '}
           <b>Fees paid in ICP are burned 100%</b>.
         </p>
       </div>
