@@ -1,8 +1,10 @@
 # X-Farm — Architecture Overview
 
-> Feature overview. The **primary design is per-user Farmer canisters + a factory**
-> (the spec'd/owner choice); a **shared-state module** is the documented cheaper
-> alternative — see [README §3 / D-arch](README.md) and [04 R1/R5](04-adversarial-review.md).
+> Feature overview. **D-arch is RESOLVED → per-user Farmer canisters + a factory**
+> (04 R1): each Farmer **is** its own canister, created/installed/funded by the
+> factory. A **shared-state module** stays a documented **Phase-2 fallback** only
+> (cheaper, but concentrates all deliberate burn on one subnet — R9) — see
+> [README §3 / D-arch](README.md) and [04 R1/R5](04-adversarial-review.md).
 > Everything except *where Farmers physically live* is identical between the two.
 
 ## System context
@@ -43,18 +45,18 @@
                                           └──────────────┬─────────────────────┘
                                                          ▼
                                           ┌──────────────────────────────────┐
-                                          │ Gemini 2.5 Flash                   │
+                                          │ Gemini 3 Flash (preview)            │
                                           │ generateContent + responseSchema   │
                                           │ + Google Search / URL-context      │
                                           └──────────────────────────────────┘
 ```
 
-## Where Farmers live — the two D-arch shapes (logic is identical)
+## Where Farmers live — chosen (per-user) vs Phase-2 fallback (shared-state)
 
 ```
-PRIMARY (per-user canister)            ALTERNATIVE (shared-state module)
-─────────────────────────────         ─────────────────────────────────
-factory ──create_canister──▶ Farmer    backend holds FARMERS rows +
+CHOSEN — per-user canister (D-arch)     FALLBACK — shared-state module (Phase-2)
+─────────────────────────────────       ─────────────────────────────────────────
+factory ──create_canister──▶ Farmer      backend holds FARMERS rows +
          ──install_code────▶  (timer,   per-farmer DRAFTS sub-maps;
          ──deposit_cycles──▶  drafts)   ONE backend daily sweep timer
 expiry: stop+delete depleted            iterates active farmers;
@@ -81,7 +83,7 @@ sequenceDiagram
     participant FM as Farmer canister
 
     U->>FE: pick persona + tier, confirm pay
-    FE->>FC: get_xfarm_quote(tier)   (flat ICP base price, D1)
+    FE->>FC: get_xfarm_quote(tier)   (USD price → ICP at XRC rate, D1)
     FE->>LG: icrc1_transfer(price → per-user escrow)
     FE->>FC: create_farmer(tier, persona)
     FC->>LG: balance(escrow) ≥ price+fee ?
@@ -144,17 +146,17 @@ sequenceDiagram
 | backend / factory | `FARMERS` registry, tiers/config/proxy cfg, money path, create/install/fund, cleanup sweep | reuse burn leg + escrow; **net-new = factory (`create_canister`/`install_code`/`deposit_cycles`/`delete_canister`)** |
 | Farmer canister (per user) | own bounded `DRAFTS`, init config, **daily timer**, generation outcall | **net-new = a 2nd wasm** the factory installs |
 | ICP ledger / CMC / Treasury | payment, burn-to-cycles, 10% cut | pure reuse |
-| Cloud-Run proxy | holds Gemini key, `/v1/tweets`, bearer auth, 2-call reformat | **shared with ai-proposal-review** (build once) |
-| Gemini 2.5 Flash | draft generation, grounding | off-chain |
+| Cloud-Run proxy | holds Gemini key (or ADC), `/v1/tweets`, bearer auth | **shared with ai-proposal-review** (build once); see [06-cloud-run-proxy-build.md](06-cloud-run-proxy-build.md) |
+| Gemini 3 Flash | draft generation, grounding + structured output in one call | off-chain |
 
 ## How the adversarial risks land on this architecture
-- **R0 (USD vs burn sustainability):** tiers are **ICP-priced (D1)** so a falling
-  ICP price compresses the 10% treasury margin against the fixed-USD Gemini bill;
-  the 10% covers Gemini ~20× over at launch (7-day), but admin can raise tier ICP
-  prices as a USD floor. → [04 R0](04-adversarial-review.md).
+- **R0 (USD vs burn sustainability):** tiers are **USD-priced via XRC, paid in ICP
+  (D1)** so the 10% treasury cut tracks the fixed-USD Gemini bill even if ICP falls
+  (the margin doesn't compress); the 10% covers Gemini ~5× over at launch (7-day).
+  → [04 R0](04-adversarial-review.md).
 - **R1 (creation cost floor):** per-user adds **$0.683/farmer day-0** (carved out of
-  the 7-day budget) → Sprout must be ~1 ICP under per-user; the **shared-state alt
-  removes it** (Sprout 0.5 ICP holds).
+  the 7-day budget) → Sprout must be ~1 ICP under per-user; the **shared-state
+  fallback removes it** (Sprout 0.5 ICP holds).
 - **R3 (prompt injection):** persona/history framed as untrusted data in the proxy.
 - **R5 (lifecycle/orphans):** create→install→top-up ordering, delete-on-failed-
   install, factory = sole controller, cleanup sweep stops+deletes **depleted**

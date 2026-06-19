@@ -23,16 +23,17 @@ disabled-with-tooltip otherwise).
 │            [ Cancel ]  [ Next ]                      │
 └─────────────────────────────────────────────────────┘
 ┌─ Step 2 · Tier ─────────────────────────────────────┐
-│   Sprout   1 draft/day · 7d   0.50 ICP             │
-│   Grow     5 drafts/day · 7d   1.00 ICP   ◉         │
-│   Bloom    10 drafts/day · 7d  2.00 ICP             │
-│  (admin can add/edit tiers)                          │
+│   Sprout   1 draft/day · 7d    ~1.0 ICP             │
+│   Grow     5 drafts/day · 7d   ~1.5 ICP   ◉         │
+│   Bloom    10 drafts/day · 7d  ~2.0 ICP             │
+│   Harvest  10 + 1 image/day · 7d  ~2.5 ICP (Nano Banana 2) │
+│  (USD-priced via XRC, paid in ICP; admin can edit)   │
 │            [ Back ]  [ Next ]                        │
 └─────────────────────────────────────────────────────┘
 ┌─ Step 3 · Pay ──────────────────────────────────────┐
 │  Persona: Degen ICP maxi                             │
 │  Tier:    Grow — 5 drafts/day · 7 days               │
-│  Price:   1.00 ICP                                   │
+│  Price:   ~1.5 ICP  (≈ $3.60 at $2.40/ICP, XRC)      │
 │    └ burned to your Farmer's 7-day cycle budget ─ 90%│
 │    └ to the treasury                  ─ 10%          │
 │  Your balance: 4.20 ICP                              │
@@ -87,8 +88,10 @@ Reuse `shareProposalOnX`'s intent pattern. Tweet body = the chosen draft (alread
 - **Cycles low warning:** "Your Farmer is low on cycles — extend to avoid a gap."
 - **Generation failure** (outcall/parse): the day's batch is empty with an inline
   "Couldn't generate today — the Farmer will retry tomorrow." **No charge to the
-  user** (cycles already burned; the burn still happened — on-theme; the miss is a
-  service gap, not a refund, since the burn is upfront D2). *Open: credit a day?*
+  user**: per R8 the deliberate burn tick is **skipped** on a `Failed` day, so the
+  budget isn't spent on nothing — the 7-day window effectively extends by failed
+  days (the cycle balance is the timer; no ICP moves). The ICP was burned at
+  purchase (D2); the make-good is *delivery* (budget lasts longer), not a refund.
 - **Content notice (D8 / no moderation):** a one-line "Drafts are AI-generated
   suggestions. You're responsible for what you post. Admins may disable Farmers."
   near the drafts. No word filter; admin can `admin_disable_farmer(id)`.

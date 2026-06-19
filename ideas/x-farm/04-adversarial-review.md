@@ -11,8 +11,8 @@ The user's ICP is **burned to IC cycles** (good — real burn, funds compute) +
 proxy operator**, and the IC burn doesn't directly pay Google. If the project
 can't sustain the USD bill, Farmers stop producing and prepaid users get nothing.
 This is tao-like-reward's "loop broken" risk reincarnated.
-- **Why it's likely fine here (unlike tao):** Gemini 2.5 Flash is ~$0.003/daily
-  call → **~$0.02/farmer-week**, while the 10% treasury from a 2 ICP (Bloom) base
+- **Why it's likely fine here (unlike tao):** Gemini 3 Flash is ~$0.007/daily
+  call → **~$0.05/farmer-week**, while the 10% treasury from a 2 ICP (Bloom) base
   price ≈ 0.2 ICP ≈ $0.48 over the same 7 days. **The 10% alone covers Gemini
   ~20× over**, with the burn covering IC cycles. The loop is **net-positive**, not
   broken. (Note: most of the 90% cycle budget is **deliberately burned** on a
@@ -46,9 +46,9 @@ chunk carved out of the 7-day cycle budget). This dominates per-farmer economics
 under the per-user model **Sprout can't be 0.5 ICP** — it must start at ~1 ICP to
 clear creation *and* still deplete over 7 days. Abandoned/depleted Farmers also
 accumulate as live canisters if the cleanup sweep lags.
-- **Mitigate:** (1) **D-arch shared-state fallback** — no per-user creation,
-  ~4–5× cheaper, lets Sprout sit at 0.5 ICP (recommended if volume/low-tier
-  matter). (2) Set per-user base prices above the creation + 7-day-budget floor.
+- **Mitigate:** (1) **D-arch shared-state fallback** (Phase-2 only) — no
+  per-user creation, ~4–5× cheaper, lets Sprout sit at 0.5 ICP (a graduation path
+  if low-tier volume ever matters). (2) Set per-user base prices above the creation + 7-day-budget floor.
   (3) **Cleanup sweep must `delete_canister`** stopped Farmers — don't let dead
   Farmers pile up. (No cycle reclamation needed — they're depleted to ~0 by
   design; see finding #7.) → owner picks D-arch.
@@ -122,9 +122,10 @@ drafts via their own tooling — that's their X-account risk, not ours.
 ## R8 — Refund / "I paid but no tweets" expectation (LOW–MED)
 The burn is **upfront and non-refundable** (D2). If a Farmer's daily generation
 fails for several days (proxy down, Gemini outage), the user paid for content they
-didn't receive — but the ICP is already burned **and the cycle budget still
-depletes on its 7-day schedule** (the deliberate-burn tick runs regardless of
-Gemini success, finding #7). So a proxy outage can mean: budget gone, no drafts.
+didn't receive — and the ICP is already burned. The question is whether the cycle
+budget *also* depletes on those failed days. Unmitigated, it would: the
+deliberate-burn tick runs on schedule (finding #7) and a proxy outage could mean
+budget gone, no drafts.
 - **Mitigate:** (1) Track `last_generation_at` + `Failed` days; show them in the
   dashboard (transparency). (2) **Make-good is delivery, not ICP**: skip the
   deliberate-burn tick on `Failed` days so the budget isn't spent on nothing —
@@ -155,6 +156,32 @@ shared subnet**: instructions executed purely to destroy cycles.
   future IC cycle-pricing change that makes deliberate instruction burn
   economically or operationally hostile; the model assumes today's
   1T-cycles-per-XDR + per-instruction billing.
+
+## R10 — AI-generated pro-ICP images (MED; new under D9; amplifies R2)
+Premium Farmers (D9) can attach a **Nano Banana 2** generated image to a daily
+draft. An image is **visual propaganda** — more persuasive than text and easier to
+mislead with (fake charts, fake screenshots, depictions of real people, fake
+"milestones"). This sharpens R2 (astroturfing / paid token promotion): a wall of
+coordinated pro-ICP images from many Farmers is a stronger manufactured-consensus
+signal than text alone, and a misleading image is a bigger liability than a
+misleading tweet.
+- **Mitigate:** (1) **SynthID watermark** is embedded automatically — a free,
+  verifiable "AI-generated" disclosure signal. (2) **D8 disclosure tag** extended to
+  the image card. (3) **Image-prompt guardrails in the proxy**: no real-person
+  likenesses, no fake screenshots/charts/quotes, no misleading figures; brand-safe
+  abstract/visual prompts. (4) The image prompt is synthesized from the
+  *schema-constrained generated draft text + a fixed template*, **not** from raw
+  user persona — a stronger injection boundary than the text path (R3). (5) Gemini
+  safety settings on; the user is the publisher and sees the image before posting
+  (human review gate). (6) Consider disabling likenesses of identifiable people at
+  the model safety-settings level. See
+  [07-premium-images-nano-banana.md](07-premium-images-nano-banana.md).
+- **R0 amendment (image USD cost):** images are an off-chain USD bill like text, and
+  the 10%-treasury-covers-Gemini invariant must hold for them too. **1 image/day @
+  512px (~$0.32/week) fits inside Bloom's existing 10% margin (~$0.48); 1K needs a
+  ~2.5 ICP base (Harvest). Image-per-draft is economically unviable (~$4.69/week →
+  ~$50 base to cover via 10%) and is explicitly excluded.** The 7-day burn is
+  unchanged — images touch only this R0 math.
 
 ---
 
@@ -188,8 +215,11 @@ subnet). **All blocking decisions are now resolved:**
    Per-user isolation (decision 1) keeps the load bounded per canister.
    *Note:* the ICP itself is already burned at purchase (the CMC mint destroys
    it), so the 7-day deliberate cycle-spend is a **paced-depletion choice**, not a
-   second ICP burn — if subnet-load optics ever bite, reclaiming leftover cycles
-   (the original D7) is the cleaner fallback.
+   second ICP burn. If subnet-load optics ever bite, the lever is to **reduce the
+   deliberate-burn rate** (spend the budget down over, say, 14 days instead of 7,
+   or pause it on busy subnets) — **not** to reclaim leftover cycles, which is
+   impossible (cycles can't be moved to treasury or converted back to ICP; see
+   finding #7). The cycle balance is the timer; slowing the burn just stretches it.
 
 Reuses ai-proposal-review's Cloud-Run proxy (build once, two endpoints) — the two
 features should ship in coordination. As with proposal-discussions, **build on the
