@@ -1888,7 +1888,7 @@ export default function App() {
         </Btn>
         <Btn variant={page === 'about' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('about')}>
           <Icon name="info" size={14} stroke={page === 'about' ? 'var(--char-950)' : 'currentColor'} />
-          About Us
+          Mission Statement
         </Btn>
 
         <Eyebrow style={{ margin: '14px 0 4px' }}>Governance</Eyebrow>

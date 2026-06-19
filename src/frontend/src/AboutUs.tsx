@@ -2,8 +2,8 @@ import React from 'react';
 import type { AppPage } from "./App";
 import { Icon, Eyebrow, Btn } from "./ui";
 
-// About Us — the project's purpose and the vision for where it's headed.
-// Static, self-contained marketing/informational page (no actor needed).
+// Mission Statement — the project's purpose, the vision for where it's headed,
+// and a call to fellow ICP builders. Static, self-contained (no actor needed).
 
 interface AboutUsProps {
   signedIn: boolean;
@@ -34,7 +34,7 @@ export default function AboutUs({ signedIn, onSignIn, go }: AboutUsProps) {
     <div className="dashboard-container">
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
-        <Eyebrow accent>About</Eyebrow>
+        <Eyebrow accent>Mission Statement</Eyebrow>
         <span className="row" style={{ gap: 10, alignItems: 'center' }}>
           <Icon name="flame" size={22} stroke="var(--burn-ink)" />
           <h4 style={{ margin: 0 }}>Why Caldera exists</h4>
@@ -72,6 +72,11 @@ export default function AboutUs({ signedIn, onSignIn, go }: AboutUsProps) {
             The prize pool is funded entirely by staking yield, so nobody's principal is ever at risk.
             Stakers collect free tickets and the jackpot pays out in ICP.
           </Pillar>
+          <Pillar icon="list" title="Proposal discussions">
+            Start a conversation on any proposal for $1, weigh in for $0.25, and up/down-vote the takes.
+            Conversation-starters earn lottery tickets for every upvote, and ICP spent here is burned 100% —
+            so the community debate itself tightens supply.
+          </Pillar>
         </div>
       </div>
 
@@ -88,8 +93,35 @@ export default function AboutUs({ signedIn, onSignIn, go }: AboutUsProps) {
             <li>Grow the Neuron Syndicate until the community leader is a top-tier voice on every proposal that matters.</li>
             <li>Drive a steady, transparent burn so participation measurably tightens ICP supply over time.</li>
             <li>Recycle protocol yield into prizes, payouts, and community R&D — funding public goods the ecosystem needs.</li>
+            <li>Make the lottery prize <b>sustainable and genuinely valuable</b> — growing the jackpot as ICP reaches key price targets, so a win means more over time, not less.</li>
             <li>Keep every value-moving path on-chain, auditable, and lossless by design.</li>
           </ul>
+        </div>
+      </div>
+
+      {/* ── A call to ICP builders ── */}
+      <div className="col" style={{ gap: 10 }}>
+        <Eyebrow accent>A call to ICP builders</Eyebrow>
+        <div style={{ ...card, gap: 12 }}>
+          <p style={{ fontSize: 13, color: 'var(--fg-1)', lineHeight: 1.6, margin: 0 }}>
+            If you're building on the Internet Computer, <b style={{ color: 'var(--fg)' }}>join me in this mission</b>.
+            The IC wins when its builders stop fighting over the same small pie and start growing it together.
+            Let's <b>band together</b>: cross-promote each other's dapps, integrate and actually <i>use</i> one another's
+            tools, and send users across the ecosystem instead of walling them in.
+          </p>
+          <p style={{ fontSize: 13, color: 'var(--fg-2)', lineHeight: 1.6, margin: 0 }}>
+            Infighting and fragmentation are the only things that can hold the IC back — so let's choose the
+            opposite. Lift each other up, point your community at great ICP apps, and make the Internet Computer
+            the obvious home for the next wave of users. A rising tide carries every canister.
+          </p>
+          <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+            <Btn variant="secondary" onClick={() => go('explorer')}>
+              <Icon name="compass" size={13} /> Discover ICP dapps
+            </Btn>
+            <Btn variant="ghost" onClick={() => go('ideas')}>
+              <Icon name="bulb" size={13} /> Pitch on Roadmap &amp; Development
+            </Btn>
+          </div>
         </div>
       </div>
 
