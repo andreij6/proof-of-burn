@@ -18579,7 +18579,8 @@ const XFARM_DURATION_DAYS: u64 = 7;                   // default/min depletion w
 // Per-day pricing (owner-chosen lifespan): $0.50/day, 7..30 days. Mirrors the
 // Explorer per-day model (EXPLORER_PRICE_PER_DAY_USD_E8S). Tier = drafts/day only;
 // price is days × per-day (tier no longer affects price).
-const XFARM_PRICE_PER_DAY_USD_E8S: u64 = 50_000_000; // $0.50 (USD e8s)
+const XFARM_PRICE_PER_DAY_USD_E8S: u64 = 100_000_000; // $1.00 (USD e8s)
+const XFARM_30DAY_DISCOUNT_USD_E8S: u64 = 300_000_000; // $3 off the full 30-day lifespan
 const XFARM_MIN_DAYS: u32 = 7;
 const XFARM_MAX_DAYS: u32 = 30;
 const XFARM_MAX_TIERS: usize = 10;
@@ -18912,7 +18913,11 @@ async fn get_xfarm_quote(tier_id: u32, days: u32) -> Result<XFarmQuote, String> 
     let backend_cfg = CONFIG.with(|c| c.borrow().get().clone());
     let rate = explorer_usd_rate_e8s(ExplorerToken::ICP, &backend_cfg).await?; // USD e8s per 1 ICP
     if rate == 0 { return Err("RATE_UNAVAILABLE".to_string()); }
-    let usd_total = days as u128 * XFARM_PRICE_PER_DAY_USD_E8S as u128; // $0.50/day
+    // $1.00/day, with a flat $3 discount at the full 30-day lifespan.
+    let mut usd_total = days as u128 * XFARM_PRICE_PER_DAY_USD_E8S as u128;
+    if days >= XFARM_MAX_DAYS {
+        usd_total = usd_total.saturating_sub(XFARM_30DAY_DISCOUNT_USD_E8S as u128);
+    }
     let price = u64::try_from(usd_total * 100_000_000u128 / rate as u128)
         .map_err(|_| "PRICE_OVERFLOW".to_string())?;
     if price == 0 { return Err("PRICE_TOO_LOW".to_string()); }
@@ -28264,20 +28269,24 @@ mod tests {
         let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         set_mock_caller(alice);
 
-        // Days-based pricing: $0.50/day. 7 days = $3.50; at $5/ICP = 0.70 ICP.
+        // Days-based pricing: $1.00/day. 7 days = $7.00; at $5/ICP = 1.40 ICP.
         let q1 = get_xfarm_quote(1, 7).await.unwrap();
         assert_eq!(q1.tier_id, 1);
         assert_eq!(q1.days, 7);
-        assert_eq!(q1.usd_e8s, 350_000_000, "7 × $0.50 = $3.50");
-        assert_eq!(q1.price_e8s, 70_000_000, "$3.50 at $5/ICP = 0.70 ICP");
+        assert_eq!(q1.usd_e8s, 700_000_000, "7 × $1.00 = $7.00");
+        assert_eq!(q1.price_e8s, 140_000_000, "$7.00 at $5/ICP = 1.40 ICP");
         assert_eq!(q1.fee_e8s, ICP_FEE_E8S * 2);
         assert_eq!(q1.rate_usd_e8s, 500_000_000);
         assert!(q1.expires_at > q1.created_at);
 
-        // Price scales with days, not tier: 30 days = $15 → 3.0 ICP.
+        // Full 30-day lifespan: $30 − $3 discount = $27 → 5.4 ICP at $5/ICP.
         let q30 = get_xfarm_quote(1, 30).await.unwrap();
-        assert_eq!(q30.usd_e8s, 1_500_000_000);
-        assert_eq!(q30.price_e8s, 300_000_000, "$15 at $5/ICP = 3.0 ICP");
+        assert_eq!(q30.usd_e8s, 2_700_000_000, "30 × $1.00 − $3 = $27");
+        assert_eq!(q30.price_e8s, 540_000_000, "$27 at $5/ICP = 5.4 ICP");
+
+        // The discount applies only at the full 30 days: 29 days = $29 (no discount).
+        let q29 = get_xfarm_quote(1, 29).await.unwrap();
+        assert_eq!(q29.usd_e8s, 2_900_000_000, "29 × $1.00 = $29 (no discount)");
 
         // Tier doesn't change price (tier = drafts/day only): tier 2 @ 7d == tier 1 @ 7d.
         let q2 = get_xfarm_quote(2, 7).await.unwrap();

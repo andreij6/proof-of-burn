@@ -80,10 +80,15 @@ const PERSONA_PRESETS: { id: string; label: string; description: string; text: s
 ];
 const MAX_PERSONA = 300;
 
-// Lifespan pricing: $0.50/day, 7–30 days. Final ICP price comes from the quote.
-const PRICE_PER_DAY_USD = 0.5;
+// Lifespan pricing: $1.00/day, 7–30 days, with $3 off the full 30-day lifespan. The
+// final ICP price comes from the quote (the canister applies the same math).
+const PRICE_PER_DAY_USD = 1.0;
+const DISCOUNT_30DAY_USD = 3;
 const MIN_DAYS = 7;
 const MAX_DAYS = 30;
+function lifespanUsd(days: number): number {
+  return days * PRICE_PER_DAY_USD - (days >= MAX_DAYS ? DISCOUNT_30DAY_USD : 0);
+}
 
 function DaysPicker({ days, setDays }: { days: number; setDays: (n: number) => void }) {
   return (
@@ -94,11 +99,21 @@ function DaysPicker({ days, setDays }: { days: number; setDays: (n: number) => v
         style={{ width: '100%', accentColor: 'var(--burn)' }}
       />
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <span style={{ fontSize: 13, color: 'var(--fg-2)' }}><b style={{ color: 'var(--fg-1)' }}>{days}</b> days</span>
-        <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--burn-ink)' }}>${(days * PRICE_PER_DAY_USD).toFixed(2)}</span>
+        <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>
+          <b style={{ color: 'var(--fg-1)' }}>{days}</b> days
+          {days >= MAX_DAYS && <span style={{ color: 'var(--burn-ink)', fontWeight: 600 }}> · $3 off</span>}
+        </span>
+        <span style={{ fontSize: 15, fontWeight: 700, color: 'var(--burn-ink)' }}>
+          {days >= MAX_DAYS && (
+            <span style={{ fontSize: 12, color: 'var(--fg-3)', fontWeight: 400, textDecoration: 'line-through', marginRight: 6 }}>
+              ${(days * PRICE_PER_DAY_USD).toFixed(2)}
+            </span>
+          )}
+          ${lifespanUsd(days).toFixed(2)}
+        </span>
       </div>
       <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-        ${PRICE_PER_DAY_USD.toFixed(2)}/day · {MIN_DAYS}–{MAX_DAYS} days · charged in ICP at the live XRC rate.
+        ${PRICE_PER_DAY_USD.toFixed(2)}/day · {MIN_DAYS}–{MAX_DAYS} days · $3 off at {MAX_DAYS} days · charged in ICP at the live XRC rate.
       </span>
     </div>
   );
@@ -342,7 +357,7 @@ export default function XFarm({
             <div className="col" style={{ gap: 6 }}>
               <Eyebrow accent>Tiers</Eyebrow>
               <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>Sprout</b> 5 drafts/day · <b>Grow</b> 10/day · <b>Bloom</b> 15/day. Pick a 7–30 day lifespan at $0.50/day.</li>
+                <li><b>Sprout</b> 5 drafts/day · <b>Grow</b> 10/day · <b>Bloom</b> 15/day. Pick a 7–30 day lifespan at $1/day ($3 off at 30 days).</li>
                 <li>USD-priced via the XRC oracle, paid in ICP. 90% → your Farmer's cycles, 10% → treasury.</li>
                 <li>Drafts are generated on demand — only when you ask, at most once per day per farm.</li>
               </ul>
@@ -497,7 +512,7 @@ export default function XFarm({
                       </div>
                       <div className="row" style={{ justifyContent: 'space-between' }}>
                         <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Lifespan</span>
-                        <span style={{ fontSize: 12.5 }}>{days} days · ${(days * PRICE_PER_DAY_USD).toFixed(2)}</span>
+                        <span style={{ fontSize: 12.5 }}>{days} days · ${lifespanUsd(days).toFixed(2)}{days >= MAX_DAYS ? ' ($3 off)' : ''}</span>
                       </div>
                       {quote ? (
                         <>
