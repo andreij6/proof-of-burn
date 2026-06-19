@@ -116,6 +116,13 @@ gated per-deploy by the owner**; commit to local freely; coordinate doc edits he
   - Failed proxy call (502) = no drafts stored for today, no day consumed; the user
     can retry (subject to the 1/day throttle — decide if a *failed* attempt counts;
     recommend it does NOT, so a failure doesn't waste the day).
+- **No per-user Farmer cap (owner decision 2026-06-19).** Users may own as many
+  Farmers as they want — every extra farm is more ICP burned (on-theme). Do NOT add a
+  per-user limit. The only optional limiter is a **global** safety ceiling
+  `max_live_farmers_global` as an admin-configurable config field that **defaults to
+  unlimited/off** (0 or absent = no limit); it exists only as an ops brake for an R9
+  subnet-load emergency and must never restrict a user under normal operation.
+
 - **Burn model = 7-CALENDAR-DAY burn timer, DECOUPLED from generation (owner decision
   2026-06-19).**
   - Each Farmer keeps a per-Farmer **burn-only** IC timer that deliberately spends
