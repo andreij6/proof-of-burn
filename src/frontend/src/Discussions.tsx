@@ -4,6 +4,7 @@ import { ExplorerToken, VoteDir } from "./bindings/backend";
 import type { ExplorerInfo, Thread, Comment } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Btn, LiveDot } from "./ui";
+import { useErrorImpression } from "./analytics";
 
 // ==========================================
 // Proposal Discussions — forum threads on a proposal.
@@ -94,6 +95,7 @@ export default function Discussions({
   const [comments, setComments] = useState<Comment[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  useErrorImpression(error, 'discussions');
 
   // compose
   const [token, setToken] = useState<ExplorerToken>(ExplorerToken.ICP);

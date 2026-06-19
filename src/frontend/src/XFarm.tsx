@@ -4,6 +4,7 @@ import { FarmerStatus } from "./bindings/backend";
 import type { Farmer, FarmerTier, XFarmQuote, XFarmDraft, XFarmInfo } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, Skeleton, fmtICP, usePageDevControls } from "./ui";
+import { useErrorImpression } from "./analytics";
 
 // ==========================================
 // X-Farm — per-user Farmer canisters that burn ICP→cycles to run Gemini drafting
@@ -168,6 +169,8 @@ export default function XFarm({
 
   const personaText = personaPreset === 'custom' ? customPersona.trim()
     : (PERSONA_PRESETS.find(p => p.id === personaPreset)?.text ?? '');
+
+  useErrorImpression(error, 'xfarm_create');
 
   const refresh = useCallback(async () => {
     if (!actor) return;
@@ -342,11 +345,11 @@ export default function XFarm({
               <Eyebrow accent>The gist</Eyebrow>
               <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
                 You pay a tier price; a factory spins up a <b>per-user Farmer canister</b>, burns 90% of
-                the ICP into cycles, and tops it up. When you open a farm and tap <b>Generate today's
-                drafts</b>, it calls a Gemini proxy to draft pro-ICP tweets (at most once a day); you review
-                and post them on X. The cycle budget is a deliberate burn over the lifespan you choose —
-                honest proof-of-burn on a schedule. Create as many farms as you want; each is its own
-                canister and its own burn.
+                the ICP into cycles, and tops it up. When you open a farm it drafts fresh pro-ICP tweets
+                via a Gemini proxy — grounded in today's ICP news, each ending with <b>$ICP</b> plus
+                relevant hashtags — at most once a day, for you to review and post on X. The cycle budget
+                is a deliberate burn over the lifespan you choose — honest proof-of-burn on a schedule.
+                Create as many farms as you want; each is its own canister and its own burn.
               </p>
             </div>
             <div className="col" style={{ gap: 6 }}>
@@ -354,7 +357,7 @@ export default function XFarm({
               <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
                 <li><b>Sprout</b> 5 drafts/day ($1/day) · <b>Grow</b> 10/day ($1.50/day) · <b>Bloom</b> 15/day ($2/day). Pick a 7–30 day lifespan; 10% off at 30 days.</li>
                 <li>USD-priced via the XRC oracle, paid in ICP. 90% → your Farmer's cycles, 10% → treasury.</li>
-                <li>Drafts are generated on demand — only when you ask, at most once per day per farm.</li>
+                <li>Drafts auto-refresh once a day when you open the farm; each ends with $ICP and relevant hashtags, grounded in today's ICP news.</li>
               </ul>
             </div>
             <div className="col" style={{ gap: 6 }}>
@@ -605,6 +608,9 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   const [renewErr, setRenewErr] = useState<string | null>(null);
   const [renewStep, setRenewStep] = useState('');
   const [renewDays, setRenewDays] = useState<number>(MIN_DAYS);
+
+  useErrorImpression(err, 'xfarm_generate');
+  useErrorImpression(renewErr, 'xfarm_renew');
 
   // 30-day lookback in NANOSECONDS (Farmer.created_at / draft.created_at are ns).
   const since = useMemo(() => (BigInt(Date.now()) - BigInt(30 * 86_400_000)) * 1_000_000n, []);
