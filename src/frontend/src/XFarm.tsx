@@ -392,12 +392,6 @@ export default function XFarm({
           padding: '12px 14px', gap: 12, justifyContent: 'space-between', flexWrap: 'wrap', width: '100%'
         }}>
           <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-            <span>Farms started</span>
-            <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
-              {info ? info.total_started.toString() : "…"}
-            </span>
-          </span>
-          <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
             <span>Active farms</span>
             <span className="mono" style={{ fontSize: 14, color: 'var(--sprout-ink)' }}>
               {info ? info.active_count.toString() : "…"}

@@ -18711,7 +18711,6 @@ pub struct XFarmInfo {
     pub wasm_uploaded: bool,
     pub max_active_farmers: usize,
     pub active_count: usize,
-    pub total_started: u64,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -18922,7 +18921,6 @@ fn get_xfarm_info() -> XFarmInfo {
         wasm_uploaded: XFARM_WASM.with(|w| w.borrow().is_some()),
         max_active_farmers: cfg.max_active_farmers,
         active_count: xfarm_active_count(),
-        total_started: XFARM_NEXT_ID.with(|c| c.borrow().get().saturating_sub(1)),
     }
 }
 
