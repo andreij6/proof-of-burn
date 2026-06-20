@@ -38,36 +38,48 @@ const LABEL_STYLE: React.CSSProperties = {
   textTransform: 'uppercase', letterSpacing: '0.06em',
 };
 
-const PERSONA_PRESETS: { id: string; label: string; description: string; text: string }[] = [
+const PERSONA_PRESETS: { id: string; label: string; description: string; text: string; example: string }[] = [
   {
     id: 'ai',
     label: 'AI Visionary',
     description: 'Latest AI trends through an ICP lens — dreams up on-chain AI use cases.',
     text: 'An AI-focused Internet Computer enthusiast, fluent in the latest AI trends and how they intersect with ICP. Loves imagining on-chain AI use cases — autonomous agents, on-chain inference, verifiable models, data sovereignty — that only ICP can enable. Forward-looking and imaginative.',
+    example: 'AI agents need a chain they can actually run on — not just sign a tx and hope. On ICP, smart contracts host models, hold keys, and call the web natively. No oracle band-aids. The agentic web is being built right here. $ICP #AI #Web3',
   },
   {
     id: 'bull',
     label: 'Price Bull',
     description: "Perma-bull on ICP's price potential and market upside.",
     text: "An ICP markets perma-bull, relentlessly optimistic about $ICP's long-term price potential. Frames fundamentals, adoption, and news as reasons the market is undervaluing the Internet Computer. Confident and momentum-driven (not financial advice).",
+    example: "Everyone's chasing the next 10x narrative while ICP quietly ships chain-key crypto, reverse-gas, and on-chain AI. Fundamentals don't stay hidden forever. The market wakes up when it wakes up. Not financial advice. $ICP #Crypto",
   },
   {
     id: 'tech',
     label: 'Tech Maximalist',
     description: "Compares other chains to ICP — champions ICP's technology.",
     text: 'An Internet Computer technology maximalist who compares other blockchains to ICP and makes the case for ICP\'s technical edge — reverse-gas, fully on-chain frontends, chain-key cryptography, web-speed finality, and true decentralization. Direct, comparison-driven, and evidence-based.',
+    example: "Other chains bill you per transaction. ICP bills you nothing — reverse-gas means users never touch a wallet to interact. Fully on-chain frontends, 2s finality, chain-key signing across BTC and ETH. The comparison isn't close. $ICP #Blockchain",
   },
   {
     id: 'macro',
     label: 'Macro Disruptor',
     description: 'ICP as a disruptor reshaping tech, economics & sovereignty.',
     text: 'A macro and big-tech thinker who sees the Internet Computer as a structural disruptor — reshaping cloud computing, big tech, economics, and digital sovereignty. Connects ICP to broad trends like AI, data ownership, and the shift away from centralized platforms. Big-picture and thesis-driven.',
+    example: 'AWS is a $100B/yr toll booth on the internet. ICP hosts apps AND data on-chain — owned by no one, censorship-resistant. This isn\'t another token, it\'s a re-plumbing of who gets to compute. $ICP #Decentralization',
   },
   {
     id: 'funny',
     label: 'Crypto Comedian',
     description: 'Satire & jokes tying crypto, current events and sports to ICP.',
     text: 'A crypto comedian who writes jokes and satire about crypto and the Internet Computer, often tying in current events, sports, and Crypto-Twitter culture. Lighthearted, witty, and meme-aware — but still unmistakably pro-ICP.',
+    example: 'Me: I should diversify my portfolio.\nAlso me: buys more ICP because the canister literally farms my tweets for me.\nAt least my bags have a work ethic now. $ICP #CryptoTwitter',
+  },
+  {
+    id: 'bridge',
+    label: 'Bridge Builder',
+    description: 'Cross-chain diplomat — touts Chain Fusion & routes liquidity onto ICP.',
+    text: 'A cross-chain ecosystem builder fluent across Bitcoin, Ethereum, Solana and other chains. Sees ICP\'s chain-key signatures and Chain Fusion as crypto\'s missing connective tissue — champions partnerships and cross-chain collaboration that route liquidity and users onto ICP. Bridges, not walls.',
+    example: 'ETH liquidity shouldn\'t be trapped on ETH. chain-key signatures let ICP sign and settle directly on Bitcoin and Ethereum — no wrapped tokens, no bridge to hack. Bring your liquidity where it can actually move cross-chain. $ICP #ChainFusion',
   },
 ];
 const MAX_PERSONA = 300;
@@ -404,6 +416,9 @@ export default function XFarm({
         )}
       </div>
 
+      {/* ── Empty state: advertise use cases + persona gallery (only when farmless) ── */}
+      {farmers.length === 0 && <PersonaGallery onStart={signedIn ? openWizard : onSignIn} canStart={signedIn} />}
+
       {/* ── Wizard modal ── */}
       {wizardOpen && (
         <div style={MODAL_OVERLAY} onClick={() => !busy && setWizardOpen(false)}>
@@ -600,6 +615,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   const [generatedToday, setGeneratedToday] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState<number>(Date.now()); // drives the next-round countdown
+  const [draftPage, setDraftPage] = useState(0); // drafts paginate 10 per page
 
   // Renew (pay again to extend lifespan).
   const [renewOpen, setRenewOpen] = useState(false);
@@ -718,8 +734,12 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   const countdownMs = nextGenMs !== null ? nextGenMs - nowTick : null;
 
   const nowMs = Date.now();
-  const today = drafts.filter(d => Number(d.created_at) / 1_000_000 >= nowMs - 24 * 3_600_000);
-  const archive = drafts.filter(d => Number(d.created_at) / 1_000_000 < nowMs - 24 * 3_600_000);
+  // Newest first, paginated 10 per page.
+  const sortedDrafts = [...drafts].sort((a, b) => Number(b.created_at - a.created_at));
+  const DRAFTS_PER_PAGE = 10;
+  const totalDraftPages = Math.max(1, Math.ceil(sortedDrafts.length / DRAFTS_PER_PAGE));
+  const safeDraftPage = Math.min(draftPage, totalDraftPages - 1);
+  const pageDrafts = sortedDrafts.slice(safeDraftPage * DRAFTS_PER_PAGE, safeDraftPage * DRAFTS_PER_PAGE + DRAFTS_PER_PAGE);
   const active = farmer.status === FarmerStatus.Active;
   // Scheduled expiry (when the cycle budget should run out) so the owner knows when to renew.
   const expiresAtMs = Number(farmer.expected_depleted_at) / 1_000_000;
@@ -736,7 +756,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
         {active && (
           <span className="row" style={{ gap: 8 }}>
             <Btn variant="secondary" onClick={openRenew} disabled={renewBusy || renewOpen}>Renew</Btn>
-            {today.length === 0 && (
+            {drafts.length === 0 && (
               <Btn variant="primary" onClick={generate} disabled={loadingDrafts}>
                 {loadingDrafts ? 'Generating…' : "Generate today's drafts"}
               </Btn>
@@ -785,10 +805,10 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
         </span>
       </div>
 
-      {/* Today's drafts + next-round countdown */}
+      {/* Drafts (newest first, 10 per page) + next-round countdown */}
       <div className="col" style={{ gap: 8 }}>
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 6 }}>
-          <span style={LABEL_STYLE}>Today's drafts ({today.length})</span>
+          <span style={LABEL_STYLE}>Drafts ({sortedDrafts.length})</span>
           {active && countdownMs !== null && (
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               {countdownMs > 0
@@ -798,7 +818,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
           )}
         </div>
         {err && <div className="card" style={{ padding: 10, borderColor: 'var(--bad)', color: 'var(--bad)', fontSize: 12.5 }}>{err}</div>}
-        {!generatedToday && drafts.length === 0 && !loadingDrafts && !err && (
+        {!generatedToday && sortedDrafts.length === 0 && !loadingDrafts && !err && (
           <p style={{ fontSize: 12.5, color: 'var(--fg-3)', margin: 0 }}>
             {active
               ? <>Tap <b>Generate today's drafts</b> to have your Farmer draft fresh pro-ICP tweets. It runs at most once per day{nextGen !== null && !nextGenPassed ? ' — today\'s batch may already be ready' : ''}.</>
@@ -806,22 +826,17 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
           </p>
         )}
         {loadingDrafts && <Skeleton width={'100%'} height={48} />}
-        {today.map(d => (
+        {pageDrafts.map(d => (
           <DraftRow key={Number(d.id)} d={d} onShare={shareDraftOnX} />
         ))}
-      </div>
-
-      {/* Archive */}
-      {archive.length > 0 && (
-        <details style={{ marginTop: 4 }}>
-          <summary style={{ cursor: 'pointer', fontSize: 12.5, color: 'var(--fg-3)' }}>Archive (last 30 days, {archive.length})</summary>
-          <div className="col" style={{ gap: 8, marginTop: 8 }}>
-            {archive.slice(0, 30).map(d => (
-              <DraftRow key={Number(d.id)} d={d} onShare={shareDraftOnX} />
-            ))}
+        {totalDraftPages > 1 && (
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 2 }}>
+            <Btn variant="ghost" sm onClick={() => setDraftPage(p => Math.max(0, p - 1))} disabled={safeDraftPage === 0}>← Newer</Btn>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>Page {safeDraftPage + 1} of {totalDraftPages}</span>
+            <Btn variant="ghost" sm onClick={() => setDraftPage(p => Math.min(totalDraftPages - 1, p + 1))} disabled={safeDraftPage >= totalDraftPages - 1}>Older →</Btn>
           </div>
-        </details>
-      )}
+        )}
+      </div>
 
       <div className="row" style={{ gap: 8, alignItems: 'center', fontSize: 11.5, color: 'var(--fg-3)' }}>
         <span>Drafts are AI-generated suggestions. You're responsible for what you post. Admins may disable Farmers.</span>
@@ -839,6 +854,83 @@ function fmtCountdown(ms: number): string {
 
 const TWITTER_BLUE = '#1DA1F2';
 
+// ── Empty-state: use-case pitch + persona grid with example tweets ──────────
+const XFARM_USE_CASES: { icon: string; title: string; body: string }[] = [
+  {
+    icon: 'flame',
+    title: 'A steady drumbeat for ICP',
+    body: 'One farm drafts pro-ICP tweets every day for the lifespan you pick — so the narrative never goes quiet even when you\'re busy.',
+  },
+  {
+    icon: 'bulb',
+    title: 'Creative content helper',
+    body: 'Stuck on what to post? Each farm drafts fresh, news-grounded pro-ICP tweets daily — a springboard you edit and make your own.',
+  },
+];
+
+function PersonaGallery({ onStart, canStart }: { onStart: () => void; canStart: boolean }) {
+  return (
+    <div className="col" style={{ marginTop: 24, gap: 28 }}>
+      {/* Why this helps the community */}
+      <div className="col" style={{ gap: 12 }}>
+        <Eyebrow accent>Why this helps</Eyebrow>
+        <h5 style={{ margin: 0, fontSize: 18 }}>Every farm grows the ICP voice — and burns to prove it</h5>
+        <p style={{ margin: 0, fontSize: 13.5, color: 'var(--fg-2)', maxWidth: 640, lineHeight: 1.6 }}>
+          X-Farm turns idle ICP into a daily, on-chain contribution to the Internet Computer's presence on X.
+          You're not just holding a bag — you're burning it into real compute that drafts content, funds the
+          treasury, and keeps the pro-ICP conversation alive. No farm yet? Here's what one gives you.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+          {XFARM_USE_CASES.map(u => (
+            <div key={u.title} className="card col" style={{ gap: 8, padding: 14 }}>
+              <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+                <Icon name={u.icon as any} size={16} stroke="var(--burn-ink)" />
+                <b style={{ fontSize: 13.5 }}>{u.title}</b>
+              </span>
+              <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>{u.body}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Persona grid with example tweets */}
+      <div className="col" style={{ gap: 12 }}>
+        <Eyebrow accent>Pick a voice</Eyebrow>
+        <h5 style={{ margin: 0, fontSize: 18 }}>Six personas, each with its own pro-ICP angle</h5>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--fg-3)', maxWidth: 620 }}>
+          Each Farmer drafts in a voice you choose. Here's a sample tweet each one might produce.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 14 }}>
+          {PERSONA_PRESETS.map(p => (
+            <div key={p.id} className="card col" style={{ gap: 10, padding: 14 }}>
+              <div className="col" style={{ gap: 3 }}>
+                <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--burn-ink)' }}>{p.label}</span>
+                <span style={{ fontSize: 12, color: 'var(--fg-3)', lineHeight: 1.4 }}>{p.description}</span>
+              </div>
+              <div className="col" style={{
+                gap: 8, padding: '11px 13px', background: 'var(--surface)',
+                border: '1px solid var(--border)', borderLeft: `3px solid ${TWITTER_BLUE}`, borderRadius: 8,
+              }}>
+                <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--fg-3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                  Example draft
+                </span>
+                <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)', whiteSpace: 'pre-wrap' }}>
+                  {p.example}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="row" style={{ gap: 8, marginTop: 4 }}>
+          <Btn variant="primary" onClick={onStart}>
+            {canStart ? 'Start a farm' : 'Sign in to start'}
+          </Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DraftRow({ d, onShare }: {
   d: XFarmDraft; onShare: (d: XFarmDraft) => void;
 }) {
@@ -851,12 +943,15 @@ function DraftRow({ d, onShare }: {
         {d.text}
       </p>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-        {d.cited_url ? (
-          <a href={d.cited_url} target="_blank" rel="noopener noreferrer"
-             style={{ fontSize: 11, color: 'var(--fg-3)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <Icon name="external" size={11} /> source
-          </a>
-        ) : <span />}
+        <span className="row" style={{ gap: 8, alignItems: 'center', fontSize: 11, color: 'var(--fg-3)' }}>
+          <span>{new Date(Number(d.created_at) / 1_000_000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+          {d.cited_url && (
+            <a href={d.cited_url} target="_blank" rel="noopener noreferrer"
+               style={{ color: 'var(--fg-3)', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <Icon name="external" size={11} /> source
+            </a>
+          )}
+        </span>
         <button onClick={() => onShare(d)} title="Share on X" style={{
           background: TWITTER_BLUE, color: '#fff', border: 'none', borderRadius: 8,
           padding: '7px 14px', display: 'inline-flex', alignItems: 'center', gap: 6,
