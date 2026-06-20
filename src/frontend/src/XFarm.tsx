@@ -744,7 +744,6 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
     window.open(`https://twitter.com/intent/tweet${q}`, '_blank', 'noopener,noreferrer');
   };
 
-  const daysLeft = statusTuple ? Number(statusTuple[1]) / 1_000_000_000_000 / 86_400 : null;
   const nextGen = statusTuple ? Number(statusTuple[2]) : null;
   const nextGenPassed = nextGen !== null && nextGen <= Date.now() * 1_000_000;
   const nextGenMs = nextGen !== null ? nextGen / 1_000_000 : null;
@@ -810,10 +809,6 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
       {/* Status row */}
       <div className="col" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)' }}>
         <span>persona: <span style={{ color: 'var(--fg-1)' }}>{farmer.persona}</span></span>
-        <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
-          {daysLeft !== null && <span>budget left: <b>~{Math.max(0, daysLeft).toFixed(1)} days</b></span>}
-          <span>burned: <b>{(Number(farmer.burned_cycles) / 1_000_000_000_000).toFixed(2)}T cycles</b></span>
-        </div>
         <span>
           {expired ? 'expired: ' : 'expires: '}
           <b style={expired ? { color: 'var(--bad)' } : undefined}>
