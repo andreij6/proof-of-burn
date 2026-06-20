@@ -534,6 +534,16 @@ export default function App() {
   const [aiOpenMap, setAiOpenMap] = useState<Record<string, boolean>>({});
 
   const [skillsCopied, setSkillsCopied] = useState(false);
+  // Bookmark hint: browsers block programmatic bookmarking, so clicking the
+  // star reveals the platform shortcut (and copies the URL as a fallback).
+  const [bookmarkHint, setBookmarkHint] = useState(false);
+  const isMacLike = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
+  const bookmarkShortcut = isMacLike ? '⌘ + D' : 'Ctrl + D';
+  const handleBookmark = () => {
+    try { navigator.clipboard?.writeText(window.location.origin); } catch { /* ignore */ }
+    setBookmarkHint(true);
+    setTimeout(() => setBookmarkHint(false), 4000);
+  };
 
   // Active tab selection
   const [activeTab, setActiveTab] = useState<'open' | 'committed' | 'history'>('open');
@@ -2168,19 +2178,50 @@ export default function App() {
 
         </div>
 
-        {/* Theme toggle — sun in dark mode (tap for light), moon in light mode */}
-        <button
-          onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
-          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-          title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
-          style={{
-            background: 'transparent', border: '1px solid var(--border)', borderRadius: 8,
-            cursor: 'pointer', color: 'var(--fg-2)', padding: 7, display: 'flex',
-            alignItems: 'center', flexShrink: 0,
-          }}
-        >
-          <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
-        </button>
+        <div className="row" style={{ gap: 8, alignItems: 'center', flexShrink: 0, position: 'relative' }}>
+          {/* Bookmark — reveals the keyboard shortcut (browsers block scripted
+              bookmarking) and copies the app URL as a fallback. */}
+          <button
+            onClick={handleBookmark}
+            aria-label="Bookmark this app"
+            title="Bookmark Caldera"
+            style={{
+              background: 'transparent', border: '1px solid var(--border)', borderRadius: 8,
+              cursor: 'pointer', color: 'var(--fg-2)', padding: 7, display: 'flex',
+              alignItems: 'center', flexShrink: 0,
+            }}
+          >
+            <Icon name="star" size={16} fill={bookmarkHint ? 'var(--burn-ink)' : 'none'} stroke={bookmarkHint ? 'var(--burn-ink)' : 'currentColor'} />
+          </button>
+          {bookmarkHint && (
+            <div role="status" style={{
+              position: 'absolute', top: 'calc(100% + 8px)', right: 0, zIndex: 50,
+              background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8,
+              padding: '8px 11px', boxShadow: '0 6px 20px rgba(0,0,0,0.18)', width: 'max-content', maxWidth: 240,
+            }}>
+              <span style={{ fontSize: 12.5, color: 'var(--fg-1)' }}>
+                Press <b className="mono" style={{ color: 'var(--burn-ink)' }}>{bookmarkShortcut}</b> to bookmark Caldera.
+              </span>
+              <span style={{ display: 'block', fontSize: 11.5, color: 'var(--fg-3)', marginTop: 3 }}>
+                Link copied to your clipboard too.
+              </span>
+            </div>
+          )}
+
+          {/* Theme toggle — sun in dark mode (tap for light), moon in light mode */}
+          <button
+            onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+            style={{
+              background: 'transparent', border: '1px solid var(--border)', borderRadius: 8,
+              cursor: 'pointer', color: 'var(--fg-2)', padding: 7, display: 'flex',
+              alignItems: 'center', flexShrink: 0,
+            }}
+          >
+            <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
+          </button>
+        </div>
       </header>
 
       {/* ── Main Layout (Nav Sidebar + Content + Tweak Panel) ── */}
