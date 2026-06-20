@@ -1077,6 +1077,14 @@ type UnstakeStatus = variant {
   // Neuron split off; StartDissolving not yet confirmed (sweep retries).
   SplitDone;
 };
+type UserBalanceRow = record {
+  icp : nat;
+  "principal" : principal;
+  ckbtc : nat;
+  cketh : nat;
+  ckusdc : nat;
+  ckusdt : nat;
+};
 type UserStakeInfo = record {
   tiers : vec UserTierStake;
   // Sum of the caller's stakes across tiers.
@@ -1202,6 +1210,9 @@ service : (InitPayload) -> {
   // Admin: every unstake record across all users — the split neurons the
   // canister manages on users' behalf (dissolving, restaked, disbursed).
   admin_list_pending_unstakes : () -> (vec PendingUnstake) query;
+  // Admin: every known participant principal (dedup union across all features).
+  // Cheap (no outcalls) — the frontend pages this list into `admin_user_balances`.
+  admin_list_user_principals : () -> (vec principal) query;
   admin_mute_chat : (principal, nat64) -> (Result);
   // Pause/unpause the round loop. The current round still settles; no new
   // betting window opens while paused.
@@ -1317,6 +1328,10 @@ service : (InitPayload) -> {
   admin_unhide_course : (nat64) -> (Result);
   // Admin: update a project's details and its single USD funding goal.
   admin_update_project : (nat64, text, text, text, nat64) -> (Result);
+  // Admin: wallet balances (own default account) for a chunk of principals across
+  // all five supported tokens. Call in batches (e.g. ~8/call → ~40 outcalls) and
+  // accumulate client-side. A token with no configured ledger reports 0.
+  admin_user_balances : (vec principal) -> (vec UserBalanceRow);
   // Catastrophic-wedge escape hatch (writer #4): refund every wager in the
   // current round (delta 0 for all, house delta 0) and archive it void.
   admin_void_crash_round : () -> (Result);

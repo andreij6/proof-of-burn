@@ -12047,6 +12047,83 @@ async fn reclaim_escrow(
     Ok(amount)
 }
 
+// ── Admin: per-user wallet balances across all supported tokens ──────────────
+//
+// One row per known participant with their OWN wallet balance (default account,
+// no subaccount) on each ledger. "All users" has no single registry, so we union
+// every per-feature map that records a principal. Amounts are `Nat` (ckETH wei
+// overflows u64). Balances are fetched by `admin_user_balances` in caller-supplied
+// chunks so a large user base doesn't blow the per-call outcall budget.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct UserBalanceRow {
+    pub principal: Principal,
+    pub icp: candid::Nat,
+    pub ckbtc: candid::Nat,
+    pub cketh: candid::Nat,
+    pub ckusdc: candid::Nat,
+    pub ckusdt: candid::Nat,
+}
+
+/// Deduped union of every principal that appears in any per-feature map.
+fn admin_collect_user_principals() -> Vec<Principal> {
+    let mut set: std::collections::BTreeSet<Principal> = std::collections::BTreeSet::new();
+    COMMITMENTS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.key().principal); }));
+    USER_AGGREGATES.with(|m| m.borrow().iter().for_each(|e| { set.insert(*e.key()); }));
+    STAKES.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.key().user); }));
+    LOTTERY_TICKETS.with(|m| m.borrow().iter().for_each(|e| { set.insert(*e.key()); }));
+    EARLY_ADOPTERS.with(|m| m.borrow().iter().for_each(|e| { set.insert(*e.key()); }));
+    IDEAS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().poster); }));
+    PROJECT_FUNDINGS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().funder); }));
+    THREADS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().author); }));
+    COMMENTS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().author); }));
+    XFARM_FARMERS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().owner); }));
+    POOL_NEURONS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().registered_by); }));
+    set.remove(&Principal::anonymous());
+    set.into_iter().collect()
+}
+
+/// Admin: every known participant principal (dedup union across all features).
+/// Cheap (no outcalls) — the frontend pages this list into `admin_user_balances`.
+#[ic_cdk::query(guard = "require_admin")]
+fn admin_list_user_principals() -> Vec<Principal> {
+    admin_collect_user_principals()
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn ledger_balance_nat(ledger: Principal, owner: Principal) -> candid::Nat {
+    let acct = LedgerAccount { owner, subaccount: None };
+    let r: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_balance_of", (acct,)).await;
+    r.map(|(n,)| n).unwrap_or_else(|_| candid::Nat::from(0u32))
+}
+#[cfg(not(target_arch = "wasm32"))]
+async fn ledger_balance_nat(_ledger: Principal, _owner: Principal) -> candid::Nat {
+    candid::Nat::from(0u32)
+}
+
+/// Admin: wallet balances (own default account) for a chunk of principals across
+/// all five supported tokens. Call in batches (e.g. ~8/call → ~40 outcalls) and
+/// accumulate client-side. A token with no configured ledger reports 0.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_user_balances(principals: Vec<Principal>) -> Vec<UserBalanceRow> {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let icp_l = config.ledger_canister_id;
+    let ckbtc_l = config.ckbtc_ledger_canister_id;
+    let cketh_l = config.cketh_ledger_canister_id;
+    let ckusdc_l = config.ckusdc_ledger_canister_id;
+    let ckusdt_l = config.ckusdt_ledger_canister_id;
+    let zero = || candid::Nat::from(0u32);
+    let mut rows = Vec::with_capacity(principals.len());
+    for p in principals {
+        let icp = ledger_balance_nat(icp_l, p).await;
+        let ckbtc = match ckbtc_l { Some(l) => ledger_balance_nat(l, p).await, None => zero() };
+        let cketh = match cketh_l { Some(l) => ledger_balance_nat(l, p).await, None => zero() };
+        let ckusdc = match ckusdc_l { Some(l) => ledger_balance_nat(l, p).await, None => zero() };
+        let ckusdt = match ckusdt_l { Some(l) => ledger_balance_nat(l, p).await, None => zero() };
+        rows.push(UserBalanceRow { principal: p, icp, ckbtc, cketh, ckusdc, ckusdt });
+    }
+    rows
+}
+
 /// Admin: seed/override a token's USD rate (e8s per whole token). The local
 /// network has no XRC so this is the only knob there; on mainnet it acts as
 /// an emergency seed that the next successful XRC refresh overwrites.

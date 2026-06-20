@@ -4,7 +4,8 @@ import { UnstakeStatus } from "./bindings/backend";
 import { FlagState } from "./bindings/backend";
 import type { Config, FeatureFlag, GlobalStats, LotteryInfo, EarlyAdopterInfo, StakingPoolInfo, PoolInfo, NeuronFollowStatus, AuditLogEntry, StakeTier, PendingUnstake } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import type { ModerationCandidate } from "./bindings/backend";
+import type { ModerationCandidate, UserBalanceRow } from "./bindings/backend";
+import type { Principal } from "@icp-sdk/core/principal";
 import { Icon, Eyebrow, Btn, Chip, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 import { useErrorImpression } from "./analytics";
 import CourseEditor from "./arcade/CourseEditor";
@@ -29,7 +30,7 @@ interface AdminProps {
   openTreasury: () => void;
 }
 
-type AdminSection = 'overview' | 'treasury' | 'neurons' | 'governance' | 'staking' | 'features' | 'content' | 'moderation' | 'reference';
+type AdminSection = 'overview' | 'treasury' | 'neurons' | 'governance' | 'staking' | 'features' | 'content' | 'moderation' | 'users' | 'reference';
 
 const SECTIONS: { key: AdminSection; label: string; icon: string }[] = [
   { key: 'overview', label: 'Overview', icon: 'eye' },
@@ -40,8 +41,18 @@ const SECTIONS: { key: AdminSection; label: string; icon: string }[] = [
   { key: 'features', label: 'Features', icon: 'zap' },
   { key: 'content', label: 'Content', icon: 'gamepad' },
   { key: 'moderation', label: 'Course moderation', icon: 'eye' },
+  { key: 'users', label: 'Users', icon: 'list' },
   { key: 'reference', label: 'Reference', icon: 'info' },
 ];
+
+// Columns for the user-balances table: field key on UserBalanceRow + decimals.
+const USER_BAL_COLS = [
+  { key: 'icp', label: 'ICP', dec: 8 },
+  { key: 'ckbtc', label: 'ckBTC', dec: 8 },
+  { key: 'cketh', label: 'ckETH', dec: 18 },
+  { key: 'ckusdc', label: 'ckUSDC', dec: 6 },
+  { key: 'ckusdt', label: 'ckUSDT', dec: 6 },
+] as const;
 
 // The treasury account exists on every configured ledger — fees and shares
 // accumulate per token. Decimals drive display + smallest-unit conversion.
@@ -416,6 +427,37 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       const list: ModerationCandidate[] = await actor.admin_list_moderation_candidates(200);
       setModCandidates(list);
     } catch { /* transient */ }
+  };
+
+  // ── user wallet balances ─────────────────────────────────────────────────
+  // Union of every known participant principal, each with its own wallet balance
+  // across the five tokens. Fetched in chunks (5 outcalls/user) so a big user
+  // base doesn't blow one call's outcall budget; rows accumulate as they arrive.
+  const [userRows, setUserRows] = useState<UserBalanceRow[] | null>(null);
+  const [userProgress, setUserProgress] = useState<{ done: number; total: number } | null>(null);
+
+  const loadUserBalances = async () => {
+    if (!actor) return;
+    setBusy('users'); setError(null); setNotice(null);
+    setUserRows(null); setUserProgress(null);
+    try {
+      const principals: Principal[] = await actor.admin_list_user_principals();
+      setUserProgress({ done: 0, total: principals.length });
+      const CHUNK = 8;
+      const rows: UserBalanceRow[] = [];
+      for (let i = 0; i < principals.length; i += CHUNK) {
+        const part = await actor.admin_user_balances(principals.slice(i, i + CHUNK));
+        rows.push(...part);
+        setUserRows([...rows]);
+        setUserProgress({ done: Math.min(i + CHUNK, principals.length), total: principals.length });
+      }
+      setUserRows(rows);
+      setNotice(`Loaded ${rows.length} user${rows.length === 1 ? '' : 's'}.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
   };
 
   const hideCourse = (c: ModerationCandidate) => run(`mod-hide-${c.token_id}`, async () => {
@@ -1021,6 +1063,77 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                     </span>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ════ USERS ════ */}
+      {section === 'users' && (
+        <>
+          <div className="col" style={{ ...card, gap: 10 }}>
+            <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="list" size={13} stroke="var(--burn-ink)" />
+                <Eyebrow>User wallet balances</Eyebrow>
+              </span>
+              <Btn variant="ghost" sm onClick={loadUserBalances} disabled={busy !== null}>
+                <Icon name="undo" size={12} /> {userRows === null ? 'Load' : 'Reload'}
+              </Btn>
+            </span>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              Every known participant — the union across voting, staking, lottery, ideas,
+              project funding, discussions, pool neurons and X-Farm — and the balance held in
+              their <b>own wallet</b> on each ledger. Fetched in batches (5 ledger reads per
+              user), so a large user base takes a moment.
+            </span>
+
+            {userProgress && busy === 'users' && (
+              <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
+                Loading balances… {userProgress.done}/{userProgress.total}
+              </span>
+            )}
+            {userRows !== null && userRows.length === 0 && busy !== 'users' && (
+              <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No participants yet.</span>
+            )}
+
+            {userRows !== null && userRows.length > 0 && (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ color: 'var(--fg-3)' }}>
+                      <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 500 }}>Principal</th>
+                      {USER_BAL_COLS.map(c => (
+                        <th key={c.key} style={{ textAlign: 'right', padding: '4px 8px', fontWeight: 500 }}>{c.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {userRows.map(r => (
+                      <tr key={r.principal.toText()} style={{ borderTop: '1px solid var(--border)' }}>
+                        <td className="mono" style={{ padding: '4px 8px', textAlign: 'left' }} title={r.principal.toText()}>
+                          {formatPrincipal(r.principal)}
+                        </td>
+                        {USER_BAL_COLS.map(c => (
+                          <td key={c.key} className="mono" style={{ padding: '4px 8px', textAlign: 'right' }}>
+                            {fmtUnits(r[c.key], c.dec)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ borderTop: '2px solid var(--border-hi)', fontWeight: 600 }}>
+                      <td style={{ padding: '6px 8px', textAlign: 'left' }}>TOTAL ({userRows.length})</td>
+                      {USER_BAL_COLS.map(c => (
+                        <td key={c.key} className="mono" style={{ padding: '6px 8px', textAlign: 'right', color: 'var(--burn-ink)' }}>
+                          {fmtUnits(userRows.reduce((s, r) => s + r[c.key], 0n), c.dec)}
+                        </td>
+                      ))}
+                    </tr>
+                  </tfoot>
+                </table>
               </div>
             )}
           </div>
