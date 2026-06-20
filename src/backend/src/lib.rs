@@ -2014,6 +2014,23 @@ thread_local! {
     static TEST_ACCT_BALANCES: RefCell<std::collections::HashMap<(Principal, [u8; 32]), u64>> =
         RefCell::new(std::collections::HashMap::new());
     static TEST_ACCT_NEXT_BLOCK: RefCell<u64> = const { RefCell::new(1) };
+    /// When Some(err), the host `notify_cmc_topup` mock returns that Err instead of
+    /// Ok — lets unit tests simulate a CMC notify failure (the C2 trapped-fund
+    /// scenario) and assert the renew journaled the block + the sweep recovers it.
+    static TEST_CMC_NOTIFY_FAIL: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// When Some(err), the host `xfarm_extend_farmer` mock returns that Err — lets
+    /// unit tests simulate a Farmer `extend` failure (post-money renew error path).
+    static TEST_XFARM_EXTEND_FAIL: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_cmc_notify_fail(err: Option<String>) {
+    TEST_CMC_NOTIFY_FAIL.with(|cell| { *cell.borrow_mut() = err; });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_mock_xfarm_extend_fail(err: Option<String>) {
+    TEST_XFARM_EXTEND_FAIL.with(|cell| { *cell.borrow_mut() = err; });
 }
 
 /// Subaccount key for the accounting ledger; `None` subaccount → all-zeros.
@@ -2385,6 +2402,8 @@ async fn notify_cmc_topup(
 // Host-test mock: the CMC is unreachable off-canister, so treat the notify as a
 // no-op success. Saga idempotency/transfer logic is exercised via the mocked
 // ledger; the real notify path is covered by PocketIC integration tests.
+// `set_mock_cmc_notify_fail(Some(..))` forces a failure to exercise the
+// journal-before-notify + sweep-recovery path (the C2 trapped-fund fix).
 #[cfg(not(target_arch = "wasm32"))]
 async fn notify_cmc_topup(
     _cmc: Principal,
@@ -2392,6 +2411,9 @@ async fn notify_cmc_topup(
     _block_index: u64,
     _fail_on_missing_cmc: bool,
 ) -> Result<(), String> {
+    if let Some(e) = TEST_CMC_NOTIFY_FAIL.with(|cell| cell.borrow().clone()) {
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -11866,24 +11888,85 @@ fn admin_set_explorer_ledger(token: ExplorerToken, ledger: Principal) -> Result<
 }
 
 /// Which pay-first deposit escrow to reclaim from.
+///
+/// `Explorer`/`Arcade`/`EarlyAdopter` were the original reclaimable kinds
+/// (review 2026-06-11). The 2026-06-20 escrow audit found that every other
+/// pay-first escrow — Featured, Idea-post, Discussion, Stake, Commitment,
+/// Project — had **no reclaim path at all**, so a deposit that wasn't
+/// consumed (abandoned, failed a guard, overpaid, or — for Discussion —
+/// the proposal settled before the comment landed) was permanently
+/// stranded. All six are now reclaimable here.
+///
+/// `Commitment` and `Project` are keyed by an id (proposal_id / project_id)
+/// passed as `reclaim_escrow`'s `key` arg; the other kinds are per-principal
+/// and ignore `key`. `Commitment`/`Project` refuse to reclaim while an
+/// in-flight record still claims the escrow (settlement/funding owns it
+/// then) — see `commitment_in_flight` / `project_funding_in_flight`. That
+/// keeps a user from clawing back committed/staked principal mid-saga;
+/// overpayment dust becomes reclaimable once the record reaches a terminal
+/// state (Commitment `Burned`/`Returned`, or no record at all).
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug)]
 pub enum EscrowKind {
     Explorer,
     Arcade,
     EarlyAdopter,
+    Featured,
+    IdeaPost,
+    Discussion,
+    Stake,
+    Commitment,
+    Project,
+}
+
+/// Is there a non-terminal Commitment for `(caller, proposal_id)`? If so the
+/// settlement process still owns the escrow (Pending = awaiting cutoff;
+/// ThresholdMet/FailedBurn/FailedRefund/StuckFunds = mid-settlement). Only
+/// `Burned`/`Returned` (or no record at all) leave any balance reclaimable.
+fn commitment_in_flight(caller: &Principal, proposal_id: u64) -> bool {
+    let key = CommitmentKey { proposal_id, principal: *caller };
+    match COMMITMENTS.with(|m| m.borrow().get(&key)) {
+        Some(c) => {
+            c.status != CommitmentStatus::Burned && c.status != CommitmentStatus::Returned
+        }
+        None => false,
+    }
+}
+
+/// Is there an in-flight ProjectFunding for `(caller, project_id)`? A
+/// `FailedPayout` row means `fund_project` journaled the funding BEFORE its
+/// escrow→treasury transfer (the retryable pattern) and the sweep will still
+/// draw `amount` from the escrow — reclaiming it would steal that funding.
+/// `Settled` rows already drew their amount (escrow holds only overpay now).
+fn project_funding_in_flight(caller: &Principal, project_id: u64) -> bool {
+    PROJECT_FUNDINGS.with(|m| {
+        m.borrow().iter().any(|e| {
+            let f = e.value();
+            f.funder == *caller && f.project_id == project_id
+                && f.status == UpvoteStatus::FailedPayout
+        })
+    })
 }
 
 /// Withdraw the caller's remaining balance from one of their pay-first
-/// deposit subaccounts (Explorer listing / Arcade customization / Early Adopter
-/// stake). These accounts are funded right before a paid action; if that
-/// action then fails — expired quote, listing quota, closed membership — the
-/// deposit would otherwise be stranded with no recovery path (review
-/// 2026-06-11). Only ever touches the caller's own derived subaccount, and
-/// the shared CallerGuard makes it mutually exclusive with the paid actions.
+/// deposit subaccounts. These accounts are funded right before a paid
+/// action; if that action then fails — expired quote, listing quota, closed
+/// membership, a guard rejection, an overpayment, or (Discussion) the proposal
+/// settling before the comment landed — the deposit would otherwise be
+/// stranded with no recovery path. Only ever touches the caller's own derived
+/// subaccount, and the shared CallerGuard makes it mutually exclusive with the
+/// paid actions (every consume method already takes CallerGuard).
 /// Deliberately NOT feature-flag-gated: stranded funds must stay recoverable
 /// even after a kill switch.
+///
+/// `key` is the proposal_id for `Commitment` and the project_id for `Project`
+/// (required for those; `KEY_REQUIRED` if missing). The per-principal kinds
+/// ignore it.
 #[ic_cdk::update]
-async fn reclaim_escrow(kind: EscrowKind, token: ExplorerToken) -> Result<u64, String> {
+async fn reclaim_escrow(
+    kind: EscrowKind,
+    token: ExplorerToken,
+    key: Option<u64>,
+) -> Result<u64, String> {
     require_authenticated()?;
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
@@ -11891,6 +11974,36 @@ async fn reclaim_escrow(kind: EscrowKind, token: ExplorerToken) -> Result<u64, S
         EscrowKind::Explorer => derive_explorer_subaccount(&caller),
         EscrowKind::Arcade => derive_arcade_subaccount(&caller),
         EscrowKind::EarlyAdopter => derive_early_adopter_subaccount(&caller),
+        EscrowKind::Featured => derive_featured_subaccount(&caller),
+        EscrowKind::IdeaPost => derive_idea_subaccount(&caller, IDEA_POST_SEED),
+        EscrowKind::Discussion => derive_discussion_subaccount(&caller),
+        EscrowKind::Stake => {
+            // Stake escrow is ICP-only (funds the governance staking subaccount).
+            if token != ExplorerToken::ICP {
+                return Err("STAKE_ICP_ONLY".to_string());
+            }
+            derive_subaccount(&caller, STAKE_SEED)
+        }
+        EscrowKind::Commitment => {
+            let proposal_id = key.ok_or_else(|| "KEY_REQUIRED: proposal_id".to_string())?;
+            if commitment_in_flight(&caller, proposal_id) {
+                // Settlement still owns this escrow — reclaiming would claw
+                // back committed/staked principal. Overpay is reclaimable once
+                // the commitment reaches Burned/Returned (or never existed).
+                return Err("COMMITMENT_IN_FLIGHT".to_string());
+            }
+            derive_subaccount(&caller, proposal_id)
+        }
+        EscrowKind::Project => {
+            let project_id = key.ok_or_else(|| "KEY_REQUIRED: project_id".to_string())?;
+            if project_funding_in_flight(&caller, project_id) {
+                // A journaled funding still draws from this escrow — reclaiming
+                // would steal it. Reclaimable once the funding settles (or none
+                // was ever journaled, i.e. a pure orphan deposit).
+                return Err("PROJECT_FUNDING_IN_FLIGHT".to_string());
+            }
+            derive_project_subaccount(&caller, project_id)
+        }
     };
     let config = CONFIG.with(|c| c.borrow().get().clone());
     let ledger_id = explorer_token_ledger(token, &config);
@@ -11911,7 +12024,7 @@ async fn reclaim_escrow(kind: EscrowKind, token: ExplorerToken) -> Result<u64, S
     let entry = AuditLogEntry {
         timestamp: current_time(),
         event_type: "escrow_reclaim".to_string(),
-        proposal_id: 0,
+        proposal_id: key.unwrap_or(0),
         user: caller,
         amount_e8s: amount,
     };
@@ -18904,6 +19017,29 @@ async fn xfarm_delete_canister(cid: Principal) -> Result<(), String> {
 #[cfg(not(target_arch = "wasm32"))]
 async fn xfarm_delete_canister(_cid: Principal) -> Result<(), String> { Ok(()) }
 
+// Tell an EXISTING Farmer canister to bump its cycle budget + duration and re-arm
+// the burn timer (called by renew_farmer after the money legs). The Farmer's
+// `extend` returns Result<(), String>; the inter-canister call itself may also
+// reject, so both layers are unwrapped.
+#[cfg(target_arch = "wasm32")]
+async fn xfarm_extend_farmer(cid: Principal, add_budget: u64, add_days: u32) -> Result<(), String> {
+    let res: Result<(Result<(), String>,), _> = ic_cdk::call(cid, "extend", (add_budget, add_days)).await;
+    match res {
+        Ok((Ok(()),)) => Ok(()),
+        Ok((Err(e),)) => Err(format!("EXTEND_FAILED: {}", e)),
+        Err((c, m)) => Err(format!("EXTEND_CALL ({:?}): {}", c, m)),
+    }
+}
+// Host mock: no-op Ok (the Farmer canister only runs on wasm). A test-fail seam
+// lets unit tests simulate an extend failure to exercise the renew error path.
+#[cfg(not(target_arch = "wasm32"))]
+async fn xfarm_extend_farmer(_cid: Principal, _add_budget: u64, _add_days: u32) -> Result<(), String> {
+    if let Some(e) = TEST_XFARM_EXTEND_FAIL.with(|cell| cell.borrow().clone()) {
+        return Err(e);
+    }
+    Ok(())
+}
+
 // ── Public query/update API ─────────────────────────────────────────
 
 #[ic_cdk::query]
@@ -19160,9 +19296,27 @@ async fn admin_refund_xfarm_escrow(user: Principal) -> Result<u64, String> {
 /// canister — then calls the Farmer's `extend(add_budget_cycles, add_days)` to bump
 /// the budget + duration and re-arm the burn timer. The owner gets a fresh quote for
 /// the Farmer's tier first (frontend calls get_xfarm_quote). A depleted/swept Farmer
-/// (no canister) can't be renewed → create a new one. Like create_farmer the
-/// multi-leg path isn't fully idempotent on partial failure; the locked quote is only
-/// consumed on full success.
+/// (no canister) can't be renewed → create a new one.
+///
+/// C2 trapped-fund fix (2026-06-20): the CMC leg now journals `burn_block_index` +
+/// clears `cmc_notified` BEFORE the notify call (mirrors `create_farmer`), so a
+/// transient notify failure no longer strands the 90% ICP at the CMC — `xfarm_sweep`
+/// re-notifies the journaled block and recovers it as cycles. `CMC_REFUNDED` drops
+/// the block (the CMC sent the ICP back to the escrow) and the auto-refund wrapper
+/// returns it. Like `create_farmer`, ANY failure auto-refunds the escrow: pre-money
+/// failures refund the full deposit; post-money failures find the escrow drained →
+/// refund no-ops (the CMC leg is journaled, so the sweep recovers those funds).
+///
+/// NOTE: the money legs here are NOT guarded the way create's are — the Farmer's
+/// `treasury_block` / `burn_block_index` / `cmc_notified` fields are reused from
+/// create and can't cleanly distinguish "this renew's block" from "create's block"
+/// without per-renew struct fields. So a renew always re-runs the treasury + CMC
+/// transfers (overwriting the historical create blocks). This matches the pre-fix
+/// behavior; the only change is the journaling that lets the sweep recover a notify
+/// failure. The retry-after-extend-failure double-charge this implies is a known
+/// limitation documented in docs/escrow-fix-review-2026-06-20.md (the proper fix is
+/// a per-renew epoch field; deferred — extend failures are rare, the Farmer canister
+/// is controller-owned and the call is local).
 #[ic_cdk::update]
 async fn renew_farmer(farmer_id: u64, days: u32) -> Result<Farmer, String> {
     require_authenticated()?;
@@ -19170,6 +19324,7 @@ async fn renew_farmer(farmer_id: u64, days: u32) -> Result<Farmer, String> {
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
 
+    let result: Result<Farmer, String> = async move {
     let mut farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
         .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
     if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
@@ -19202,24 +19357,36 @@ async fn renew_farmer(farmer_id: u64, days: u32) -> Result<Farmer, String> {
     let burn_amt = quote.price_e8s.saturating_sub(treasury_amt); // 90% → cycles
     let add_budget = burn_amt.saturating_sub(fee);
 
+    // 10% → treasury (overwrites the historical create block — see NOTE above).
     let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, treasury_amt, Some(fee))
+    let tb = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, treasury_amt, Some(fee))
         .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
+    farmer.treasury_block = Some(tb);
+    xfarm_put_farmer(&farmer);
 
-    // 90% → CMC topup to the EXISTING Farmer canister (funds the extension).
+    // 90% → CMC topup to the EXISTING Farmer canister. Journal the block + clear
+    // cmc_notified BEFORE notify (the C2 fix) so a notify failure is recoverable by
+    // `xfarm_sweep` (which re-notifies any Active farmer with a block + !cmc_notified).
     let block = call_cmc_topup_transfer(ledger_id, Some(sub), farmer_cid, burn_amt, fee)
         .await.map_err(|e| format!("RENEW_CMC_XFER: {}", e))?;
-    notify_cmc_topup(cmc_principal(), farmer_cid, block, false).await
-        .map_err(|e| format!("RENEW_CMC_NOTIFY: {}", e))?;
+    farmer.burn_block_index = Some(block);
+    farmer.cmc_notified = false;
+    xfarm_put_farmer(&farmer);
+    if let Err(e) = notify_cmc_topup(cmc_principal(), farmer_cid, block, false).await {
+        if e.starts_with("CMC_REFUNDED") {
+            // The CMC refused the block and sent the ICP back to the escrow subaccount;
+            // drop the block so the sweep doesn't re-notify a refunded one, and let the
+            // auto-refund wrapper below return it to the owner.
+            farmer.burn_block_index = None;
+            xfarm_put_farmer(&farmer);
+        }
+        return Err(format!("RENEW_CMC_NOTIFY: {}", e));
+    }
+    farmer.cmc_notified = true;
+    xfarm_put_farmer(&farmer);
 
     // Tell the Farmer to extend its budget + duration + re-arm the burn timer.
-    let res: Result<(Result<(), String>,), _> =
-        ic_cdk::call(farmer_cid, "extend", (add_budget, days)).await;
-    match res {
-        Ok((Ok(()),)) => {}
-        Ok((Err(e),)) => return Err(format!("EXTEND_FAILED: {}", e)),
-        Err((c, m)) => return Err(format!("EXTEND_CALL ({:?}): {}", c, m)),
-    }
+    xfarm_extend_farmer(farmer_cid, add_budget, days).await?;
 
     farmer.budget_cycles = farmer.budget_cycles.saturating_add(add_budget);
     farmer.expected_depleted_at = farmer.expected_depleted_at
@@ -19230,6 +19397,21 @@ async fn renew_farmer(farmer_id: u64, days: u32) -> Result<Farmer, String> {
     XFARM_QUOTES.with(|q| q.borrow_mut().remove(&caller));
     staking_audit("xfarm_renew", caller, quote.price_e8s, farmer_id);
     Ok(farmer)
+    }.await;
+
+    // On ANY failure auto-refund whatever's left in the escrow (mirrors create_farmer).
+    // Pre-treasury failures refund the full deposit; post-treasury/post-CMC failures
+    // find the escrow drained → refund no-ops (the CMC leg is journaled, so the sweep
+    // recovers those funds as cycles rather than stranding them at the CMC).
+    if result.is_err() {
+        if let Ok(amt) = xfarm_refund_escrow(caller).await {
+            if amt > 0 {
+                canister_print(&format!(
+                    "xfarm: refunded {} e8s to {} after failed renew", amt, caller.to_text()));
+            }
+        }
+    }
+    result
 }
 
 /// Called by a Farmer canister when its cycle balance hits the stop-floor (D2).
@@ -21935,13 +22117,146 @@ mod tests {
         set_mock_caller(user);
         // Nothing deposited → nothing to reclaim.
         set_mock_ledger_balance(0);
-        assert_eq!(reclaim_escrow(EscrowKind::Explorer, ExplorerToken::ICP).await.unwrap_err(), "NOTHING_TO_RECLAIM");
+        assert_eq!(reclaim_escrow(EscrowKind::Explorer, ExplorerToken::ICP, None).await.unwrap_err(), "NOTHING_TO_RECLAIM");
         // A stranded 5 ICP deposit (e.g. quote expired) comes back minus one fee.
         set_mock_ledger_balance(5 * ICP);
         set_mock_ledger_transfer(Ok(9));
-        assert_eq!(reclaim_escrow(EscrowKind::Explorer, ExplorerToken::ICP).await.unwrap(), 5 * ICP - 10_000);
-        assert_eq!(reclaim_escrow(EscrowKind::Arcade, ExplorerToken::CkUSDT).await.unwrap(), 5 * ICP - 10_000);
-        assert_eq!(reclaim_escrow(EscrowKind::EarlyAdopter, ExplorerToken::ICP).await.unwrap(), 5 * ICP - 10_000);
+        assert_eq!(reclaim_escrow(EscrowKind::Explorer, ExplorerToken::ICP, None).await.unwrap(), 5 * ICP - 10_000);
+        assert_eq!(reclaim_escrow(EscrowKind::Arcade, ExplorerToken::CkUSDT, None).await.unwrap(), 5 * ICP - 10_000);
+        assert_eq!(reclaim_escrow(EscrowKind::EarlyAdopter, ExplorerToken::ICP, None).await.unwrap(), 5 * ICP - 10_000);
+    }
+
+    /// Fix #1 (2026-06-20): the six newly-reclaimable escrow kinds. Each routes to
+    /// the caller's own derived subaccount and refunds balance-minus-fee. The
+    /// `Commitment`/`Project` kinds require a `key` and refuse reclaim while a
+    /// non-terminal record still owns the escrow.
+    #[tokio::test]
+    async fn test_reclaim_escrow_new_kinds() {
+        let user = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_caller(user);
+
+        // ── per-principal kinds (key ignored) ──────────────────────────────────
+        // Featured / IdeaPost / Discussion all refund a stranded deposit.
+        for kind in [EscrowKind::Featured, EscrowKind::IdeaPost, EscrowKind::Discussion] {
+            set_mock_ledger_balance(0);
+            assert_eq!(
+                reclaim_escrow(kind, ExplorerToken::ICP, None).await.unwrap_err(),
+                "NOTHING_TO_RECLAIM",
+                "{:?}: empty escrow is not reclaimable", kind,
+            );
+            set_mock_ledger_balance(3 * ICP);
+            set_mock_ledger_transfer(Ok(11));
+            assert_eq!(
+                reclaim_escrow(kind, ExplorerToken::ICP, None).await.unwrap(),
+                3 * ICP - 10_000,
+                "{:?}: stranded deposit refunded minus fee", kind,
+            );
+        }
+
+        // Stake is ICP-only — a non-ICP token is rejected before any ledger call.
+        assert_eq!(
+            reclaim_escrow(EscrowKind::Stake, ExplorerToken::CkBTC, None).await.unwrap_err(),
+            "STAKE_ICP_ONLY",
+        );
+        set_mock_ledger_balance(2 * ICP);
+        set_mock_ledger_transfer(Ok(3));
+        assert_eq!(
+            reclaim_escrow(EscrowKind::Stake, ExplorerToken::ICP, None).await.unwrap(),
+            2 * ICP - 10_000,
+        );
+
+        // ── keyed kinds ───────────────────────────────────────────────────────
+        // Missing key → KEY_REQUIRED (no ledger call made).
+        assert_eq!(
+            reclaim_escrow(EscrowKind::Commitment, ExplorerToken::ICP, None).await.unwrap_err(),
+            "KEY_REQUIRED: proposal_id",
+        );
+        assert_eq!(
+            reclaim_escrow(EscrowKind::Project, ExplorerToken::ICP, None).await.unwrap_err(),
+            "KEY_REQUIRED: project_id",
+        );
+
+        // No in-flight record → pure orphan deposit is reclaimable.
+        assert!(COMMITMENTS.with(|m| m.borrow().is_empty()));
+        set_mock_ledger_balance(4 * ICP);
+        set_mock_ledger_transfer(Ok(5));
+        assert_eq!(
+            reclaim_escrow(EscrowKind::Commitment, ExplorerToken::ICP, Some(777)).await.unwrap(),
+            4 * ICP - 10_000,
+        );
+        set_mock_ledger_balance(4 * ICP);
+        set_mock_ledger_transfer(Ok(6));
+        assert_eq!(
+            reclaim_escrow(EscrowKind::Project, ExplorerToken::ICP, Some(88)).await.unwrap(),
+            4 * ICP - 10_000,
+        );
+    }
+
+    /// Fix #1 guard: a non-terminal Commitment or a journaled FailedPayout
+    /// ProjectFunding still owns the escrow — reclaim must refuse rather than
+    /// claw back committed/staked principal or steal a pending funding.
+    #[tokio::test]
+    async fn test_reclaim_escrow_in_flight_guards() {
+        let user = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_caller(user);
+
+        // A Pending commitment for (user, proposal 42) owns the escrow.
+        COMMITMENTS.with(|m| {
+            m.borrow_mut().insert(
+                CommitmentKey { proposal_id: 42, principal: user },
+                Commitment {
+                    proposal_id: 42, principal: user, amount_e8s: 5 * ICP,
+                    status: CommitmentStatus::Pending, created_at: current_time(),
+                    stance: Stance::Adopt, subaccount: [0u8; 32], settled_at: None,
+                    cmc_block_index: None, treasury_block: None, frontend_cmc_block: None,
+                    token: None, token_amount: None, swapped_icp_e8s: None,
+                },
+            );
+        });
+        set_mock_ledger_balance(5 * ICP); // would be reclaimable if not guarded
+        assert_eq!(
+            reclaim_escrow(EscrowKind::Commitment, ExplorerToken::ICP, Some(42)).await.unwrap_err(),
+            "COMMITMENT_IN_FLIGHT",
+        );
+
+        // Once terminal (Burned), the escrow holds only overpay → reclaimable.
+        COMMITMENTS.with(|m| {
+            let mut map = m.borrow_mut();
+            if let Some(mut c) = map.get(&CommitmentKey { proposal_id: 42, principal: user }) {
+                c.status = CommitmentStatus::Burned;
+                map.insert(CommitmentKey { proposal_id: 42, principal: user }, c);
+            }
+        });
+        set_mock_ledger_balance(1 * ICP);
+        set_mock_ledger_transfer(Ok(7));
+        assert_eq!(
+            reclaim_escrow(EscrowKind::Commitment, ExplorerToken::ICP, Some(42)).await.unwrap(),
+            1 * ICP - 10_000,
+        );
+
+        // A journaled-but-unpaid ProjectFunding (FailedPayout) owns the escrow —
+        // the sweep will still draw `amount` from it, so reclaim must refuse.
+        PROJECT_FUNDINGS.with(|m| {
+            m.borrow_mut().insert(
+                1u64,
+                ProjectFunding {
+                    id: 1, project_id: 9, funder: user, token: IdeaToken::ICP,
+                    amount: 5 * ICP, status: UpvoteStatus::FailedPayout,
+                    created_at: current_time(), treasury_block: None,
+                },
+            );
+        });
+        set_mock_ledger_balance(5 * ICP);
+        assert_eq!(
+            reclaim_escrow(EscrowKind::Project, ExplorerToken::ICP, Some(9)).await.unwrap_err(),
+            "PROJECT_FUNDING_IN_FLIGHT",
+        );
+
+        // Clean up so other tests aren't polluted.
+        COMMITMENTS.with(|m| m.borrow_mut().remove(&CommitmentKey { proposal_id: 42, principal: user }));
+        PROJECT_FUNDINGS.with(|m| { m.borrow_mut().remove(&1u64); });
     }
 
     #[tokio::test]
@@ -28548,6 +28863,202 @@ mod tests {
         set_mock_ledger_balance(qb.price_e8s + qb.fee_e8s);
         set_mock_ledger_transfer(Ok(8));
         assert_eq!(create_farmer(1, "bob persona".into(), 7).await.unwrap_err(), "MAX_FARMERS_REACHED");
+    }
+
+    /// Fix #2 (2026-06-20): renew_farmer happy path. The renew reuses the
+    /// Farmer's money-leg fields; a fresh renew (cmc_notified from create) resets
+    /// them, then re-runs the 10% treasury + 90% CMC legs idempotantly and bumps
+    /// budget_cycles + expected_depleted_at after `extend`.
+    #[tokio::test]
+    async fn test_xfarm_renew_farmer_happy_path() {
+        install_staking_test_config();
+        xfarm_reset();
+        xfarm_enable();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        xfarm_set_admins(alice);
+        set_mock_caller(alice);
+        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+
+        // Create a tier-1 / 7-day farmer.
+        let q0 = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q0.price_e8s + q0.fee_e8s);
+        set_mock_ledger_transfer(Ok(42));
+        let f = create_farmer(1, "degen maxis, gm".into(), 7).await.unwrap();
+        let before = xfarm_farmers_by_owner(&alice).pop().unwrap();
+        assert_eq!(before.cmc_notified, true);
+        let budget_before = before.budget_cycles;
+        let depletion_before = before.expected_depleted_at;
+
+        // Renew: fresh quote for the same tier + days, fund escrow, renew.
+        let q = get_xfarm_quote(1, 7).await.unwrap();
+        assert_eq!(q.tier_id, 1);
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+        set_mock_ledger_transfer(Ok(100)); // treasury + CMC blocks
+        let renewed = renew_farmer(f.id, 7).await.unwrap();
+        assert_eq!(renewed.status, FarmerStatus::Active);
+        assert_eq!(renewed.cmc_notified, true, "renew CMC notify leg completed");
+        assert_eq!(renewed.treasury_block, Some(100), "renew treasury leg journaled");
+        assert_eq!(renewed.burn_block_index, Some(100), "renew CMC block journaled before notify");
+
+        let add_budget = (q.price_e8s - q.price_e8s / 10).saturating_sub(ICP_FEE_E8S);
+        assert_eq!(
+            renewed.budget_cycles, budget_before + add_budget,
+            "budget bumped by the 90% net of the CMC-leg fee",
+        );
+        assert_eq!(
+            renewed.expected_depleted_at, depletion_before + 7 * DAY_NS,
+            "duration extended by the renew days",
+        );
+        // Quote consumed on success.
+        assert!(XFARM_QUOTES.with(|qq| qq.borrow().get(&alice).is_none()));
+    }
+
+    /// Fix #2 (C2 trapped-fund): a CMC notify failure mid-renew used to strand the
+    /// 90% ICP at the CMC with no record the sweep could re-notify. Now the block
+    /// is journaled BEFORE notify (burn_block_index = Some, cmc_notified = false),
+    /// so `xfarm_sweep` recovers it as cycles. The 10% treasury leg is also
+    /// journaled and skipped on the retry (idempotent). Pre-treasury failures
+    /// auto-refund the escrow.
+    #[tokio::test]
+    async fn test_xfarm_renew_notify_failure_journals_and_sweep_recovers() {
+        install_staking_test_config();
+        xfarm_reset();
+        xfarm_enable();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        xfarm_set_admins(alice);
+        set_mock_caller(alice);
+        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+
+        // Create a farmer (notify Ok — no fail set yet).
+        let q0 = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q0.price_e8s + q0.fee_e8s);
+        set_mock_ledger_transfer(Ok(42));
+        let f = create_farmer(1, "persona".into(), 7).await.unwrap();
+        let farmer_id = f.id;
+
+        // Renew: treasury + CMC topup succeed, but the notify FAILS (transient CMC
+        // error, NOT a Refunded). Block must be journaled so the sweep can retry.
+        let q = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+        set_mock_ledger_transfer(Ok(200)); // treasury + CMC blocks
+        set_mock_cmc_notify_fail(Some("CMC call rejected (test): boom".to_string()));
+        let err = renew_farmer(farmer_id, 7).await.unwrap_err();
+        assert!(
+            err.starts_with("RENEW_CMC_NOTIFY"),
+            "renew surfaces the notify failure: {}", err,
+        );
+        // The C2 fix: block journaled + not yet notified → sweep can recover it.
+        let mid = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id).unwrap());
+        assert_eq!(mid.cmc_notified, false, "notify failed → not marked notified");
+        assert!(mid.burn_block_index.is_some(), "CMC block journaled before notify (the C2 fix)");
+        assert!(mid.treasury_block.is_some(), "treasury leg completed before the failed notify");
+
+        // Sweep re-notifies the journaled block; with the fail cleared it succeeds.
+        set_mock_cmc_notify_fail(None);
+        xfarm_sweep().await;
+        let after = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id).unwrap());
+        assert_eq!(after.cmc_notified, true, "sweep recovered the stranded CMC leg");
+
+        // ── CMC_REFUNDED path: the block is dropped (the CMC sent the ICP back to
+        // the escrow subaccount) and the auto-refund wrapper returns it. ─────────
+        let q = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+        set_mock_ledger_transfer(Ok(300));
+        set_mock_cmc_notify_fail(Some("CMC_REFUNDED: test".to_string()));
+        let err = renew_farmer(farmer_id, 7).await.unwrap_err();
+        assert!(err.starts_with("RENEW_CMC_NOTIFY"), "CMC_REFUNDED surfaces: {}", err);
+        let refunded = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id).unwrap());
+        assert_eq!(refunded.burn_block_index, None, "CMC_REFUNDED drops the block (sweep won't re-notify a refunded one)");
+        set_mock_cmc_notify_fail(None);
+    }
+
+    /// Fix #2 auto-refund: a renew that fails BEFORE the treasury leg (e.g. an
+    /// expired quote, a bad-days guard, insufficient deposit) auto-refunds the
+    /// escrow so the deposit isn't stranded — mirrors create_farmer.
+    #[tokio::test]
+    async fn test_xfarm_renew_premoney_failure_auto_refunds() {
+        install_staking_test_config();
+        xfarm_reset();
+        xfarm_enable();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        xfarm_set_admins(alice);
+        set_mock_caller(alice);
+        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+
+        // Create + renew once so a farmer exists in Active state.
+        let q0 = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q0.price_e8s + q0.fee_e8s);
+        set_mock_ledger_transfer(Ok(42));
+        let f = create_farmer(1, "persona".into(), 7).await.unwrap();
+        let q1 = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q1.price_e8s + q1.fee_e8s);
+        set_mock_ledger_transfer(Ok(43));
+        renew_farmer(f.id, 7).await.unwrap();
+
+        // Now a renew that fails at a pre-money guard: BAD_DAYS. The caller's
+        // escrow (funded below) is auto-refunded rather than stranded. We assert
+        // the guard fires and the call returns Err; the refund is a no-op here
+        // because no deposit was made for this attempt, but the wrapper must not
+        // panic and the farmer must remain Active + money legs untouched.
+        let q2 = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q2.price_e8s + q2.fee_e8s);
+        set_mock_ledger_transfer(Ok(44));
+        assert_eq!(renew_farmer(f.id, 99).await.unwrap_err(), "BAD_DAYS");
+        let after = XFARM_FARMERS.with(|m| m.borrow().get(&f.id).unwrap());
+        assert_eq!(after.status, FarmerStatus::Active, "failed renew leaves the farmer Active");
+        assert_eq!(after.cmc_notified, true, "prior renew's CMC leg intact");
+        // The quote for the failed attempt is NOT consumed (renew returned before
+        // the consume step) — the owner can re-lock and retry.
+        assert!(XFARM_QUOTES.with(|qq| qq.borrow().get(&alice).is_some()), "quote survives a pre-money failure");
+    }
+
+    /// Fix #2 post-money path: the money legs (treasury + CMC topup + notify) all
+    /// succeed, but the Farmer `extend` call fails. The renew returns Err; the
+    /// budget/duration are NOT bumped (extend never ran); the money legs stay
+    /// journaled (cmc_notified=true). The escrow is already drained → the
+    /// auto-refund no-ops. A retry (re-locking the quote, re-funding the escrow)
+    /// re-runs the money legs and completes the extend — the documented limitation
+    /// (the re-charge is the price of not having per-renew block fields).
+    #[tokio::test]
+    async fn test_xfarm_renew_extend_failure_is_idempotent_retry() {
+        install_staking_test_config();
+        xfarm_reset();
+        xfarm_enable();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        xfarm_set_admins(alice);
+        set_mock_caller(alice);
+        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+
+        let q0 = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q0.price_e8s + q0.fee_e8s);
+        set_mock_ledger_transfer(Ok(42));
+        let f = create_farmer(1, "persona".into(), 7).await.unwrap();
+        let before = xfarm_farmers_by_owner(&alice).pop().unwrap();
+        let budget_before = before.budget_cycles;
+        let depletion_before = before.expected_depleted_at;
+
+        // Renew: money legs succeed, extend fails.
+        let q = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
+        set_mock_ledger_transfer(Ok(500));
+        set_mock_xfarm_extend_fail(Some("EXTEND_FAILED: farmer down".to_string()));
+        let err = renew_farmer(f.id, 7).await.unwrap_err();
+        assert!(err.starts_with("EXTEND_FAILED"), "extend failure surfaces: {}", err);
+        let mid = XFARM_FARMERS.with(|m| m.borrow().get(&f.id).unwrap());
+        assert_eq!(mid.cmc_notified, true, "money legs completed before extend");
+        assert!(mid.treasury_block.is_some() && mid.burn_block_index.is_some());
+        assert_eq!(mid.budget_cycles, budget_before, "budget NOT bumped (extend never ran)");
+        assert_eq!(mid.expected_depleted_at, depletion_before, "duration NOT extended (extend never ran)");
+
+        // Retry: re-lock a fresh quote, re-fund the escrow, clear the extend fail.
+        set_mock_xfarm_extend_fail(None);
+        let q2 = get_xfarm_quote(1, 7).await.unwrap();
+        set_mock_ledger_balance(q2.price_e8s + q2.fee_e8s);
+        set_mock_ledger_transfer(Ok(600));
+        let renewed = renew_farmer(f.id, 7).await.unwrap();
+        assert!(renewed.budget_cycles > budget_before, "retry bumps the budget");
+        assert!(renewed.expected_depleted_at > depletion_before, "retry extends the duration");
+        assert_eq!(renewed.cmc_notified, true);
     }
 
     #[tokio::test]

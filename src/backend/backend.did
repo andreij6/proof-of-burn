@@ -406,7 +406,34 @@ type EligibilityInfo = record {
   has_committed : bool;
 };
 // Which pay-first deposit escrow to reclaim from.
-type EscrowKind = variant { Explorer; Arcade; EarlyAdopter };
+// 
+// `Explorer`/`Arcade`/`EarlyAdopter` were the original reclaimable kinds
+// (review 2026-06-11). The 2026-06-20 escrow audit found that every other
+// pay-first escrow — Featured, Idea-post, Discussion, Stake, Commitment,
+// Project — had **no reclaim path at all**, so a deposit that wasn't
+// consumed (abandoned, failed a guard, overpaid, or — for Discussion —
+// the proposal settled before the comment landed) was permanently
+// stranded. All six are now reclaimable here.
+// 
+// `Commitment` and `Project` are keyed by an id (proposal_id / project_id)
+// passed as `reclaim_escrow`'s `key` arg; the other kinds are per-principal
+// and ignore `key`. `Commitment`/`Project` refuse to reclaim while an
+// in-flight record still claims the escrow (settlement/funding owns it
+// then) — see `commitment_in_flight` / `project_funding_in_flight`. That
+// keeps a user from clawing back committed/staked principal mid-saga;
+// overpayment dust becomes reclaimable once the record reaches a terminal
+// state (Commitment `Burned`/`Returned`, or no record at all).
+type EscrowKind = variant {
+  Stake;
+  Explorer;
+  Discussion;
+  Project;
+  Arcade;
+  Commitment;
+  Featured;
+  EarlyAdopter;
+  IdeaPost;
+};
 // Everything the Explorer UI needs in one query.
 type ExplorerInfo = record {
   cketh_ledger : principal;
@@ -1739,15 +1766,20 @@ service : (InitPayload) -> {
   post_idea : (text, text, text, IdeaToken) -> (BalanceResult);
   rate_course : (nat64, nat8, opt text) -> (Result);
   // Withdraw the caller's remaining balance from one of their pay-first
-  // deposit subaccounts (Explorer listing / Arcade customization / Early Adopter
-  // stake). These accounts are funded right before a paid action; if that
-  // action then fails — expired quote, listing quota, closed membership — the
-  // deposit would otherwise be stranded with no recovery path (review
-  // 2026-06-11). Only ever touches the caller's own derived subaccount, and
-  // the shared CallerGuard makes it mutually exclusive with the paid actions.
+  // deposit subaccounts. These accounts are funded right before a paid
+  // action; if that action then fails — expired quote, listing quota, closed
+  // membership, a guard rejection, an overpayment, or (Discussion) the proposal
+  // settling before the comment landed — the deposit would otherwise be
+  // stranded with no recovery path. Only ever touches the caller's own derived
+  // subaccount, and the shared CallerGuard makes it mutually exclusive with the
+  // paid actions (every consume method already takes CallerGuard).
   // Deliberately NOT feature-flag-gated: stranded funds must stay recoverable
   // even after a kill switch.
-  reclaim_escrow : (EscrowKind, IdeaToken) -> (BalanceResult);
+  // 
+  // `key` is the proposal_id for `Commitment` and the project_id for `Project`
+  // (required for those; `KEY_REQUIRED` if missing). The per-principal kinds
+  // ignore it.
+  reclaim_escrow : (EscrowKind, IdeaToken, opt nat64) -> (BalanceResult);
   record_hole_event : (nat64, nat8) -> (Result_11);
   // Count a detail-view open (signed-in users only — anonymous ingress is
   // already rejected by inspect_message). Drives "most viewed" sorting.
@@ -1766,9 +1798,27 @@ service : (InitPayload) -> {
   // canister — then calls the Farmer's `extend(add_budget_cycles, add_days)` to bump
   // the budget + duration and re-arm the burn timer. The owner gets a fresh quote for
   // the Farmer's tier first (frontend calls get_xfarm_quote). A depleted/swept Farmer
-  // (no canister) can't be renewed → create a new one. Like create_farmer the
-  // multi-leg path isn't fully idempotent on partial failure; the locked quote is only
-  // consumed on full success.
+  // (no canister) can't be renewed → create a new one.
+  // 
+  // C2 trapped-fund fix (2026-06-20): the CMC leg now journals `burn_block_index` +
+  // clears `cmc_notified` BEFORE the notify call (mirrors `create_farmer`), so a
+  // transient notify failure no longer strands the 90% ICP at the CMC — `xfarm_sweep`
+  // re-notifies the journaled block and recovers it as cycles. `CMC_REFUNDED` drops
+  // the block (the CMC sent the ICP back to the escrow) and the auto-refund wrapper
+  // returns it. Like `create_farmer`, ANY failure auto-refunds the escrow: pre-money
+  // failures refund the full deposit; post-money failures find the escrow drained →
+  // refund no-ops (the CMC leg is journaled, so the sweep recovers those funds).
+  // 
+  // NOTE: the money legs here are NOT guarded the way create's are — the Farmer's
+  // `treasury_block` / `burn_block_index` / `cmc_notified` fields are reused from
+  // create and can't cleanly distinguish "this renew's block" from "create's block"
+  // without per-renew struct fields. So a renew always re-runs the treasury + CMC
+  // transfers (overwriting the historical create blocks). This matches the pre-fix
+  // behavior; the only change is the journaling that lets the sweep recover a notify
+  // failure. The retry-after-extend-failure double-charge this implies is a known
+  // limitation documented in docs/escrow-fix-review-2026-06-20.md (the proper fix is
+  // a per-renew epoch field; deferred — extend failures are rare, the Farmer canister
+  // is controller-owned and the call is local).
   renew_farmer : (nat64, nat32) -> (Result_4);
   // Called by a Farmer canister when its cycle balance hits the stop-floor (D2).
   // Only the Farmer's own canister may report. Sets Depleted so the sweep reaps it.
