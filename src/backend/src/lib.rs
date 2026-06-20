@@ -10924,7 +10924,7 @@ fn log_dapp_event(event_type: &str, dapp_id: u64, user: Principal, amount: u64) 
 /// Canonical Explorer categories. The submit dialog + filter read this list
 /// from `ExplorerInfo`; community submissions are validated against it so the
 /// filter only ever has to match known values.
-const DAPP_CATEGORIES: [&str; 11] = [
+const DAPP_CATEGORIES: [&str; 12] = [
     "DeFi",
     "DEX",
     "Wallet",
@@ -10936,6 +10936,7 @@ const DAPP_CATEGORIES: [&str; 11] = [
     "Analytics",
     "Infrastructure",
     "Marketplace",
+    "Identity",
 ];
 const MAX_DAPP_CATEGORIES: usize = 3;
 
@@ -10984,7 +10985,7 @@ fn seed_default_dapps() {
         c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
     });
     let now = current_time();
-    let samples: [(&str, &str, &str, &[&str]); 14] = [
+    let samples: [(&str, &str, &str, &[&str]); 15] = [
         (
             "idGeek 2.0",
             "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
@@ -11068,6 +11069,12 @@ fn seed_default_dapps() {
             "https://t5t44-naaaa-aaaah-qcutq-cai.raw.icp0.io/",
             "Analytics tool for Internet Computer NFTs: explore collections, holders, transfers and market activity across IC NFT projects — on-chain data and insights for collectors and traders, served entirely from a canister.",
             &["NFT", "Analytics"],
+        ),
+        (
+            "iiname",
+            "https://z7eqj-riaaa-aaaac-qc7zq-cai.icp0.io/",
+            "A readable name for your unreadable principal ID: claim a human-readable handle on the Internet Computer and turn it into a shareable link-in-bio profile — avatar plus your X, GitHub and other links — so people find and reach you by name instead of a long principal, all on-chain.",
+            &["Identity", "Social"],
         ),
     ];
     for (name, url, description, categories) in samples {
@@ -21443,7 +21450,7 @@ mod tests {
         seed_default_dapps();
         seed_default_dapps(); // re-run inserts nothing new
         let listed = list_dapps();
-        assert_eq!(listed.len(), 14);
+        assert_eq!(listed.len(), 15);
         assert_eq!(listed[0].name, "idGeek 2.0");
         assert_eq!(listed[1].name, "Liquidium");
         assert_eq!(listed[2].name, "ICPSwap");
@@ -21458,6 +21465,7 @@ mod tests {
         assert_eq!(listed[11].name, "Taggr");
         assert_eq!(listed[12].name, "Menese Protocol");
         assert_eq!(listed[13].name, "nftGeek");
+        assert_eq!(listed[14].name, "iiname");
         assert!(listed.iter().all(|d| !d.community && d.expires_at.is_none()));
     }
 
@@ -21468,10 +21476,10 @@ mod tests {
         // Simulate a directory seeded before the newer curated entries existed.
         let icpswap_id = list_dapps().iter().find(|d| d.name == "ICPSwap").unwrap().id;
         DAPPS.with(|m| { m.borrow_mut().remove(&icpswap_id); });
-        assert_eq!(list_dapps().len(), 13);
+        assert_eq!(list_dapps().len(), 14);
         seed_default_dapps();
         let listed = list_dapps();
-        assert_eq!(listed.len(), 14, "missing curated entry is backfilled");
+        assert_eq!(listed.len(), 15, "missing curated entry is backfilled");
         assert_eq!(listed.iter().filter(|d| d.name == "ICPSwap").count(), 1, "no duplicates");
     }
 
