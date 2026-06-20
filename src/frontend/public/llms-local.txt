@@ -67,11 +67,11 @@ brew install icp-cli
 
 ---
 
-## 3. Confirm following the Primary Neuron
-To vote and commit ICP, you must follow the Caldera primary
-neuron (`4821667`) on the NNS. Since the app cannot directly verify neuron
-ownership on-chain, you must self-attest that you are following by calling
-`confirm_follow`:
+## 3. (Optional) Self-attest that you follow the Primary Neuron
+Voting is **burn-only and open to any authenticated caller** — you do NOT need to
+follow any neuron to commit. Following the Caldera primary neuron (`4821667`) on
+the NNS is encouraged so your own NNS vote also moves with the community, and you
+may self-attest it (purely informational; not a precondition to commit):
 ```bash
 icp canister call backend confirm_follow "()" -e local
 ```

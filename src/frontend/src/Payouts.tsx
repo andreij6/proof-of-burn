@@ -164,7 +164,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
       key: 'rd',
       name: 'Community R&D board',
       file: `llms-rd-${env}.txt`,
-      blurb: 'Post ideas, upvote with funds, defend ideas from expiry, fund official projects.',
+      blurb: 'Post ideas ($0.05 in ICP/ckBTC/ckETH), upvote for free, defend ideas from expiry, fund official projects.',
       instruction: 'read, post, upvote and fund on the Caldera Community R&D board',
     },
     {

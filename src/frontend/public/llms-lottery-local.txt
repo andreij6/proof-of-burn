@@ -19,9 +19,9 @@ drawings and winners.
   tickets, and tickets scale with staked ICP. A drawing only runs when the pot
   holds at least 25 ICP (otherwise it rolls over) — three drawings a week (Mon/Wed/Sat nights US
   Eastern). Tickets accumulate round after round until someone hits.
-* **Winner takes 80% of the pot**, 20% seeds the next round, everyone's
-  tickets reset. **The prize is transferred straight to the winner's wallet —
-  there is nothing to claim.**
+* **Winner takes 65% of the pot**, 30% seeds the next round, and 5% is burned to
+  backend-canister cycles via the CMC; everyone's tickets reset. **The prize is
+  transferred straight to the winner's wallet — there is nothing to claim.**
 
 ## Eligibility — staking is the entry ticket
 Only stakers collect tickets. Daily grant = base (5) × the term multiplier,
