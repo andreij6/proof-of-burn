@@ -1093,6 +1093,7 @@ type XFarmInfo = record {
   active_count : nat64;
   enabled : bool;
   proxy_set : bool;
+  total_started : nat64;
   max_active_farmers : nat64;
 };
 type XFarmQuote = record {

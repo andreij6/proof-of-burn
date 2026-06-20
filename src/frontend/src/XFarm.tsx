@@ -383,6 +383,29 @@ export default function XFarm({
         </p>
       </div>
 
+      {/* ── Protocol totals — site-wide farm counts, mirrors the voting page's
+           slim "all participants" bar (info.* is global, not the caller's). ── */}
+      <div className="col" style={{ gap: 6, marginTop: 16 }}>
+        <Eyebrow style={{ color: 'var(--fg-3)' }}>Protocol totals · all participants</Eyebrow>
+        <div className="row" data-testid="xfarm-stats-strip" style={{
+          border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-alt)',
+          padding: '12px 14px', gap: 12, justifyContent: 'space-between', flexWrap: 'wrap', width: '100%'
+        }}>
+          <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+            <span>Farms started</span>
+            <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
+              {info ? info.total_started.toString() : "…"}
+            </span>
+          </span>
+          <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
+            <span>Active farms</span>
+            <span className="mono" style={{ fontSize: 14, color: 'var(--sprout-ink)' }}>
+              {info ? info.active_count.toString() : "…"}
+            </span>
+          </span>
+        </div>
+      </div>
+
       {/* ── CTA / dashboard ── */}
       <div className="col" style={{ marginTop: 16, gap: 14 }}>
         {!signedIn ? (
