@@ -19564,10 +19564,15 @@ async fn get_farmer_status(farmer_id: u64) -> Result<(Farmer, u64, u64), String>
     let (cycles_remaining, next_gen) = match farmer.canister_id {
         None => (farmer.budget_cycles.saturating_sub(farmer.burned_cycles), farmer.last_generation_at.saturating_add(DAY_NS)),
         Some(cid) => {
-            // get_status(since) -> (cycles_remaining, next_generation_at); Farmer canister owns these.
-            let res: Result<((u64, u64),), _> = ic_cdk::call(cid, "get_status", (farmer.id,)).await;
+            // get_status(id) -> Result<(cycles_remaining, next_generation_at), String>.
+            // The Farmer returns a candid `variant { Ok; Err }`, so decode the Result —
+            // NOT a bare tuple (that mismatch made every real-canister status call fail,
+            // hiding the next-round countdown + days-left on mainnet).
+            let res: Result<(Result<(u64, u64), String>,), _> =
+                ic_cdk::call(cid, "get_status", (farmer.id,)).await;
             match res {
-                Ok(((cr, ng),)) => (cr, ng),
+                Ok((Ok((cr, ng)),)) => (cr, ng),
+                Ok((Err(e),)) => return Err(format!("STATUS_REJECTED: {}", e)),
                 Err((c, m)) => return Err(format!("STATUS_FAILED ({:?}): {}", c, m)),
             }
         }
@@ -28961,6 +28966,26 @@ mod tests {
     /// Farmer's money-leg fields; a fresh renew (cmc_notified from create) resets
     /// them, then re-runs the 10% treasury + 90% CMC legs idempotantly and bumps
     /// budget_cycles + expected_depleted_at after `extend`.
+    /// Regression: the Farmer's `get_status` returns `Result<(u64,u64),String>`
+    /// (candid `variant { Ok; Err }`). `get_farmer_status` used to decode the reply
+    /// as a BARE tuple `(u64,u64)`, which fails for every real farmer canister →
+    /// status (countdown + days-left) silently vanished on mainnet. This pins the
+    /// wire-level shape: the Result type decodes, the bare tuple must NOT.
+    #[test]
+    fn test_get_farmer_status_decodes_result_not_bare_tuple() {
+        use candid::{Encode, Decode};
+        // Exactly what the Farmer's get_status replies with.
+        let reply = Encode!(&Ok::<(u64, u64), String>((123u64, 456u64))).unwrap();
+        // The fix: decode as the Result the Farmer actually returns.
+        let decoded = Decode!(&reply, Result<(u64, u64), String>).unwrap();
+        assert_eq!(decoded, Ok((123u64, 456u64)));
+        // The old code: decoding a variant reply as a bare record must fail.
+        assert!(
+            Decode!(&reply, (u64, u64)).is_err(),
+            "bare-tuple decode of a Result reply must fail — this was the mainnet bug"
+        );
+    }
+
     #[tokio::test]
     async fn test_xfarm_renew_farmer_happy_path() {
         install_staking_test_config();
