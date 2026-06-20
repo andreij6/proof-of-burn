@@ -3,14 +3,47 @@ import { Principal } from "@icp-sdk/core/principal";
 import {} from "./bindings/backend";
 import { IdeaToken } from "./tokens";
 import { fmtUsd } from "./tokens";
-import type { Idea, IdeaBoardInfo, Project } from "./bindings/backend";
+import type { Idea, IdeaBoardInfo, Project, ExplorerInfo } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal } from "./ui";
 import { useErrorImpression } from "./analytics";
 
+// Post fee ($0.05) is payable in any of these tokens (ICP burns 100%; others →
+// treasury). Ledgers/fees come from ExplorerInfo (the 5-token registry).
+const POST_TOKENS: { t: IdeaToken; label: string }[] = [
+  { t: IdeaToken.ICP, label: 'ICP' },
+  { t: IdeaToken.CkBTC, label: 'ckBTC' },
+  { t: IdeaToken.CkETH, label: 'ckETH' },
+  { t: IdeaToken.CkUSDC, label: 'ckUSDC' },
+  { t: IdeaToken.CkUSDT, label: 'ckUSDT' },
+];
+function postTokenLedger(token: IdeaToken, info: ExplorerInfo | null): Principal | null {
+  if (!info) return null;
+  switch (token) {
+    case IdeaToken.ICP: return info.icp_ledger;
+    case IdeaToken.CkBTC: return info.ckbtc_ledger;
+    case IdeaToken.CkETH: return info.cketh_ledger;
+    case IdeaToken.CkUSDC: return info.ckusdc_ledger;
+    case IdeaToken.CkUSDT: return info.ckusdt_ledger;
+    default: return info.icp_ledger;
+  }
+}
+function postTokenFee(token: IdeaToken, info: ExplorerInfo): bigint {
+  switch (token) {
+    case IdeaToken.ICP: return info.fee_icp_e8s;
+    case IdeaToken.CkBTC: return info.fee_ckbtc_sats;
+    case IdeaToken.CkETH: return info.fee_cketh_wei;
+    case IdeaToken.CkUSDC: return info.fee_ckusdc_micro;
+    case IdeaToken.CkUSDT: return info.fee_ckusdt_micro;
+    default: return info.fee_icp_e8s;
+  }
+}
+function postTokenLabel(token: IdeaToken): string { return POST_TOKENS.find(x => x.t === token)?.label ?? 'ICP'; }
+
 // ==========================================
 // Community R&D — ideas + admin-curated projects
-// Ideas: post for a 1 ICP fee; upvotes are free (one per user per idea);
+// Ideas: post for a $0.05 fee in any token (ICP burns 100%, others → treasury);
+// upvotes are free (one per user per idea);
 // deleted after 30 days without an upvote.
 // Projects: admin-created funding goals; contributions go 100% to treasury.
 // Minimum amounts are value-aligned across tokens (~$1 equivalent).
@@ -167,6 +200,8 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   const [ideas, setIdeas] = useState<Idea[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [info, setInfo] = useState<IdeaBoardInfo | null>(null);
+  const [explorerInfo, setExplorerInfo] = useState<ExplorerInfo | null>(null);
+  const [postToken, setPostToken] = useState<IdeaToken>(IdeaToken.ICP);
   const [isLoading, setIsLoading] = useState(true);
   const [gridPage, setGridPage] = useState(0);
   const [projectPage, setProjectPage] = useState(0);
@@ -218,14 +253,16 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   const refreshAll = async (currentActor = actor) => {
     if (!currentActor) return;
     try {
-      const [ideaList, projectList, boardInfo] = await Promise.all([
+      const [ideaList, projectList, boardInfo, expInfo] = await Promise.all([
         currentActor.list_ideas(),
         currentActor.list_projects(),
         currentActor.get_idea_board_info(),
+        currentActor.get_explorer_info(),
       ]);
       setIdeas(ideaList);
       setProjects(projectList);
       setInfo(boardInfo);
+      setExplorerInfo(expInfo);
     } catch (err) {
       console.error("Failed to fetch R&D board:", err);
     } finally {
@@ -368,9 +405,10 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
     }
   };
 
-  // Post an idea: pay the 1 ICP fee into the post-fee escrow, then post.
+  // Post an idea: quote the $0.05 fee in the chosen token, pay it into the post-fee
+  // escrow, then post. ICP burns 100%; any other token goes 100% to the treasury.
   const executePost = async () => {
-    if (!actor || !identity || isPosting || !info) return;
+    if (!actor || !identity || isPosting || !explorerInfo) return;
     const title = postTitle.trim();
     const description = postDescription.trim();
     if (!title) { setPostError("Give your idea a title."); return; }
@@ -378,13 +416,21 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
     if (!description) { setPostError("Add a short description."); return; }
     if (description.length > 280) { setPostError("Description must be 280 characters or fewer."); return; }
     if (postDetail.trim().length > 4000) { setPostError("Detail must be 4000 characters or fewer."); return; }
+    const ledger = postTokenLedger(postToken, explorerInfo);
+    if (!ledger) { setPostError("Token ledger unavailable."); return; }
 
     setIsPosting(true);
     setPostError(null);
     try {
-      setPostStep("Step 1/2: Paying the posting fee...");
+      setPostStep("Step 1/3: Quoting the fee…");
+      const qres = await actor.get_idea_post_quote(postToken);
+      if (qres.__kind__ === "Err") throw new Error(`Quote failed: ${qres.Err}`);
+      const quote = qres.Ok;
+      const deposit = quote.amount + postTokenFee(postToken, explorerInfo);
+
+      setPostStep(`Step 2/3: Paying the posting fee in ${postTokenLabel(postToken)}…`);
       const acct = await actor.get_idea_post_deposit_address();
-      const ledgerActor = createLedgerActor(info.icp_ledger.toString(), {
+      const ledgerActor = createLedgerActor(ledger.toString(), {
         agentOptions: { host, identity, rootKey }
       });
       const transferResult = await ledgerActor.icrc1_transfer({
@@ -392,18 +438,18 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
           owner: acct.owner,
           subaccount: acct.subaccount ? acct.subaccount : undefined,
         },
-        amount: info.post_fee_e8s + info.fee_icp_e8s,
+        amount: deposit,
       });
       if (transferResult.__kind__ === "Err") {
         const err = transferResult.Err as any;
         const detail = err.__kind__ === "InsufficientFunds"
-          ? `balance is ${fmtTokenAmount(err.InsufficientFunds.balance, 8)} ICP — posting costs ${fmtTokenAmount(info.post_fee_e8s, 8)} ICP + fees`
+          ? `balance is ${fmtTokenAmount(err.InsufficientFunds.balance, 8)} — posting costs $0.05 + fees`
           : JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
         throw new Error(`Fee payment failed: ${detail}`);
       }
 
-      setPostStep("Step 2/2: Publishing your idea...");
-      const res = await actor.post_idea(title, description, postDetail.trim());
+      setPostStep("Step 3/3: Publishing your idea...");
+      const res = await actor.post_idea(title, description, postDetail.trim(), postToken);
       if (res.__kind__ === "Err") {
         throw new Error(res.Err);
       }
@@ -905,7 +951,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
           <div className="col" style={{ gap: 6 }}>
             <Eyebrow accent>How it works</Eyebrow>
             <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-              <li><b>Post an idea (1 ICP fee):</b> a title, a short description for the card, and as much detail as you like. The fee goes to the treasury and keeps the board signal-rich.</li>
+              <li><b>Post an idea ($0.05 in any token):</b> a title, a short description for the card, and as much detail as you like. Paid in ICP the fee is burned 100%; other tokens go to the treasury — anti-spam to keep the board signal-rich.</li>
               <li><b>Upvote for free:</b> anyone signed in can upvote an idea — one upvote per person per idea, no crypto required. Upvotes surface the best ideas and reset the expiry clock.</li>
               <li><b>Expiry:</b> an idea that goes 30 days without a single upvote is deleted from the board. Every upvote resets the clock.</li>
               <li><b>Projects:</b> the team curates official projects with funding goals. Contributions in any of the three tokens go 100% to the treasury, which pays for the build.</li>
@@ -974,9 +1020,23 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
               />
             </div>
 
+            <div className="col" style={{ gap: 6 }}>
+              <label style={LABEL_STYLE}>Pay the fee in</label>
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                {POST_TOKENS.map(({ t, label }) => (
+                  <button key={label} type="button" onClick={() => setPostToken(t)} style={{
+                    background: postToken === t ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
+                    border: `1px solid ${postToken === t ? 'var(--burn)' : 'var(--border)'}`,
+                    color: postToken === t ? 'var(--burn-ink)' : 'var(--fg-3)',
+                    borderRadius: 999, padding: '5px 11px', fontSize: 11.5, fontWeight: 500, cursor: 'pointer',
+                  }}>{label}</button>
+                ))}
+              </div>
+            </div>
+
             <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
               <Icon name="info" size={12} stroke="var(--fg-3)" />
-              Posting costs {info ? fmtTokenAmount(info.post_fee_e8s, 8) : '1'} ICP (to the treasury, anti-spam). Upvotes are free — they surface the best ideas and keep yours from expiring.
+              Posting costs {info ? fmtUsd(info.post_fee_usd_e8s) : '$0.05'} in any token — paid in ICP it's burned 100%; other tokens go to the treasury (anti-spam). Upvotes are free.
             </span>
 
             {isPosting && postStep && (
@@ -987,7 +1047,7 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
 
             <Btn variant="primary" style={{ width: '100%' }} onClick={executePost} disabled={isPosting || !postTitle.trim() || !postDescription.trim()}>
               {isPosting ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="bulb" size={14} stroke="var(--char-950)" />}
-              {isPosting ? ' Posting…' : ` Pay ${info ? fmtTokenAmount(info.post_fee_e8s, 8) : '1'} ICP & post`}
+              {isPosting ? ' Posting…' : ` Pay ${info ? fmtUsd(info.post_fee_usd_e8s) : '$0.05'} in ${postTokenLabel(postToken)} & post`}
             </Btn>
           </div>
         </div>

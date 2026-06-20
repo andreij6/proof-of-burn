@@ -4957,7 +4957,7 @@ const IDEA_EXPIRY_NANOS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
 /// keeps the 75% split (`amount * 3 / 4`) overflow-free by construction.
 const MAX_UPVOTE_UNITS: u64 = u64::MAX / 4;
 /// Posting an idea costs 1 ICP (anti-spam; 100% to the treasury).
-const IDEA_POST_FEE_E8S: u64 = 100_000_000;
+const IDEA_POST_FEE_USD_E8S: u64 = 5_000_000; // $0.05 (USD e8s); priced per token via XRC
 /// Subaccount seed for the posting-fee escrow — far above any real idea id.
 const IDEA_POST_SEED: u64 = u64::MAX;
 const MAX_PROJECTS: u64 = 200;
@@ -5129,8 +5129,9 @@ pub struct IdeaBoardInfo {
     pub fee_ckbtc_sats: u64,
     pub fee_cketh_wei: u64,
     pub expiry_nanos: u64,
-    /// Flat fee (ICP e8s) to post an idea; 100% to the treasury.
-    pub post_fee_e8s: u64,
+    /// Post fee in USD e8s ($0.05), priced per token via XRC. ICP burns 100%;
+    /// other tokens go 100% to the treasury.
+    pub post_fee_usd_e8s: u64,
 }
 
 impl_storable!(Idea);
@@ -5506,7 +5507,7 @@ fn get_idea_board_info() -> IdeaBoardInfo {
         fee_ckbtc_sats: token_fee(IdeaToken::CkBTC, &config),
         fee_cketh_wei: token_fee(IdeaToken::CkETH, &config),
         expiry_nanos: IDEA_EXPIRY_NANOS,
-        post_fee_e8s: IDEA_POST_FEE_E8S,
+        post_fee_usd_e8s: IDEA_POST_FEE_USD_E8S,
     }
 }
 
@@ -5567,8 +5568,15 @@ fn record_idea_view(idea_id: u64) -> Result<(), String> {
     })
 }
 
-/// The caller's deposit account for the 1 ICP idea-posting fee. Fund it with
-/// `post_fee + 0.0001 ICP` on the ICP ledger, then call `post_idea`.
+thread_local! {
+    // Heap-only 15-min locked post-fee quotes per caller (ephemeral; like XFARM_QUOTES).
+    static IDEA_POST_QUOTES: RefCell<std::collections::HashMap<Principal, ExplorerQuote>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// The caller's deposit account for the idea-posting fee. Quote with
+/// `get_idea_post_quote(token)`, fund this account on that token's ledger with
+/// `quote.amount + token fee`, then call `post_idea`.
 #[ic_cdk::query]
 fn get_idea_post_deposit_address() -> LedgerAccount {
     let caller = get_caller();
@@ -5578,8 +5586,28 @@ fn get_idea_post_deposit_address() -> LedgerAccount {
     }
 }
 
+/// Quote the $0.05 idea-post fee in `token` at the live XRC rate; locks the price
+/// for the caller for 15 minutes. ICP is burned 100%; other tokens → the treasury.
 #[ic_cdk::update]
-async fn post_idea(title: String, description: String, detail: String) -> Result<u64, String> {
+async fn get_idea_post_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
+    require_authenticated()?;
+    require_idea_board_enabled()?;
+    let caller = get_caller();
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let rate = explorer_usd_rate_e8s(token, &config).await?;
+    let amount = discussion_quote_amount(IDEA_POST_FEE_USD_E8S, rate, explorer_token_decimals(token))?;
+    let now = current_time();
+    let quote = ExplorerQuote {
+        token, days: 0, amount, rate_usd_e8s: rate,
+        usd_total_e8s: IDEA_POST_FEE_USD_E8S,
+        created_at: now, expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
+    };
+    IDEA_POST_QUOTES.with(|m| { m.borrow_mut().insert(caller, quote.clone()); });
+    Ok(quote)
+}
+
+#[ic_cdk::update]
+async fn post_idea(title: String, description: String, detail: String, token: ExplorerToken) -> Result<u64, String> {
     require_authenticated()?;
     require_idea_board_enabled()?;
     let caller = get_caller();
@@ -5612,26 +5640,22 @@ async fn post_idea(title: String, description: String, detail: String) -> Result
         return Err(e.to_string());
     }
 
-    // 1 ICP posting fee → treasury (anti-spam). Charged before the idea is
-    // created; if the fee transfer fails nothing is stored.
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let ledger_id = config.ledger_canister_id;
-    let sub = derive_idea_subaccount(&caller, IDEA_POST_SEED);
-    let escrow = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(sub),
-    };
-    let balance = call_ledger_balance(ledger_id, escrow).await?;
-    if balance < IDEA_POST_FEE_E8S + 10_000 {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
+    // $0.05 post fee, priced per token (anti-spam). ICP burns 100% to backend cycles
+    // (proof-of-burn); any other token goes 100% to the treasury. Charged before the
+    // idea is created; if collection fails nothing is stored. Reuses the discussions
+    // fee collector (ICP→burn / non-ICP→treasury).
+    let quote = IDEA_POST_QUOTES.with(|m| m.borrow().get(&caller).cloned())
+        .ok_or_else(|| "NO_QUOTE".to_string())?;
+    if quote.token != token || quote.usd_total_e8s != IDEA_POST_FEE_USD_E8S {
+        return Err("QUOTE_MISMATCH".to_string());
     }
-    let treasury_dest = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(TREASURY_SUBACCOUNT),
-    };
-    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, IDEA_POST_FEE_E8S, Some(10_000))
-        .await
-        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
+    if now > quote.expires_at {
+        return Err("QUOTE_EXPIRED".to_string());
+    }
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let sub = derive_idea_subaccount(&caller, IDEA_POST_SEED);
+    collect_discussion_fee(token, sub, quote.amount, &config).await?;
+    IDEA_POST_QUOTES.with(|m| { m.borrow_mut().remove(&caller); });
 
     let id = NEXT_IDEA_ID.with(|c| {
         let id = *c.borrow().get();
@@ -5663,7 +5687,7 @@ async fn post_idea(title: String, description: String, detail: String) -> Result
         event_type: "idea_post".to_string(),
         proposal_id: id,
         user: caller,
-        amount_e8s: IDEA_POST_FEE_E8S,
+        amount_e8s: quote.amount,
     };
     AUDIT_LOG.with(|log| {
         let _ = log.borrow_mut().append(&log_entry);
@@ -22186,46 +22210,71 @@ mod tests {
         assert_eq!(token_fee(IdeaToken::CkBTC, &local_cfg), 10);
     }
 
+    // Quote ($0.05 in ICP at the host static rate), fund the escrow, post, return id.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn seed_idea(title: &str, desc: &str, detail: &str) -> u64 {
+        set_mock_ledger_transfer(Ok(1));
+        let q = get_idea_post_quote(ExplorerToken::ICP).await.unwrap();
+        set_mock_ledger_balance(q.amount + 10_000);
+        post_idea(title.into(), desc.into(), detail.into(), ExplorerToken::ICP).await.unwrap()
+    }
+
     #[tokio::test]
     async fn test_post_idea_validation_quota_and_fee() {
         let caller = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         set_mock_caller(caller);
         set_mock_ledger_transfer(Ok(5));
 
-        // Posting fee unpaid → rejected, nothing stored.
-        set_mock_ledger_balance(IDEA_POST_FEE_E8S); // missing the ledger fee
+        // No locked quote → rejected.
         assert_eq!(
-            post_idea("Unpaid".into(), "Desc".into(), "".into()).await.unwrap_err(),
+            post_idea("NoQuote".into(), "Desc".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
+            "NO_QUOTE"
+        );
+
+        // $0.05 in ICP at the static $5 rate = 0.01 ICP.
+        let q = get_idea_post_quote(ExplorerToken::ICP).await.unwrap();
+        assert_eq!(q.amount, 1_000_000);
+        assert_eq!(q.usd_total_e8s, IDEA_POST_FEE_USD_E8S);
+
+        // Underfunded escrow → rejected, nothing stored (quote not consumed on failure).
+        set_mock_ledger_balance(q.amount); // missing the ledger fee
+        assert_eq!(
+            post_idea("Unpaid".into(), "Desc".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
             "INSUFFICIENT_DEPOSIT"
         );
         assert!(IDEAS.with(|m| m.borrow().is_empty()));
 
-        // happy path (fee escrow funded)
-        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
-        let id = post_idea("Title".into(), "Desc".into(), "Detail".into()).await.unwrap();
+        // happy path (fee escrow funded) — consumes the quote.
+        set_mock_ledger_balance(q.amount + 10_000);
+        let id = post_idea("Title".into(), "Desc".into(), "Detail".into(), ExplorerToken::ICP).await.unwrap();
         let idea = IDEAS.with(|m| m.borrow().get(&id)).unwrap();
         assert_eq!(idea.poster, caller);
         assert_eq!(idea.views, 0);
         assert_eq!(idea.last_upvote_at, idea.created_at);
 
-        // invalid title (validated before the fee is touched)
+        // invalid title (validated before the fee/quote is touched).
         assert_eq!(
-            post_idea("   ".into(), "Desc".into(), "".into()).await.unwrap_err(),
+            post_idea("   ".into(), "Desc".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
             "INVALID_TITLE"
         );
 
-        // per-user active quota
+        // per-user active quota — each successful post needs a fresh quote.
         for i in 0..MAX_ACTIVE_IDEAS_PER_USER {
-            let _ = post_idea(format!("Idea {}", i), "Desc".into(), "".into()).await;
+            set_mock_ledger_transfer(Ok(1));
+            if let Ok(q) = get_idea_post_quote(ExplorerToken::ICP).await {
+                set_mock_ledger_balance(q.amount + 10_000);
+            }
+            let _ = post_idea(format!("Idea {}", i), "Desc".into(), "".into(), ExplorerToken::ICP).await;
         }
+        // Quota reached → rejected (the quota check precedes the quote check).
         assert_eq!(
-            post_idea("One too many".into(), "Desc".into(), "".into()).await.unwrap_err(),
+            post_idea("One too many".into(), "Desc".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
             "TOO_MANY_ACTIVE_IDEAS"
         );
 
         // anonymous rejected
         set_mock_caller(anon());
-        assert!(post_idea("T".into(), "D".into(), "".into()).await.is_err());
+        assert!(post_idea("T".into(), "D".into(), "".into(), ExplorerToken::ICP).await.is_err());
 
         // disabled flag rejected
         set_mock_caller(caller);
@@ -22233,7 +22282,7 @@ mod tests {
             m.borrow_mut().insert(FLAG_IDEA_BOARD.to_string(), 0u8);
         });
         assert_eq!(
-            post_idea("T".into(), "D".into(), "".into()).await.unwrap_err(),
+            post_idea("T".into(), "D".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
             "FEATURE_DISABLED"
         );
         FEATURE_FLAGS.with(|m| {
@@ -22380,9 +22429,7 @@ mod tests {
         let voter = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
 
         set_mock_caller(poster);
-        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
-        set_mock_ledger_transfer(Ok(1));
-        let idea_id = post_idea("Upvotable".into(), "Desc".into(), "".into()).await.unwrap();
+        let idea_id = seed_idea("Upvotable", "Desc", "").await;
 
         // Unknown idea.
         set_mock_caller(voter);
@@ -22416,9 +22463,7 @@ mod tests {
         let caller2 = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
 
         set_mock_caller(caller1);
-        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
-        set_mock_ledger_transfer(Ok(1));
-        let id = post_idea("Viewable".into(), "Desc".into(), "".into()).await.unwrap();
+        let id = seed_idea("Viewable", "Desc", "").await;
 
         // Caller 1 views -> view count = 1
         record_idea_view(id).unwrap();
@@ -22442,9 +22487,7 @@ mod tests {
         let voter = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
 
         set_mock_caller(poster);
-        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
-        set_mock_ledger_transfer(Ok(1));
-        let idea_id = post_idea("Retry me".into(), "Desc".into(), "".into()).await.unwrap();
+        let idea_id = seed_idea("Retry me", "Desc", "").await;
 
         // Upvotes are now free, but the paid-upvote retry machinery is retained
         // for any legacy journal entries. Simulate one that failed mid-payout.
@@ -22478,9 +22521,7 @@ mod tests {
         let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         let voter = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
         set_mock_caller(poster);
-        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
-        set_mock_ledger_transfer(Ok(1));
-        let idea_id = post_idea("Doomed idea".into(), "Desc".into(), "".into()).await.unwrap();
+        let idea_id = seed_idea("Doomed idea", "Desc", "").await;
 
         // A legacy paid upvote that failed mid-saga, journaled as FailedPayout.
         set_mock_caller(voter);
@@ -22513,9 +22554,7 @@ mod tests {
     async fn test_expired_idea_rejected_then_deleted() {
         let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         set_mock_caller(poster);
-        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
-        set_mock_ledger_transfer(Ok(1));
-        let idea_id = post_idea("Old idea".into(), "Desc".into(), "".into()).await.unwrap();
+        let idea_id = seed_idea("Old idea", "Desc", "").await;
 
         // Age the idea past the 30-day window.
         IDEAS.with(|m| {
@@ -22538,9 +22577,7 @@ mod tests {
     async fn test_admin_remove_idea() {
         let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         set_mock_caller(poster);
-        set_mock_ledger_balance(IDEA_POST_FEE_E8S + 10_000);
-        set_mock_ledger_transfer(Ok(1));
-        let idea_id = post_idea("Idea to remove".into(), "Desc".into(), "".into()).await.unwrap();
+        let idea_id = seed_idea("Idea to remove", "Desc", "").await;
         assert!(IDEAS.with(|m| m.borrow().get(&idea_id)).is_some());
 
         // Remove the idea (guard isn't executed in unit tests, so we test core logic)
@@ -24964,7 +25001,7 @@ mod tests {
         // Board info reflects local ledger fallbacks.
         let info = get_idea_board_info();
         assert!(info.enabled);
-        assert_eq!(info.post_fee_e8s, IDEA_POST_FEE_E8S);
+        assert_eq!(info.post_fee_usd_e8s, IDEA_POST_FEE_USD_E8S);
 
         // require_admin: rejected for non-admins, accepted once added.
         assert!(require_admin().is_err());
@@ -25325,7 +25362,8 @@ mod tests {
         let pid = 730_001u64;
         open_proposal(pid, 10_000_000_000);
         commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
-        let _idea = post_idea("Tx history".into(), "d".into(), "".into()).await.unwrap();
+        let _ = get_idea_post_quote(ExplorerToken::ICP).await.unwrap();
+        let _idea = post_idea("Tx history".into(), "d".into(), "".into(), ExplorerToken::ICP).await.unwrap();
         stake(200_000_000, StakeTier::SixMonths).await.unwrap();
 
         // In leg: the commitment refunds when the proposal misses.
@@ -25337,7 +25375,7 @@ mod tests {
         assert_eq!(dep.direction, TxDirection::Out);
         assert_eq!(dep.amount, 200_000_000);
         let post = kind("idea_post").expect("idea post fee recorded");
-        assert_eq!(post.amount, IDEA_POST_FEE_E8S);
+        assert_eq!(post.amount, 1_000_000); // $0.05 in ICP at the static $5 rate
         let st = kind("stake").expect("stake lockup recorded");
         assert_eq!(st.direction, TxDirection::Out);
         assert_eq!(st.amount, 200_000_000);

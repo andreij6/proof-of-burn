@@ -625,13 +625,14 @@ type IdeaBoardInfo = record {
   cketh_ledger : principal;
   fee_icp_e8s : nat64;
   min_upvote_icp_e8s : nat64;
-  // Flat fee (ICP e8s) to post an idea; 100% to the treasury.
-  post_fee_e8s : nat64;
   fee_cketh_wei : nat64;
   min_upvote_ckbtc_e8s : nat64;
   enabled : bool;
   icp_ledger : principal;
   ckbtc_ledger : principal;
+  // Post fee in USD e8s ($0.05), priced per token via XRC. ICP burns 100%;
+  // other tokens go 100% to the treasury.
+  post_fee_usd_e8s : nat64;
   expiry_nanos : nat64;
   fee_ckbtc_sats : nat64;
   min_upvote_cketh_wei : nat64;
@@ -1596,9 +1597,13 @@ service : (InitPayload) -> {
   // is used on every token's ledger — fund it on the ledger of the token you
   // intend to upvote with, then call `upvote_idea`.
   get_idea_deposit_address : (nat64) -> (LedgerAccount) query;
-  // The caller's deposit account for the 1 ICP idea-posting fee. Fund it with
-  // `post_fee + 0.0001 ICP` on the ICP ledger, then call `post_idea`.
+  // The caller's deposit account for the idea-posting fee. Quote with
+  // `get_idea_post_quote(token)`, fund this account on that token's ledger with
+  // `quote.amount + token fee`, then call `post_idea`.
   get_idea_post_deposit_address : () -> (LedgerAccount) query;
+  // Quote the $0.05 idea-post fee in `token` at the live XRC rate; locks the price
+  // for the caller for 15 minutes. ICP is burned 100%; other tokens → the treasury.
+  get_idea_post_quote : (IdeaToken) -> (Result_6);
   // Cached public stats for the community leader neuron (voting power, dissolve
   // delay, stake). `updated_at == 0` means not yet fetched.
   get_leader_neuron_info : () -> (LeaderNeuronInfo) query;
@@ -1731,7 +1736,7 @@ service : (InitPayload) -> {
   // Rendered as plain text by the UI — no markup, no links: zero injection
   // surface. Muted users' posts are silently accepted but only echoed to them.
   post_casino_chat : (text) -> (BalanceResult);
-  post_idea : (text, text, text) -> (BalanceResult);
+  post_idea : (text, text, text, IdeaToken) -> (BalanceResult);
   rate_course : (nat64, nat8, opt text) -> (Result);
   // Withdraw the caller's remaining balance from one of their pay-first
   // deposit subaccounts (Explorer listing / Arcade customization / Early Adopter

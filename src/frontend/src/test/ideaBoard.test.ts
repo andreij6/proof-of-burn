@@ -21,7 +21,7 @@ function fakeInfo(overrides: Partial<IdeaBoardInfo> = {}): IdeaBoardInfo {
     fee_ckbtc_sats: 10n,
     fee_cketh_wei: 2_000_000_000_000n,
     expiry_nanos: 2_592_000_000_000_000n,
-    post_fee_e8s: 100_000_000n,
+    post_fee_usd_e8s: 5_000_000n,
     ...overrides,
   };
 }
