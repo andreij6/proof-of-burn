@@ -5,7 +5,7 @@ import { FlagState } from "./bindings/backend";
 import type { Config, FeatureFlag, GlobalStats, LotteryInfo, EarlyAdopterInfo, StakingPoolInfo, PoolInfo, NeuronFollowStatus, AuditLogEntry, StakeTier, PendingUnstake } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import type { ModerationCandidate, UserBalanceRow } from "./bindings/backend";
-import type { Principal } from "@icp-sdk/core/principal";
+import { Principal } from "@icp-sdk/core/principal";
 import { Icon, Eyebrow, Btn, Chip, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 import { useErrorImpression } from "./analytics";
 import CourseEditor from "./arcade/CourseEditor";
@@ -30,19 +30,18 @@ interface AdminProps {
   openTreasury: () => void;
 }
 
-type AdminSection = 'overview' | 'treasury' | 'neurons' | 'governance' | 'staking' | 'features' | 'content' | 'moderation' | 'users' | 'reference';
+// Consolidated into 7 job-based tabs (was 10): Governance folds in Neurons;
+// Content folds in course Moderation; Settings folds in Feature flags + Reference.
+type AdminSection = 'overview' | 'treasury' | 'governance' | 'staking' | 'content' | 'users' | 'settings';
 
 const SECTIONS: { key: AdminSection; label: string; icon: string }[] = [
   { key: 'overview', label: 'Overview', icon: 'eye' },
   { key: 'treasury', label: 'Treasury', icon: 'wallet' },
-  { key: 'neurons', label: 'Neurons', icon: 'target' },
   { key: 'governance', label: 'Governance', icon: 'flame' },
   { key: 'staking', label: 'Staking & Lottery', icon: 'zap' },
-  { key: 'features', label: 'Features', icon: 'zap' },
-  { key: 'content', label: 'Content', icon: 'gamepad' },
-  { key: 'moderation', label: 'Course moderation', icon: 'eye' },
+  // 'content' (course editor + moderation) hidden for now — re-add to show it.
   { key: 'users', label: 'Users', icon: 'list' },
-  { key: 'reference', label: 'Reference', icon: 'info' },
+  { key: 'settings', label: 'Settings', icon: 'info' },
 ];
 
 // Columns for the user-balances table: field key on UserBalanceRow + decimals.
@@ -460,6 +459,24 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     }
   };
 
+  // Local dev only: populate the table with fabricated rows so the layout/totals
+  // can be eyeballed without real participants or funded wallets. Uses real,
+  // valid principals (well-known canister IDs) purely as display placeholders.
+  const loadMockUsers = () => {
+    const mk = (text: string, icp: bigint, ckbtc: bigint, cketh: bigint, ckusdc: bigint, ckusdt: bigint): UserBalanceRow =>
+      ({ principal: Principal.fromText(text), icp, ckbtc, cketh, ckusdc, ckusdt });
+    setUserProgress(null);
+    setUserRows([
+      mk('ryjl3-tyaaa-aaaaa-aaaba-cai', 1_240_000_000n, 150_000n, 50_000_000_000_000_000n, 100_000_000n, 0n),
+      mk('rrkah-fqaaa-aaaaa-aaaaq-cai', 310_000_000n, 0n, 0n, 50_000_000n, 25_000_000n),
+      mk('rdmx6-jaaaa-aaaaa-aaadq-cai', 9_900_000_000n, 1_000_000n, 2_500_000_000_000_000_000n, 0n, 0n),
+      mk('renrk-eyaaa-aaaaa-aaada-cai', 5_000_000n, 0n, 0n, 0n, 1_000_000n),
+      mk('qoctq-giaaa-aaaaa-aaaea-cai', 0n, 25_000n, 0n, 250_000_000n, 0n),
+    ]);
+    setError(null);
+    setNotice('Loaded mock users (local dev — fabricated data).');
+  };
+
   const hideCourse = (c: ModerationCandidate) => run(`mod-hide-${c.token_id}`, async () => {
     const res = c.hidden
       ? await actor.admin_unhide_course(c.token_id)
@@ -497,13 +514,32 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
         <b style={{ fontSize: 17 }}>Every protocol dial, grouped by job.</b>
       </div>
 
-      {/* ── Section nav ── */}
-      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+      {/* ── Section tabs (underline style, matches Roadmap & Development) ── */}
+      <div className="row" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 6, gap: 18, width: '100%', overflowX: 'auto', scrollbarWidth: 'thin' }}>
         {SECTIONS.map(s => (
-          <Btn key={s.key} variant={section === s.key ? 'primary' : 'ghost'} sm onClick={() => { setSection(s.key); setError(null); setNotice(null); if (s.key === 'governance' || s.key === 'treasury') refreshAudit(); if (s.key === 'neurons') refreshSplitNeurons(); if (s.key === 'moderation') refreshModeration(); }}>
-            <Icon name={s.icon} size={13} stroke={section === s.key ? 'var(--char-950)' : 'currentColor'} />
+          <button
+            key={s.key}
+            onClick={() => {
+              setSection(s.key); setError(null); setNotice(null);
+              if (s.key === 'governance') { refreshAudit(); refreshSplitNeurons(); }
+              if (s.key === 'treasury') refreshAudit();
+              if (s.key === 'content') refreshModeration();
+            }}
+            style={{
+              background: 'transparent', border: 'none', flexShrink: 0,
+              color: section === s.key ? 'var(--burn-ink)' : 'var(--fg-3)',
+              fontSize: 14, fontWeight: section === s.key ? 600 : 500,
+              cursor: 'pointer', padding: '6px 4px', position: 'relative', whiteSpace: 'nowrap',
+              display: 'flex', alignItems: 'center', gap: 6,
+              transition: 'color var(--dur-fast) var(--ease-out)',
+            }}
+          >
+            <Icon name={s.icon} size={13} stroke={section === s.key ? 'var(--burn-ink)' : 'currentColor'} />
             {s.label}
-          </Btn>
+            {section === s.key && (
+              <div style={{ position: 'absolute', bottom: -3, left: 0, right: 0, height: 2, background: 'var(--burn)', borderRadius: 999 }} />
+            )}
+          </button>
         ))}
       </div>
 
@@ -693,7 +729,8 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       )}
 
       {/* ════ NEURONS ════ */}
-      {section === 'neurons' && (
+      {/* Neurons — folded into Governance */}
+      {section === 'governance' && (
         <>
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
@@ -924,7 +961,8 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       )}
 
       {/* ════ FEATURES & CONTENT ════ */}
-      {section === 'features' && (
+      {/* Feature flags — folded into Settings */}
+      {section === 'settings' && (
         <>
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8 }}>
@@ -991,7 +1029,8 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       )}
 
       {/* ════ COURSE MODERATION ════ */}
-      {section === 'moderation' && (
+      {/* Course moderation — folded into Content */}
+      {section === 'content' && (
         <>
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
@@ -1078,9 +1117,16 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                 <Icon name="list" size={13} stroke="var(--burn-ink)" />
                 <Eyebrow>User wallet balances</Eyebrow>
               </span>
-              <Btn variant="ghost" sm onClick={loadUserBalances} disabled={busy !== null}>
-                <Icon name="undo" size={12} /> {userRows === null ? 'Load' : 'Reload'}
-              </Btn>
+              <span className="row" style={{ gap: 8 }}>
+                {config?.is_local && (
+                  <Btn variant="secondary" sm onClick={loadMockUsers} disabled={busy !== null}>
+                    <Icon name="gamepad" size={12} /> Mock users
+                  </Btn>
+                )}
+                <Btn variant="ghost" sm onClick={loadUserBalances} disabled={busy !== null}>
+                  <Icon name="undo" size={12} /> {userRows === null ? 'Load' : 'Reload'}
+                </Btn>
+              </span>
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Every known participant — the union across voting, staking, lottery, ideas,
@@ -1140,8 +1186,8 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
         </>
       )}
 
-      {/* ════ REFERENCE ════ */}
-      {section === 'reference' && (
+      {/* ════ REFERENCE (folded into Settings) ════ */}
+      {section === 'settings' && (
         <>
           <div className="col" style={{ gap: 6 }}>
             <Eyebrow accent>How each feature works</Eyebrow>
