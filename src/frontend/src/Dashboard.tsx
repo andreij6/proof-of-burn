@@ -362,7 +362,8 @@ export default function Dashboard({
             {eaStaked > 0n ? (
               <>
                 <Big>{fmtICP(eaStaked)} ICP staked</Big>
-                <Sub>Earning {(Number(eaStaked / 100_000_000n) * 100).toLocaleString()} lottery tickets/day. Permanent stake — no exit.</Sub>
+                {/* Mirrors backend BOOSTER_TICKETS_PER_ICP_PER_DAY (40) × max(1, whole ICP). */}
+                <Sub>Earning {(Math.max(1, Math.floor(Number(eaStaked) / 1e8)) * 40).toLocaleString()} lottery tickets/day. Permanent stake — no exit.</Sub>
               </>
             ) : (
               <>
