@@ -75,6 +75,50 @@ function MiniStat({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
+// ── ICP total-supply chart (last 14 days, sampled every 30 min server-side) ──
+// Lightweight inline SVG line+area chart — no charting lib. data = [(at_ns, e8s)].
+function SupplyChart({ data }: { data: Array<[bigint, bigint]> }) {
+  if (data.length < 2) {
+    return <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Collecting supply data — the first points appear within ~30 minutes.</span>;
+  }
+  const pts = data
+    .map(([at, e8s]) => ({ x: Number(at / 1_000_000n), y: Number(e8s) / 1e8 }))
+    .sort((a, b) => a.x - b.x);
+  const W = 600, H = 140, padT = 8, padB = 2;
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const spanX = maxX - minX || 1, spanY = (maxY - minY) || 1;
+  const sx = (x: number) => ((x - minX) / spanX) * W;
+  const sy = (y: number) => padT + (1 - (y - minY) / spanY) * (H - padT - padB);
+  const line = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(' ');
+  const area = `${line} L${W},${H} L0,${H} Z`;
+  const first = pts[0].y, last = pts[pts.length - 1].y, delta = last - first;
+  const fmt0 = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  const fmt2 = (n: number) => n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return (
+    <div className="col" style={{ gap: 8 }}>
+      <div className="row" style={{ gap: 22, flexWrap: 'wrap', alignItems: 'baseline' }}>
+        <MiniStat label="Total supply" value={`${fmt0(last)} ICP`} />
+        <MiniStat label="14-day change" value={
+          <span style={{ color: delta < 0 ? 'var(--burn-ink)' : delta > 0 ? 'var(--fg-1)' : 'var(--fg-3)' }}>
+            {delta >= 0 ? '+' : ''}{fmt2(delta)} ICP
+          </span>
+        } />
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} preserveAspectRatio="none" style={{ display: 'block', overflow: 'visible' }}>
+        <path d={area} fill="var(--burn)" fillOpacity={0.12} stroke="none" />
+        <path d={line} fill="none" stroke="var(--burn)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
+      </svg>
+      <div className="row" style={{ justifyContent: 'space-between', fontSize: 10.5, color: 'var(--fg-3)' }}>
+        <span>{new Date(minX).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+        <span>sampled every 30 min</span>
+        <span>{new Date(maxX).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
+      </div>
+    </div>
+  );
+}
+
 // ── Page ──
 
 export default function Dashboard({
@@ -100,13 +144,14 @@ export default function Dashboard({
   const [ea, setEa] = useState<EarlyAdopterInfo | null>(null);
   const [payouts, setPayouts] = useState<Payout[]>([]);
   const [ideaCount, setIdeaCount] = useState<number | null>(null);
+  const [supplyHistory, setSupplyHistory] = useState<Array<[bigint, bigint]>>([]);
 
   // One parallel fetch per mount for everything App.tsx doesn't already hold.
   useEffect(() => {
     if (!actor) return;
     let cancelled = false;
     (async () => {
-      const [lot, eaInfo, pays, ideas] = await Promise.all([
+      const [lot, eaInfo, pays, ideas, supply] = await Promise.all([
         // get_lottery_info is an update method but anonymous-allowlisted, so we
         // fetch it for everyone — signed-out visitors still see the live jackpot
         // and the countdown to the next drawing.
@@ -114,12 +159,14 @@ export default function Dashboard({
         flags.earlyAdopters ? actor.get_early_adopter_info().catch(() => null) : Promise.resolve(null),
         signedIn ? actor.get_my_payouts().catch(() => []) : Promise.resolve([]),
         flags.ideas ? actor.list_ideas().catch(() => null) : Promise.resolve(null),
+        actor.get_icp_supply_history().catch(() => [] as Array<[bigint, bigint]>),
       ]);
       if (cancelled) return;
       setLottery(lot);
       setEa(eaInfo);
       setPayouts(pays);
       setIdeaCount(ideas === null ? null : ideas.length);
+      setSupplyHistory(supply);
     })();
     return () => { cancelled = true; };
   }, [actor, signedIn, flags.lottery, flags.earlyAdopters, flags.ideas]);
@@ -351,6 +398,15 @@ export default function Dashboard({
             </div>
           </HubCard>
         )}
+      </div>
+
+      {/* ICP total supply — the deflation story, sampled every 30 min over 14 days */}
+      <div className="col" style={{ gap: 12, padding: '16px 18px', borderRadius: 12, background: 'var(--surface)', border: '1px solid var(--border)' }}>
+        <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <Icon name="flame" size={14} stroke="var(--burn-ink)" />
+          <Eyebrow>ICP total supply · last 14 days</Eyebrow>
+        </span>
+        <SupplyChart data={supplyHistory} />
       </div>
     </div>
   );

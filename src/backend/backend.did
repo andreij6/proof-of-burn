@@ -1634,6 +1634,9 @@ service : (InitPayload) -> {
   // Pure read over in-memory maps — `O(n)` over proposals + votes. Safe for any
   // reasonable n; documented in the task.
   get_global_stats : () -> (GlobalStats) query;
+  // Dashboard data: the rolling 14-day ICP total-supply history, ascending by time
+  // → (timestamp_ns, supply_e8s).
+  get_icp_supply_history : () -> (vec record { nat64; nat64 }) query;
   get_idea_board_info : () -> (IdeaBoardInfo) query;
   // The caller's deposit account for upvoting `idea_id`. The same subaccount
   // is used on every token's ledger — fund it on the ledger of the token you

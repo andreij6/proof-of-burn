@@ -891,6 +891,7 @@ fn init(payload: InitPayload) {
     if is_local {
         seed_mock_proposals();
         seed_mock_ideas();
+        seed_mock_supply_history();
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
     }
@@ -915,6 +916,7 @@ fn post_upgrade() {
     if is_local {
         seed_mock_proposals();
         seed_mock_ideas();
+        seed_mock_supply_history();
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
         // The USD-rate cache is heap state and resets on upgrade — re-warm it
@@ -4730,7 +4732,119 @@ async fn cycle_topup_check() {
     }
 }
 
+// ── ICP total-supply tracker (dashboard chart) ───────────────────────────────
+// Polls the ledger-api total-supply endpoint every 30 min via a NON-replicated
+// HTTPS outcall (the value ticks continuously, so 13 replicas could never agree
+// for a replicated call), keeping a rolling 14-day record. Older samples are
+// pruned on each insert. The chart on the Dashboard reads get_icp_supply_history.
+const ICP_SUPPLY_URL: &str = "https://ledger-api.internetcomputer.org/supply/total/latest.txt";
+const SUPPLY_SAMPLE_INTERVAL_SECS: u64 = 1_800; // 30 minutes
+const SUPPLY_HISTORY_WINDOW_NS: u64 = 14 * 86_400 * 1_000_000_000; // 14 days
+const SUPPLY_OUTCALL_CYCLES: u128 = 100_000_000_000;
+
+// http_request arg with `is_replicated` (ic-cdk 0.19's CanisterHttpRequestArgument
+// lacks it). Reuses ic-cdk's field types; is_replicated=false → a single replica
+// makes the call, so no consensus is needed over a continuously-changing value.
+#[derive(candid::CandidType)]
+struct HttpReqArg {
+    url: String,
+    max_response_bytes: Option<u64>,
+    method: ic_cdk::api::management_canister::http_request::HttpMethod,
+    headers: Vec<ic_cdk::api::management_canister::http_request::HttpHeader>,
+    body: Option<Vec<u8>>,
+    transform: Option<ic_cdk::api::management_canister::http_request::TransformContext>,
+    is_replicated: Option<bool>,
+}
+
+thread_local! {
+    // at (ns) -> ICP total supply (e8s). Rolling 14-day window, pruned on insert.
+    static SUPPLY_SAMPLES: RefCell<StableBTreeMap<u64, u64, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(26)))));
+}
+
+/// Parse the supply body ("554148322.73587447\n") to e8s. Pure / testable.
+fn parse_supply_e8s(body: &[u8]) -> Option<u64> {
+    let s = std::str::from_utf8(body).ok()?.trim();
+    let v: f64 = s.parse().ok()?;
+    if !v.is_finite() || v < 0.0 { return None; }
+    Some((v * 1e8).round() as u64)
+}
+
+/// Insert a sample, then drop anything older than the 14-day window.
+fn record_supply_sample(at: u64, supply_e8s: u64) {
+    SUPPLY_SAMPLES.with(|m| {
+        let mut map = m.borrow_mut();
+        map.insert(at, supply_e8s);
+        let cutoff = at.saturating_sub(SUPPLY_HISTORY_WINDOW_NS);
+        // iter() is ascending by key, so the leading entries are the oldest.
+        let stale: Vec<u64> = map.iter().take_while(|e| *e.key() < cutoff).map(|e| *e.key()).collect();
+        for k in stale { map.remove(&k); }
+    });
+}
+
+/// 30-min timer body: non-replicated GET of the ICP total supply → one sample.
+/// Best-effort: any failure (incl. the local replica being unable to make HTTPS
+/// outcalls) just skips this tick.
+async fn sample_icp_supply() {
+    use ic_cdk::api::management_canister::http_request::{HttpMethod, HttpResponse};
+    use ic_cdk::call::Call;
+    let arg = HttpReqArg {
+        url: ICP_SUPPLY_URL.to_string(),
+        max_response_bytes: Some(256),
+        method: HttpMethod::GET,
+        headers: vec![],
+        body: None,
+        transform: None,
+        is_replicated: Some(false),
+    };
+    let response = match Call::bounded_wait(Principal::management_canister(), "http_request")
+        .with_arg(arg)
+        .with_cycles(SUPPLY_OUTCALL_CYCLES)
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let resp: HttpResponse = match response.candid() { Ok(r) => r, Err(_) => return };
+    let status: u64 = resp.status.to_string().parse().unwrap_or(0);
+    if !(200..300).contains(&status) { return; }
+    if let Some(e8s) = parse_supply_e8s(&resp.body) {
+        record_supply_sample(current_time(), e8s);
+    }
+}
+
+/// Dashboard data: the rolling 14-day ICP total-supply history, ascending by time
+/// → (timestamp_ns, supply_e8s).
+#[ic_cdk::query]
+fn get_icp_supply_history() -> Vec<(u64, u64)> {
+    SUPPLY_SAMPLES.with(|m| m.borrow().iter().map(|e| (*e.key(), e.value())).collect())
+}
+
+/// Local-dev: seed a ~14-day supply curve (2h spacing) so the Dashboard chart
+/// renders without live outcalls, which the local replica can't make. No-op on
+/// mainnet or if samples already exist.
+fn seed_mock_supply_history() {
+    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+    if !is_local { return; }
+    if SUPPLY_SAMPLES.with(|m| m.borrow().len()) != 0 { return; }
+    let now = current_time();
+    let step = 2 * 3_600 * 1_000_000_000u64; // every 2h
+    let points = SUPPLY_HISTORY_WINDOW_NS / step; // ~168
+    let base = 554_148_322.0f64;
+    for i in 0..points {
+        let age = (points - 1 - i) * step;
+        let at = now.saturating_sub(age);
+        let v = base - (i as f64) * 0.0007; // gentle deflation (proof-of-burn vibe)
+        record_supply_sample(at, (v * 1e8).round() as u64);
+    }
+}
+
 fn setup_timers() {
+    // ICP total-supply: one sample shortly after boot, then every 30 minutes.
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(30), async { sample_icp_supply().await; });
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(SUPPLY_SAMPLE_INTERVAL_SECS), || async {
+        sample_icp_supply().await;
+    });
     ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || async {
         // PB-117: refresh live NNS proposals on mainnet before settling.
         let is_local = CONFIG.with(|c| c.borrow().get().is_local);
@@ -28984,6 +29098,28 @@ mod tests {
             Decode!(&reply, (u64, u64)).is_err(),
             "bare-tuple decode of a Result reply must fail — this was the mainnet bug"
         );
+    }
+
+    #[test]
+    fn test_parse_supply_e8s() {
+        assert_eq!(parse_supply_e8s(b"100\n"), Some(10_000_000_000));
+        assert_eq!(parse_supply_e8s(b"  1.5 "), Some(150_000_000));
+        // Real endpoint format → ~554.1M ICP in e8s (avoid exact f64 assertion).
+        assert!(parse_supply_e8s(b"554148322.73587447").unwrap() > 55_414_000_000_000_000);
+        assert_eq!(parse_supply_e8s(b"nope"), None);
+        assert_eq!(parse_supply_e8s(b""), None);
+        assert_eq!(parse_supply_e8s(b"-5"), None);
+    }
+
+    #[test]
+    fn test_supply_history_prunes_older_than_14d() {
+        // Use a high base time so any stray entries get pruned by the new insert.
+        let now = 1_000 * SUPPLY_HISTORY_WINDOW_NS;
+        record_supply_sample(now - SUPPLY_HISTORY_WINDOW_NS - 1, 111); // just over 14d old
+        record_supply_sample(now, 222);
+        let hist = get_icp_supply_history();
+        assert!(hist.iter().all(|(at, _)| *at >= now - SUPPLY_HISTORY_WINDOW_NS), "old sample pruned");
+        assert!(hist.iter().any(|(at, v)| *at == now && *v == 222), "newest sample kept");
     }
 
     #[tokio::test]
