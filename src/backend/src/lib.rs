@@ -3076,10 +3076,16 @@ async fn commit_inner(
         return Err("TOO_MANY_COMMITMENTS".to_string());
     }
 
-    // $1 minimum, valued in USD via the XRC oracle, for BOTH ICP and token
-    // commits (presets start at $1). `target_e8s` is the ICP-equivalent for
-    // token commits too, so one check covers both paths.
-    if icp_amount_usd_e8s(target_e8s) < USD_E8S_PER_USD {
+    // $1 minimum, valued in USD via the XRC oracle (presets start at $1). For a
+    // TOKEN commit, value the DEPOSITED token directly — NOT the floored ICP-
+    // equivalent in `target_e8s`. Round-tripping token→ICP (floor)→USD dropped an
+    // exact-$1 deposit (e.g. 1 ckUSDT at a non-round ICP price like $2.27) a hair
+    // under $1, wrongly rejecting it with BELOW_MINIMUM.
+    let commit_usd_e8s = match token_commit {
+        Some((tok, amt)) => token_amount_usd_e8s(tok, amt),
+        None => icp_amount_usd_e8s(target_e8s),
+    };
+    if commit_usd_e8s < USD_E8S_PER_USD {
         return Err("BELOW_MINIMUM".to_string());
     }
 
@@ -29137,6 +29143,24 @@ mod tests {
         let hist = get_icp_supply_history();
         assert!(hist.iter().all(|(at, _)| *at >= now - SUPPLY_HISTORY_WINDOW_NS), "old sample pruned");
         assert!(hist.iter().any(|(at, v)| *at == now && *v == 222), "newest sample kept");
+    }
+
+    // Regression: an exact-$1 token commit (e.g. 1 ckUSDT) must clear the $1
+    // minimum. The old check valued the FLOORED ICP-equivalent, which at a
+    // non-round ICP price ($2.27) round-trips to $0.99999… and wrongly rejected
+    // with BELOW_MINIMUM. The fix values the deposited token directly.
+    #[test]
+    fn test_token_commit_min_uses_direct_usd_not_floored_icp_roundtrip() {
+        let idx = explorer_token_index(ExplorerToken::ICP);
+        EXPLORER_USD_RATES.with(|r| r.borrow_mut()[idx] = (227_154_568, 0)); // $2.27/ICP
+        let one_ckusdt = 1_000_000u64; // $1 at 6 decimals
+        // The fix: direct token valuation = exactly $1 → passes the minimum.
+        assert!(token_amount_usd_e8s(ExplorerToken::CkUSDT, one_ckusdt) >= USD_E8S_PER_USD);
+        // The old check: floored ICP round-trip values below $1 (the bug).
+        let roundtrip = icp_amount_usd_e8s(expected_icp_for_token(ExplorerToken::CkUSDT, one_ckusdt));
+        assert!(roundtrip < USD_E8S_PER_USD,
+            "ICP round-trip drops an exact-$1 token deposit under $1 at a non-round price");
+        EXPLORER_USD_RATES.with(|r| r.borrow_mut()[idx] = (0, 0)); // reset
     }
 
     #[tokio::test]
