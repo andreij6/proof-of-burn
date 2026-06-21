@@ -402,10 +402,15 @@ export default function Dashboard({
 
       {/* ICP total supply — the deflation story, sampled every 30 min over 14 days */}
       <div className="col" style={{ gap: 12, padding: '16px 18px', borderRadius: 12, background: 'var(--surface)', border: '1px solid var(--border)' }}>
-        <span className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <Icon name="flame" size={14} stroke="var(--burn-ink)" />
-          <Eyebrow>ICP total supply · last 14 days</Eyebrow>
-        </span>
+        <div className="row" style={{ gap: 8, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+            <Icon name="flame" size={14} stroke="var(--burn-ink)" />
+            <Eyebrow>ICP total supply · last 14 days</Eyebrow>
+          </span>
+          <Btn variant="secondary" sm onClick={() => window.open('https://dashboard.internetcomputer.org/', '_blank', 'noopener,noreferrer')}>
+            <Icon name="compass" size={12} /> IC Dashboard
+          </Btn>
+        </div>
         <SupplyChart data={supplyHistory} />
       </div>
     </div>
