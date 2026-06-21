@@ -1,7 +1,7 @@
-# Caldera CLI & Agent Integration (Local Development)
+# Cycle Burn CLI & Agent Integration (Local Development)
 
 This document provides instructions for AI agents and developer scripts to
-interact with the local Caldera canisters using the `icp` CLI.
+interact with the local Cycle Burn canisters using the `icp` CLI.
 
 
 ## Canister Identifiers (Local)
@@ -69,7 +69,7 @@ brew install icp-cli
 
 ## 3. (Optional) Self-attest that you follow the Primary Neuron
 Voting is **burn-only and open to any authenticated caller** — you do NOT need to
-follow any neuron to commit. Following the Caldera primary neuron (`4821667`) on
+follow any neuron to commit. Following the Cycle Burn primary neuron (`4821667`) on
 the NNS is encouraged so your own NNS vote also moves with the community, and you
 may self-attest it (purely informational; not a precondition to commit):
 ```bash

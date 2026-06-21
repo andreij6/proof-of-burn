@@ -1,4 +1,4 @@
-# Caldera — Lossless Lottery: CLI & Agent Integration (Local Development)
+# Cycle Burn — Lossless Lottery: CLI & Agent Integration (Local Development)
 
 Instructions for AI agents and scheduled scripts to play the lossless lottery
 with the `icp` CLI: check state, claim the daily ticket grant, and track

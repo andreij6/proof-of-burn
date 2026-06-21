@@ -1,7 +1,7 @@
-# Caldera CLI & Agent Integration (Production Mainnet)
+# Cycle Burn CLI & Agent Integration (Production Mainnet)
 
 This document provides instructions for AI agents and developer scripts to
-interact with the mainnet Caldera canisters using the `icp` CLI.
+interact with the mainnet Cycle Burn canisters using the `icp` CLI.
 
 
 ## Canister Identifiers (Production)
@@ -66,7 +66,7 @@ brew install icp-cli
 
 ## 3. (Optional) Self-attest that you follow the Primary Neuron
 Voting is **burn-only and open to any authenticated caller** — you do NOT need to
-follow any neuron to commit. Following the Caldera primary neuron
+follow any neuron to commit. Following the Cycle Burn primary neuron
 (`17802688826615984104`) on the NNS is encouraged so your own NNS vote also moves
 with the community, and you may self-attest it (purely informational; not a
 precondition to commit):

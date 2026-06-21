@@ -273,7 +273,7 @@ export default function Landing({ onEnter, flags }: LandingProps) {
         background: 'linear-gradient(color-mix(in srgb, var(--char-950) 88%, transparent), transparent)',
       }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 15 }}>
-          <Icon name="flame" size={16} stroke="var(--burn-ink)" /> Caldera
+          <Icon name="flame" size={16} stroke="var(--burn-ink)" /> Cycle Burn
         </span>
         <Btn variant="primary" sm onClick={onEnter}>
           Go to App <Icon name="chevRight" size={13} stroke="var(--char-950)" />
@@ -494,7 +494,7 @@ export default function Landing({ onEnter, flags }: LandingProps) {
         </div>
 
         <span style={{ fontSize: 11, color: 'var(--fg-3)', marginTop: 18 }}>
-          Caldera · an ICP Dapp Factory build · runs entirely on the Internet Computer
+          Cycle Burn · an ICP Dapp Factory build · runs entirely on the Internet Computer
         </span>
       </section>
     </div>

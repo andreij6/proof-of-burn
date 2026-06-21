@@ -1032,8 +1032,8 @@ export default function App() {
     const commitment = myCommitments.find(c => c.proposal_id === p.id);
     const stance = commitment?.stance;
     const text = stance !== undefined
-      ? `I'm backing ${stance === Stance.Adopt ? 'ADOPT' : 'REJECT'} on NNS proposal #${id} — “${title}” — on Caldera. Burn ICP, move the vote. 🔥 $ICP`
-      : `NNS proposal #${id} — “${title}” — is live on Caldera. Burn ICP, move the vote. 🔥 $ICP`;
+      ? `I'm backing ${stance === Stance.Adopt ? 'ADOPT' : 'REJECT'} on NNS proposal #${id} — “${title}” — on Cycle Burn. Burn ICP, move the vote. 🔥 $ICP`
+      : `NNS proposal #${id} — “${title}” — is live on Cycle Burn. Burn ICP, move the vote. 🔥 $ICP`;
     const url = `${window.location.origin}/#proposal-${id}`;
     window.open(
       `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
@@ -1400,7 +1400,7 @@ export default function App() {
     const llmsUrl = `${window.location.origin}/llms-${isLocal ? 'local' : 'prod'}.txt`;
     const clipboardMsg =
       `Fetch ${llmsUrl} and follow its instructions when interacting with ` +
-      `Caldera`;
+      `Cycle Burn`;
     navigator.clipboard.writeText(clipboardMsg);
     setSkillsCopied(true);
     setTimeout(() => setSkillsCopied(false), 2000);
@@ -2115,7 +2115,7 @@ export default function App() {
             <Icon name="flame" size={17} stroke="var(--burn-ink)" />
           </span>
           <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Caldera
+            Cycle Burn
           </b>
 
         </div>
@@ -2126,7 +2126,7 @@ export default function App() {
           <button
             onClick={handleBookmark}
             aria-label="Bookmark this app"
-            title="Bookmark Caldera"
+            title="Bookmark Cycle Burn"
             style={{
               background: 'transparent', border: '1px solid var(--border)', borderRadius: 8,
               cursor: 'pointer', color: 'var(--fg-2)', padding: 7, display: 'flex',
@@ -2142,7 +2142,7 @@ export default function App() {
               padding: '8px 11px', boxShadow: '0 6px 20px rgba(0,0,0,0.18)', width: 'max-content', maxWidth: 240,
             }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-1)' }}>
-                Press <b className="mono" style={{ color: 'var(--burn-ink)' }}>{bookmarkShortcut}</b> to bookmark Caldera.
+                Press <b className="mono" style={{ color: 'var(--burn-ink)' }}>{bookmarkShortcut}</b> to bookmark Cycle Burn.
               </span>
               <span style={{ display: 'block', fontSize: 11.5, color: 'var(--fg-3)', marginTop: 3 }}>
                 Link copied to your clipboard too.
@@ -3423,7 +3423,7 @@ export default function App() {
             </div>
 
             <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0, lineHeight: 1.55 }}>
-              Caldera directs the community leader neuron based on
+              Cycle Burn directs the community leader neuron based on
               what participants burn. We recommend also following it on the NNS
               so your own neuron votes the same way.
             </p>
@@ -4482,7 +4482,7 @@ export default function App() {
               <div className="col" style={{ gap: 4 }}>
                 <span className="mono" style={{ color: 'var(--fg)', fontWeight: 600 }}>Fees</span>
                 <p style={{ margin: 0, color: 'var(--fg-2)', fontSize: 12.5 }}>
-                  None. Caldera charges no protocol fee and the treasury covers every ledger fee on your behalf. If the proposal fails to meet its threshold, the committed amount is returned to you in full — exactly what you put in.
+                  None. Cycle Burn charges no protocol fee and the treasury covers every ledger fee on your behalf. If the proposal fails to meet its threshold, the committed amount is returned to you in full — exactly what you put in.
                 </p>
               </div>
 
@@ -4513,7 +4513,7 @@ export default function App() {
               <Icon name="flame" size={15} stroke="var(--burn-ink)" />
             </span>
             <b style={{ fontSize: 16, color: 'var(--fg)', fontFamily: 'var(--font-display)', letterSpacing: '-0.01em' }}>
-              Caldera
+              Cycle Burn
             </b>
           </span>
           <button

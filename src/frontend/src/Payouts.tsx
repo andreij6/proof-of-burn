@@ -14,7 +14,7 @@ import { makeCkbtcMinter, makeApprover, CKBTC_MINTER_ID } from "./minters";
 // ==========================================
 // Profile — sectioned like the Admin console: Overview (identity + social +
 // account summary), Activity (the full receipt trail), and Agent Space (the
-// machine half of Caldera: skills, quickstart, endpoint cheat-sheet).
+// machine half of Cycle Burn: skills, quickstart, endpoint cheat-sheet).
 // ==========================================
 
 interface PayoutsProps {
@@ -147,7 +147,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
     })();
   }, [actor, principal, signedIn, isLocal]);
 
-  // ── Agent skills: every flow in Caldera ships as a copy-paste skill ──
+  // ── Agent skills: every flow in Cycle Burn ships as a copy-paste skill ──
   const [copiedSkill, setCopiedSkill] = useState<string | null>(null);
   const isLocalHost = typeof window !== 'undefined' &&
     (window.location.origin.includes('localhost') || window.location.origin.includes('127.0.0.1'));
@@ -158,28 +158,28 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
       name: 'Voting & burning',
       file: `llms-${env}.txt`,
       blurb: 'Read live NNS proposals, commit ICP behind a stance, track refunds and burns.',
-      instruction: 'read proposals, commit ICP behind adopt/reject stances, and track settlements on Caldera',
+      instruction: 'read proposals, commit ICP behind adopt/reject stances, and track settlements on Cycle Burn',
     },
     {
       key: 'rd',
       name: 'Community R&D board',
       file: `llms-rd-${env}.txt`,
       blurb: 'Post ideas ($0.05 in ICP/ckBTC/ckETH), upvote for free, defend ideas from expiry, fund official projects.',
-      instruction: 'read, post, upvote and fund on the Caldera Community R&D board',
+      instruction: 'read, post, upvote and fund on the Cycle Burn Community R&D board',
     },
     {
       key: 'lottery',
       name: 'Lossless Lottery',
       file: `llms-lottery-${env}.txt`,
       blurb: 'Claim daily tickets on a schedule and track drawings and winnings.',
-      instruction: 'claim daily Caldera lottery tickets (cron-friendly) and track drawings',
+      instruction: 'claim daily Cycle Burn lottery tickets (cron-friendly) and track drawings',
     },
     {
       key: 'early_adopters',
       name: 'Perm neuron validation',
       file: 'llms-early_adopters-validate.txt',
       blurb: 'Independently audit the Perm neuron (permanent stake) program against its source code and tests.',
-      instruction: 'independently verify, from source code and tests, that the Caldera Perm neuron program works exactly as advertised',
+      instruction: 'independently verify, from source code and tests, that the Cycle Burn Perm neuron program works exactly as advertised',
     },
   ];
   const copySkill = (s: typeof SKILLS[number]) => {
@@ -192,7 +192,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
   // One-paste onboarding for an agent: who we are, where, and the house rules.
   const [quickstartCopied, setQuickstartCopied] = useState(false);
   const quickstart = [
-    `You are connecting to Caldera, an ICP governance dapp.`,
+    `You are connecting to Cycle Burn, an ICP governance dapp.`,
     `Backend canister: ${backendCanisterId} (${isLocal ? 'local replica' : 'IC mainnet'}). Candid: ${window?.location?.origin ?? ''}/llms-${env}.txt lists the flows.`,
     `Authentication: any self-generated principal works (no Internet Identity needed). Generate a key, sign your calls; queries are free and anonymous.`,
     `House rules: staking and unstaking are whole-ICP only; voting is burn-only and open to any signed-in caller (following the community leader is encouraged but not required); staking earns daily lottery tickets (claimable once per UTC day via claim_daily_tickets).`,
@@ -290,7 +290,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
                 </button>
               </div>
               <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Your principal is your account everywhere in Caldera — deposits, stakes, votes and
+                Your principal is your account everywhere in Cycle Burn — deposits, stakes, votes and
                 payouts all key on it. Payouts land in your wallet automatically; nothing to claim.
               </span>
             </div>
@@ -437,7 +437,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
         <>
           <div className="col" style={{ gap: 6 }}>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 680 }}>
-              Caldera is built agent-first: every flow has a machine-readable skill, queries are
+              Cycle Burn is built agent-first: every flow has a machine-readable skill, queries are
               open, and any self-generated principal can transact — no Internet Identity required.
               Point an agent here and it can vote, stake, claim tickets and back ideas on your
               schedule.

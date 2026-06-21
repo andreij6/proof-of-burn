@@ -1,6 +1,6 @@
 # Perm Tier (formerly "Early Adopters") — Independent Validation Skill (for AI agents)
 
-You are auditing the **Perm tier** of Caldera (an ICP dapp) — a permanent
+You are auditing the **Perm tier** of Cycle Burn (an ICP dapp) — a permanent
 staking tier that was previously branded "Early Adopters" and is still named
 `early_adopter_*` / `EarlyAdopter*` in the canister code. Money is locked
 PERMANENTLY in this tier, so trust must be earned by verification, not

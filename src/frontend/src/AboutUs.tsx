@@ -37,10 +37,10 @@ export default function AboutUs({ signedIn, onSignIn, go }: AboutUsProps) {
         <Eyebrow accent>Mission Statement</Eyebrow>
         <span className="row" style={{ gap: 10, alignItems: 'center' }}>
           <Icon name="flame" size={22} stroke="var(--burn-ink)" />
-          <h4 style={{ margin: 0 }}>Why Caldera exists</h4>
+          <h4 style={{ margin: 0 }}>Why Cycle Burn exists</h4>
         </span>
         <p style={{ fontSize: 13.5, color: 'var(--fg-2)', maxWidth: 660, lineHeight: 1.6 }}>
-          Caldera is a community-owned governance layer on the Internet Computer. We turn collective
+          Cycle Burn is a community-owned governance layer on the Internet Computer. We turn collective
           conviction into real NNS voting power — and we make every action <b style={{ color: 'var(--fg)' }}>provably
           shrink the ICP supply</b>. No custody, no lock-ups you can't reverse, no promises we can't settle on-chain.
         </p>
@@ -50,7 +50,7 @@ export default function AboutUs({ signedIn, onSignIn, go }: AboutUsProps) {
       <div className="col" style={{ gap: 10 }}>
         <Eyebrow>Our purpose</Eyebrow>
         <p style={{ fontSize: 13, color: 'var(--fg-2)', lineHeight: 1.6, maxWidth: 700, margin: 0 }}>
-          A handful of large neurons decide most NNS proposals. Caldera gives the rest of us a way to
+          A handful of large neurons decide most NNS proposals. Cycle Burn gives the rest of us a way to
           matter: pool our voice behind a community leader neuron, and back the proposals we care about
           by burning ICP. The burn is the point — it permanently removes ICP from circulation, so
           steering governance and strengthening the token's economics become the same act.

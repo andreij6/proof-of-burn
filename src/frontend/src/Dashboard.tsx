@@ -233,7 +233,7 @@ export default function Dashboard({
           </HubCard>
         ) : newUser ? (
           <HubCard span2 eyebrow="Get started" icon="checkCircle" chip={<Chip tone="pending">{checklist.filter(c => c.done).length}/{checklist.length}</Chip>}>
-            <Big>Welcome to Caldera</Big>
+            <Big>Welcome to Cycle Burn</Big>
             <div className="col" style={{ gap: 8, marginTop: 2 }}>
               {checklist.map((step, i) => (
                 <button key={i} onClick={() => go(step.page)} style={{
