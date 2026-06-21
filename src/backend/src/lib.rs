@@ -4782,35 +4782,52 @@ fn record_supply_sample(at: u64, supply_e8s: u64) {
     });
 }
 
-/// 30-min timer body: non-replicated GET of the ICP total supply → one sample.
-/// Best-effort: any failure (incl. the local replica being unable to make HTTPS
-/// outcalls) just skips this tick.
-async fn sample_icp_supply() {
+/// Non-replicated GET of the ICP total supply → e8s. Returns a descriptive Err so
+/// the failure path is observable (via admin_sample_supply_now) instead of silent.
+/// max_response_bytes must cover the response HEADERS too (a CDN sends ~1KB), and
+/// the bounded-wait deadline is set explicitly (the default is short).
+async fn fetch_icp_supply() -> Result<u64, String> {
     use ic_cdk::api::management_canister::http_request::{HttpMethod, HttpResponse};
     use ic_cdk::call::Call;
     let arg = HttpReqArg {
         url: ICP_SUPPLY_URL.to_string(),
-        max_response_bytes: Some(256),
+        max_response_bytes: Some(8_192),
         method: HttpMethod::GET,
         headers: vec![],
         body: None,
         transform: None,
         is_replicated: Some(false),
     };
-    let response = match Call::bounded_wait(Principal::management_canister(), "http_request")
+    let response = Call::bounded_wait(Principal::management_canister(), "http_request")
         .with_arg(arg)
         .with_cycles(SUPPLY_OUTCALL_CYCLES)
+        .change_timeout(60)
         .await
-    {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    let resp: HttpResponse = match response.candid() { Ok(r) => r, Err(_) => return };
+        .map_err(|e| format!("OUTCALL ({:?})", e))?;
+    let resp: HttpResponse = response.candid().map_err(|e| format!("DECODE ({:?})", e))?;
     let status: u64 = resp.status.to_string().parse().unwrap_or(0);
-    if !(200..300).contains(&status) { return; }
-    if let Some(e8s) = parse_supply_e8s(&resp.body) {
+    if !(200..300).contains(&status) {
+        return Err(format!("STATUS_{}", status));
+    }
+    parse_supply_e8s(&resp.body)
+        .ok_or_else(|| format!("PARSE({})", String::from_utf8_lossy(&resp.body).chars().take(40).collect::<String>()))
+}
+
+/// 30-min timer body. Best-effort: a failure just skips this tick (the next tick
+/// retries; on the local replica, which can't make outcalls, it always skips).
+async fn sample_icp_supply() {
+    if let Ok(e8s) = fetch_icp_supply().await {
         record_supply_sample(current_time(), e8s);
     }
+}
+
+/// Admin: trigger one supply sample now and return the value (or the exact error).
+/// Diagnostic + manual backfill for the dashboard chart.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_sample_supply_now() -> Result<u64, String> {
+    let e8s = fetch_icp_supply().await?;
+    record_supply_sample(current_time(), e8s);
+    Ok(e8s)
 }
 
 /// Dashboard data: the rolling 14-day ICP total-supply history, ascending by time

@@ -1250,6 +1250,9 @@ service : (InitPayload) -> {
   admin_remove_thread : (nat64) -> (Result);
   // Admin: drop one hole's override, reverting it to the built-in layout.
   admin_reset_arcade_hole : (nat8) -> (Result);
+  // Admin: trigger one supply sample now and return the value (or the exact error).
+  // Diagnostic + manual backfill for the dashboard chart.
+  admin_sample_supply_now : () -> (Result_1);
   // Genesis default course (PB-309 A7/B3). Minted exactly ONCE to the admin
   // principal as a NORMAL ICRC-7 course NFT, auto-listed and playable, so the
   // marketplace is never empty. Idempotent: guarded by `SYSTEM_COURSE_MINTED`, so
