@@ -1841,6 +1841,32 @@ export default function App() {
           Mission Statement
         </Btn>
 
+        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Play</Eyebrow>
+        )}
+        {arcadeEnabled && (
+          <Btn variant={page === 'arcade' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('arcade')}>
+            <Icon name="gamepad" size={14} stroke={page === 'arcade' ? 'var(--char-950)' : 'currentColor'} />
+            Arcade
+          </Btn>
+        )}
+        {casinoEnabled && (
+          <Btn variant={page === 'casino' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => {
+            // Always land on the Casino hub, even from /casino/crash.
+            if (typeof window !== 'undefined' && window.location.hash !== '#/casino') window.location.hash = '#/casino';
+            go('casino');
+          }}>
+            <Icon name="zap" size={14} stroke={page === 'casino' ? 'var(--char-950)' : 'currentColor'} />
+            Casino
+          </Btn>
+        )}
+        {lotteryEnabled && (
+          <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
+            <Icon name="target" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
+            Lottery
+          </Btn>
+        )}
+
         <Eyebrow style={{ margin: '14px 0 4px' }}>Governance</Eyebrow>
         <Btn variant={page === 'voting' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('voting')}>
           <Icon name="flame" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
@@ -1885,31 +1911,6 @@ export default function App() {
           </Btn>
         )}
 
-        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
-          <Eyebrow style={{ margin: '14px 0 4px' }}>Play</Eyebrow>
-        )}
-        {arcadeEnabled && (
-          <Btn variant={page === 'arcade' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('arcade')}>
-            <Icon name="gamepad" size={14} stroke={page === 'arcade' ? 'var(--char-950)' : 'currentColor'} />
-            Arcade
-          </Btn>
-        )}
-        {casinoEnabled && (
-          <Btn variant={page === 'casino' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => {
-            // Always land on the Casino hub, even from /casino/crash.
-            if (typeof window !== 'undefined' && window.location.hash !== '#/casino') window.location.hash = '#/casino';
-            go('casino');
-          }}>
-            <Icon name="zap" size={14} stroke={page === 'casino' ? 'var(--char-950)' : 'currentColor'} />
-            Casino
-          </Btn>
-        )}
-        {lotteryEnabled && (
-          <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
-            <Icon name="target" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
-            Lottery
-          </Btn>
-        )}
       </>
     );
   };
