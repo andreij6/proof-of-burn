@@ -14,6 +14,7 @@ import type { DappListing, ExplorerInfo, ExplorerQuote, FeaturedInfo, FeaturedVi
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal, usePageDevControls } from "./ui";
 import { fmtTokenAmount } from "./IdeaBoard";
+import { usdToTokenUnits } from "./tokens";
 import { useErrorImpression } from "./analytics";
 
 // ==========================================
@@ -148,6 +149,10 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
   const [quote, setQuote] = useState<ExplorerQuote | null>(null);
   const [isQuoting, setIsQuoting] = useState(false);
   const [subBalance, setSubBalance] = useState<bigint | null>(null);
+  // Per-token balance + USD rate so the picker can disable tokens the user can't
+  // afford the listing cost in. Loaded when the submit modal opens.
+  const [subBalances, setSubBalances] = useState<Record<string, bigint | null>>({});
+  const [subRates, setSubRates] = useState<Record<string, bigint>>({});
   const [subError, setSubError] = useState<string | null>(null);
   const [subStep, setSubStep] = useState('');
   const [subBusy, setSubBusy] = useState(false);
@@ -231,6 +236,30 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
     ? daysNum >= Number(info.min_days) && daysNum <= Number(info.max_days)
     : daysNum >= 1 && daysNum <= 3650;
 
+  // Required listing cost (incl. ledger fee) in a token at the chosen days, or
+  // null if unknown/invalid. True affordability unless we KNOW balance < cost.
+  const subRequired = (t: ExplorerToken): bigint | null => {
+    if (!info || !daysValid) return null;
+    const rate = subRates[t as unknown as string];
+    if (!rate || rate <= 0n) return null;
+    const usd = (Number(info.price_per_day_usd_e8s) / 1e8) * daysNum;
+    const amt = usdToTokenUnits(usd, rate, TOKEN_BASE[t].decimals);
+    if (amt === null) return null;
+    return amt + tokenFee(t, info);
+  };
+  const subAffordable = (t: ExplorerToken): boolean => {
+    const bal = subBalances[t as unknown as string];
+    const req = subRequired(t);
+    if (bal === undefined || bal === null || req === null) return true; // still loading
+    return bal >= req;
+  };
+  // If the selected token can't cover the cost, hop to the first one that can.
+  useEffect(() => {
+    if (!isSubmitOpen || subAffordable(subToken)) return;
+    const alt = TOKEN_ORDER.find(t => subAffordable(t));
+    if (alt && alt !== subToken) setSubToken(alt);
+  }, [subBalances, subRates, subDays, isSubmitOpen, subToken]);
+
   // Live price quote — refetched (debounced) whenever token/days change while
   // the modal is open. The backend locks the quoted price for 15 minutes.
   useEffect(() => {
@@ -266,6 +295,33 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
       .catch(() => { if (!cancelled) setSubBalance(0n); });
     return () => { cancelled = true; };
   }, [isSubmitOpen, subToken, identity, info]);
+
+  // On submit-modal open: load USD rates + each token's balance so the picker can
+  // disable tokens the user can't cover the listing cost in.
+  useEffect(() => {
+    if (!isSubmitOpen || !signedIn || !info || !principal) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const rates = await actor.get_usd_rates();
+        if (!cancelled) {
+          const m: Record<string, bigint> = {};
+          for (const r of rates) m[r.token as unknown as string] = r.rate_usd_e8s;
+          setSubRates(m);
+        }
+      } catch { /* rates best-effort */ }
+      await Promise.all(TOKEN_ORDER.map(async (t) => {
+        const ledger = tokenLedger(t, info);
+        if (!ledger) { if (!cancelled) setSubBalances(p => ({ ...p, [t]: 0n })); return; }
+        try {
+          const bal = await createLedgerActor(ledger.toString(), { agentOptions: { host, identity, rootKey } })
+            .icrc1_balance_of({ owner: principal });
+          if (!cancelled) setSubBalances(p => ({ ...p, [t]: bal }));
+        } catch { if (!cancelled) setSubBalances(p => ({ ...p, [t]: 0n })); }
+      }));
+    })();
+    return () => { cancelled = true; };
+  }, [isSubmitOpen, signedIn, info, identity]);
 
   // Pick which active placement the hero shows — random, once per load (and
   // whenever the active set size changes). Mirrors the backend's "random per
@@ -1043,18 +1099,25 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
                   <div className="col" style={{ gap: 6 }}>
                     <label style={LABEL_STYLE}>Pay with</label>
                     <span className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
-                      {TOKEN_ORDER.map(t => (
-                        <button key={t} onClick={() => { setSubToken(t); setSubError(null); }}
+                      {TOKEN_ORDER.map(t => {
+                        const afford = subAffordable(t);
+                        return (
+                        <button key={t} disabled={!afford}
+                          onClick={() => { if (afford) { setSubToken(t); setSubError(null); } }}
+                          title={afford ? TOKEN_BASE[t].label : `Not enough ${TOKEN_BASE[t].label} to cover the cost`}
                           style={{
                             background: subToken === t ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
                             border: `1px solid ${subToken === t ? 'var(--burn)' : 'var(--border)'}`,
-                            color: subToken === t ? 'var(--burn-ink)' : 'var(--fg-3)',
+                            color: !afford ? 'var(--fg-3)' : subToken === t ? 'var(--burn-ink)' : 'var(--fg-3)',
                             borderRadius: 999, padding: '5px 10px', fontSize: 11.5, fontWeight: 500,
-                            cursor: 'pointer', transition: 'all var(--dur-fast) var(--ease-out)',
+                            cursor: afford ? 'pointer' : 'not-allowed', opacity: afford ? 1 : 0.4,
+                            textDecoration: afford ? 'none' : 'line-through',
+                            transition: 'all var(--dur-fast) var(--ease-out)',
                           }}>
                           {TOKEN_BASE[t].label}
                         </button>
-                      ))}
+                        );
+                      })}
                     </span>
                   </div>
                 </div>

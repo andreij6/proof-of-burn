@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
 import {} from "./bindings/backend";
 import { IdeaToken } from "./tokens";
-import { fmtUsd } from "./tokens";
+import { fmtUsd, usdToTokenUnits } from "./tokens";
 import type { Idea, IdeaBoardInfo, Project, ExplorerInfo } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal } from "./ui";
@@ -202,6 +202,10 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   const [info, setInfo] = useState<IdeaBoardInfo | null>(null);
   const [explorerInfo, setExplorerInfo] = useState<ExplorerInfo | null>(null);
   const [postToken, setPostToken] = useState<IdeaToken>(IdeaToken.ICP);
+  // Per-token wallet balance + USD rate, so the picker can disable tokens the
+  // user can't afford the $0.05 fee in. Fetched when the post modal opens.
+  const [postBalances, setPostBalances] = useState<Record<string, bigint | null>>({});
+  const [postRates, setPostRates] = useState<Record<string, bigint>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [gridPage, setGridPage] = useState(0);
   const [projectPage, setProjectPage] = useState(0);
@@ -290,6 +294,59 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
       .catch((err: any) => { console.error("Failed to fetch token balance:", err); if (!cancelled) setPayBalance(0n); });
     return () => { cancelled = true; };
   }, [payTarget, payToken, identity, info]);
+
+  // When the post modal opens: load USD rates + each post-token's wallet balance,
+  // so the picker can disable tokens the user can't cover the fee in.
+  useEffect(() => {
+    if (!isPostOpen || !signedIn || !explorerInfo || !principal) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const rates = await actor.get_usd_rates();
+        if (!cancelled) {
+          const m: Record<string, bigint> = {};
+          for (const r of rates) m[r.token as unknown as string] = r.rate_usd_e8s;
+          setPostRates(m);
+        }
+      } catch { /* rates best-effort */ }
+      await Promise.all(POST_TOKENS.map(async ({ t }) => {
+        const ledger = postTokenLedger(t, explorerInfo);
+        if (!ledger) { if (!cancelled) setPostBalances(p => ({ ...p, [t]: 0n })); return; }
+        try {
+          const bal = await createLedgerActor(ledger.toString(), { agentOptions: { host, identity, rootKey } })
+            .icrc1_balance_of({ owner: principal });
+          if (!cancelled) setPostBalances(p => ({ ...p, [t]: bal }));
+        } catch { if (!cancelled) setPostBalances(p => ({ ...p, [t]: 0n })); }
+      }));
+    })();
+    return () => { cancelled = true; };
+  }, [isPostOpen, signedIn, explorerInfo, identity]);
+
+  // Required fee amount (incl. ledger fee) in a token, or null if unknown yet.
+  const postRequired = (t: IdeaToken): bigint | null => {
+    if (!explorerInfo || !info) return null;
+    const rate = postRates[t as unknown as string];
+    if (!rate || rate <= 0n) return null;
+    const usd = Number(info.post_fee_usd_e8s) / 1e8; // $0.05
+    const amt = usdToTokenUnits(usd, rate, TOKEN_BASE[t].decimals);
+    if (amt === null) return null;
+    return amt + postTokenFee(t, explorerInfo);
+  };
+  // True unless we KNOW the user can't cover the fee (balance loaded < required).
+  const postAffordable = (t: IdeaToken): boolean => {
+    const bal = postBalances[t as unknown as string];
+    const req = postRequired(t);
+    if (bal === undefined || bal === null || req === null) return true; // still loading
+    return bal >= req;
+  };
+
+  // If the selected token becomes unaffordable, hop to the first one that isn't.
+  useEffect(() => {
+    if (!isPostOpen) return;
+    if (postAffordable(postToken)) return;
+    const alt = POST_TOKENS.find(({ t }) => postAffordable(t));
+    if (alt && alt.t !== postToken) setPostToken(alt.t);
+  }, [postBalances, postRates, isPostOpen, postToken]);
 
   // Free upvote — one per user per idea. No payment, no modal.
   const handleUpvote = async (idea: Idea) => {
@@ -1023,14 +1080,22 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             <div className="col" style={{ gap: 6 }}>
               <label style={LABEL_STYLE}>Pay the fee in</label>
               <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                {POST_TOKENS.map(({ t, label }) => (
-                  <button key={label} type="button" onClick={() => setPostToken(t)} style={{
+                {POST_TOKENS.map(({ t, label }) => {
+                  const afford = postAffordable(t);
+                  return (
+                  <button key={label} type="button" disabled={!afford}
+                    onClick={() => { if (afford) setPostToken(t); }}
+                    title={afford ? label : `Not enough ${label} to cover the fee`}
+                    style={{
                     background: postToken === t ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
                     border: `1px solid ${postToken === t ? 'var(--burn)' : 'var(--border)'}`,
-                    color: postToken === t ? 'var(--burn-ink)' : 'var(--fg-3)',
-                    borderRadius: 999, padding: '5px 11px', fontSize: 11.5, fontWeight: 500, cursor: 'pointer',
+                    color: !afford ? 'var(--fg-4, var(--fg-3))' : postToken === t ? 'var(--burn-ink)' : 'var(--fg-3)',
+                    borderRadius: 999, padding: '5px 11px', fontSize: 11.5, fontWeight: 500,
+                    cursor: afford ? 'pointer' : 'not-allowed', opacity: afford ? 1 : 0.4,
+                    textDecoration: afford ? 'none' : 'line-through',
                   }}>{label}</button>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
