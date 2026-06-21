@@ -8,7 +8,6 @@ import {
   Stance,
   CommitmentStatus,
   ExplorerToken,
-  EscrowKind,
 } from "./bindings/backend";
 import { IdeaToken } from "./tokens";
 import { createActor as createLedgerActor } from "./bindings/ledger";
@@ -481,8 +480,10 @@ export default function App() {
   const [confirmUsd, setConfirmUsd] = useState<string>("");       // dollar amount (the input)
   const [confirmStance, setConfirmStance] = useState<Stance | null>(null);
   // Vote dialog: conviction burn (voting is burn-only).
-  // Multi-token voting: which token funds the burn commitment.
-  const [voteToken, setVoteToken] = useState<WalletToken>('ICP');
+  // Voting is ICP-only.
+  // Voting is ICP-only (non-ICP commit support removed). Kept as a typed const
+  // so existing references (pricing, gating) compile unchanged.
+  const voteToken: WalletToken = 'ICP';
   // Cached USD rates (e8s of USD per whole token) for $ thresholds/previews.
   const [usdRates, setUsdRates] = useState<Record<string, bigint>>({});
   // Bumping this opens the Profile page on its Wallet tab.
@@ -1427,77 +1428,7 @@ export default function App() {
   const executeTransaction = async () => {
     if (!actor || !confirmProposalId || !confirmStance) return;
 
-    // ── Non-ICP commitment: deposit the token, the canister swaps to ICP ──
-    if (voteToken !== 'ICP') {
-      const meta = WALLET_TOKEN_META[voteToken];
-      const smallest = parseTokenUnits(confirmAmount, meta.decimals);
-      if (!smallest || smallest <= 0n) {
-        setTxError(`Enter a valid ${voteToken} amount.`);
-        return;
-      }
-      const rate = usdRates[meta.variant] ?? 0n;
-      if (rate > 0n) {
-        const usd = smallest * rate / BigInt(10) ** BigInt(meta.decimals);
-        if (usd < MIN_COMMIT_USD_E8S) {
-          setTxError(`Too small — ${voteToken} commitments start at $${MIN_COMMIT_USD}.`);
-          return;
-        }
-      }
-      const ledgers: Record<string, string | undefined> = {
-        ckBTC: explorerInfo?.ckbtc_ledger.toText(),
-        ckETH: explorerInfo?.cketh_ledger.toText(),
-        ckUSDC: explorerInfo?.ckusdc_ledger.toText(),
-        ckUSDT: explorerInfo?.ckusdt_ledger.toText(),
-      };
-      const tokenLedger = ledgers[voteToken];
-      if (!tokenLedger) { setTxError('Token ledger unavailable — try again shortly.'); return; }
-      setIsTransacting(true);
-      setTxError(null);
-      try {
-        setTxStep("Deriving secure escrow subaccount...");
-        const depositAccount = await actor.get_deposit_address(confirmProposalId);
-        setTxStep(`Step 1/2: Depositing ${voteToken} into escrow...`);
-        const tokenActor = createLedgerActor(tokenLedger, {
-          agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
-        });
-        const xfer = await tokenActor.icrc1_transfer({
-          to: { owner: depositAccount.owner, subaccount: depositAccount.subaccount ? depositAccount.subaccount : undefined },
-          amount: smallest,
-        });
-        if (xfer.__kind__ === "Err") {
-          throw new Error(`Token transfer failed: ${JSON.stringify(xfer.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
-        }
-        setTxStep("Step 2/2: Locking the escrow and registering your stance...");
-        const res = await actor.commit_token(confirmProposalId, confirmStance, meta.variant, smallest);
-        if (res.__kind__ === "Err") {
-          const code = res.Err as string;
-          // The deposit already landed in escrow but the commit was rejected —
-          // auto-refund it. reclaim_escrow is guarded (no-op if a commitment owns
-          // the escrow), so this only returns a genuinely stranded deposit.
-          let refunded = false;
-          try {
-            const rc = await actor.reclaim_escrow(EscrowKind.Commitment, meta.variant as unknown as IdeaToken, confirmProposalId);
-            refunded = rc.__kind__ === "Ok" && rc.Ok > 0n;
-          } catch { /* best-effort refund */ }
-          await refreshAllData();
-          throw new Error(
-            (code === "BELOW_MINIMUM" ? `Too small — ${voteToken} commitments start at $1.` : `Commit failed: ${code}`)
-            + (refunded ? ` Your ${voteToken} deposit was refunded.` : "")
-          );
-        }
-        setTxSuccess(true);
-        setTxStep(`Committed! Your ${voteToken} stays escrowed — it converts to ICP only if the vote passes; otherwise it comes back as ${voteToken}.`);
-        // Land on the Committed tab so the user sees what they just voted on.
-        setActiveTab('committed');
-        await refreshAllData();
-      } catch (err: any) {
-        console.error("Token commitment error:", err);
-        setTxError(err.message || String(err));
-      } finally {
-        setIsTransacting(false);
-      }
-      return;
-    }
+    // Voting is ICP-only. (Non-ICP commit support was removed.)
 
     const amount = parseFloat(confirmAmount);
     if (isNaN(amount) || amount <= 0) {
@@ -4120,19 +4051,10 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Amount — entered in USD; priced into the selected currency.
-                    Switching currency re-prices the same dollars (see effect). */}
+                {/* Amount — entered in USD; priced into ICP (votes are ICP-only). */}
                 <div className="col" style={{ gap: 8 }}>
-                  <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                    {WALLET_TOKENS.map(t => (
-                      <Btn key={t} variant={voteToken === t ? 'primary' : 'ghost'} sm
-                        onClick={() => { setVoteToken(t); setTxError(null); }}>
-                        {t}
-                      </Btn>
-                    ))}
-                  </div>
                   <label style={{ fontSize: 12, color: 'var(--fg-3)', letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-                    How much to burn? (USD)
+                    How much ICP to burn? (USD)
                   </label>
                   {/* USD presets */}
                   <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>

@@ -3016,27 +3016,13 @@ async fn commit_token(
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
 
-    if token == ExplorerToken::ICP {
-        // ICP needs no conversion: same semantics as commit(amount).
-        return commit_inner(caller, proposal_id, stance, amount, None).await;
+    // Voting is ICP-only. Non-ICP commits are no longer accepted; an ICP commit
+    // here is delegated to the normal path. (Existing token commitments already
+    // recorded still settle via the settlement logic.)
+    if token != ExplorerToken::ICP {
+        return Err("TOKEN_VOTING_DISABLED: vote with ICP".to_string());
     }
-
-    let config = CONFIG.with(|cell| cell.borrow().get().clone());
-    // Keep the oracle caches warm: the ICP-equivalent below seeds the pots.
-    let _ = explorer_usd_rate_e8s(token, &config).await;
-    refresh_icp_rate(&config).await;
-
-    let icp_equiv = expected_icp_for_token(token, amount);
-    let entry = AuditLogEntry {
-        timestamp: current_time(),
-        event_type: "commit_token".to_string(),
-        proposal_id,
-        user: caller,
-        amount_e8s: icp_equiv,
-    };
-    AUDIT_LOG.with(|log| { let _ = log.borrow_mut().append(&entry); });
-
-    commit_inner(caller, proposal_id, stance, icp_equiv, Some((token, amount))).await
+    commit_inner(caller, proposal_id, stance, amount, None).await
 }
 
 /// Refund whatever a user's per-proposal escrow holds (minus the ledger fee) on
@@ -24515,137 +24501,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_commit_token_escrows_without_swapping() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        follow_as(alice);
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(9));
-        set_mock_swap(Some(Err("MUST_NOT_SWAP_AT_COMMIT".to_string())));
-
-        let pid = 770_010u64;
-        open_proposal(pid, 100_000_000);
-
-        // $10 of ckUSDC: escrowed as TOKEN; pots carry the 2 ICP equivalent.
-        commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap();
-        let key = CommitmentKey { proposal_id: pid, principal: alice };
-        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
-        assert_eq!(c.token, Some(ExplorerToken::CkUSDC));
-        assert_eq!(c.token_amount, Some(10_000_000));
-        assert_eq!(c.swapped_icp_e8s, None, "no swap until settlement");
-        assert_eq!(c.amount_e8s, 200_000_000, "pots use the oracle ICP-equivalent");
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.adopt_pot_e8s, 200_000_000);
-        assert_eq!(prop.status, "met");
-        let log = get_audit_log(0, 1000);
-        assert!(log.iter().any(|e| e.event_type == "commit_token" && e.proposal_id == pid));
-        set_mock_swap(None);
-
-        // ICP passthrough still behaves like commit().
-        let pid2 = 770_011u64;
-        open_proposal(pid2, 100_000_000);
-        commit_token(pid2, Stance::Reject, ExplorerToken::ICP, 150_000_000).await.unwrap();
-        let c2 = COMMITMENTS.with(|m| m.borrow().get(&CommitmentKey { proposal_id: pid2, principal: alice })).unwrap();
-        assert_eq!(c2.token, None);
-        assert_eq!(c2.amount_e8s, 150_000_000);
-    }
-
-    #[tokio::test]
-    async fn test_commit_token_settlement_swaps_then_burns() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        follow_as(alice);
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(11));
-        set_mock_swap(None); // rate-derived swap at settlement
-
-        let pid = 770_030u64;
-        open_proposal(pid, 100_000_000);
-        commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap(); // $10 → 2 ICP
-
-        process_proposal_cutoff(pid).await.unwrap();
-
-        let key = CommitmentKey { proposal_id: pid, principal: alice };
-        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
-        assert_eq!(c.status, CommitmentStatus::Burned);
-        assert_eq!(c.swapped_icp_e8s, Some(200_000_000), "settlement swap ran exactly once");
-        assert_eq!(c.amount_e8s, 200_000_000 - 30_000, "real proceeds minus split fees");
-        assert!(c.treasury_block.is_some() && c.cmc_block_index.is_some() && c.frontend_cmc_block.is_some());
-        let prop = PROPOSALS.with(|m| m.borrow().get(&pid)).unwrap();
-        assert_eq!(prop.status, "settled");
-        // Burned = cycle-converted half of the post-fee proceeds (treasury 50% held).
-        let proceeds = 200_000_000u64 - 30_000;
-        assert_eq!(prop.total_burned_e8s, Some(proceeds - proceeds / 2));
-    }
-
-    #[tokio::test]
-    async fn test_commit_token_settlement_swap_failure_retries_without_double_swap() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        follow_as(alice);
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(12));
-
-        let pid = 770_040u64;
-        open_proposal(pid, 100_000_000);
-        commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap();
-
-        // Swap down at cutoff → FailedBurn, nothing journaled.
-        set_mock_swap(Some(Err("DEX_DOWN".to_string())));
-        process_proposal_cutoff(pid).await.unwrap();
-        let key = CommitmentKey { proposal_id: pid, principal: alice };
-        let c1 = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
-        assert_eq!(c1.status, CommitmentStatus::FailedBurn);
-        assert_eq!(c1.swapped_icp_e8s, None);
-
-        // Recovery: the sweep retries — swap succeeds, burn completes.
-        set_mock_swap(None);
-        retry_failed_settlements().await;
-        let c2 = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
-        assert_eq!(c2.status, CommitmentStatus::Burned);
-        assert_eq!(c2.swapped_icp_e8s, Some(200_000_000));
-
-        // A further retry pass must NOT swap again (journal holds).
-        set_mock_swap(Some(Err("WOULD_DOUBLE_SWAP".to_string())));
-        retry_failed_settlements().await;
-        let c3 = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
-        assert_eq!(c3.status, CommitmentStatus::Burned);
-        assert_eq!(c3.swapped_icp_e8s, Some(200_000_000));
-        set_mock_swap(None);
-    }
-
-    #[tokio::test]
-    async fn test_commit_token_threshold_miss_refunds_in_kind() {
-        install_staking_test_config();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        follow_as(alice);
-        set_mock_ledger_balance(100_000_000_000);
-        set_mock_ledger_transfer(Ok(13));
-        set_mock_swap(Some(Err("MUST_NOT_SWAP_ON_REFUND".to_string())));
-
-        let pid = 770_050u64;
-        open_proposal(pid, 100_000_000_000); // 1,000 ICP — unreachable
-        commit_token(pid, Stance::Adopt, ExplorerToken::CkBTC, 100_000).await.unwrap(); // 0.001 ckBTC ($100)
-
-        process_proposal_cutoff(pid).await.unwrap();
-
-        let key = CommitmentKey { proposal_id: pid, principal: alice };
-        let c = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
-        assert_eq!(c.status, CommitmentStatus::Returned, "threshold missed → refunded");
-        assert_eq!(c.swapped_icp_e8s, None, "refunds never swap");
-        // The refund payout is recorded in the COMMITTED token, and the
-        // treasury fronts the transfer fee — the user gets back the EXACT
-        // deposit (zero-fee commits).
-        let payouts: Vec<Payout> = PAYOUTS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
-        assert!(payouts.iter().any(|po| po.user == alice
-            && po.payout_type == PayoutType::CommitmentRefund
-            && po.token == IdeaToken::CkBTC
-            && po.amount == 100_000));
-        set_mock_swap(None);
-    }
-
-    #[tokio::test]
-    async fn test_commit_token_guards() {
+    async fn test_commit_token_disabled_non_icp() {
         install_staking_test_config();
         let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         follow_as(alice);
@@ -24653,35 +24509,18 @@ mod tests {
         set_mock_ledger_transfer(Ok(9));
         let pid = 770_020u64;
         open_proposal(pid, 100_000_000);
-
-        // $0.50 of USDC is under the $1 floor (checked before the treasury/escrow gates).
-        assert_eq!(
-            commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 500_000).await.unwrap_err(),
-            "BELOW_MINIMUM"
-        );
-
-        // Empty token escrow refuses. Use per-account mode so the treasury (ICP)
-        // is funded — the treasury fronting guard passes — while the token escrow
-        // is genuinely empty, isolating the INSUFFICIENT_DEPOSIT path.
-        acct_reset();
-        acct_set(get_canister_id(), Some(TREASURY_SUBACCOUNT), 10 * ICP_FEE_E8S);
-        assert_eq!(
-            commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap_err(),
-            "INSUFFICIENT_DEPOSIT"
-        );
-        acct_disable();
-        set_mock_ledger_balance(100_000_000_000);
-
-        // Settled proposals refuse (status checked before the treasury/escrow gates).
-        PROPOSALS.with(|m| {
-            let mut p = m.borrow().get(&pid).unwrap();
-            p.status = "settled".to_string();
-            m.borrow_mut().insert(pid, p);
-        });
-        assert_eq!(
-            commit_token(pid, Stance::Adopt, ExplorerToken::CkUSDC, 10_000_000).await.unwrap_err(),
-            "COMMITMENT_CLOSED"
-        );
+        // Voting is ICP-only: every non-ICP commit is rejected up front.
+        for tok in [ExplorerToken::CkUSDC, ExplorerToken::CkUSDT, ExplorerToken::CkBTC, ExplorerToken::CkETH] {
+            assert!(
+                commit_token(pid, Stance::Adopt, tok, 10_000_000).await.unwrap_err().starts_with("TOKEN_VOTING_DISABLED"),
+                "non-ICP commit must be rejected"
+            );
+        }
+        // ICP via commit_token still delegates to the normal commit path.
+        commit_token(pid, Stance::Adopt, ExplorerToken::ICP, 150_000_000).await.unwrap();
+        let c = COMMITMENTS.with(|m| m.borrow().get(&CommitmentKey { proposal_id: pid, principal: alice })).unwrap();
+        assert_eq!(c.token, None);
+        assert_eq!(c.amount_e8s, 150_000_000);
     }
 
     #[tokio::test]

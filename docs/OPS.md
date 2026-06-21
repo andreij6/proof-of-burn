@@ -338,20 +338,16 @@ Stopping the canister preserves all stable-memory state. The timer will restart 
 
 ---
 
-## Multi-Token Voting & USD Thresholds (June 2026)
+## Voting (ICP-only) & USD Thresholds
 
-Users can fund a burn commitment in **any supported token** (`commit_token`):
-the token converts to ICP **at commit time**, then the standard ICP rules run
-unchanged (pots, burns, refunds — refunds pay ICP). Conversion paths:
-
-- **Local**: an internal desk pays ICP from `SWAP_LIQUIDITY_SUBACCOUNT`
-  (`[8u8;32]`, seeded 100 ICP by deploy-local.sh) at the cached oracle rates.
-- **Mainnet**: ICPSwap (approve → depositFrom → swap → withdraw) with a 2%
-  slippage rail vs the XRC rates. **Each token's pool must be wired first**:
-  `admin_set_swap_pool(token, pool_principal, token_is_token0)` — discover
-  pools via the SwapFactory (`4mmnk-kiaaa-aaaag-qbllq-cai` getPool, fee 3000).
-  ⚠ The mainnet swap path has NOT had a live canary yet — wire one pool and
-  run a small commit_token before announcing.
+Voting is **ICP-only**: commitments are made in ICP via `commit` /
+`add_to_commitment`. Multi-token voting was **removed** — `commit_token` now
+rejects any non-ICP token with `TOKEN_VOTING_DISABLED` (an ICP token delegates to
+the normal commit path). Existing token commitments recorded before removal still
+settle via the unchanged settlement logic (swap-on-settle / refund-in-kind); the
+swap-pool wiring (`admin_set_swap_pool`) is retained only for that legacy
+settlement. (Other features — Idea Board, projects, Explorer, Discussions, the
+wallet on/off-ramps — remain multi-token.)
 
 Thresholds can be **dollar-denominated**: `admin_set_default_threshold_usd(usd_e8s)`
 ($1 = 100_000_000) re-thresholds open proposals; pots are valued at the cached

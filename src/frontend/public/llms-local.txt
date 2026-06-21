@@ -126,11 +126,8 @@ To add to your commitment:
    icp canister call backend add_to_commitment '(<proposal_id> : nat64, <additional_amount_in_e8s> : nat64)' -e local
    ```
 
-## Multi-token voting (June 2026)
-You can commit in ckBTC/ckETH/ckUSDC/ckUSDT, not just ICP: fund the proposal's
-escrow subaccount (get_deposit_address) on the TOKEN's ledger, then call
-`commit_token(proposal_id, stance, token_variant, amount_in_smallest_units)`.
-The canister converts to ICP at commit (2% max slippage vs oracle rates);
-everything downstream — pots, burns, refunds — is ICP. Refunds pay ICP.
-Thresholds may be dollar-denominated (`threshold_usd_e8s` on the proposal);
-`get_usd_rates` returns the rates used for valuation.
+## Voting is ICP-only
+Commitments are made in **ICP only** (via `commit` / `add_to_commitment`). Other
+tokens are not accepted for voting. Thresholds may be dollar-denominated
+(`threshold_usd_e8s` on the proposal); `get_usd_rates` returns the rates used to
+value the committed ICP against a USD threshold.

@@ -41,7 +41,7 @@ Caldera's answer fuses the two: **you don't buy or rent voting power — you bur
 ## 2. How the core loop works — burn voting
 
 1. You browse **live NNS proposals** inside Caldera.
-2. You **commit ICP** behind **Adopt** or **Reject**. There's **no fee** to commit (the treasury even fronts the ledger fees), and the minimum is **1 ICP**. You can commit in ICP *or* in ckBTC/ckETH/ckUSDC/ckUSDT — the canister converts non-ICP to ICP at the live oracle rate.
+2. You **commit ICP** behind **Adopt** or **Reject**. There's **no fee** to commit (the treasury even fronts the ledger fees), and the minimum is **~$1** worth of ICP. Voting is **ICP-only** — other tokens aren't accepted for votes.
 3. Your ICP sits in a **canister-controlled escrow** tied to you and that proposal. You can **add more** any time before the cutoff, but commitments are **final** — you can't pull them back. (Conviction has to cost something.)
 4. At the proposal's deadline the canister tallies all commitments:
    - **Threshold met →** the leader neuron votes the heavier side (adopt vs reject), and your committed ICP is **spent**: **50% to the protocol treasury, 25% burned into backend-canister cycles, 25% burned into frontend-canister cycles.** The cycle portions permanently leave the ICP supply (ICP → cycles via the Cycles Minting Canister).
@@ -100,7 +100,7 @@ You spin up your **own personal "Farmer" canister**. It burns your ICP into a cy
 
 | Action | What you pay | Where it goes | Tokens |
 |---|---|---|---|
-| **Commit / vote** | No fee; min 1 ICP (treasury fronts ledger fees) | If vote fires: 50% treasury / 25% backend cycles / 25% frontend cycles (cycles = burned). Else fully refunded. | ICP + ckBTC/ckETH/ckUSDC/ckUSDT |
+| **Commit / vote** | No fee; ~$1 min (treasury fronts ledger fees) | If vote fires: 50% treasury / 25% backend cycles / 25% frontend cycles (cycles = burned). Else fully refunded. | ICP only |
 | **Post an idea** | $0.05 USD | ICP → 100% burned · ck-token → 100% treasury | ICP/ckBTC/ckETH |
 | **Upvote an idea** | Free | — | — |
 | **Fund a project** | The amount you choose (toward a USD goal) | 100% treasury | Any supported token |
