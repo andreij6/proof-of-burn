@@ -8,6 +8,7 @@ import {
   Stance,
   CommitmentStatus,
   ExplorerToken,
+  EscrowKind,
 } from "./bindings/backend";
 import { IdeaToken } from "./tokens";
 import { createActor as createLedgerActor } from "./bindings/ledger";
@@ -1470,7 +1471,19 @@ export default function App() {
         const res = await actor.commit_token(confirmProposalId, confirmStance, meta.variant, smallest);
         if (res.__kind__ === "Err") {
           const code = res.Err as string;
-          throw new Error(code === "BELOW_MINIMUM" ? `Too small — ${voteToken} commitments start at $1.` : `Commit failed: ${code}`);
+          // The deposit already landed in escrow but the commit was rejected —
+          // auto-refund it. reclaim_escrow is guarded (no-op if a commitment owns
+          // the escrow), so this only returns a genuinely stranded deposit.
+          let refunded = false;
+          try {
+            const rc = await actor.reclaim_escrow(EscrowKind.Commitment, meta.variant as unknown as IdeaToken, confirmProposalId);
+            refunded = rc.__kind__ === "Ok" && rc.Ok > 0n;
+          } catch { /* best-effort refund */ }
+          await refreshAllData();
+          throw new Error(
+            (code === "BELOW_MINIMUM" ? `Too small — ${voteToken} commitments start at $1.` : `Commit failed: ${code}`)
+            + (refunded ? ` Your ${voteToken} deposit was refunded.` : "")
+          );
         }
         setTxSuccess(true);
         setTxStep(`Committed! Your ${voteToken} stays escrowed — it converts to ICP only if the vote passes; otherwise it comes back as ${voteToken}.`);

@@ -3039,6 +3039,42 @@ async fn commit_token(
     commit_inner(caller, proposal_id, stance, icp_equiv, Some((token, amount))).await
 }
 
+/// Refund whatever a user's per-proposal escrow holds (minus the ledger fee) on
+/// the given token's ledger back to them. Returns the refunded amount (0 = dust).
+async fn refund_commitment_escrow_to(user: Principal, proposal_id: u64, token: ExplorerToken) -> Result<u64, String> {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger_id = explorer_token_ledger(token, &config);
+    let fee = explorer_token_fee(token, &config);
+    let sub = derive_subaccount(&user, proposal_id);
+    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
+    let balance = call_ledger_balance(ledger_id, escrow).await?;
+    if balance <= fee { return Ok(0); }
+    let amount = balance - fee;
+    let dest = LedgerAccount { owner: user, subaccount: None };
+    call_ledger_transfer(ledger_id, Some(sub), dest, amount, Some(fee))
+        .await
+        .map_err(|e| format!("REFUND_FAILED: {}", e))?;
+    Ok(amount)
+}
+
+/// Admin: recover token deposits stranded in a user's commitment escrows — e.g. a
+/// token deposited for a vote that the commit then rejected without refunding.
+/// Scans every known proposal and refunds any non-empty escrow that NO live
+/// commitment owns (`commitment_in_flight` guard), so a real in-flight commitment
+/// is never clawed back. Returns the total refunded (token smallest units).
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_refund_stranded_commitments(user: Principal, token: ExplorerToken) -> Result<u64, String> {
+    let pids: Vec<u64> = PROPOSALS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    let mut total = 0u64;
+    for pid in pids {
+        if commitment_in_flight(&user, pid) { continue; }
+        if let Ok(amt) = refund_commitment_escrow_to(user, pid, token).await {
+            total = total.saturating_add(amt);
+        }
+    }
+    Ok(total)
+}
+
 async fn commit_inner(
     caller: Principal,
     proposal_id: u64,
@@ -3085,7 +3121,7 @@ async fn commit_inner(
         Some((tok, amt)) => token_amount_usd_e8s(tok, amt),
         None => icp_amount_usd_e8s(target_e8s),
     };
-    if commit_usd_e8s < USD_E8S_PER_USD {
+    if commit_usd_e8s < COMMIT_MIN_USD_E8S {
         return Err("BELOW_MINIMUM".to_string());
     }
 
@@ -3241,8 +3277,8 @@ async fn add_to_commitment(proposal_id: u64, additional_e8s: u64) -> Result<(), 
         return Err("COMMITMENT_NOT_PENDING".to_string());
     }
 
-    // 2. Validate additional amount — $1 USD floor (matches commit()).
-    if icp_amount_usd_e8s(additional_e8s) < USD_E8S_PER_USD {
+    // 2. Validate additional amount — $1 floor with the 10% gray area (matches commit()).
+    if icp_amount_usd_e8s(additional_e8s) < COMMIT_MIN_USD_E8S {
         return Err("BELOW_MINIMUM".to_string());
     }
     let new_amount = commitment.amount_e8s
@@ -10316,6 +10352,11 @@ const XRC_CALL_CYCLES: u128 = 1_000_000_000;
 /// $1.00 per day of visibility, expressed in USD e8s (8 decimals).
 const EXPLORER_PRICE_PER_DAY_USD_E8S: u64 = 100_000_000;
 const USD_E8S_PER_USD: u64 = 100_000_000;
+/// Commit minimum with a 10% gray area: the UI shows a $1 minimum, but the
+/// backend accepts down to $0.90 so multi-token rate rounding / minor price
+/// drift never rejects an honest at-the-minimum vote (e.g. 1 ckUSDT valued a
+/// hair under $1). = $0.90 in USD e8s.
+const COMMIT_MIN_USD_E8S: u64 = USD_E8S_PER_USD * 90 / 100;
 const EXPLORER_MIN_DAYS: u64 = 1;
 const EXPLORER_MAX_DAYS: u64 = 3650;
 const MAX_DAPPS: u64 = 500;
@@ -29161,6 +29202,15 @@ mod tests {
         assert!(roundtrip < USD_E8S_PER_USD,
             "ICP round-trip drops an exact-$1 token deposit under $1 at a non-round price");
         EXPLORER_USD_RATES.with(|r| r.borrow_mut()[idx] = (0, 0)); // reset
+    }
+
+    #[test]
+    fn test_commit_min_has_10pct_gray_area() {
+        assert_eq!(COMMIT_MIN_USD_E8S, 90_000_000); // $0.90 floor (UI still shows $1)
+        // 0.90 ckUSDT = $0.90 → accepted; 0.89 → rejected; 1.00 → accepted.
+        assert!(token_amount_usd_e8s(ExplorerToken::CkUSDT, 900_000) >= COMMIT_MIN_USD_E8S);
+        assert!(token_amount_usd_e8s(ExplorerToken::CkUSDT, 890_000) < COMMIT_MIN_USD_E8S);
+        assert!(token_amount_usd_e8s(ExplorerToken::CkUSDT, 1_000_000) >= COMMIT_MIN_USD_E8S);
     }
 
     #[tokio::test]

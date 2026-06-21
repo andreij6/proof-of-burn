@@ -1217,6 +1217,12 @@ service : (InitPayload) -> {
   // Pause/unpause the round loop. The current round still settles; no new
   // betting window opens while paused.
   admin_pause_crash : (bool) -> (Result);
+  // Admin: recover token deposits stranded in a user's commitment escrows — e.g. a
+  // token deposited for a vote that the commit then rejected without refunding.
+  // Scans every known proposal and refunds any non-empty escrow that NO live
+  // commitment owns (`commitment_in_flight` guard), so a real in-flight commitment
+  // is never clawed back. Returns the total refunded (token smallest units).
+  admin_refund_stranded_commitments : (principal, ExplorerToken) -> (Result_1);
   // Admin recovery: refund a specific user's stranded x-farm escrow deposit.
   admin_refund_xfarm_escrow : (principal) -> (Result_1);
   // Admin: upgrade every existing Farmer canister to the currently-uploaded wasm
