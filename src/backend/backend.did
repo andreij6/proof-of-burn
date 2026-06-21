@@ -1217,11 +1217,12 @@ service : (InitPayload) -> {
   // Pause/unpause the round loop. The current round still settles; no new
   // betting window opens while paused.
   admin_pause_crash : (bool) -> (Result);
-  // Admin: recover token deposits stranded in a user's commitment escrows — e.g. a
-  // token deposited for a vote that the commit then rejected without refunding.
-  // Scans every known proposal and refunds any non-empty escrow that NO live
-  // commitment owns (`commitment_in_flight` guard), so a real in-flight commitment
-  // is never clawed back. Returns the total refunded (token smallest units).
+  // Admin: refund a stranded token deposit from ONE specific proposal's escrow —
+  // fast (a single ledger read), for when the full scan is too slow. Token-aware
+  // guard: refuses only if a commitment actually owns this token's escrow.
+  admin_refund_commitment_escrow : (principal, nat64, ExplorerToken) -> (
+      Result_1,
+    );
   admin_refund_stranded_commitments : (principal, ExplorerToken) -> (Result_1);
   // Admin recovery: refund a specific user's stranded x-farm escrow deposit.
   admin_refund_xfarm_escrow : (principal) -> (Result_1);
@@ -1343,6 +1344,14 @@ service : (InitPayload) -> {
   // hardcoded there) — NOT the raw config Options, which are null on mainnet and
   // made every ck-token balance read 0.
   admin_user_balances : (vec principal) -> (vec UserBalanceRow);
+  // Admin: recover token deposits stranded in a user's commitment escrows — e.g. a
+  // token deposited for a vote that the commit then rejected without refunding.
+  // Scans every known proposal and refunds any non-empty escrow that NO live
+  // commitment owns (`commitment_in_flight` guard), so a real in-flight commitment
+  // is never clawed back. Returns the total refunded (token smallest units).
+  // Admin: proposal ids where `user` holds a commitment (any status). Cheap (no
+  // ledger calls) — used to target stranded-escrow refunds without a full scan.
+  admin_user_commitment_proposals : (principal) -> (vec nat64) query;
   // Catastrophic-wedge escape hatch (writer #4): refund every wager in the
   // current round (delta 0 for all, house delta 0) and archive it void.
   admin_void_crash_round : () -> (Result);

@@ -3062,6 +3062,27 @@ async fn refund_commitment_escrow_to(user: Principal, proposal_id: u64, token: E
 /// Scans every known proposal and refunds any non-empty escrow that NO live
 /// commitment owns (`commitment_in_flight` guard), so a real in-flight commitment
 /// is never clawed back. Returns the total refunded (token smallest units).
+/// Admin: proposal ids where `user` holds a commitment (any status). Cheap (no
+/// ledger calls) — used to target stranded-escrow refunds without a full scan.
+#[ic_cdk::query(guard = "require_admin")]
+fn admin_user_commitment_proposals(user: Principal) -> Vec<u64> {
+    COMMITMENTS.with(|m| m.borrow().iter()
+        .filter(|e| e.key().principal == user)
+        .map(|e| e.key().proposal_id)
+        .collect())
+}
+
+/// Admin: refund a stranded token deposit from ONE specific proposal's escrow —
+/// fast (a single ledger read), for when the full scan is too slow. Token-aware
+/// guard: refuses only if a commitment actually owns this token's escrow.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_refund_commitment_escrow(user: Principal, proposal_id: u64, token: ExplorerToken) -> Result<u64, String> {
+    if commitment_owns_token(&user, proposal_id, token) {
+        return Err("COMMITMENT_OWNS_ESCROW".to_string());
+    }
+    refund_commitment_escrow_to(user, proposal_id, token).await
+}
+
 #[ic_cdk::update(guard = "require_admin")]
 async fn admin_refund_stranded_commitments(user: Principal, token: ExplorerToken) -> Result<u64, String> {
     let pids: Vec<u64> = PROPOSALS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
