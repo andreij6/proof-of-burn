@@ -3067,7 +3067,7 @@ async fn admin_refund_stranded_commitments(user: Principal, token: ExplorerToken
     let pids: Vec<u64> = PROPOSALS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
     let mut total = 0u64;
     for pid in pids {
-        if commitment_in_flight(&user, pid) { continue; }
+        if commitment_owns_token(&user, pid, token) { continue; }
         if let Ok(amt) = refund_commitment_escrow_to(user, pid, token).await {
             total = total.saturating_add(amt);
         }
@@ -12123,6 +12123,25 @@ fn commitment_in_flight(caller: &Principal, proposal_id: u64) -> bool {
     }
 }
 
+/// Does a non-terminal commitment for (caller, proposal_id) own the escrow for
+/// THIS specific token? The per-proposal subaccount is shared across ledgers, so
+/// an in-flight ICP commitment owns only the ICP on the ICP ledger — NOT, say, a
+/// ckUSDT deposit stranded in the same subaccount on the ckUSDT ledger. A token
+/// commitment owns only its own token. Used to gate refunds precisely so a
+/// genuinely stranded token deposit isn't blocked by an unrelated commitment.
+fn commitment_owns_token(caller: &Principal, proposal_id: u64, token: ExplorerToken) -> bool {
+    let key = CommitmentKey { proposal_id, principal: *caller };
+    match COMMITMENTS.with(|m| m.borrow().get(&key)) {
+        Some(c) if c.status != CommitmentStatus::Burned && c.status != CommitmentStatus::Returned => {
+            match c.token {
+                Some(t) => t == token,            // token commitment owns its token
+                None => token == ExplorerToken::ICP, // ICP commitment owns only ICP
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Is there an in-flight ProjectFunding for `(caller, project_id)`? A
 /// `FailedPayout` row means `fund_project` journaled the funding BEFORE its
 /// escrow→treasury transfer (the retryable pattern) and the sweep will still
@@ -12177,10 +12196,10 @@ async fn reclaim_escrow(
         }
         EscrowKind::Commitment => {
             let proposal_id = key.ok_or_else(|| "KEY_REQUIRED: proposal_id".to_string())?;
-            if commitment_in_flight(&caller, proposal_id) {
-                // Settlement still owns this escrow — reclaiming would claw
-                // back committed/staked principal. Overpay is reclaimable once
-                // the commitment reaches Burned/Returned (or never existed).
+            // Token-aware: only block if a commitment owns the escrow for THIS
+            // token. A stranded ckUSDT deposit isn't owned by an in-flight ICP
+            // commitment sharing the same per-proposal subaccount.
+            if commitment_owns_token(&caller, proposal_id, token) {
                 return Err("COMMITMENT_IN_FLIGHT".to_string());
             }
             derive_subaccount(&caller, proposal_id)
@@ -12280,23 +12299,24 @@ async fn ledger_balance_nat(_ledger: Principal, _owner: Principal) -> candid::Na
 
 /// Admin: wallet balances (own default account) for a chunk of principals across
 /// all five supported tokens. Call in batches (e.g. ~8/call → ~40 outcalls) and
-/// accumulate client-side. A token with no configured ledger reports 0.
+/// accumulate client-side. Uses `explorer_token_ledger` (mainnet ledgers are
+/// hardcoded there) — NOT the raw config Options, which are null on mainnet and
+/// made every ck-token balance read 0.
 #[ic_cdk::update(guard = "require_admin")]
 async fn admin_user_balances(principals: Vec<Principal>) -> Vec<UserBalanceRow> {
     let config = CONFIG.with(|c| c.borrow().get().clone());
-    let icp_l = config.ledger_canister_id;
-    let ckbtc_l = config.ckbtc_ledger_canister_id;
-    let cketh_l = config.cketh_ledger_canister_id;
-    let ckusdc_l = config.ckusdc_ledger_canister_id;
-    let ckusdt_l = config.ckusdt_ledger_canister_id;
-    let zero = || candid::Nat::from(0u32);
+    let icp_l = explorer_token_ledger(ExplorerToken::ICP, &config);
+    let ckbtc_l = explorer_token_ledger(ExplorerToken::CkBTC, &config);
+    let cketh_l = explorer_token_ledger(ExplorerToken::CkETH, &config);
+    let ckusdc_l = explorer_token_ledger(ExplorerToken::CkUSDC, &config);
+    let ckusdt_l = explorer_token_ledger(ExplorerToken::CkUSDT, &config);
     let mut rows = Vec::with_capacity(principals.len());
     for p in principals {
         let icp = ledger_balance_nat(icp_l, p).await;
-        let ckbtc = match ckbtc_l { Some(l) => ledger_balance_nat(l, p).await, None => zero() };
-        let cketh = match cketh_l { Some(l) => ledger_balance_nat(l, p).await, None => zero() };
-        let ckusdc = match ckusdc_l { Some(l) => ledger_balance_nat(l, p).await, None => zero() };
-        let ckusdt = match ckusdt_l { Some(l) => ledger_balance_nat(l, p).await, None => zero() };
+        let ckbtc = ledger_balance_nat(ckbtc_l, p).await;
+        let cketh = ledger_balance_nat(cketh_l, p).await;
+        let ckusdc = ledger_balance_nat(ckusdc_l, p).await;
+        let ckusdt = ledger_balance_nat(ckusdt_l, p).await;
         rows.push(UserBalanceRow { principal: p, icp, ckbtc, cketh, ckusdc, ckusdt });
     }
     rows
