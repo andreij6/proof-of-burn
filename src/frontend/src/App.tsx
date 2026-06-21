@@ -46,6 +46,7 @@ import AboutUs from "./AboutUs";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext } from "./ui";
 import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient } from "./tokens";
 import { useErrorImpression } from "./analytics";
+import { countdownShort } from "./hubLogic";
 
 // ── Shareable URL routing (hash-based; this is a static asset canister) ──
 // Each in-app page maps to a stable hash path so links are copy-pasteable.
@@ -536,6 +537,8 @@ export default function App() {
   const [aiOpenMap, setAiOpenMap] = useState<Record<string, boolean>>({});
 
   const [skillsCopied, setSkillsCopied] = useState(false);
+  // Next lottery drawing time (for the nav badge). Anonymous-allowlisted query.
+  const [nextDrawAt, setNextDrawAt] = useState<bigint | null>(null);
   // Bookmark hint: browsers block programmatic bookmarking, so clicking the
   // star reveals the platform shortcut (and copies the URL as a fallback).
   const [bookmarkHint, setBookmarkHint] = useState(false);
@@ -1321,6 +1324,7 @@ export default function App() {
     fetchFeatureFlags(actor);
     fetchBoardInfo(actor);
     fetchMyStake(actor);
+    actor.get_lottery_info().then((i: any) => setNextDrawAt(i?.next_draw_at ?? null)).catch(() => {});
   }, [actor]);
 
   // Refresh non-ICP balances whenever the wallet OR a commit modal opens — the
@@ -1829,6 +1833,7 @@ export default function App() {
   const renderNavLinks = (onNavigate?: () => void) => {
     const go = (p: typeof page) => { setPage(p); onNavigate?.(); };
     const linkStyle: React.CSSProperties = { justifyContent: 'flex-start', width: '100%', height: 38 };
+    const drawCountdown = nextDrawAt ? countdownShort(nextDrawAt, Date.now()) : null;
     const onEarn = (EARN_PAGES as string[]).includes(page);
     return (
       <>
@@ -1841,8 +1846,8 @@ export default function App() {
           Mission Statement
         </Btn>
 
-        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
-          <Eyebrow style={{ margin: '14px 0 4px' }}>Play</Eyebrow>
+        {(arcadeEnabled || lotteryEnabled || casinoEnabled || xFarmEnabled) && (
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Featured</Eyebrow>
         )}
         {arcadeEnabled && (
           <Btn variant={page === 'arcade' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('arcade')}>
@@ -1864,6 +1869,14 @@ export default function App() {
           <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
             <Icon name="target" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
             Lottery
+            {drawCountdown && <Chip tone="muted" style={{ marginLeft: 'auto', height: 18, fontSize: 10 }}>{drawCountdown}</Chip>}
+          </Btn>
+        )}
+        {xFarmEnabled && (
+          <Btn variant={page === 'xfarm' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('xfarm')}>
+            <Icon name="spark" size={14} stroke={page === 'xfarm' ? 'var(--char-950)' : 'currentColor'} />
+            X-Farm
+            <Chip tone="pending" style={{ marginLeft: 'auto', height: 18, fontSize: 10 }}>experimental</Chip>
           </Btn>
         )}
 
@@ -1889,7 +1902,7 @@ export default function App() {
           </Btn>
         )}
 
-        {(ideaBoardEnabled || explorerEnabled || xFarmEnabled) && (
+        {(ideaBoardEnabled || explorerEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Community</Eyebrow>
         )}
         {ideaBoardEnabled && (
@@ -1902,12 +1915,6 @@ export default function App() {
           <Btn variant={page === 'explorer' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('explorer')}>
             <Icon name="compass" size={14} stroke={page === 'explorer' ? 'var(--char-950)' : 'currentColor'} />
             Explorer
-          </Btn>
-        )}
-        {xFarmEnabled && (
-          <Btn variant={page === 'xfarm' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('xfarm')}>
-            <Icon name="spark" size={14} stroke={page === 'xfarm' ? 'var(--char-950)' : 'currentColor'} />
-            X-Farm
           </Btn>
         )}
 
