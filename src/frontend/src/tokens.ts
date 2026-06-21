@@ -48,3 +48,32 @@ export function fmtUsd(usdE8s: bigint): string {
   return `$${(Number(cents) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+
+/// Convert a USD amount into a token's smallest units at the given USD-per-whole-
+/// token rate (e8s), rounding UP so the deposit always values to >= the entered
+/// USD (matches the canister's shared rate). Returns null for a non-positive
+/// amount or rate. Decimal-agnostic — correct for ICP (8), ck stables (6), ckETH (18).
+export function usdToTokenUnits(usd: number, rateUsdE8s: bigint, decimals: number): bigint | null {
+  if (!isFinite(usd) || usd <= 0) return null;
+  if (rateUsdE8s <= 0n) return null;
+  const usdE8s = BigInt(Math.round(usd * 1e8));
+  const d = BigInt(10) ** BigInt(decimals);
+  return (usdE8s * d + rateUsdE8s - 1n) / rateUsdE8s; // ceil
+}
+
+/// Smallest units → a plain decimal string (no grouping) for an input field.
+export function unitsToDecimalString(units: bigint, decimals: number): string {
+  const d = BigInt(10) ** BigInt(decimals);
+  const whole = units / d;
+  const frac = (units % d).toString().padStart(decimals, '0').replace(/0+$/, '');
+  return frac ? `${whole}.${frac}` : whole.toString();
+}
+
+/// Commit gate: an UNKNOWN balance (null = not yet fetched) is NOT insufficient —
+/// we're still loading it, so don't falsely show "Not enough funds". A known
+/// balance is insufficient only when `needed` exceeds it. (Fixes non-ICP votes
+/// failing the gate because token balances aren't loaded until the wallet opens.)
+export function commitInsufficient(balance: bigint | null, needed: bigint): boolean {
+  if (balance === null) return false;
+  return needed > balance;
+}

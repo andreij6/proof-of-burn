@@ -44,7 +44,7 @@ import Dashboard from "./Dashboard";
 import AboutUs from "./AboutUs";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext } from "./ui";
-import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress } from "./tokens";
+import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient } from "./tokens";
 import { useErrorImpression } from "./analytics";
 
 // ── Shareable URL routing (hash-based; this is a static asset canister) ──
@@ -1321,12 +1321,13 @@ export default function App() {
     fetchMyStake(actor);
   }, [actor]);
 
-  // Refresh ckBTC/ckETH/ckUSDC balances whenever the wallet opens.
+  // Refresh non-ICP balances whenever the wallet OR a commit modal opens — the
+  // vote/add-more gate needs real balances or it falsely shows "Not enough funds".
   useEffect(() => {
-    if (isWalletOpen) {
+    if (isWalletOpen || isConfirming || isAddingMore) {
       fetchTokenBalances();
     }
-  }, [isWalletOpen, boardInfo, identity, config]);
+  }, [isWalletOpen, isConfirming, isAddingMore, boardInfo, identity, config]);
 
   // Fetch Ledger Balance
   useEffect(() => {
@@ -1403,21 +1404,10 @@ export default function App() {
   // sync with the USD the user entered and the selected currency. Switching
   // currency re-prices the same dollars into the new token.
   useEffect(() => {
-    const usd = parseFloat(confirmUsd);
-    if (!isFinite(usd) || usd <= 0) { setConfirmAmount(""); return; }
     const meta = WALLET_TOKEN_META[voteToken];
     const rate = usdRates[meta.variant] ?? 0n;
-    if (rate <= 0n) { setConfirmAmount(""); return; }
-    const usdE8s = BigInt(Math.round(usd * 1e8));
-    const d = BigInt(10) ** BigInt(meta.decimals);
-    // Round UP (ceil division): floor division lands the token amount a hair
-    // below the entered USD, so a "$1" vote values back to $0.99999998 and trips
-    // the $1 minimum on BOTH the client and the backend (which share this exact
-    // cached rate). Ceil guarantees the deposit values to >= the entered USD.
-    const smallest = (usdE8s * d + rate - 1n) / rate;
-    const whole = smallest / d;
-    const frac = (smallest % d).toString().padStart(meta.decimals, '0').replace(/0+$/, '');
-    setConfirmAmount(frac ? `${whole}.${frac}` : whole.toString());
+    const units = usdToTokenUnits(parseFloat(confirmUsd), rate, meta.decimals);
+    setConfirmAmount(units === null ? "" : unitsToDecimalString(units, meta.decimals));
   }, [confirmUsd, voteToken, usdRates]);
 
   // Open modal with stance pre-selected; amount is entered inside the modal
@@ -4209,15 +4199,18 @@ export default function App() {
                   // Balance of the SELECTED currency vs the priced token amount.
                   const meta = WALLET_TOKEN_META[voteToken];
                   const needed = parseTokenUnits(confirmAmount || '0', meta.decimals) ?? 0n;
-                  const bal = voteToken === 'ICP' ? holdings
-                    : voteToken === 'ckBTC' ? (tokenBalances.ckbtc ?? 0n)
-                    : voteToken === 'ckETH' ? (tokenBalances.cketh ?? 0n)
-                    : voteToken === 'ckUSDC' ? (tokenBalances.ckusdc ?? 0n)
-                    : (tokenBalances.ckusdt ?? 0n);
+                  // Raw balance keeps `null` (still loading) distinct from 0 so the
+                  // gate doesn't falsely read "Not enough funds" before non-ICP
+                  // balances have been fetched. ICP (`holdings`) is always loaded.
+                  const balRaw: bigint | null = voteToken === 'ICP' ? holdings
+                    : voteToken === 'ckBTC' ? tokenBalances.ckbtc
+                    : voteToken === 'ckETH' ? tokenBalances.cketh
+                    : voteToken === 'ckUSDC' ? tokenBalances.ckusdc
+                    : tokenBalances.ckusdt;
                   const usd = parseFloat(confirmUsd);
                   const hasAmount = isFinite(usd) && usd > 0 && needed > 0n;
                   const belowMin = hasAmount && usd < MIN_COMMIT_USD;
-                  const insufficient = hasAmount && needed > bal;
+                  const insufficient = hasAmount && commitInsufficient(balRaw, needed);
                   const canSubmit = tier >= 2 && hasAmount && !belowMin && !insufficient && treasuryCanFront;
                   return (
                   <div className="col" style={{ gap: 8 }}>
