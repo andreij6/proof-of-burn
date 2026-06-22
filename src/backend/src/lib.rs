@@ -19767,7 +19767,12 @@ async fn get_farmer_status(farmer_id: u64) -> Result<(Farmer, u64, u64), String>
         .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
     if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
     let (cycles_remaining, next_gen) = match farmer.canister_id {
-        None => (farmer.budget_cycles.saturating_sub(farmer.burned_cycles), farmer.last_generation_at.saturating_add(DAY_NS)),
+        // next_gen = next UTC midnight after the last generation (when the
+        // 1-per-UTC-day throttle resets) — matches the Farmer's get_status; 0 = ready.
+        None => (
+            farmer.budget_cycles.saturating_sub(farmer.burned_cycles),
+            if farmer.last_generation_at == 0 { 0 } else { (farmer.last_generation_at / DAY_NS + 1) * DAY_NS },
+        ),
         Some(cid) => {
             // get_status(id) -> Result<(cycles_remaining, next_generation_at), String>.
             // The Farmer returns a candid `variant { Ok; Err }`, so decode the Result —

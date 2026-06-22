@@ -470,6 +470,14 @@ fn same_utc_day(a: u64, b: u64) -> bool {
     a / DAY_NS == b / DAY_NS
 }
 
+/// When the 1-per-UTC-day generation throttle next resets = the NEXT UTC midnight
+/// strictly after `last_generation_at`. 0 if never generated (ready now). Kept in
+/// lockstep with the `same_utc_day` throttle so the timer can't disagree with when
+/// generation actually unlocks.
+fn next_gen_at(last_generation_at: u64) -> u64 {
+    if last_generation_at == 0 { 0 } else { (last_generation_at / DAY_NS + 1) * DAY_NS }
+}
+
 /// All retained drafts (newest pruning already applied on store).
 fn all_drafts() -> Vec<Draft> {
     DRAFTS.with(|m| m.borrow().iter().map(|e| e.value().clone()).collect())
@@ -563,8 +571,7 @@ fn get_drafts(since: u64) -> Result<Vec<Draft>, String> {
 fn get_status(_farmer_id: u64) -> Result<(u64, u64), String> {
     require_backend_or_owner()?;
     let cfg = config();
-    let next_gen = cfg.last_generation_at.saturating_add(DAY_NS);
-    Ok((self_cycles(), next_gen))
+    Ok((self_cycles(), next_gen_at(cfg.last_generation_at)))
 }
 
 /// The owner's own config snapshot (dashboard status row).
@@ -692,6 +699,22 @@ mod tests {
             assert!(map.get(&total).is_some(), "newest draft retained");
         });
         clear_drafts();
+    }
+
+    #[test]
+    fn test_next_gen_at_matches_utc_day_throttle() {
+        // Never generated → ready now.
+        assert_eq!(next_gen_at(0), 0);
+        // Generated at day 100 + 2h → next gen unlocks at the start of day 101,
+        // i.e. 22h later — NOT last_gen + 24h. This is the bug that was fixed:
+        // the throttle (same_utc_day) unlocks at the UTC boundary, so the timer
+        // must too, or it shows time remaining after generation already unlocked.
+        let last = 100u64 * DAY_NS + 2 * 3600 * 1_000_000_000;
+        assert_eq!(next_gen_at(last), 101u64 * DAY_NS);
+        assert!(next_gen_at(last) < last + DAY_NS, "unlocks before last_gen + 24h");
+        // The unlock instant is exactly when same_utc_day flips to false.
+        assert!(same_utc_day(last, next_gen_at(last) - 1));
+        assert!(!same_utc_day(last, next_gen_at(last)));
     }
 
     #[test]
