@@ -1269,6 +1269,16 @@ export default function App() {
     actor.claim_daily_tickets().catch(() => {});
   }, [actor, principal, lotteryEnabled]);
 
+  // Login ping: record this principal with the backend's "ever logged in"
+  // registry so Admin → Users can list every signed-in principal (even those
+  // with zero balance / no on-chain action). Fires once per session restore
+  // AND after a fresh II login, since both set `actor` + `principal`. Fire and
+  // forget — failures are noise (the next authenticated update re-pings).
+  useEffect(() => {
+    if (!actor || !principal || principal.isAnonymous()) return;
+    actor.whoami().catch(() => {});
+  }, [actor, principal]);
+
   // Initialize Auth
   useEffect(() => {
     AuthClient.create().then(async (client) => {
@@ -1966,6 +1976,19 @@ export default function App() {
           }}
         >
           <DiscordMark size={17} color="#5865F2" /> Join the ICP Dapp Factory
+        </a>
+        <a
+          href="https://x.com/CalderaICP" target="_blank" rel="noreferrer"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 9, textDecoration: 'none',
+            color: 'var(--fg)', fontSize: 13.5, fontWeight: 500, marginBottom: 8,
+            padding: '0 0 0 2px',
+          }}
+        >
+          <svg width={15} height={15} viewBox="0 0 1200 1227" fill="currentColor" style={{ flexShrink: 0 }} aria-hidden="true">
+            <path d="M714.163 519.284 1160.89 0h-105.86L667.137 450.887 357.328 0H0l468.492 681.821L0 1226.37h105.866l409.625-476.152 327.181 476.152H1200L714.137 519.284h.026ZM569.165 687.828l-47.468-67.894-377.686-540.24h162.604l304.797 435.991 47.468 67.894 396.2 566.721H892.476L569.165 687.854v-.026Z"/>
+          </svg>
+          Follow on X
         </a>
 
         <Eyebrow style={{ marginBottom: 6 }}>Account</Eyebrow>
