@@ -4,7 +4,7 @@ import { UnstakeStatus } from "./bindings/backend";
 import { FlagState } from "./bindings/backend";
 import type { Config, FeatureFlag, GlobalStats, LotteryInfo, EarlyAdopterInfo, StakingPoolInfo, PoolInfo, NeuronFollowStatus, AuditLogEntry, StakeTier, PendingUnstake } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import type { ModerationCandidate, UserBalanceRow } from "./bindings/backend";
+import type { ModerationCandidate, UserBalanceRow, SeenUser } from "./bindings/backend";
 import { Principal } from "@icp-sdk/core/principal";
 import { Icon, Eyebrow, Btn, Chip, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 import { useErrorImpression } from "./analytics";
@@ -76,6 +76,12 @@ function parseUnits(text: string, decimals: number): bigint | null {
   if (!m) return null;
   const frac = (m[2] ?? '').slice(0, decimals).padEnd(decimals, '0');
   try { return BigInt(m[1]) * BigInt(10) ** BigInt(decimals) + BigInt(frac || '0'); } catch { return null; }
+}
+
+// Nanoseconds (IC time) → "YYYY-MM-DD HH:MM" UTC. Matches the audit-log formatting above.
+function fmtSeenNs(ns: bigint): string {
+  if (!ns) return '—';
+  return new Date(Number(ns / 1_000_000n)).toISOString().slice(0, 16).replace('T', ' ');
 }
 
 const TREASURY_FLOOR = 1_500_000_000n; // 15 ICP — mirrored from the backend guard
@@ -434,6 +440,28 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   // base doesn't blow one call's outcall budget; rows accumulate as they arrive.
   const [userRows, setUserRows] = useState<UserBalanceRow[] | null>(null);
   const [userProgress, setUserProgress] = useState<{ done: number; total: number } | null>(null);
+
+  // Every principal that has ever logged in (the backend's SEEN_USERS registry),
+  // with first/last-seen timestamps. One query, zero ledger outcalls — loads
+  // instantly regardless of user count. This is the "all logged-in principals"
+  // view (includes zero-balance / no-action users); the balance table below is
+  // the heavier per-wallet breakdown.
+  const [seenUsers, setSeenUsers] = useState<[Principal, SeenUser][] | null>(null);
+
+  const loadSeenUsers = async () => {
+    if (!actor) return;
+    setBusy('users'); setError(null); setNotice(null);
+    setSeenUsers(null);
+    try {
+      const rows = await actor.admin_list_seen_users();
+      setSeenUsers(rows);
+      setNotice(`Loaded ${rows.length} logged-in principal${rows.length === 1 ? '' : 's'}.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const loadUserBalances = async () => {
     if (!actor) return;
@@ -1115,6 +1143,65 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
               <span className="row" style={{ gap: 8 }}>
                 <Icon name="list" size={13} stroke="var(--burn-ink)" />
+                <Eyebrow>Logged-in principals</Eyebrow>
+              </span>
+              <span className="row" style={{ gap: 8 }}>
+                <Btn variant="ghost" sm onClick={loadSeenUsers} disabled={busy !== null}>
+                  <Icon name="undo" size={12} /> {seenUsers === null ? 'Load' : 'Reload'}
+                </Btn>
+              </span>
+            </span>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              Every principal that has ever signed in — recorded on the first
+              authenticated call (the login ping), regardless of balance or whether
+              they took any on-chain action. Sorted by most recent login. Zero ledger
+              reads, so it loads instantly.
+            </span>
+
+            {seenUsers !== null && seenUsers.length === 0 && busy !== 'users' && (
+              <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No signed-in principals yet.</span>
+            )}
+
+            {seenUsers !== null && seenUsers.length > 0 && (
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ color: 'var(--fg-3)' }}>
+                      <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 500 }}>Principal</th>
+                      <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 500 }}>First seen</th>
+                      <th style={{ textAlign: 'left', padding: '4px 8px', fontWeight: 500 }}>Last seen</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {seenUsers.map(([p, s]) => (
+                      <tr key={p.toText()} style={{ borderTop: '1px solid var(--border)' }}>
+                        <td className="mono" style={{ padding: '4px 8px', textAlign: 'left' }} title={p.toText()}>
+                          {formatPrincipal(p)}
+                        </td>
+                        <td className="mono" style={{ padding: '4px 8px', textAlign: 'left', color: 'var(--fg-3)' }}>
+                          {fmtSeenNs(s.first_seen_ns)}
+                        </td>
+                        <td className="mono" style={{ padding: '4px 8px', textAlign: 'left', color: 'var(--fg-3)' }}>
+                          {fmtSeenNs(s.last_seen_ns)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr style={{ borderTop: '2px solid var(--border-hi)', fontWeight: 600 }}>
+                      <td style={{ padding: '6px 8px', textAlign: 'left' }}>TOTAL ({seenUsers.length})</td>
+                      <td /><td />
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="col" style={{ ...card, gap: 10 }}>
+            <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="list" size={13} stroke="var(--burn-ink)" />
                 <Eyebrow>User wallet balances</Eyebrow>
               </span>
               <span className="row" style={{ gap: 8 }}>
@@ -1130,9 +1217,10 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Every known participant — the union across voting, staking, lottery, ideas,
-              project funding, discussions, pool neurons and X-Farm — and the balance held in
-              their <b>own wallet</b> on each ledger. Fetched in batches (5 ledger reads per
-              user), so a large user base takes a moment.
+              project funding, discussions, pool neurons, X-Farm, and every signed-in
+              principal above — and the balance held in their <b>own wallet</b> on each
+              ledger. Includes logged-in users with zero balance. Fetched in batches
+              (5 ledger reads per user), so a large user base takes a moment.
             </span>
 
             {userProgress && busy === 'users' && (

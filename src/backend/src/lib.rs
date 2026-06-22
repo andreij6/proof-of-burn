@@ -12268,9 +12268,65 @@ pub struct UserBalanceRow {
     pub ckusdt: candid::Nat,
 }
 
-/// Deduped union of every principal that appears in any per-feature map.
+// ── Admin: "every principal that has ever logged in" registry ───────────────
+//
+// The IC has no server-side session — the canister only learns a principal
+// exists when it makes an authenticated call. The `whoami` update (a login ping
+// the frontend fires as soon as a signed-in actor exists) calls `note_seen()` so
+// the first time we see any signed-in principal we record it, regardless of
+// whether it ever takes an on-chain action (stake, commit, ticket, …).
+// `last_seen_ns` is refreshed at most once per hour per principal so we don't
+// write to stable memory on every ping. Capture is via `whoami` (an UPDATE —
+// stable writes are safe there) rather than `require_authenticated()`, because
+// the latter is also used as a guard on QUERY methods, where stable writes
+// neither persist nor belong. This registry is the source for
+// `admin_list_seen_users()` and is folded into `admin_collect_user_principals()`
+// so the balance view also includes idle-but-logged-in principals (zero
+// balances).
+const SEEN_REFRESH_NS: u64 = 60 * 60 * 1_000_000_000; // 1h
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SeenUser {
+    pub first_seen_ns: u64,
+    pub last_seen_ns: u64,
+}
+impl_storable!(SeenUser);
+
+thread_local! {
+    static SEEN_USERS: RefCell<StableBTreeMap<Principal, SeenUser, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(103))))
+    });
+}
+
+/// Record (or refresh) the caller's first/last-seen timestamp. Skips the
+/// anonymous principal. Cheap on the hot path: one stable `get` per call; a
+/// write happens only on first-ever sighting or once per `SEEN_REFRESH_NS`.
+fn note_seen(caller: Principal) {
+    if caller == Principal::anonymous() {
+        return;
+    }
+    let now = current_time();
+    SEEN_USERS.with(|m| {
+        let map = m.borrow();
+        if let Some(existing) = map.get(&caller) {
+            if now.saturating_sub(existing.last_seen_ns) > SEEN_REFRESH_NS {
+                drop(map);
+                m.borrow_mut().insert(caller, SeenUser { first_seen_ns: existing.first_seen_ns, last_seen_ns: now });
+            }
+        } else {
+            drop(map);
+            m.borrow_mut().insert(caller, SeenUser { first_seen_ns: now, last_seen_ns: now });
+        }
+    });
+}
+
+/// Deduped union of every principal that appears in any per-feature map,
+/// PLUS every principal that has ever logged in (`SEEN_USERS`). The latter
+/// captures signed-in users who took no on-chain action — shown with zero
+/// balances in the wallet-balances view.
 fn admin_collect_user_principals() -> Vec<Principal> {
     let mut set: std::collections::BTreeSet<Principal> = std::collections::BTreeSet::new();
+    SEEN_USERS.with(|m| m.borrow().iter().for_each(|e| { set.insert(*e.key()); }));
     COMMITMENTS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.key().principal); }));
     USER_AGGREGATES.with(|m| m.borrow().iter().for_each(|e| { set.insert(*e.key()); }));
     STAKES.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.key().user); }));
@@ -12291,6 +12347,37 @@ fn admin_collect_user_principals() -> Vec<Principal> {
 #[ic_cdk::query(guard = "require_admin")]
 fn admin_list_user_principals() -> Vec<Principal> {
     admin_collect_user_principals()
+}
+
+/// Login ping: any signed-in caller records its first/last-seen timestamp and
+/// gets back `(principal, first_seen_ns, last_seen_ns)`. The frontend fires this
+/// on login so a principal is captured even if it never makes another
+/// authenticated call (e.g. lottery disabled, pure browsing). Not admin-gated.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct WhoamiReply {
+    pub principal: Principal,
+    pub first_seen_ns: u64,
+    pub last_seen_ns: u64,
+}
+
+#[ic_cdk::update]
+fn whoami() -> Result<WhoamiReply, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    note_seen(caller);
+    let s = SEEN_USERS.with(|m| m.borrow().get(&caller).unwrap_or(SeenUser { first_seen_ns: 0, last_seen_ns: 0 }));
+    Ok(WhoamiReply { principal: caller, first_seen_ns: s.first_seen_ns, last_seen_ns: s.last_seen_ns })
+}
+
+/// Admin: every principal that has ever logged in, with first/last-seen
+/// timestamps. Zero ledger outcalls — the primary "all logged-in principals"
+/// list. Sorted by `last_seen_ns` descending (most recent login first).
+#[ic_cdk::query(guard = "require_admin")]
+fn admin_list_seen_users() -> Vec<(Principal, SeenUser)> {
+    let mut rows: Vec<(Principal, SeenUser)> = SEEN_USERS
+        .with(|m| m.borrow().iter().map(|e| (*e.key(), e.value().clone())).collect());
+    rows.sort_by(|a, b| b.1.last_seen_ns.cmp(&a.1.last_seen_ns));
+    rows
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -27537,6 +27624,108 @@ mod tests {
 
         // limit 0 returns nothing.
         assert!(admin_list_moderation_candidates(0).is_empty());
+    }
+
+    // ── SEEN_USERS registry ("every principal that has ever logged in") ──────
+
+    fn clear_seen_users() {
+        SEEN_USERS.with(|m| {
+            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys { map.remove(&k); }
+        });
+    }
+
+    #[test]
+    fn test_note_seen_inserts_first_seen() {
+        clear_seen_users();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let alice = Principal::from_slice(&[1; 29]);
+        note_seen(alice);
+        let s = SEEN_USERS.with(|m| m.borrow().get(&alice).expect("inserted"));
+        assert_eq!(s.first_seen_ns, 1_700_000_000_000_000_000);
+        assert_eq!(s.last_seen_ns, 1_700_000_000_000_000_000);
+    }
+
+    #[test]
+    fn test_note_seen_skips_anonymous() {
+        clear_seen_users();
+        note_seen(Principal::anonymous());
+        assert!(SEEN_USERS.with(|m| m.borrow().is_empty()));
+    }
+
+    #[test]
+    fn test_note_seen_rate_limits_last_seen() {
+        clear_seen_users();
+        let base = 1_700_000_000_000_000_000u64;
+        let alice = Principal::from_slice(&[1; 29]);
+        // First sighting.
+        set_mock_time(Some(base));
+        note_seen(alice);
+        // 30 min later — within SEEN_REFRESH_NS (1h): no write, last_seen unchanged.
+        set_mock_time(Some(base + 30 * 60 * 1_000_000_000));
+        note_seen(alice);
+        let mid = SEEN_USERS.with(|m| m.borrow().get(&alice).unwrap());
+        assert_eq!(mid.first_seen_ns, base, "first_seen never changes");
+        assert_eq!(mid.last_seen_ns, base, "last_seen must not refresh within 1h");
+        // 61 min after the first sighting — past the window: last_seen updates,
+        // first_seen stays.
+        set_mock_time(Some(base + 61 * 60 * 1_000_000_000));
+        note_seen(alice);
+        let after = SEEN_USERS.with(|m| m.borrow().get(&alice).unwrap());
+        assert_eq!(after.first_seen_ns, base);
+        assert_eq!(after.last_seen_ns, base + 61 * 60 * 1_000_000_000);
+    }
+
+    #[test]
+    fn test_seen_users_appear_in_admin_union() {
+        clear_seen_users();
+        // A principal that ONLY triggered note_seen (no feature-map entry) must
+        // still appear in the admin union so the balance view includes it.
+        let lone = Principal::from_slice(&[7; 29]);
+        note_seen(lone);
+        let union = admin_collect_user_principals();
+        assert!(union.contains(&lone), "logged-in-only principal must be in the union");
+        assert!(!union.contains(&Principal::anonymous()));
+    }
+
+    #[test]
+    fn test_whoami_rejects_anonymous_and_records_signed_in() {
+        clear_seen_users();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        // Anonymous is rejected by require_authenticated().
+        set_mock_caller(Principal::anonymous());
+        assert!(whoami().is_err());
+
+        // A signed-in caller is recorded and gets back its first/last seen.
+        let alice = Principal::from_slice(&[1; 29]);
+        set_mock_caller(alice);
+        let reply = whoami().expect("signed-in whoami ok");
+        assert_eq!(reply.principal, alice);
+        assert_eq!(reply.first_seen_ns, 1_700_000_000_000_000_000);
+        assert_eq!(reply.last_seen_ns, 1_700_000_000_000_000_000);
+        assert!(SEEN_USERS.with(|m| m.borrow().contains_key(&alice)));
+    }
+
+    #[test]
+    fn test_admin_list_seen_users_sorted_by_last_seen_desc() {
+        clear_seen_users();
+        let base = 1_700_000_000_000_000_000u64;
+        let a = Principal::from_slice(&[1; 29]);
+        let b = Principal::from_slice(&[2; 29]);
+        let c = Principal::from_slice(&[3; 29]);
+        // Insert at increasing times; the only way to set an arbitrary last_seen
+        // past the 1h window is to advance the clock past it each time.
+        set_mock_time(Some(base));
+        note_seen(a);
+        set_mock_time(Some(base + 2 * 60 * 60 * 1_000_000_000)); // +2h
+        note_seen(b);
+        set_mock_time(Some(base + 4 * 60 * 60 * 1_000_000_000)); // +4h
+        note_seen(c);
+        let rows = admin_list_seen_users();
+        let order: Vec<Principal> = rows.iter().map(|(p, _)| *p).collect();
+        assert_eq!(order, vec![c, b, a], "most recent login first");
+        set_mock_time(None);
     }
 
     // ── Happy path: ordering + split (accounting ledger) ─────────────────────

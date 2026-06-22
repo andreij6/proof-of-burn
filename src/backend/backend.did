@@ -1085,6 +1085,16 @@ type UserBalanceRow = record {
   ckusdc : nat;
   ckusdt : nat;
 };
+type SeenUser = record {
+  first_seen_ns : nat64;
+  last_seen_ns : nat64;
+};
+type WhoamiReply = record {
+  "principal" : principal;
+  first_seen_ns : nat64;
+  last_seen_ns : nat64;
+};
+type Result_15 = variant { Ok : WhoamiReply; Err : text };
 type UserStakeInfo = record {
   tiers : vec UserTierStake;
   // Sum of the caller's stakes across tiers.
@@ -1213,6 +1223,12 @@ service : (InitPayload) -> {
   // Admin: every known participant principal (dedup union across all features).
   // Cheap (no outcalls) — the frontend pages this list into `admin_user_balances`.
   admin_list_user_principals : () -> (vec principal) query;
+  // Admin: every principal that has ever logged in, with first/last-seen (ns).
+  // Zero ledger outcalls. Sorted by last_seen desc. Admin-gated.
+  admin_list_seen_users : () -> (vec record { principal; SeenUser }) query;
+  // Login ping: any signed-in caller records its first/last-seen and gets back
+  // WhoamiReply. Frontend fires this on login.
+  whoami : () -> (Result_15);
   admin_mute_chat : (principal, nat64) -> (Result);
   // Pause/unpause the round loop. The current round still settles; no new
   // betting window opens while paused.
