@@ -3082,6 +3082,42 @@ async fn admin_refund_stranded_commitments(user: Principal, token: ExplorerToken
     Ok(total)
 }
 
+/// Admin: force ONE stuck commitment (FailedBurn / FailedRefund / StuckFunds)
+/// to a terminal `Burned` state so the 5-minute settlement retry sweep stops
+/// re-attempting it forever. Use only when the escrow is verified empty and the
+/// settlement saga can never succeed — e.g. a legacy token commitment whose
+/// escrow was never funded (approve fails InsufficientFunds balance 0). Does
+/// NOT move funds (verify the escrow is empty beforehand via the ledger) and
+/// does NOT alter the proposal's `total_burned` (the commitment produced 0 ICP;
+/// it was never counted as burned, and we don't count it now). Rejects if the
+/// commitment is not in a stuck state, so it can't be misused on active ones.
+#[ic_cdk::update(guard = "require_admin")]
+fn admin_close_stuck_commitment(proposal_id: u64, user: Principal) -> Result<(), String> {
+    close_stuck_commitment_inner(proposal_id, user)
+}
+
+fn close_stuck_commitment_inner(proposal_id: u64, user: Principal) -> Result<(), String> {
+    let key = CommitmentKey { proposal_id, principal: user };
+    let mut commitment = COMMITMENTS.with(|m| m.borrow().get(&key))
+        .ok_or("COMMITMENT_NOT_FOUND".to_string())?;
+    match commitment.status {
+        CommitmentStatus::FailedBurn
+        | CommitmentStatus::FailedRefund
+        | CommitmentStatus::StuckFunds => {}
+        ref other => return Err(format!("COMMITMENT_NOT_STUCK: {:?}", other)),
+    }
+    let prior_status = commitment.status.clone();
+    commitment.status = CommitmentStatus::Burned;
+    commitment.settled_at = Some(current_time());
+    COMMITMENTS.with(|m| m.borrow_mut().insert(key, commitment));
+    staking_audit("admin_close_commitment", user, 0, proposal_id);
+    canister_print(&format!(
+        "admin_close_stuck_commitment: force-closed proposal {} user {} (was {:?}) -> Burned",
+        proposal_id, user, prior_status
+    ));
+    Ok(())
+}
+
 async fn commit_inner(
     caller: Principal,
     proposal_id: u64,
@@ -24854,6 +24890,38 @@ mod tests {
             COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap().status,
             CommitmentStatus::Returned
         );
+    }
+
+    #[test]
+    fn test_close_stuck_commitment_forces_terminal_and_stops_retry() {
+        install_staking_test_config();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let pid = 700_090u64;
+        // Seed a stuck FailedBurn commitment (e.g. a legacy token commitment
+        // whose escrow was never funded — approve fails balance 0 forever).
+        let key = CommitmentKey { proposal_id: pid, principal: alice };
+        let c = sample_commitment(pid, alice, 0, CommitmentStatus::FailedBurn);
+        COMMITMENTS.with(|m| { m.borrow_mut().insert(key.clone(), c); });
+
+        // Active commitments are NOT closeable — guards against misuse.
+        let active = sample_commitment(pid + 1, alice, 100_000_000, CommitmentStatus::Pending);
+        let akey = CommitmentKey { proposal_id: pid + 1, principal: alice };
+        COMMITMENTS.with(|m| { m.borrow_mut().insert(akey.clone(), active); });
+        assert!(close_stuck_commitment_inner(pid + 1, alice).is_err());
+
+        // Missing commitment is an error, not a silent ok.
+        assert!(close_stuck_commitment_inner(999_999, alice).is_err());
+
+        // The stuck one closes to Burned + gets a settled_at timestamp.
+        assert!(close_stuck_commitment_inner(pid, alice).is_ok());
+        let closed = COMMITMENTS.with(|m| m.borrow().get(&key)).unwrap();
+        assert_eq!(closed.status, CommitmentStatus::Burned);
+        assert!(closed.settled_at.is_some());
+
+        // Idempotent against the retry sweep: Burned is not re-attempted.
+        // (retry_failed_settlements only picks FailedBurn / FailedRefund.)
+        // A second close is rejected because it's no longer stuck.
+        assert!(close_stuck_commitment_inner(pid, alice).is_err());
     }
 
     #[tokio::test]

@@ -1240,6 +1240,11 @@ service : (InitPayload) -> {
       Result_1,
     );
   admin_refund_stranded_commitments : (principal, ExplorerToken) -> (Result_1);
+  // Admin: force ONE stuck commitment (FailedBurn/FailedRefund/StuckFunds) to a
+  // terminal Burned state so the 5-min retry sweep stops re-attempting it. Use
+  // only when the escrow is verified empty (e.g. a legacy token commitment whose
+  // escrow was never funded). Moves no funds; does not alter total_burned.
+  admin_close_stuck_commitment : (nat64, principal) -> (Result);
   // Admin recovery: refund a specific user's stranded x-farm escrow deposit.
   admin_refund_xfarm_escrow : (principal) -> (Result_1);
   // Admin: upgrade every existing Farmer canister to the currently-uploaded wasm
