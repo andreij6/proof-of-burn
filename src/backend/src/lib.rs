@@ -8113,26 +8113,29 @@ async fn mock_disburse(neuron_id: u64, owner: Principal) -> Result<u64, String> 
     Ok(block)
 }
 
-/// Disburse 100% of the pool neuron's maturity to the yield inbox. The real
-/// NNS mints the ICP ~7 days later; the local mock transfers immediately from
-/// the canister's own funds (faucet-style) so the distribution runs for real.
-async fn gov_disburse_maturity(neuron_id: u64) -> Result<(), String> {
+/// Disburse 100% of a neuron's maturity into `dest_sub`. Tier neurons target
+/// the shared yield inbox ([2u8;32]); the permanent Booster (early-adopter)
+/// neuron targets the EA yield inbox ([6u8;32]) that the monthly settlement
+/// reads. The real NNS mints the ICP ~7 days later; the local mock transfers
+/// immediately from the canister's own funds (faucet-style) so the distribution
+/// runs for real.
+async fn gov_disburse_maturity(neuron_id: u64, dest_sub: [u8; 32]) -> Result<(), String> {
     let cmd = Command::DisburseMaturity(DisburseMaturityCmd {
         percentage_to_disburse: 100,
         to_account: Some(GovAccount {
             owner: Some(get_canister_id()),
-            subaccount: Some(YIELD_INBOX_SUBACCOUNT.to_vec()),
+            subaccount: Some(dest_sub.to_vec()),
         }),
         to_account_identifier: None,
     });
     match call_manage_neuron(Some(neuron_id), cmd).await? {
         GovOutcome::Response(CommandResponse::DisburseMaturity(_)) => Ok(()),
         GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
-        GovOutcome::LocalFallback => mock_disburse_maturity(neuron_id).await,
+        GovOutcome::LocalFallback => mock_disburse_maturity(neuron_id, dest_sub).await,
     }
 }
 
-async fn mock_disburse_maturity(neuron_id: u64) -> Result<(), String> {
+async fn mock_disburse_maturity(neuron_id: u64, dest_sub: [u8; 32]) -> Result<(), String> {
     let amount = MOCK_GOV.with(|g| {
         g.borrow()
             .neurons
@@ -8146,7 +8149,7 @@ async fn mock_disburse_maturity(neuron_id: u64) -> Result<(), String> {
     let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
     let dest = LedgerAccount {
         owner: get_canister_id(),
-        subaccount: Some(YIELD_INBOX_SUBACCOUNT),
+        subaccount: Some(dest_sub),
     };
     call_ledger_transfer(ledger_id, None, dest, amount, Some(ICP_FEE_E8S)).await?;
     MOCK_GOV.with(|g| {
@@ -8776,7 +8779,7 @@ async fn harvest_staking_maturity() {
             continue;
         }
 
-        if let Err(e) = gov_disburse_maturity(neuron_id).await {
+        if let Err(e) = gov_disburse_maturity(neuron_id, YIELD_INBOX_SUBACCOUNT).await {
             canister_print(&format!("disburse_maturity failed ({:?}): {}", tier, e));
             continue;
         }
@@ -13574,6 +13577,39 @@ async fn claim_early_adopter_yield() -> Result<u64, String> {
     Err("BOOSTERS_NO_YIELD".to_string())
 }
 
+/// Harvest the permanent Booster (early-adopter) neuron's accrued voting
+/// maturity into the EA yield inbox ([6u8;32]) — the inbox the monthly
+/// settlement reads and routes 70% lottery / 30% treasury. Mirrors
+/// `harvest_staking_maturity` for the tier neurons; skipped until the neuron
+/// is bootstrapped (bootstrap >= 3, i.e. following the primary leader and
+/// earning voting rewards). On the real NNS the mint lands ~7 days after the
+/// `DisburseMaturity` call, so this sweep feeds the inbox that the NEXT
+/// monthly settlement distributes (steady-state, ~1 month lag, same as the
+/// tier neurons' 7-day mint delay).
+async fn harvest_early_adopter_maturity() {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
+    let neuron_id = match state.neuron_id {
+        Some(id) if state.bootstrap >= 3 => id,
+        _ => return,
+    };
+    let maturity = match staking_neuron_maturity(neuron_id).await {
+        Ok(m) => m,
+        Err(e) => {
+            canister_print(&format!("ea maturity check failed: {}", e));
+            return;
+        }
+    };
+    if maturity < config.maturity_threshold_e8s {
+        return;
+    }
+    if let Err(e) = gov_disburse_maturity(neuron_id, EARLY_ADOPTER_YIELD_SUBACCOUNT).await {
+        canister_print(&format!("ea disburse_maturity failed: {}", e));
+        return;
+    }
+    staking_audit("ea_yield_harvest", get_canister_id(), maturity, neuron_id);
+}
+
 /// Run (or resume) one monthly settlement: expire unclaimed shares →
 /// treasury, route the month's yield (<500 restake / 1,000 cut / excess →
 /// pot), then split the pot in proportion to stake. All amounts are
@@ -13747,6 +13783,10 @@ async fn early_adopter_settlement_check() {
     if let Err(e) = advance_early_adopter_bootstrap().await {
         canister_print(&format!("early_adopter bootstrap retry failed: {}", e));
     }
+    // Feed the EA yield inbox: pull the neuron's accrued maturity into [6u8;32]
+    // so the settlement below has something to route. (No-op until the neuron
+    // is bootstrapped and maturity crosses the threshold.)
+    harvest_early_adopter_maturity().await;
     let now = current_time();
     let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
     // Run when a new period starts, and ALSO whenever a journaled settlement
