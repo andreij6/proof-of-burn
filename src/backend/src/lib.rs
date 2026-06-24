@@ -19920,6 +19920,34 @@ async fn get_farmer_drafts(farmer_id: u64, since: u64) -> Result<Vec<XFarmDraft>
     }
 }
 
+/// Read-only companion to `get_farmer_drafts`: returns the Farmer's currently
+/// STORED drafts WITHOUT triggering generation (no Gemini outcall, no throttle
+/// consumed). The UI calls this first to paint cached drafts instantly, then calls
+/// `get_farmer_drafts` in the background to (maybe) refresh — so a slow or failed
+/// generation never blanks the list the owner already has.
+#[ic_cdk::update]
+async fn get_farmer_drafts_cached(farmer_id: u64, since: u64) -> Result<Vec<XFarmDraft>, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
+        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
+    if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
+    match farmer.canister_id {
+        None => Ok(XFARM_MOCK_DRAFTS.with(|d| d.borrow().get(&farmer.id).cloned()).unwrap_or_default()
+            .into_iter().filter(|x| x.created_at >= since).collect()),
+        Some(cid) => {
+            // get_drafts(since) is a pure read on the Farmer — no outcall, no throttle.
+            let res: Result<(Result<Vec<XFarmDraft>, String>,), _> =
+                ic_cdk::call(cid, "get_drafts", (since,)).await;
+            match res {
+                Ok((Ok(drafts),)) => Ok(drafts),
+                Ok((Err(e),)) => Err(format!("DRAFTS_REJECTED: {}", e)),
+                Err((c, m)) => Err(format!("DRAFTS_FAILED ({:?}): {}", c, m)),
+            }
+        }
+    }
+}
+
 /// The owner's live Farmer status: cycles remaining, days of budget left, next
 /// generation. Proxies to the Farmer canister for the live cycle balance.
 #[ic_cdk::update]

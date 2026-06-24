@@ -975,6 +975,7 @@ type Result_11 = variant { Ok : RecordHoleOk; Err : text };
 type Result_12 = variant { Ok : StartSessionOk; Err : text };
 type Result_13 = variant { Ok : bool; Err : text };
 type Result_14 = variant { Ok : CrashVerifyView; Err : text };
+type Result_15 = variant { Ok : WhoamiReply; Err : text };
 type Result_2 = variant { Ok : text; Err : text };
 type Result_3 = variant { Ok : CompleteRoundOk; Err : text };
 type Result_4 = variant { Ok : Farmer; Err : text };
@@ -983,6 +984,7 @@ type Result_6 = variant { Ok : ExplorerQuote; Err : text };
 type Result_7 = variant { Ok : vec XFarmDraft; Err : text };
 type Result_8 = variant { Ok : record { Farmer; nat64; nat64 }; Err : text };
 type Result_9 = variant { Ok : XFarmQuote; Err : text };
+type SeenUser = record { last_seen_ns : nat64; first_seen_ns : nat64 };
 // Fixed staking terms. The 6-month minimum matches the NNS minimum dissolve
 // delay for voting eligibility, so no Mission 70 gate applies. Voting weight
 // and the daily lottery-ticket grant both scale with the same multiplier,
@@ -1085,16 +1087,6 @@ type UserBalanceRow = record {
   ckusdc : nat;
   ckusdt : nat;
 };
-type SeenUser = record {
-  first_seen_ns : nat64;
-  last_seen_ns : nat64;
-};
-type WhoamiReply = record {
-  "principal" : principal;
-  first_seen_ns : nat64;
-  last_seen_ns : nat64;
-};
-type Result_15 = variant { Ok : WhoamiReply; Err : text };
 type UserStakeInfo = record {
   tiers : vec UserTierStake;
   // Sum of the caller's stakes across tiers.
@@ -1124,6 +1116,15 @@ type VoteRecord = record {
   nns_outcome : opt text;
   decided_at : nat64;
   icp_burned_e8s : nat64;
+};
+// Login ping: any signed-in caller records its first/last-seen timestamp and
+// gets back `(principal, first_seen_ns, last_seen_ns)`. The frontend fires this
+// on login so a principal is captured even if it never makes another
+// authenticated call (e.g. lottery disabled, pure browsing). Not admin-gated.
+type WhoamiReply = record {
+  "principal" : principal;
+  last_seen_ns : nat64;
+  first_seen_ns : nat64;
 };
 type XFarmDraft = record {
   id : nat64;
@@ -1197,6 +1198,16 @@ service : (InitPayload) -> {
   // governance. Answers "are our neurons actually following the primary?".
   admin_check_neuron_following : () -> (vec NeuronFollowStatus);
   admin_clear_featured_slot : () -> (Result);
+  // Admin: force ONE stuck commitment (FailedBurn / FailedRefund / StuckFunds)
+  // to a terminal `Burned` state so the 5-minute settlement retry sweep stops
+  // re-attempting it forever. Use only when the escrow is verified empty and the
+  // settlement saga can never succeed — e.g. a legacy token commitment whose
+  // escrow was never funded (approve fails InsufficientFunds balance 0). Does
+  // NOT move funds (verify the escrow is empty beforehand via the ledger) and
+  // does NOT alter the proposal's `total_burned` (the commitment produced 0 ICP;
+  // it was never counted as burned, and we don't count it now). Rejects if the
+  // commitment is not in a stuck state, so it can't be misused on active ones.
+  admin_close_stuck_commitment : (nat64, principal) -> (Result);
   admin_delete_chat : (nat64) -> (Result);
   admin_disable_farmer : (nat64) -> (Result);
   // Admin: allocate treasury ICP into the early-adopter neuron (compounds the
@@ -1220,15 +1231,13 @@ service : (InitPayload) -> {
   // Admin: every unstake record across all users — the split neurons the
   // canister manages on users' behalf (dissolving, restaked, disbursed).
   admin_list_pending_unstakes : () -> (vec PendingUnstake) query;
+  // Admin: every principal that has ever logged in, with first/last-seen
+  // timestamps. Zero ledger outcalls — the primary "all logged-in principals"
+  // list. Sorted by `last_seen_ns` descending (most recent login first).
+  admin_list_seen_users : () -> (vec record { principal; SeenUser }) query;
   // Admin: every known participant principal (dedup union across all features).
   // Cheap (no outcalls) — the frontend pages this list into `admin_user_balances`.
   admin_list_user_principals : () -> (vec principal) query;
-  // Admin: every principal that has ever logged in, with first/last-seen (ns).
-  // Zero ledger outcalls. Sorted by last_seen desc. Admin-gated.
-  admin_list_seen_users : () -> (vec record { principal; SeenUser }) query;
-  // Login ping: any signed-in caller records its first/last-seen and gets back
-  // WhoamiReply. Frontend fires this on login.
-  whoami : () -> (Result_15);
   admin_mute_chat : (principal, nat64) -> (Result);
   // Pause/unpause the round loop. The current round still settles; no new
   // betting window opens while paused.
@@ -1240,11 +1249,6 @@ service : (InitPayload) -> {
       Result_1,
     );
   admin_refund_stranded_commitments : (principal, ExplorerToken) -> (Result_1);
-  // Admin: force ONE stuck commitment (FailedBurn/FailedRefund/StuckFunds) to a
-  // terminal Burned state so the 5-min retry sweep stops re-attempting it. Use
-  // only when the escrow is verified empty (e.g. a legacy token commitment whose
-  // escrow was never funded). Moves no funds; does not alter total_burned.
-  admin_close_stuck_commitment : (nat64, principal) -> (Result);
   // Admin recovery: refund a specific user's stranded x-farm escrow deposit.
   admin_refund_xfarm_escrow : (principal) -> (Result_1);
   // Admin: upgrade every existing Farmer canister to the currently-uploaded wasm
@@ -1653,6 +1657,12 @@ service : (InitPayload) -> {
   // 1/day inside the Farmer) a fresh generation, then returns its retained drafts.
   // Dev-seed Farmers (no canister) just return the seeded mock drafts so the UI works.
   get_farmer_drafts : (nat64, nat64) -> (Result_7);
+  // Read-only companion to `get_farmer_drafts`: returns the Farmer's currently
+  // STORED drafts WITHOUT triggering generation (no Gemini outcall, no throttle
+  // consumed). The UI calls this first to paint cached drafts instantly, then calls
+  // `get_farmer_drafts` in the background to (maybe) refresh — so a slow or failed
+  // generation never blanks the list the owner already has.
+  get_farmer_drafts_cached : (nat64, nat64) -> (Result_7);
   // The owner's live Farmer status: cycles remaining, days of budget left, next
   // generation. Proxies to the Farmer canister for the live cycle balance.
   get_farmer_status : (nat64) -> (Result_8);
@@ -1930,4 +1940,5 @@ service : (InitPayload) -> {
   // lottery ticket (maybe_award_thread_upvote).
   vote_thread : (nat64, VoteDir) -> (Result);
   wallet_receive : () -> (Result);
+  whoami : () -> (Result_15);
 }

@@ -660,9 +660,20 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
   // Tick every second to drive the live "next round" countdown.
   useEffect(() => { const t = setInterval(() => setNowTick(Date.now()), 1000); return () => clearInterval(t); }, []);
 
-  // ON-DEMAND generation: asks the Farmer to draft tweets. The backend throttles to at
-  // most once per day per Farmer, so a same-day call just returns the already-generated
-  // drafts (they persist); a new day auto-refreshes them.
+  // Phase 1 — paint instantly from the Farmer's STORED drafts (pure read: no Gemini
+  // outcall, no throttle consumed). Best-effort; a failure here just leaves the list
+  // empty for the background generate() below to fill.
+  const loadCached = useCallback(async () => {
+    try {
+      const dr = await actor.get_farmer_drafts_cached(farmer.id, since);
+      if (dr.__kind__ === 'Ok') setDrafts(dr.Ok);
+    } catch { /* cache read is best-effort */ }
+  }, [actor, farmer.id, since]);
+
+  // Phase 2 — ON-DEMAND generation: ask the Farmer to draft tweets. The backend
+  // throttles to at most once per UTC day, so a same-day call just returns the
+  // already-generated drafts. On failure we KEEP whatever is already shown (the
+  // cached drafts) and surface a soft notice instead of blanking the list.
   const generate = useCallback(async () => {
     setLoadingDrafts(true); setErr(null);
     try {
@@ -676,9 +687,17 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
     }
   }, [actor, farmer.id, since]);
 
-  // Persist + auto-refresh: load drafts on mount (and once per day the throttle lets it
-  // regenerate), so they stay visible across page loads until the next round.
-  useEffect(() => { if (farmer.status === FarmerStatus.Active) generate(); }, [generate, farmer.status]);
+  // On open: show cached drafts first, then refresh/generate in the background so a
+  // slow or failed Gemini call never hides the tweets the owner already has.
+  useEffect(() => {
+    if (farmer.status !== FarmerStatus.Active) return;
+    let cancelled = false;
+    (async () => {
+      await loadCached();
+      if (!cancelled) await generate();
+    })();
+    return () => { cancelled = true; };
+  }, [loadCached, generate, farmer.status]);
 
   // RENEW: pay again to extend this farm. Quote the farm's existing tier, deposit
   // price+fees into escrow, then call renew_farmer (10% treasury, 90% → more cycles,
@@ -820,7 +839,12 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
       {/* Drafts (newest first, 10 per page) + next-round countdown */}
       <div className="col" style={{ gap: 8 }}>
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 6 }}>
-          <span style={LABEL_STYLE}>Drafts ({sortedDrafts.length})</span>
+          <span className="row" style={{ gap: 8, alignItems: 'baseline' }}>
+            <span style={LABEL_STYLE}>Drafts ({sortedDrafts.length})</span>
+            {loadingDrafts && sortedDrafts.length > 0 && (
+              <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>refreshing…</span>
+            )}
+          </span>
           {active && countdownMs !== null && (
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               {countdownMs > 0
@@ -829,7 +853,15 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
             </span>
           )}
         </div>
-        {err && <div className="card" style={{ padding: 10, borderColor: 'var(--bad)', color: 'var(--bad)', fontSize: 12.5 }}>{err}</div>}
+        {err && (sortedDrafts.length > 0 ? (
+          // We still have cached drafts on screen — a failed/slow refresh is soft, not fatal.
+          <div className="row" style={{ gap: 8, alignItems: 'center', fontSize: 12, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
+            <span>Couldn't fetch fresh drafts just now — showing your latest.</span>
+            <Btn variant="ghost" sm onClick={generate} disabled={loadingDrafts}>Try again</Btn>
+          </div>
+        ) : (
+          <div className="card" style={{ padding: 10, borderColor: 'var(--bad)', color: 'var(--bad)', fontSize: 12.5 }}>{err}</div>
+        ))}
         {!generatedToday && sortedDrafts.length === 0 && !loadingDrafts && !err && (
           <p style={{ fontSize: 12.5, color: 'var(--fg-3)', margin: 0 }}>
             {active
@@ -837,7 +869,7 @@ function FarmerCard({ farmer, tiers, actor, identity, host, rootKey, ledgerCanis
               : <>This farm is {statusLabel(farmer.status)}; no new drafts.</>}
           </p>
         )}
-        {loadingDrafts && <Skeleton width={'100%'} height={48} />}
+        {loadingDrafts && sortedDrafts.length === 0 && <Skeleton width={'100%'} height={48} />}
         {pageDrafts.map(d => (
           <DraftRow key={Number(d.id)} d={d} onShare={shareDraftOnX} />
         ))}
