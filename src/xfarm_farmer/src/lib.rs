@@ -55,10 +55,13 @@ const DRAFT_RETENTION_NS: u64 = 30 * DAY_NS;
 /// Cap drafts stored per canister (last-30-days × drafts_per_day ceiling).
 const MAX_STORED_DRAFTS: usize = 400;
 /// Cycles attached to each HTTPS outcall to the proxy (unused is refunded by the IC).
-/// Generous to never under-pay a small 2KB-response call on a 13-node subnet.
+/// Generous to never under-pay the response-byte reservation on a 13-node subnet.
 const OUTCALL_CYCLES: u128 = 100_000_000_000;
-/// Cap the proxy response we accept (drafts JSON is small).
-const MAX_RESPONSE_BYTES: u64 = 2048;
+/// Cap the proxy response we accept. A full Bloom-tier reply is up to 10 drafts,
+/// each a <=270-char `text` plus a `cited_url` (Gemini grounding redirect URLs run
+/// 200-400 chars), so the JSON can reach ~6-8 KB. 32 KB leaves comfortable headroom
+/// (IC hard limit is 2 MB); the extra reserved-byte cost is negligible vs OUTCALL_CYCLES.
+const MAX_RESPONSE_BYTES: u64 = 32_768;
 /// Bounded-wait deadline for the proxy outcall (s). The non-replicated outcall inherits
 /// it; 180s covers slow grounded Gemini calls without hitting the short default.
 const OUTCALL_TIMEOUT_SECS: u32 = 180;
