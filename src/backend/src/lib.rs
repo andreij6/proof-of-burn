@@ -4062,13 +4062,18 @@ fn nns_topic_label(topic: i32) -> String {
 async fn fetch_live_proposals() {
     let nns_gov = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
     let arg = ListProposalInfo {
-        include_reward_status: vec![],
+        // Gate on REWARD status, not decision status: a proposal still "accepting
+        // votes" can be voted on even after the NNS has early-adopted/executed it
+        // (voting stays open until the original deadline for voting rewards).
+        // Filtering by decision status (Open only) hid those — yet the neuron can
+        // still cast a valid vote on them.
+        include_reward_status: vec![1], // 1 = ACCEPT_VOTES
         omit_large_fields: Some(true),
         before_proposal: None,
         limit: 50,
         exclude_topic: vec![],
         include_all_manage_neuron_proposals: Some(false),
-        include_status: vec![1], // 1 = Open
+        include_status: vec![], // don't restrict by decision status — reward_status gates votability
     };
 
     let response: Result<(ListProposalInfoResponse,), _> =
@@ -4086,14 +4091,13 @@ async fn fetch_live_proposals() {
     let now = current_time();
 
     for info in infos {
-        // Only open proposals with a real id and a future voting deadline.
+        // Any proposal still accepting votes (reward_status ACCEPT_VOTES, filtered
+        // in the request) with a real id and enough voting time left — including
+        // ones the NNS has already adopted/executed early. No decision-status gate.
         let nns_id = match info.id {
             Some(p) => p.id,
             None => continue,
         };
-        if info.status != 1 {
-            continue;
-        }
         let deadline_ns = match info.deadline_timestamp_seconds {
             Some(secs) => secs.saturating_mul(1_000_000_000),
             None => continue,
