@@ -1886,7 +1886,20 @@ export default function App() {
           <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
             <Icon name="ticket" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
             Lottery
-            {drawCountdown && <Chip tone="muted" style={{ marginLeft: 'auto', height: 18, fontSize: 10 }}>{drawCountdown}</Chip>}
+            {drawCountdown && (
+              <Chip tone="muted" style={{
+                marginLeft: 'auto', height: 18, fontSize: 10,
+                // The muted chip uses var(--fg-2) text, which collapses on the
+                // burn-orange primary fill when this nav item is selected.
+                // Drop to near-black on a translucent dark pill so the countdown
+                // stays readable against the orange.
+                ...(page === 'lottery' ? {
+                  color: 'var(--char-950)',
+                  background: 'color-mix(in srgb, var(--char-950) 14%, transparent)',
+                  borderColor: 'color-mix(in srgb, var(--char-950) 30%, transparent)',
+                } : {}),
+              }}>{drawCountdown}</Chip>
+            )}
           </Btn>
         )}
 
@@ -2269,12 +2282,12 @@ export default function App() {
                         </span>
                       </span>
                       <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
-                        <b style={{ color: 'var(--sprout-ink)' }}>Earn</b> ICP from every protocol burn. A share of all burned ICP is split among verified members and paid out in ICP — your neuron keeps working for you with nothing to lock up or spend. To qualify, set your NNS neuron to follow the leader neuron and verify it here; as long as it keeps following, you keep earning from every burn.
+                        <b style={{ color: 'var(--sprout-ink)' }}>Earn</b> ICP from every protocol burn. A share of all burned ICP is split among verified members and paid out in ICP — your neuron keeps working for you with nothing to lock up or spend. To qualify, set your NNS neuron to follow the leader neuron and verify it here; as long as it keeps following, you keep earning from every burn.{' '}
+                        <button type="button" onClick={() => setPoolDetailsOpen(true)} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--burn-ink)', fontSize: 12, textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'inherit' }}>
+                          <Icon name="info" size={11} stroke="var(--burn-ink)" /> How it works
+                        </button>
                       </p>
                     </div>
-                    <Btn variant="secondary" sm onClick={() => setPoolDetailsOpen(true)}>
-                      <Icon name="info" size={12} /> More details
-                    </Btn>
                   </div>
 
                   {!myPoolNeuron && principal && !principal.isAnonymous() && (
@@ -2521,7 +2534,7 @@ export default function App() {
               onSignIn={handleLogin}
             />
           ) : (
-          <div className="dashboard-container">
+          <div className="idea-board-container">
 
             {/* ── Your activity (Tier 3) — PRIMARY, prominent ──
                 Personal stats matter more than site-wide totals, so when the
