@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { LiveDot, formatPrincipal, DiscordMark, DISCORD_INVITE } from './ui';
+import { LiveDot, formatPrincipal, DiscordMark, DISCORD_INVITE, BrandMark } from './ui';
 import type { LotteryInfo, LotteryDraw, StakingPoolInfo } from './bindings/backend';
 
 type UsdRate = { token: string; rate_usd_e8s: bigint };
@@ -83,17 +83,6 @@ const DISPLAY = 'var(--font-display)';
 const BODY = 'var(--font-body)';
 const EYEBROW: React.CSSProperties = { fontFamily: MONO, fontSize: 11, fontWeight: 500, letterSpacing: '.14em', textTransform: 'uppercase', color: 'var(--burn)' };
 const COL_HEAD: React.CSSProperties = { fontFamily: MONO, fontSize: 10, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--fg-3)' };
-
-function Logo({ size = 24 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 64 64" fill="none" aria-hidden="true">
-      <rect x="8" y="12" width="48" height="6" rx="1.5" fill="var(--fg)" opacity="0.30" />
-      <rect x="8" y="23" width="48" height="6" rx="1.5" fill="var(--fg)" opacity="0.50" />
-      <rect x="8" y="34" width="48" height="6" rx="1.5" fill="var(--fg)" opacity="0.76" />
-      <rect x="8" y="45" width="48" height="7" rx="1.5" fill="var(--burn)" />
-    </svg>
-  );
-}
 
 export default function Landing({ onEnter, actor }: LandingProps) {
   const [info, setInfo] = useState<LotteryInfo | null>(null);
@@ -184,7 +173,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
       <nav style={{ position: 'sticky', top: 0, zIndex: 50, height: 56, background: 'rgba(12,10,9,0.82)', backdropFilter: 'blur(8px)', borderBottom: '1px solid var(--char-800)' }}>
         <div style={{ maxWidth: 1200, margin: '0 auto', height: '100%', padding: '0 24px', display: 'flex', alignItems: 'center', gap: 34 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Logo />
+            <BrandMark size={24} />
             <span style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 18, letterSpacing: '-.02em', color: 'var(--fg)' }}>Cycle Burn</span>
           </div>
           <div className="ll-nav-links" style={{ display: 'flex', gap: 24, marginLeft: 6 }}>
@@ -384,7 +373,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 40, paddingBottom: 36, borderBottom: '1px solid var(--char-800)', flexWrap: 'wrap' }}>
             <div style={{ maxWidth: 300 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <Logo size={22} />
+                <BrandMark size={22} />
                 <span style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 17, letterSpacing: '-.02em', color: 'var(--fg)' }}>Cycle Burn</span>
               </div>
               <p style={{ color: 'var(--fg-3)', fontSize: 13, lineHeight: 1.5, margin: '14px 0 0' }}>A no-loss lottery on the Internet Computer. Stake, earn tickets, win the yield — keep your principal.</p>

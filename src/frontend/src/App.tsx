@@ -43,7 +43,7 @@ import Landing from "./Landing";
 import Dashboard from "./Dashboard";
 import AboutUs from "./AboutUs";
 // Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, BrandMark } from "./ui";
 import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient } from "./tokens";
 import { useErrorImpression } from "./analytics";
 import { countdownShort } from "./hubLogic";
@@ -140,7 +140,7 @@ export function proposalThresholdMet(
 
 // Inline neuron glyph (from src/assets/neuron.svg). Rendered as inline SVG rather
 // than an <img>, because Vite inlines small SVGs as data URIs and the `#` in the
-// `#FF6A1F` fills breaks data-URI parsing (shows a broken image).
+// `#E5484D` fills breaks data-URI parsing (shows a broken image).
 function NeuronGlyph({ size = 15, color = 'var(--burn)', style }: { size?: number; color?: string; style?: React.CSSProperties }) {
   return (
     <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true"
@@ -2157,12 +2157,7 @@ export default function App() {
           >
             <Icon name="list" size={20} />
           </button>
-          <span style={{
-            width: 32, height: 32, flexShrink: 0, display: 'grid', placeItems: 'center',
-            border: '1px solid var(--burn)', borderRadius: 8, background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))'
-          }}>
-            <Icon name="flame" size={17} stroke="var(--burn-ink)" />
-          </span>
+          <BrandMark size={26} style={{ flexShrink: 0 }} />
           <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             Cycle Burn
           </b>

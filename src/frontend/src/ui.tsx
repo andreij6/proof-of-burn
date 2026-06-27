@@ -262,6 +262,21 @@ export function Skeleton({ width = '100%', height = 14, radius = 6, style }: {
 }
 
 // Formatting helpers
+/** The Cycle Burn brand mark: four stacked bars, the bottom one in burn-orange
+ *  (the "burn"). The upper bars use --fg so the mark adapts to light/dark theme.
+ *  This is the canonical logo — used by the landing, the app header, and the
+ *  favicon (static colors). */
+export function BrandMark({ size = 24, style }: { size?: number; style?: React.CSSProperties }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" fill="none" aria-hidden="true" style={style}>
+      <rect x="8" y="12" width="48" height="6" rx="1.5" fill="var(--fg)" opacity="0.30" />
+      <rect x="8" y="23" width="48" height="6" rx="1.5" fill="var(--fg)" opacity="0.50" />
+      <rect x="8" y="34" width="48" height="6" rx="1.5" fill="var(--fg)" opacity="0.76" />
+      <rect x="8" y="45" width="48" height="7" rx="1.5" fill="var(--burn)" />
+    </svg>
+  );
+}
+
 export function fmtICP(n: number | bigint) {
   return (Number(n) / 100_000_000).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 5 });
 }
