@@ -251,11 +251,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
               </div>
             ))}
 
-            <div style={{ borderTop: '1px solid var(--char-800)', marginTop: 22, paddingTop: 18, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-              <div><div style={COL_HEAD}>your tickets</div><div style={{ fontFamily: MONO, fontSize: 20, color: 'var(--fg)', marginTop: 4 }}>{info ? Number(info.my_tickets).toLocaleString('en-US') : '0'}</div></div>
-              <div><div style={COL_HEAD}>your odds</div><div style={{ fontFamily: MONO, fontSize: 20, color: 'var(--fg)', marginTop: 4 }}>{info && info.my_tickets > 0n && info.odds_denominator > 0n ? `1 in ${Number(info.odds_denominator).toLocaleString('en-US')}` : '—'}</div></div>
-            </div>
-            <button onClick={onEnter} style={{ ...primaryBtn, width: '100%', marginTop: 20, height: 44 }}>Stake to get tickets →</button>
+            <button onClick={onEnter} style={{ ...primaryBtn, width: '100%', marginTop: 22, height: 44, borderTop: '1px solid transparent' }}>Stake to get tickets →</button>
           </div>
         </div>
       </section>
