@@ -1884,7 +1884,7 @@ export default function App() {
         )}
         {lotteryEnabled && (
           <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
-            <Icon name="target" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
+            <Icon name="ticket" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
             Lottery
             {drawCountdown && <Chip tone="muted" style={{ marginLeft: 'auto', height: 18, fontSize: 10 }}>{drawCountdown}</Chip>}
           </Btn>
@@ -1899,7 +1899,7 @@ export default function App() {
 
         <Eyebrow style={{ margin: '14px 0 4px' }}>Governance</Eyebrow>
         <Btn variant={page === 'voting' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('voting')}>
-          <Icon name="flame" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
+          <Icon name="scale" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
           Voting
         </Btn>
         {discussionsEnabled && (
@@ -2629,7 +2629,7 @@ export default function App() {
                 <div className="col" style={{ gap: 6 }}>
                   <Eyebrow accent>NNS governance</Eyebrow>
                   <span className="row" style={{ gap: 10, alignItems: 'center' }}>
-                    <Icon name="flame" size={22} stroke="var(--burn-ink)" />
+                    <Icon name="scale" size={22} stroke="var(--burn-ink)" />
                     <h4 style={{ margin: 0 }}>Use our voting power</h4>
                   </span>
                   <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
