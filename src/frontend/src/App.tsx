@@ -140,7 +140,7 @@ export function proposalThresholdMet(
 
 // Inline neuron glyph (from src/assets/neuron.svg). Rendered as inline SVG rather
 // than an <img>, because Vite inlines small SVGs as data URIs and the `#` in the
-// `#E5484D` fills breaks data-URI parsing (shows a broken image).
+// `#FF6A1F` fills breaks data-URI parsing (shows a broken image).
 function NeuronGlyph({ size = 15, color = 'var(--burn)', style }: { size?: number; color?: string; style?: React.CSSProperties }) {
   return (
     <svg width={size} height={size} viewBox="0 0 100 100" aria-hidden="true"
@@ -1863,7 +1863,7 @@ export default function App() {
           </Btn>
         )}
 
-        {(arcadeEnabled || lotteryEnabled || casinoEnabled || xFarmEnabled) && (
+        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Featured</Eyebrow>
         )}
         {arcadeEnabled && (
@@ -1889,13 +1889,6 @@ export default function App() {
             {drawCountdown && <Chip tone="muted" style={{ marginLeft: 'auto', height: 18, fontSize: 10 }}>{drawCountdown}</Chip>}
           </Btn>
         )}
-        {xFarmEnabled && (
-          <Btn variant={page === 'xfarm' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('xfarm')}>
-            <Icon name="spark" size={14} stroke={page === 'xfarm' ? 'var(--char-950)' : 'currentColor'} />
-            X-Farm
-            <Chip tone="pending" style={{ marginLeft: 'auto', height: 18, fontSize: 10 }}>experimental</Chip>
-          </Btn>
-        )}
 
         <Eyebrow style={{ margin: '14px 0 4px' }}>Governance</Eyebrow>
         <Btn variant={page === 'voting' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('voting')}>
@@ -1919,7 +1912,7 @@ export default function App() {
           </Btn>
         )}
 
-        {(ideaBoardEnabled || explorerEnabled) && (
+        {(ideaBoardEnabled || explorerEnabled || xFarmEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Community</Eyebrow>
         )}
         {ideaBoardEnabled && (
@@ -1932,6 +1925,13 @@ export default function App() {
           <Btn variant={page === 'explorer' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('explorer')}>
             <Icon name="compass" size={14} stroke={page === 'explorer' ? 'var(--char-950)' : 'currentColor'} />
             Explorer
+          </Btn>
+        )}
+        {xFarmEnabled && (
+          <Btn variant={page === 'xfarm' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('xfarm')}>
+            <Icon name="spark" size={14} stroke={page === 'xfarm' ? 'var(--char-950)' : 'currentColor'} />
+            X-Farm
+            <Chip tone="pending" style={{ marginLeft: 'auto', height: 18, fontSize: 10 }}>experimental</Chip>
           </Btn>
         )}
 
