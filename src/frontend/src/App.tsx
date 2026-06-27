@@ -634,6 +634,8 @@ export default function App() {
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
   const discussionsEnabled = featureFlags.find(f => f.key === 'discussions')?.enabled ?? false;
   const xFarmEnabled = featureFlags.find(f => f.key === 'x_farm')?.enabled ?? false;
+  const dashboardEnabled = featureFlags.find(f => f.key === 'dashboard')?.enabled ?? false;
+  const missionEnabled = featureFlags.find(f => f.key === 'mission_statement')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (earns lottery tickets only).
   const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
@@ -1087,11 +1089,12 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  // Root + signed in → the app. Signed-out visitors at the root stay on the
-  // landing page (only an explicit "Go to App" / a page link leaves it).
+  // Root + signed in → the app (default app page is Lottery). Signed-out
+  // visitors at the root stay on the landing page (only an explicit "Go to
+  // App" / a page link leaves it).
   useEffect(() => {
     if (page === 'landing' && principal && !principal.isAnonymous()) {
-      redirect('dashboard');
+      redirect('lottery');
     }
   }, [page, principal]);
 
@@ -1258,7 +1261,17 @@ export default function App() {
     if (page === 'payouts' && principal && principal.isAnonymous()) {
       redirect('dashboard');
     }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
+    // Dashboard + Mission Statement are flag-gated and ship dark. When either
+    // is disabled, bounce to `voting` (always-on). The Dashboard guard also
+    // catches the many `redirect('dashboard')` fallbacks above, so a dark
+    // Dashboard never leaves a dead-end route.
+    if (page === 'dashboard' && featureFlags.length > 0 && !dashboardEnabled) {
+      redirect('voting');
+    }
+    if (page === 'about' && featureFlags.length > 0 && !missionEnabled) {
+      redirect('voting');
+    }
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, xFarmEnabled, dashboardEnabled, missionEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1847,14 +1860,18 @@ export default function App() {
     const onEarn = (EARN_PAGES as string[]).includes(page);
     return (
       <>
-        <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('dashboard')}>
-          <Icon name="list" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
-          Dashboard
-        </Btn>
-        <Btn variant={page === 'about' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('about')}>
-          <Icon name="info" size={14} stroke={page === 'about' ? 'var(--char-950)' : 'currentColor'} />
-          Mission Statement
-        </Btn>
+        {dashboardEnabled && (
+          <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('dashboard')}>
+            <Icon name="list" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
+            Dashboard
+          </Btn>
+        )}
+        {missionEnabled && (
+          <Btn variant={page === 'about' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('about')}>
+            <Icon name="info" size={14} stroke={page === 'about' ? 'var(--char-950)' : 'currentColor'} />
+            Mission Statement
+          </Btn>
+        )}
 
         {(arcadeEnabled || lotteryEnabled || casinoEnabled || xFarmEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Featured</Eyebrow>
@@ -1961,7 +1978,13 @@ export default function App() {
   const renderDrawerBody = (onNavigate?: () => void) => (
     <>
       <div className="col" style={{ gap: 8, width: '100%', marginBottom: 32 }}>
-        <Eyebrow style={{ marginBottom: 6 }}>Navigation</Eyebrow>
+        {/* The only direct children of the "Navigation" header are the
+            Dashboard + Mission Statement links (the rest sit under the
+            Featured / Governance / Community sub-headers below). Hide the
+            header when both are dark so it isn't left orphaned. */}
+        {(dashboardEnabled || missionEnabled) && (
+          <Eyebrow style={{ marginBottom: 6 }}>Navigation</Eyebrow>
+        )}
         {renderNavLinks(onNavigate)}
       </div>
 
@@ -2094,6 +2117,9 @@ export default function App() {
   if (page === 'landing') {
     return (
       <Landing
+        // Anonymous actor for the landing's live lottery reads (pot, countdown,
+        // winners, total staked) — all anonymous-allowlisted queries.
+        actor={actor}
         // Only gate sections once flags have actually loaded; before that show
         // everything (passing undefined → Landing's default-safe fallback),
         // otherwise the not-yet-loaded flags hide every flagged section.
@@ -2105,7 +2131,7 @@ export default function App() {
         } : undefined}
         onEnter={() => {
           window.scrollTo(0, 0);
-          setPage('dashboard');
+          setPage('lottery');
         }}
       />
     );

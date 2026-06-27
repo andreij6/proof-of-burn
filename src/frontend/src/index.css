@@ -376,6 +376,25 @@ a:hover {
   animation: il-pulse 2s var(--ease-in-out) infinite;
 }
 
+/* ── Landing page (No Loss Lottery) responsive grids ───────────────────────
+   Inline styles can't express media queries, so the landing's multi-column
+   grids collapse to a single column on narrow screens via these classes. */
+.ll-hero-grid { display: grid; grid-template-columns: 1fr 460px; gap: 56px; align-items: center; }
+.ll-two-col   { display: grid; grid-template-columns: 1.1fr 1fr; gap: 56px; align-items: start; }
+.ll-how-grid  { display: grid; grid-template-columns: repeat(3, 1fr); }
+.ll-table-wrap { overflow-x: auto; }
+.ll-table-wrap > div { min-width: 540px; }
+@media (max-width: 960px) {
+  .ll-hero-grid, .ll-two-col { grid-template-columns: 1fr; gap: 40px; }
+  .ll-hero-title { font-size: 52px !important; }
+}
+@media (max-width: 760px) {
+  .ll-nav-links { display: none !important; }
+  .ll-how-grid { grid-template-columns: 1fr; }
+  .ll-how-grid > div { border-right: none !important; border-bottom: 1px solid var(--char-800); }
+  .ll-hero-title { font-size: 42px !important; }
+}
+
 /* Skeleton shimmer for loading placeholders (theme-aware) */
 @keyframes il-shimmer {
   0%   { background-position: 200% 0; }
