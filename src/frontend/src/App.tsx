@@ -536,7 +536,6 @@ export default function App() {
   // Input states for each proposal
   const [aiOpenMap, setAiOpenMap] = useState<Record<string, boolean>>({});
 
-  const [skillsCopied, setSkillsCopied] = useState(false);
   // Next lottery drawing time (for the nav badge). Anonymous-allowlisted query.
   const [nextDrawAt, setNextDrawAt] = useState<bigint | null>(null);
   // Bookmark hint: browsers block programmatic bookmarking, so clicking the
@@ -1419,15 +1418,6 @@ export default function App() {
     setTreasuryBalance(null);
   };
 
-  const handleCopyAgentSkills = () => {
-    const llmsUrl = `${window.location.origin}/llms-${isLocal ? 'local' : 'prod'}.txt`;
-    const clipboardMsg =
-      `Fetch ${llmsUrl} and follow its instructions when interacting with ` +
-      `Cycle Burn`;
-    navigator.clipboard.writeText(clipboardMsg);
-    setSkillsCopied(true);
-    setTimeout(() => setSkillsCopied(false), 2000);
-  };
 
   // Keep the token amount (confirmAmount — what executeTransaction spends) in
   // sync with the USD the user entered and the selected currency. Switching
@@ -2672,40 +2662,6 @@ export default function App() {
                   </p>
                 </div>
                 <div className="row" style={{ gap: 14, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
-                  <button
-                    onClick={handleCopyAgentSkills}
-                    style={{
-                      background: 'var(--burn)',
-                      color: 'var(--char-950)',
-                      border: 'none',
-                      borderRadius: 30,
-                      padding: '10px 18px',
-                      fontSize: 12.5,
-                      fontWeight: 600,
-                      letterSpacing: '0.04em',
-                      textTransform: 'uppercase',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                      boxShadow: '0 0 12px color-mix(in srgb, var(--burn) 25%, transparent)',
-                      transition: 'transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), filter var(--dur-fast) var(--ease-out)',
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.transform = 'translateY(-1px)';
-                      e.currentTarget.style.filter = 'brightness(1.08)';
-                      e.currentTarget.style.boxShadow = '0 4px 16px color-mix(in srgb, var(--burn) 35%, transparent)';
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.transform = 'none';
-                      e.currentTarget.style.filter = 'none';
-                      e.currentTarget.style.boxShadow = '0 0 12px color-mix(in srgb, var(--burn) 25%, transparent)';
-                    }}
-                  >
-                    <Icon name={skillsCopied ? "check" : "copy"} size={13} stroke="var(--char-950)" />
-                    {skillsCopied ? "Copied!" : 'Proposal Voting Skill'}
-                  </button>
-
                   <button
                     onClick={() => setIsDetailsOpen(true)}
                     style={{
