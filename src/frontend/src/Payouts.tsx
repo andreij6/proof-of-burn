@@ -37,7 +37,6 @@ const SECTIONS: { key: ProfileSection; label: string; icon: string }[] = [
   { key: 'overview', label: 'Overview', icon: 'key' },
   { key: 'wallet', label: 'Wallet', icon: 'wallet' },
   { key: 'activity', label: 'Activity', icon: 'coins' },
-  { key: 'agents', label: 'Agent Space', icon: 'spark' },
 ];
 
 const WALLET_TOKENS_META: { token: ExplorerToken; label: string; decimals: number }[] = [
@@ -112,7 +111,8 @@ const AGENT_ENDPOINTS: { method: string; kind: 'query' | 'update'; note: string 
 
 export default function Payouts({ actor, principal, identity, host, rootKey, ledgerCanisterId, isLocal, backendCanisterId, initialSection, onSignIn }: PayoutsProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
-  const [section, setSection] = useState<ProfileSection>(initialSection);
+  // Agent Space is hidden, so never land on it (e.g. from a stale #/profile/agents link).
+  const [section, setSection] = useState<ProfileSection>(initialSection === 'agents' ? 'overview' : initialSection);
   const [txs, setTxs] = useState<TransactionRecord[]>([]);
   const [loaded, setLoaded] = useState(false);
 
@@ -264,8 +264,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
         !signedIn ? (
           <div className="col" style={{ ...card, gap: 10, alignItems: 'flex-start' }}>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-              Sign in to see your identity, social link and account summary. (The Agent Space
-              works without signing in — skills are public.)
+              Sign in to see your identity, social link and account summary.
             </span>
             <Btn variant="primary" sm onClick={onSignIn}>
               <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
