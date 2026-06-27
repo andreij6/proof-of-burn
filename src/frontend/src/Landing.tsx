@@ -165,7 +165,18 @@ export default function Landing({ onEnter, actor }: LandingProps) {
   };
 
   return (
-    <div style={{ background: 'var(--char-950)', minHeight: '100vh' }}>
+    // The landing is always a dark surface. Pin the dark-palette foreground vars
+    // so text stays light even when the app runs in light mode (which otherwise
+    // flips --fg/--fg-1/--fg-2/--fg-3 to near-black via [data-theme="light"]).
+    // These cascade to every child through CSS-variable inheritance. The
+    // --char-*/--burn/--sprout fills are theme-invariant, so they need no override.
+    <div style={{
+      background: 'var(--char-950)', minHeight: '100vh',
+      ['--fg' as string]: '#FAF9F7',
+      ['--fg-1' as string]: '#F5F4F2',
+      ['--fg-2' as string]: '#A8A29E',
+      ['--fg-3' as string]: '#78716C',
+    } as React.CSSProperties}>
       {/* ===== NAV ===== */}
       <nav style={{ position: 'sticky', top: 0, zIndex: 50, height: 56, background: 'rgba(12,10,9,0.82)', backdropFilter: 'blur(8px)', borderBottom: '1px solid var(--char-800)' }}>
         <div style={{ maxWidth: 1200, margin: '0 auto', height: '100%', padding: '0 24px', display: 'flex', alignItems: 'center', gap: 34 }}>
