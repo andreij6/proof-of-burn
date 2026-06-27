@@ -135,10 +135,13 @@ export default function Landing({ onEnter, actor }: LandingProps) {
   const poolUsd = info && icpUsdE8s > 0n
     ? '$' + Math.round(e8sToIcp(info.pot_e8s) * (Number(icpUsdE8s) / 1e8)).toLocaleString('en-US')
     : '';
-  // Progress bar = pot vs. the minimum needed for the draw to fire (real gate).
+  // A draw only fires when BOTH gates clear: the pot meets its minimum AND
+  // enough distinct people hold tickets. Each gets its own progress bar.
   const potPct = info && info.min_pot_e8s > 0n
     ? Math.min(100, Math.round((Number(info.pot_e8s) / Number(info.min_pot_e8s)) * 100))
     : 100;
+  const minHolders = info ? Number(info.min_unique_holders) : 0;
+  const playersPct = info ? (minHolders > 0 ? Math.min(100, Math.round((Number(info.unique_holders) / minHolders) * 100)) : 100) : 0;
   const baseTicket = info ? Number(info.tickets_per_day) : 0;
 
   const recentWins = useMemo(
@@ -231,12 +234,22 @@ export default function Landing({ onEnter, actor }: LandingProps) {
               <span style={COL_HEAD}>draws in</span>
               <span style={{ fontFamily: MONO, fontSize: 22, color: 'var(--fg)', fontVariantNumeric: 'tabular-nums' }}>{cd}</span>
             </div>
-            <div style={{ height: 6, borderRadius: 999, background: 'var(--char-800)', marginTop: 12, overflow: 'hidden' }}>
-              <div style={{ height: '100%', width: `${potPct}%`, background: 'var(--burn)' }} />
-            </div>
-            <div style={{ fontFamily: MONO, fontSize: 10, color: 'var(--fg-3)', marginTop: 7 }}>
-              {info ? `${potPct}% of the ${fmt2(info.min_pot_e8s)} ICP minimum to draw` : 'pot vs. minimum to draw'}
-            </div>
+            {/* Two draw gates — both must clear before a draw fires. */}
+            <div style={{ ...COL_HEAD, marginTop: 16 }}>both gates must clear to draw</div>
+            {([
+              { pct: potPct, cap: info ? `pot · ${fmt2(info.pot_e8s)} / ${fmt2(info.min_pot_e8s)} ICP` : 'pot vs. minimum' },
+              { pct: playersPct, cap: info ? (minHolders > 0 ? `players · ${Number(info.unique_holders).toLocaleString('en-US')} / ${minHolders.toLocaleString('en-US')} needed` : `players · ${Number(info.unique_holders).toLocaleString('en-US')} (no minimum)`) : 'players vs. minimum' },
+            ] as const).map((g, i) => (
+              <div key={i} style={{ marginTop: i === 0 ? 10 : 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span style={{ fontFamily: MONO, fontSize: 10, color: 'var(--fg-3)' }}>{g.cap}</span>
+                  <span style={{ fontFamily: MONO, fontSize: 10, color: g.pct >= 100 ? 'var(--sprout)' : 'var(--fg-3)' }}>{g.pct}%</span>
+                </div>
+                <div style={{ height: 6, borderRadius: 999, background: 'var(--char-800)', marginTop: 6, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${g.pct}%`, background: g.pct >= 100 ? 'var(--sprout)' : 'var(--burn)' }} />
+                </div>
+              </div>
+            ))}
 
             <div style={{ borderTop: '1px solid var(--char-800)', marginTop: 22, paddingTop: 18, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
               <div><div style={COL_HEAD}>your tickets</div><div style={{ fontFamily: MONO, fontSize: 20, color: 'var(--fg)', marginTop: 4 }}>{info ? Number(info.my_tickets).toLocaleString('en-US') : '0'}</div></div>
