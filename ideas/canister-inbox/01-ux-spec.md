@@ -107,6 +107,21 @@ The operator is the person who watches the inbox and keeps it funded. The UI is
 send a message, they do it from their own canister (or a dev tool) — the UI does not
 pretend to be a chat app.
 
+> **In-app surfacing (product decision, 2026-06-28).** This web UI lives **inside the
+> Cycle Burn app** as a permanent nav entry — "Agent Inbox" in the left-nav
+> **Community** section — at the dedicated full-page route **`/agent-inbox`** (hash
+> `#/agent-inbox`). The route is stable and always present. **While the canister is
+> still in design**, `/agent-inbox` renders a full-page **marketing/landing page** for
+> the feature (pitching the two surfaces, the three-method interface, the cycle-funded
+> model, and the honest privacy guardrails in §7, with Sign-in / Discord / Roadmap
+> CTAs) — modelled on the in-app Mission Statement page (`AboutUs.tsx`):
+> self-contained, actor-free, `dashboard-container` + design-system primitives,
+> `go(p)` / `onSignIn` props. **Once the `canister_inbox` flag flips ON and the
+> backend exists**, this same route replaces the marketing page with the functional
+> control-plane UI below (list → detail → create → top-up). The nav link is always
+> visible (not flag-gated, like Voting / Neuron Syndicate); only the *functional* UI is
+> flag-gated. The ASCII mock in §3.1 depicts the built state.
+
 ### 3.1 Screens & states
 
 ```

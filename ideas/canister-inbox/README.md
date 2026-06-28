@@ -1,6 +1,8 @@
 # Canister Inbox — Technical Specification
 
-> **Status:** Idea / feasibility research — **NOT built.** No implementation tasks scoped.
+> **Status:** Idea / feasibility research — **NOT built.** Product-scoped for in-app surfacing 2026-06-28
+> (nav link + `/agent-inbox` route + full-page marketing landing — see "Surfacing in Cycle Burn" below);
+> backend/functional UI still deferred. No implementation tasks applied.
 > **Date:** 2026-06-28. Produced via a 5-agent ultracode fan-out (UX spec · backend & tasks · reuse
 > map · ICP platform research · adversarial review).
 > **Deliverables:** [`01-ux-spec.md`](./01-ux-spec.md), [`02-backend-and-tasks.md`](./02-backend-and-tasks.md),
@@ -111,6 +113,38 @@ strictly simpler — no new canister, no new cycle drain, no freezing risk, no s
 Inbox earns its keep only for **cross-app** agent messaging, where the simpler competitor does not
 exist. Prove it on a cross-app scenario first, or scope the "first integration" to a demo, not a
 production coupling.
+
+## Surfacing in Cycle Burn (product decision, 2026-06-28)
+
+Canister Inbox is **part of the Cycle Burn app** — not a separate site. It surfaces as a permanent nav
+link and a dedicated full-page route, so the feature is discoverable *now*, while the canister itself is
+still in design:
+
+- **Nav link.** A persistent "Agent Inbox" entry in the left-nav **Community** section (alongside
+  Roadmap &amp; Development, Explorer, and X-Farm), with an `in design` chip while unbuilt. No feature
+  flag gates the *link* — it is always visible, mirroring how Voting / Neuron Syndicate are always
+  present (the `canister_inbox` flag gates the *functional* UI once built, not the marketing page).
+- **Route.** `AppPage = 'agent_inbox'`, `PAGE_PATH.agent_inbox = '/agent-inbox'` — a clean, shareable
+  URL (`/#/agent-inbox`). Deep-linkable like every other top-level page.
+- **Full page = the marketing/landing page.** Opening `/agent-inbox` renders a **full-page
+  marketing/landing surface for the feature** — the same pattern as the in-app Mission Statement page
+  (`AboutUs.tsx`): a self-contained, actor-free page using `dashboard-container` + the design-system
+  `Eyebrow`/`Icon`/`Btn`/card primitives, with `go(p)` / `onSignIn` props. It pitches the two surfaces,
+  the three-method interface, the cycle-funded model, and the honest privacy guardrails (see
+  [`01-ux-spec.md` §7](./01-ux-spec.md)), and carries CTAs (Sign in, Join the Discord, Read the spec on
+  Roadmap &amp; Development). Agents never touch this page — it is the human control plane's front
+  door, not a messaging client.
+- **What opens *later*.** The functional control-plane UI from [`01-ux-spec.md` §3](./01-ux-spec.md)
+  (deploy / top-up / monitor inboxes) replaces the marketing page at the same route once the
+  `canister_inbox` flag flips ON and the backend exists. The marketing page is the unbuilt-state
+  placeholder; the route is stable so external links survive the build.
+
+**Implementation tasks (deferred — do NOT build yet, per owner 2026-06-28):** add the `inbox` icon glyph
+to `ui.tsx` `iconPaths`; add `'agent_inbox'` to the `AppPage` union + `PAGE_PATH`; `import AgentInbox from
+"./AgentInbox"`; add the nav button in `renderNavLinks` (Community section, after X-Farm); add the
+render case in the page switch (`page === 'agent_inbox' ? <AgentInbox …/>`); create `AgentInbox.tsx`
+mirroring `AboutUs.tsx`. These are the wiring steps; they were scoped but deliberately not applied this
+turn — only the docs were updated.
 
 ## Open standard ambition
 
