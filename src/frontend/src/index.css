@@ -19,15 +19,18 @@
   --char-50:  #F5F4F2;   /* primary light surface */
   --char-0:   #FAF9F7;   /* highest-contrast white (never pure) */
 
-  /* ---------- Color — Burn (primary accent) ---------- */
-  --burn:       #FF6A1F;  /* core accent */
+  /* ---------- Color — Burn (primary accent) ----------
+     The core accent is the burn orange (#FF6A1F) — the literal "burn" color,
+     on-theme for a burn dapp. Destructive/error (--ember) is a distinct red so
+     primary actions and danger states don't collide visually. */
+  --burn:       #FF6A1F;  /* core accent (burn orange) */
   --burn-700:   #E04E0A;  /* pressed */
   --burn-300:   #FFB080;  /* hover glow / secondary */
   --burn-100:   #FFE4D2;  /* faint wash backgrounds */
-  --burn-950:   #2A1409;  /* deep ember — dark tinted surface */
+  --burn-950:   #2A1409;  /* deep burn — dark tinted surface */
 
   /* ---------- Color — Semantic support ---------- */
-  --ember:      #E5484D;  /* error / destructive */
+  --ember:      #E5484D;  /* error / destructive — red, distinct from the burn-orange accent */
   --ember-dim:  #3A1617;
   --sprout:     #4CB580;  /* success / positive burn growth */
   --sprout-dim: #14321F;
@@ -141,10 +144,10 @@
   --fg-dim:     var(--char-300);
 
   /* accent ink — darkened for AA on the light surface (bright accents collapse here) */
-  --burn-ink:   #AD3F0F;   /* 5.47:1 */
+  --burn-ink:   #AD3F0F;   /* darkened burn orange — ~5.6:1 on light */
   --sprout-ink: #15663A;   /* 6.38:1 */
   --haze-ink:   #8A5A00;   /* 5.39:1 */
-  --ember-ink:  #C2353A;   /* darkened red for AA on light */
+  --ember-ink:  #C2353A;   /* darkened red for AA on light (destructive text) */
 
   /* Tinted "dim" notice surfaces. The :root (dark) values are deep tints meant
      for a dark background; on the light surface they read as dark boxes with

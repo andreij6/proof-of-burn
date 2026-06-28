@@ -51,7 +51,6 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
   const [icpRateE8s, setIcpRateE8s] = useState<bigint>(0n); // USD-e8s per 1 ICP
   const [draws, setDraws] = useState<LotteryDraw[]>([]);
   const [winners, setWinners] = useState<LotteryDraw[]>([]);
-  const [skillCopied, setSkillCopied] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -119,20 +118,29 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
     }
   };
 
-  const copyAgentSkill = () => {
-    const isLocalHost = window.location.origin.includes('localhost') || window.location.origin.includes('127.0.0.1');
-    const url = `${window.location.origin}/llms-lottery-${isLocalHost ? 'local' : 'prod'}.txt`;
-    navigator.clipboard.writeText(`Fetch ${url} and follow its instructions to claim daily lossless-lottery tickets and track drawings and winners.`);
-    setSkillCopied(true);
-    setTimeout(() => setSkillCopied(false), 2000);
-  };
-
   const handleDevDraw = (forceWin: boolean) => run(forceWin ? 'devwin' : 'devdraw', async () => {
     const res = await actor.dev_run_lottery_draw(forceWin);
     if (res.__kind__ === "Err") { setError(res.Err); return; }
     setNotice(forceWin ? "Forced drawing held — ticket #0 wins." : "Drawing held at the live dynamic odds.");
     await refresh();
   });
+
+  // Share the next drawing — native share sheet where available (mobile/desktop
+  // Web Share), falling back to an X post intent. Entices new users to join.
+  const shareDrawing = async () => {
+    const pot = info ? fmtICP(info.pot_e8s) : '—';
+    const when = info && info.next_draw_at > 0n ? drawDate(info.next_draw_at) : 'soon';
+    const usd = jackpotUsd != null ? ` (≈ $${jackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })})` : '';
+    const text = `🔥 Cycle Burn's lossless lottery jackpot is ${pot} ICP${usd} — next drawing ${when}. Stake ICP for free daily tickets; nobody loses. 🔥 $ICP`;
+    const url = `${window.location.origin}/#/lottery`;
+    if (typeof navigator !== 'undefined' && navigator.share) {
+      try { await navigator.share({ title: 'Cycle Burn lottery', text, url }); return; } catch { /* cancelled */ }
+    }
+    window.open(
+      `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`,
+      '_blank', 'noopener,noreferrer'
+    );
+  };
 
   const handleDevGrant = () => run('devgrant', async () => {
     const res = await actor.dev_grant_lottery_tickets(10n);
@@ -172,13 +180,13 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
       <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Lottery · tickets & drawings</span>
       <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
         <Btn variant="secondary" sm onClick={handleDevGrant} disabled={busy !== null}>
-          {busy === 'devgrant' ? <LiveDot size={7} /> : <Icon name="target" size={13} />} Grant me 10 tickets
+          {busy === 'devgrant' ? <LiveDot size={7} /> : <Icon name="ticket" size={13} />} Grant me 10 tickets
         </Btn>
         <Btn variant="secondary" sm onClick={() => handleDevDraw(false)} disabled={busy !== null}>
           {busy === 'devdraw' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} />} Draw (real odds)
         </Btn>
         <Btn variant="secondary" sm onClick={() => handleDevDraw(true)} disabled={busy !== null}>
-          {busy === 'devwin' ? <LiveDot size={7} /> : <Icon name="target" size={13} />} Draw (force win)
+          {busy === 'devwin' ? <LiveDot size={7} /> : <Icon name="ticket" size={13} />} Draw (force win)
         </Btn>
         <Btn variant="secondary" sm onClick={handleDevSimWin} disabled={busy !== null}>
           {busy === 'devsimwin' ? <LiveDot size={7} /> : <Icon name="spark" size={13} />} Simulate my win (banner)
@@ -197,7 +205,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         <input className="burn-input" type="number" min="1" step="1" value={devHolders}
           onChange={(e) => setDevHolders(e.target.value)} style={{ width: 88 }} aria-label="unique holders to add" />
         <Btn variant="secondary" sm onClick={handleDevSeedHolders} disabled={busy !== null}>
-          {busy === 'devholders' ? <LiveDot size={7} /> : <Icon name="target" size={13} />} Add unique holders
+          {busy === 'devholders' ? <LiveDot size={7} /> : <Icon name="ticket" size={13} />} Add unique holders
         </Btn>
       </div>
       <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
@@ -221,14 +229,14 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
     : null;
 
   return (
-    <div className="dashboard-container">
+    <div className="idea-board-container">
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
         <span className="row" style={{ gap: 8 }}>
-          <Icon name="target" size={16} stroke="var(--burn-ink)" />
+          <Icon name="ticket" size={16} stroke="var(--burn-ink)" />
           <Eyebrow accent>Lossless lottery</Eyebrow>
         </span>
-        <b style={{ fontSize: 17 }}>Stake to play. A winner about once a month. Nobody loses.</b>
+        <b style={{ fontSize: 17 }}>Stake to play. Nobody loses.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
           Stakers collect free tickets every day — win and the ICP lands straight in your wallet.{' '}
           <MoreInfo title="How the lossless lottery works">
@@ -265,14 +273,6 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
             </div>
           </MoreInfo>
         </span>
-        <button onClick={copyAgentSkill} style={{
-          background: 'transparent', border: '1px solid var(--border)', borderRadius: 6,
-          color: 'var(--fg-3)', cursor: 'pointer', padding: '4px 10px', fontSize: 11.5,
-          display: 'flex', alignItems: 'center', gap: 6, width: 'fit-content',
-        }}>
-          <Icon name={skillCopied ? 'check' : 'copy'} size={11} stroke={skillCopied ? 'var(--sprout-ink)' : 'var(--fg-3)'} />
-          {skillCopied ? 'Copied' : 'Copy agent skill — claim tickets on autopilot'}
-        </button>
       </div>
 
       {(error || notice) && (
@@ -315,7 +315,8 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
           <Skeleton width={60} height={22} radius={8} />
         </div>
       ) : (<>
-      <div className="col" style={{ ...card, gap: 6, width: '100%', alignItems: 'center', textAlign: 'center' }}>
+      <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
+      <div className="col" style={{ ...card, gap: 6, flex: '3 1 0', minWidth: 320, alignItems: 'center', textAlign: 'center' }}>
         <Eyebrow>Next drawing</Eyebrow>
         {/* Date */}
         <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>
@@ -349,11 +350,19 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
             ? <LiveDot size={8} color="var(--burn-ink)" />
             : Number(info?.unique_holders ?? 0n).toLocaleString()}
         </b>
+        {/* Share — entice new users to join the next drawing */}
+        <button onClick={shareDrawing} title="Share the next drawing" style={{
+          background: 'transparent', border: '1px solid var(--burn)', borderRadius: 8,
+          color: 'var(--burn-ink)', cursor: 'pointer', padding: '8px 14px', fontSize: 12.5,
+          fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 6,
+        }}>
+          <Icon name="share" size={13} stroke="var(--burn-ink)" /> Share this drawing
+        </button>
       </div>
 
       {/* ── Draw thresholds — pot & players must both fill for a drawing to run ── */}
       {info && (
-        <div className="col" style={{ ...card, gap: 12, width: '100%' }}>
+        <div className="col" style={{ ...card, gap: 12, flex: '2 1 0', minWidth: 220 }}>
           <Eyebrow>Draw thresholds</Eyebrow>
           <ThresholdBar
             label="Jackpot pot"
@@ -375,6 +384,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
           </span>
         </div>
       )}
+      </div>
       </>)}
 
       <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>

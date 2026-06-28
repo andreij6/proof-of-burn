@@ -40,7 +40,7 @@ interface StakingProps {
 
 const TIER_ORDER: StakeTier[] = [StakeTier.SixMonths, StakeTier.OneYear, StakeTier.TwoYears];
 
-const TIER_META: Record<StakeTier, { label: string; short: string; mult: number; tickets: string }> = {
+export const TIER_META: Record<StakeTier, { label: string; short: string; mult: number; tickets: string }> = {
   [StakeTier.SixMonths]: { label: '6 months', short: '6 mo', mult: 1, tickets: '5' },
   [StakeTier.OneYear]: { label: '1 year', short: '1 yr', mult: 2, tickets: '10' },
   [StakeTier.TwoYears]: { label: '2 years', short: '2 yr', mult: 4, tickets: '20' },
@@ -54,7 +54,7 @@ function parseIcp(text: string): bigint | null {
 }
 
 /** "~12 days" / "~3 hours" / "any moment" from a nanosecond ETA. */
-function etaLabel(etaNs: bigint): string {
+export function etaLabel(etaNs: bigint): string {
   const ms = Number(etaNs / 1_000_000n) - Date.now();
   if (ms <= 0) return "any moment";
   const hours = ms / 3_600_000;
@@ -351,7 +351,7 @@ export default function Staking({
   );
 
   return (
-    <div className="dashboard-container">
+    <div className="idea-board-container">
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
         <span className="row" style={{ gap: 8 }}>

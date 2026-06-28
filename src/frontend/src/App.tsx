@@ -38,7 +38,6 @@ import Arcade from "./Arcade";
 import Casino from "./Casino";
 import Faucet from "./Faucet";
 import Payouts from "./Payouts";
-import Admin from "./Admin";
 import Landing from "./Landing";
 import Dashboard from "./Dashboard";
 import AboutUs from "./AboutUs";
@@ -444,7 +443,7 @@ export default function App() {
   const [myPoolNeuron, setMyPoolNeuron] = useState<PoolNeuron | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [poolDetailsOpen, setPoolDetailsOpen] = useState(false);
-  const [dashControlsOpen, setDashControlsOpen] = useState(true);
+  const [dashControlsOpen, setDashControlsOpen] = useState(false);
   const [confirmLeaveId, setConfirmLeaveId] = useState<bigint | null>(null);
   const [isLeavingPool, setIsLeavingPool] = useState(false);
   const [isPoolWizardOpen, setIsPoolWizardOpen] = useState(false);
@@ -1952,32 +1951,12 @@ export default function App() {
     );
   };
 
-  // Account-scoped links (Profile, Admin) — live in the Account section, not
-  // the main Navigation list.
-  const renderAccountLinks = (onNavigate?: () => void) => {
-    const go = (p: typeof page) => { setPage(p); onNavigate?.(); };
-    const linkStyle: React.CSSProperties = { justifyContent: 'flex-start', width: '100%', height: 38, marginBottom: 8 };
-    return (
-      <>
-        {principal && !principal.isAnonymous() && (
-          <Btn variant={page === 'payouts' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('payouts')}>
-            <Icon name="wallet" size={14} stroke={page === 'payouts' ? 'var(--char-950)' : 'currentColor'} />
-            Profile
-          </Btn>
-        )}
-        {isAdmin && (
-          <Btn variant={page === 'admin' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin')}>
-            <Icon name="key" size={14} stroke={page === 'admin' ? 'var(--char-950)' : 'currentColor'} />
-            Admin
-          </Btn>
-        )}
-      </>
-    );
-  };
-
   // Shared side-navigation body — identical in the persistent desktop sidebar
   // and the mobile drawer. `onNavigate` closes the mobile drawer (no-op on
-  // desktop). Navigation up top; Community + Account pinned to the bottom.
+  // desktop). Navigation up top; Socials pinned to the bottom. There is no
+  // Account section — the Wallet button (top bar) opens the Profile page,
+  // Admin is a tab on the Profile page, and Sign out lives on the Profile
+  // page header. Sign in lives in the top bar.
   const renderDrawerBody = (onNavigate?: () => void) => (
     <>
       <div className="col" style={{ gap: 8, width: '100%', marginBottom: 32 }}>
@@ -1992,7 +1971,7 @@ export default function App() {
       </div>
 
       <div className="col" style={{ gap: 8, width: '100%', marginTop: 'auto' }}>
-        <Eyebrow style={{ marginBottom: 6 }}>Community</Eyebrow>
+        <Eyebrow style={{ marginBottom: 6 }}>Socials</Eyebrow>
         <a
           href={DISCORD_INVITE} target="_blank" rel="noreferrer"
           style={{
@@ -2016,42 +1995,6 @@ export default function App() {
           </svg>
           Follow on X
         </a>
-
-        <Eyebrow style={{ marginBottom: 6 }}>Account</Eyebrow>
-
-        {renderAccountLinks(onNavigate)}
-
-        {!principal || principal.isAnonymous() ? (
-          <Btn
-            variant="primary"
-            style={{ width: '100%', height: 40 }}
-            onClick={() => { handleLogin(); onNavigate?.(); }}
-            disabled={isSigningIn}
-          >
-            {isSigningIn ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="key" size={14} stroke="var(--char-950)" />}
-            {isSigningIn ? " Opening II…" : " Sign in with Internet Identity"}
-          </Btn>
-        ) : (
-          <div className="col" style={{ gap: 12, width: '100%' }}>
-            {/* Wallet Actions */}
-            <div className="row" style={{ gap: 8, width: '100%' }}>
-              <Btn
-                variant="primary"
-                style={{ flex: 1, height: 38 }}
-                onClick={() => { setPage('payouts'); setWalletRequest(n => n + 1); onNavigate?.(); }}
-              >
-                <Icon name="wallet" size={14} stroke="var(--char-950)" /> Wallet
-              </Btn>
-              <Btn
-                variant="danger"
-                style={{ flex: 1, height: 38 }}
-                onClick={() => { handleLogout(); onNavigate?.(); }}
-              >
-                <Icon name="x" size={14} stroke="var(--ember)" /> Sign out
-              </Btn>
-            </div>
-          </div>
-        )}
       </div>
     </>
   );
@@ -2210,6 +2153,40 @@ export default function App() {
           >
             <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
           </button>
+
+          {/* Auth + wallet affordance in the top bar — reachable on every page.
+              Signed out: Sign in. Signed in: Wallet (opens the Profile page).
+              Sign out lives on the Profile page header (no left-nav Account
+              section). */}
+          {!principal || principal.isAnonymous() ? (
+            <button
+              onClick={handleLogin}
+              disabled={isSigningIn}
+              title="Sign in with Internet Identity"
+              style={{
+                background: 'var(--burn)', border: '1px solid var(--burn)', borderRadius: 8,
+                cursor: isSigningIn ? 'default' : 'pointer', color: 'var(--char-950)',
+                padding: '7px 12px', display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 12.5, fontWeight: 600, flexShrink: 0, opacity: isSigningIn ? 0.7 : 1,
+              }}
+            >
+              {isSigningIn ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="key" size={14} stroke="var(--char-950)" />}
+              {isSigningIn ? "Opening II…" : "Sign in"}
+            </button>
+          ) : (
+            <button
+              onClick={() => { setPage('payouts'); setWalletRequest(n => n + 1); }}
+              title="Open your wallet"
+              style={{
+                background: 'var(--burn)', border: '1px solid var(--burn)', borderRadius: 8,
+                cursor: 'pointer', color: 'var(--char-950)',
+                padding: '7px 12px', display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 12.5, fontWeight: 600, flexShrink: 0,
+              }}
+            >
+              <Icon name="wallet" size={14} stroke="var(--char-950)" /> Wallet
+            </button>
+          )}
         </div>
       </header>
 
@@ -2282,7 +2259,7 @@ export default function App() {
                         </span>
                       </span>
                       <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
-                        <b style={{ color: 'var(--sprout-ink)' }}>Earn</b> ICP from every protocol burn. A share of all burned ICP is split among verified members and paid out in ICP — your neuron keeps working for you with nothing to lock up or spend. To qualify, set your NNS neuron to follow the leader neuron and verify it here; as long as it keeps following, you keep earning from every burn.{' '}
+                        <b style={{ color: 'var(--sprout-ink)' }}>Earn ICP just for pooling your voting power.</b> A share of every protocol burn is split among verified members and paid out in ICP — your neuron keeps working for you with nothing to lock up or spend. To qualify, set your NNS neuron to follow the leader neuron and verify it here; as long as it keeps following, you keep earning from every burn.{' '}
                         <button type="button" onClick={() => setPoolDetailsOpen(true)} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--burn-ink)', fontSize: 12, textDecoration: 'underline', display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'inherit' }}>
                           <Icon name="info" size={11} stroke="var(--burn-ink)" /> How it works
                         </button>
@@ -2485,7 +2462,7 @@ export default function App() {
               onSignIn={handleLogin}
               onGoVote={() => setPage('voting')}
             />
-          ) : page === 'payouts' ? (
+          ) : page === 'payouts' || page === 'admin' ? (
             <Payouts
               key={walletRequest}
               actor={actor}
@@ -2495,19 +2472,12 @@ export default function App() {
               rootKey={env?.IC_ROOT_KEY}
               ledgerCanisterId={ledgerCanisterId}
               isLocal={config?.is_local ?? false}
-              backendCanisterId={backendCanisterId}
-              initialSection={walletRequest > 0 ? 'wallet' : 'overview'}
               onSignIn={handleLogin}
-            />
-          ) : page === 'admin' ? (
-            <Admin
-              actor={actor}
+              onSignOut={handleLogout}
+              isAdmin={isAdmin}
+              initialTab={page === 'admin' ? 'admin' : 'wallet'}
               config={config}
               featureFlags={featureFlags}
-              identity={identity}
-              host={host}
-              rootKey={env?.IC_ROOT_KEY}
-              ledgerCanisterId={ledgerCanisterId}
               onChanged={() => { fetchConfig(); fetchFeatureFlags(); }}
               openTreasury={openTreasury}
             />
@@ -2592,49 +2562,6 @@ export default function App() {
                 </div>
               </Reveal>
             )}
-
-            {/* ── Protocol totals — SECONDARY, compact & muted ──
-                Public site-wide data. Rendered as a slim, subdued single-line bar
-                so it never competes with the user's own stats above. */}
-            <Reveal delay={40} motion={motion}>
-              <div className="col" style={{ gap: 6 }}>
-                <Eyebrow style={{ color: 'var(--fg-3)' }}>Protocol totals · all participants</Eyebrow>
-                <div className="col" data-testid="global-stats-strip" style={{
-                  border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg-alt)',
-                  padding: '12px 14px', gap: 10
-                }}>
-                  {/* Voting totals only — burned, pending burn, committed. */}
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', width: '100%' }}>
-
-                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                      <span>Burned</span>
-                      <span className="mono" style={{ fontSize: 14, color: 'var(--burn-ink)' }}>
-                        {globalStats ? `${fmtICP(globalStats.total_burned_e8s)} ICP` : "…"}
-                      </span>
-                    </span>
-                    {globalStats && globalStats.pending_burn_e8s > 0n && (
-                      <>
-                        <span style={{ color: 'var(--border-hi)' }}>·</span>
-                        <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                          <span>Pending</span>
-                          <span className="mono" style={{ fontSize: 14, color: 'var(--haze-ink)' }} title="ICP committed to proposals that reached their threshold and will burn on deadline">
-                            {`${fmtICP(globalStats.pending_burn_e8s)} ICP`}
-                          </span>
-                        </span>
-                      </>
-                    )}
-                    <span style={{ color: 'var(--border-hi)' }}>·</span>
-                    <span className="row" style={{ gap: 6, alignItems: 'baseline', color: 'var(--fg-2)', fontSize: 12.5 }}>
-                      <span>Committed</span>
-                      <span className="mono" style={{ fontSize: 14, color: 'var(--fg)' }}>
-                        {globalStats ? globalStats.votes_threshold_met.toString() : "…"}
-                      </span>
-                    </span>
-                  </div>
-
-                </div>
-              </div>
-            </Reveal>
 
             {/* ── Tagline ── */}
             <Reveal delay={50} motion={motion}>
@@ -3270,8 +3197,9 @@ export default function App() {
         </main>
 
 
-        {/* Right Column: Dashboard & Controls panel — local dev only, every page */}
-        {isLocal && dashControlsOpen && <aside style={{
+        {/* Right Column: Dashboard & Controls panel — local dev only, every page.
+            Sits to the LEFT of the Account panel (which is rightmost). */}
+        {isLocal && dashControlsOpen && <aside className="hide-mobile" style={{
           width: 320, padding: 24, borderLeft: '1px solid var(--border)', background: 'var(--bg-alt)',
           display: 'flex', flexDirection: 'column', gap: 24, flexShrink: 0, overflowY: 'auto'
         }}>
@@ -3397,16 +3325,19 @@ export default function App() {
           )}
         </aside>}
 
-        {/* Reopen tab — shown when the controls panel is closed */}
+        {/* Collapsed rail for the local-dev Controls panel — in-flow so it
+            can't overlap the Account panel (which is rightmost). A thin
+            vertical bar; click to reopen. */}
         {isLocal && !dashControlsOpen && (
           <button onClick={() => setDashControlsOpen(true)} title="Open Dashboard & Controls"
+            className="hide-mobile"
             style={{
-              position: 'fixed', top: 84, right: 0, zIndex: 50,
-              background: 'var(--bg-alt)', border: '1px solid var(--border)', borderRight: 'none',
-              borderRadius: '6px 0 0 6px', padding: '8px 10px', cursor: 'pointer', color: 'var(--burn-ink)',
-              display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 600,
+              width: 40, flexShrink: 0, borderLeft: '1px solid var(--border)', background: 'var(--bg-alt)',
+              cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              gap: 10, color: 'var(--burn-ink)',
             }}>
-            <Icon name="zap" size={14} stroke="var(--burn-ink)" /> Controls
+            <Icon name="zap" size={16} stroke="var(--burn-ink)" />
+            <span style={{ writingMode: 'vertical-rl', fontSize: 10.5, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--fg-3)' }}>Controls</span>
           </button>
         )}
 

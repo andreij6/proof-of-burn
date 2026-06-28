@@ -51,12 +51,12 @@ export default function LotteryHub({
 
   return (
     <>
-      <div className="dashboard-container" style={{ paddingBottom: 0 }}>
+      <div className="idea-board-container" style={{ paddingBottom: 0 }}>
         {/* ── Page header (eyebrow · title · how it works) ── */}
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>Lossless lottery</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
-            <Icon name="target" size={22} stroke="var(--burn-ink)" />
+            <Icon name="ticket" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Lottery</h4>
             <Chip tone="pending"><LiveDot size={6} /> 3× weekly</Chip>
           </span>

@@ -5177,11 +5177,20 @@ pub const FLAG_DISCUSSIONS: &str = "discussions";
 /// (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X. Ships
 /// dark (default OFF) until the owner enables it after a playtest.
 pub const FLAG_X_FARM: &str = "x_farm";
-const KNOWN_FEATURE_FLAGS: [&str; 12] = [
+/// Dashboard (the signed-in home/landing page). Ships dark (default OFF)
+/// until an admin enables it — the existing flag-off redirects fall back to
+/// `voting` (always-on) when Dashboard is disabled, so disabling it never
+/// leaves a dead-end route.
+pub const FLAG_DASHBOARD: &str = "dashboard";
+/// Mission Statement page (`about` route). Ships dark (default OFF) until an
+/// admin enables it.
+pub const FLAG_MISSION_STATEMENT: &str = "mission_statement";
+const KNOWN_FEATURE_FLAGS: [&str; 14] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL,
     FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS, FLAG_X_FARM,
+    FLAG_DASHBOARD, FLAG_MISSION_STATEMENT,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -5450,6 +5459,11 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE_MINIGOLF => false,
         FLAG_ARCADE_FIELDGOAL => false,
         FLAG_X_FARM => false,
+        // Dashboard + Mission Statement ship dark (default OFF) — these pages
+        // were always-on before; gating them lets an admin hide either page
+        // without a deploy. The frontend redirects both to `voting` when dark.
+        FLAG_DASHBOARD => false,
+        FLAG_MISSION_STATEMENT => false,
         // Every other SHIPPED feature (Idea Board, Lossless Voting/Lottery,
         // Explorer, Early Adopters) defaults ON; unknown keys stay OFF.
         k => KNOWN_FEATURE_FLAGS.contains(&k),

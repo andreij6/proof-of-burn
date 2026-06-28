@@ -210,7 +210,6 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
   const [gridPage, setGridPage] = useState(0);
   const [projectPage, setProjectPage] = useState(0);
   const [sortBy, setSortBy] = useState<IdeaSort>('newest');
-  const [skillsCopied, setSkillsCopied] = useState(false);
 
   // Post-idea modal
   const [isPostOpen, setIsPostOpen] = useState(false);
@@ -385,14 +384,6 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
         .then(() => refreshAll())
         .catch(() => { /* view counting is best-effort */ });
     }
-  };
-
-  const copyAgentSkills = () => {
-    const isLocalHost = window.location.origin.includes('localhost') || window.location.origin.includes('127.0.0.1');
-    const url = `${window.location.origin}/llms-rd-${isLocalHost ? 'local' : 'prod'}.txt`;
-    navigator.clipboard.writeText(`Fetch ${url} and follow its instructions to read, post, upvote and fund on the Community R&D board.`);
-    setSkillsCopied(true);
-    setTimeout(() => setSkillsCopied(false), 2000);
   };
 
   const executePay = async () => {
@@ -732,14 +723,6 @@ export default function IdeaBoard({ actor, identity, principal, host, rootKey, i
             <Icon name="bulb" size={14} stroke="var(--char-950)" />
             {signedIn ? 'Post an idea' : 'Sign in to post'}
           </Btn>
-          <button onClick={copyAgentSkills} style={{
-            background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)',
-            fontSize: 11.5, textDecoration: 'underline dotted', textUnderlineOffset: 3,
-            display: 'flex', alignItems: 'center', gap: 5,
-          }}>
-            <Icon name={skillsCopied ? 'check' : 'copy'} size={11} stroke={skillsCopied ? 'var(--sprout-ink)' : 'var(--fg-3)'} />
-            {skillsCopied ? 'Copied' : 'Copy agent instructions'}
-          </button>
         </span>
       </div>
 
