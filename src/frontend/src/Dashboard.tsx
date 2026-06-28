@@ -259,7 +259,7 @@ export default function Dashboard({
               {flags.lottery && lottery && !lottery.admin_excluded && (
                 <MiniStat label="Tickets" value={myTickets.toString()} />
               )}
-              {flags.earlyAdopters && eaStaked > 0n && (
+              {flags.earlyAdopters && isAdmin && eaStaked > 0n && (
                 <MiniStat label="Perm stake" value={`${fmtICP(eaStaked)} ICP`} />
               )}
             </div>
@@ -356,7 +356,7 @@ export default function Dashboard({
           </HubCard>
         )}
 
-        {flags.earlyAdopters && (
+        {flags.earlyAdopters && isAdmin && (
           <HubCard eyebrow="Perm" icon="spark" onClick={() => go('lottery')}
             chip={<Chip tone="ok">40 tickets/ICP/day</Chip>}>
             {eaStaked > 0n ? (

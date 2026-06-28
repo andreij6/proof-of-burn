@@ -31,6 +31,8 @@ interface StakingProps {
   isLocal: boolean;
   /** Whether the permanent Booster neuron is enabled (adds a 4th tier tab). */
   boostersEnabled: boolean;
+  /** The permanent Booster neuron is admin-only — non-admins never see it. */
+  isAdmin: boolean;
   /** Treasury can front the ledger fee unstaking needs; false hides/blocks it. */
   treasuryCanFront: boolean;
   onSignIn: () => void;
@@ -77,7 +79,7 @@ function bootstrapChip(b: StakingBootstrap) {
 }
 
 export default function Staking({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, treasuryCanFront, onSignIn, onActivity,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity,
 }: StakingProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
@@ -108,7 +110,7 @@ export default function Staking({
         signedIn ? actor.get_my_stake() : Promise.resolve(null),
         signedIn ? actor.list_my_pending_unstakes() : Promise.resolve([]),
         actor.list_yield_distributions(),
-        boostersEnabled ? actor.get_early_adopter_info().catch(() => null) : Promise.resolve(null),
+        boostersEnabled && isAdmin ? actor.get_early_adopter_info().catch(() => null) : Promise.resolve(null),
       ]);
       setPool(poolInfo);
       setMyStake(mine ?? null);
@@ -423,10 +425,10 @@ export default function Staking({
             <>
               <div className="row" style={{ gap: 6 }}>
                 {TIER_ORDER.map(tierTab)}
-                {boostersEnabled && boosterTab}
+                {boostersEnabled && isAdmin && boosterTab}
               </div>
 
-              {boosterSel ? (
+              {boosterSel && isAdmin ? (
                 <>
                   <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
                     <b className="mono" style={{ fontSize: 24 }}>{fmtICP(eaInfo?.my_staked_e8s ?? 0n)}</b>
@@ -607,7 +609,7 @@ export default function Staking({
           })}
 
           {/* The permanent Booster neuron — same layout, special terms. */}
-          {boostersEnabled && (
+          {boostersEnabled && isAdmin && (
             <div
               role="button" tabIndex={0}
               onClick={() => { setBoosterSel(true); setError(null); }}

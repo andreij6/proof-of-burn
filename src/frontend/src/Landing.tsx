@@ -15,7 +15,7 @@ type UsdRate = { token: string; rate_usd_e8s: bigint };
 //
 // What's *real* vs the comp's demo data: the comp invented 4yr/8yr neuron
 // tiers and an "APY" row — the app actually has 6-month / 1-year / 2-year
-// pooled tiers plus a permanent stake (base × {1,2,4,8} tickets per ICP per
+// pooled tiers (base × {1,2,4} tickets per ICP per
 // day), a 65% / 30% / 5% prize split, and draws 3× a week that only fire once
 // the pot clears its minimum. This component reflects that.
 // ==========================================
@@ -38,13 +38,13 @@ interface LandingProps {
 }
 
 // The real staking tiers (mirrors the in-app Lottery copy + backend grants):
-// base 6-month grant × {1, 2, 4, 8}. `tickets_per_day` from the canister is the
-// 6-month base, so the table tracks any admin change to the base.
+// base 6-month grant × {1, 2, 4}. `tickets_per_day` from the canister is the
+// 6-month base, so the table tracks any admin change to the base. (The
+// permanent Booster neuron is admin-only and intentionally not shown here.)
 const TIER_ROWS: { label: string; mult: number }[] = [
   { label: '6 months', mult: 1 },
   { label: '1 year', mult: 2 },
   { label: '2 years', mult: 4 },
-  { label: 'Permanent', mult: 8 },
 ];
 
 const BACKEND_CANISTER_ID = 'k7dn6-qiaaa-aaaap-qutha-cai';
@@ -252,8 +252,8 @@ export default function Landing({ onEnter, actor }: LandingProps) {
           <h2 style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 48, lineHeight: 1.05, letterSpacing: '-.03em', color: 'var(--fg)', margin: '12px 0 44px', maxWidth: 680 }}>Stake. Earn tickets. Win the yield.</h2>
           <div className="ll-how-grid" style={{ borderTop: '1px solid var(--char-800)', borderBottom: '1px solid var(--char-800)' }}>
             {[
-              { n: '01', h: 'Stake into a neuron', b: "Lock ICP into a pooled Cycle Burn neuron — choose a 6-month, 1-year, or 2-year term, or stake permanently. Your principal always stays yours." },
-              { n: '02', h: 'Earn tickets daily', b: "Tickets mint every day you're staked. The longer the term, the more you earn per ICP — up to 8× — and the better your odds." },
+              { n: '01', h: 'Stake into a neuron', b: "Lock ICP into a pooled Cycle Burn neuron — choose a 6-month, 1-year, or 2-year term. Your principal always stays yours." },
+              { n: '02', h: 'Earn tickets daily', b: "Tickets mint every day you're staked. The longer the term, the more you earn per ICP — up to 4× — and the better your odds." },
               { n: '03', h: 'Win the yield', b: "Three times a week the pooled neuron yield is drawn: 65% to one winner, 30% rolls into the next pot, 5% is burned. Lose and you keep every staked token — there's no losing." },
             ].map((c, i) => (
               <div key={c.n} style={{ padding: '36px 26px', borderRight: i < 2 ? '1px solid var(--char-800)' : undefined }}>

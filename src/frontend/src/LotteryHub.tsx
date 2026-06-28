@@ -24,6 +24,8 @@ interface LotteryHubProps {
   stakingEnabled: boolean;
   /** Whether Boosters (permanent stake) is enabled (shown within staking). */
   boostersEnabled: boolean;
+  /** The permanent Booster neuron is admin-only — non-admins never see it. */
+  isAdmin: boolean;
   /** Treasury can front the unstake fee; false hides/blocks unstaking. */
   treasuryCanFront: boolean;
   onSignIn: () => void;
@@ -35,7 +37,7 @@ type Tab = 'lottery' | 'staking';
 
 export default function LotteryHub({
   actor, identity, principal, host, rootKey, ledgerCanisterId,
-  isLocal, stakingEnabled, boostersEnabled, treasuryCanFront, onSignIn, onActivity,
+  isLocal, stakingEnabled, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity,
 }: LotteryHubProps) {
   // Active tab lives in the hash (#/lottery, #/lottery/staking) so Back moves
   // between tabs instead of leaving the page.
@@ -61,7 +63,7 @@ export default function LotteryHub({
             <Chip tone="pending"><LiveDot size={6} /> 3× weekly</Chip>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
-            Earn a free ticket every day just by staking. Every draw is a chance to win, and your ICP is never at risk. The only requirement is staking ICP into a neuron — lock it forever for the most tickets, or unstake and wait for it to dissolve to get your ICP back.{' '}
+            Earn a free ticket every day just by staking. Every draw is a chance to win, and your ICP is never at risk. The only requirement is staking ICP into a neuron — unstake any time and wait for it to dissolve to get your ICP back.{' '}
             <MoreInfo title="How the lossless lottery works">
               <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
                 <Eyebrow accent>The gist</Eyebrow>
@@ -138,6 +140,7 @@ export default function LotteryHub({
           ledgerCanisterId={ledgerCanisterId}
           isLocal={isLocal}
           boostersEnabled={boostersEnabled}
+          isAdmin={isAdmin}
           treasuryCanFront={treasuryCanFront}
           onSignIn={onSignIn}
           onActivity={onActivity}

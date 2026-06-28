@@ -6307,6 +6307,14 @@ fn caller_vote(kind: u8, item_id: u64, caller: Principal) -> Option<VoteDir> {
 /// Grant `count` lottery tickets to `user` in the current round (caller-agnostic
 /// internal helper). Returns the user's new ticket count. No-op if count is 0.
 fn grant_lottery_tickets(user: Principal, count: u64) -> u64 {
+    // Admins are excluded from the lottery entirely (see user_daily_tickets /
+    // claim_daily_tickets / add_admin, which all void or zero their tickets).
+    // Treat every award path — discussion upvotes, course tickets, anything
+    // that routes here — as a no-op so an admin can never be granted tickets
+    // and therefore can never win.
+    if is_admin_principal(user) {
+        return LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).map(|e| e.count).unwrap_or(0);
+    }
     if count == 0 {
         return LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).map(|e| e.count).unwrap_or(0);
     }
@@ -22527,6 +22535,53 @@ mod tests {
         });
         assert_eq!(user_daily_tickets(user), 120);
         clear_early_adopters();
+    }
+
+    #[test]
+    fn test_admin_booster_stake_grants_no_tickets() {
+        // The permanent Booster neuron must not earn an admin any lottery
+        // tickets — an admin can't win, so the 40/ICP/day booster rate is
+        // silently zeroed for them, exactly like the term tiers.
+        clear_early_adopters();
+        install_staking_test_config();
+        enable_lottery();
+        let admin = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        add_admin(admin).unwrap();
+        assert!(is_admin_principal(admin));
+        let now = current_time();
+        EARLY_ADOPTERS.with(|m| {
+            m.borrow_mut().insert(admin, EarlyAdopter {
+                user: admin, staked_e8s: 3 * ICP, joined_at: now, last_stake_at: now, claimable_e8s: 0,
+            });
+        });
+        // A non-admin would earn 120 tickets/day from this 3 ICP booster.
+        assert_eq!(user_daily_tickets(admin), 0);
+        clear_early_adopters();
+    }
+
+    #[test]
+    fn test_grant_lottery_tickets_is_noop_for_admin() {
+        // Every award path that routes through grant_lottery_tickets — thread
+        // upvotes, anything future — must be a no-op for admins: zero tickets
+        // granted and the round's total_tickets unchanged.
+        clear_early_adopters();
+        install_staking_test_config();
+        enable_lottery();
+        let admin = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        add_admin(admin).unwrap();
+        let before = lottery_state().total_tickets;
+        assert_eq!(grant_lottery_tickets(admin, 5), 0, "admin is awarded zero tickets");
+        assert_eq!(lottery_state().total_tickets, before, "round total unchanged");
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&admin).map(|e| e.count).unwrap_or(0)),
+            0,
+        );
+        // A normal user in the same round still gets tickets — proves the guard
+        // is admin-specific, not a global short-circuit.
+        let user = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let before2 = lottery_state().total_tickets;
+        assert_eq!(grant_lottery_tickets(user, 5), 5);
+        assert_eq!(lottery_state().total_tickets, before2 + 5);
     }
 
     #[tokio::test]
