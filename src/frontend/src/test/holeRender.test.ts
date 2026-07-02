@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   fitView, isoP, isoUn, ballSprite, WALL_Z, BALL_SPRITE_R,
+  ELEV_Z, rotorPalette, bladeProfile,
 } from '../arcade/holeRender';
 import { CELL, BALL_R, CellType, type HoleDef, type Vec } from '../arcade/engine';
 
@@ -160,5 +161,47 @@ describe('ball sprite vs wall-cube silhouette at physical contact', () => {
     const sprite = ballSprite(view, mid);
     expect(sprite.r).toBeGreaterThanOrEqual(4.5);
     expect(sprite.r).toBe(BALL_SPRITE_R * view.scale);
+  });
+});
+
+describe('elevated plateau geometry', () => {
+  const view = fitView(mkDef(22, 14), 860, 510);
+
+  it('ELEV_Z is a real plateau height, clearly below a wall cube', () => {
+    expect(ELEV_Z).toBeGreaterThan(0);
+    expect(ELEV_Z).toBeLessThan(WALL_Z);
+  });
+
+  it('the plateau top projects straight up from the ground point', () => {
+    const g = isoP(view, 400, 300, 0);
+    const t = isoP(view, 400, 300, ELEV_Z);
+    expect(t.x).toBe(g.x);                                // z shifts screen-y only
+    expect(t.y).toBeCloseTo(g.y - ELEV_Z * view.scale, 6); // up by the scaled height
+  });
+
+  it('a lifted ball rides the plateau top (same x/r, raised y)', () => {
+    const pos = { x: 400, y: 300 };
+    const flat = ballSprite(view, pos);
+    const lifted = ballSprite(view, pos, ELEV_Z);
+    expect(lifted.x).toBe(flat.x);
+    expect(lifted.r).toBe(flat.r);
+    expect(lifted.y).toBeCloseTo(flat.y - ELEV_Z * view.scale, 6);
+  });
+});
+
+describe('rotor blades', () => {
+  it('2/3/4-arm rotors have distinct accents; unknown counts fall back to classic', () => {
+    const tops = [2, 3, 4].map((a) => rotorPalette(a).top);
+    expect(new Set(tops).size).toBe(3);
+    expect(rotorPalette(7)).toEqual(rotorPalette(2));
+  });
+
+  it('blades taper toward the tip in both width and height', () => {
+    const hub = bladeProfile(0);
+    const tip = bladeProfile(1);
+    expect(tip.half).toBeLessThan(hub.half);
+    expect(tip.half).toBeGreaterThan(0);
+    expect(tip.zTop).toBeLessThan(hub.zTop);
+    expect(hub.zTop).toBeLessThanOrEqual(WALL_Z + 2); // blades stay near wall height
   });
 });

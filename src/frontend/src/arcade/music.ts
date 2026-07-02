@@ -142,9 +142,9 @@ export class ArcadeMusic {
     return this.timer !== null;
   }
 
-  /** Call from a user gesture (autoplay policy). No-op if muted or running. */
-  start(): void {
-    if (!this.enabled || this.timer) return;
+  /** Lazily create the AudioContext + master gain + shared noise buffer.
+   *  Returns false (silently) without WebAudio (old browser / test env). */
+  private ensureCtx(): boolean {
     try {
       if (!this.ctx) {
         this.ctx = new AudioContext();
@@ -156,12 +156,62 @@ export class ArcadeMusic {
         const data = this.noiseBuf.getChannelData(0);
         for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
       }
-      void this.ctx.resume();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Call from a user gesture (autoplay policy). No-op if muted or running. */
+  start(): void {
+    if (!this.enabled || this.timer) return;
+    if (!this.ensureCtx()) return;
+    try {
+      void this.ctx!.resume();
       this.step = 0;
-      this.nextStepTime = this.ctx.currentTime + 0.05;
+      this.nextStepTime = this.ctx!.currentTime + 0.05;
       this.timer = setInterval(() => this.schedule(), LOOKAHEAD_MS);
     } catch {
       // No WebAudio (old browser / test env) — stay silent.
+    }
+  }
+
+  /**
+   * One-shot "jar opening" pop for tunnel teleports: a fast upward pitch-bent
+   * sine thump (the lid's suction release) plus a sliver of band-passed noise
+   * (the click). Respects the mute toggle; safe to call any time — lazily
+   * creates audio, never throws, and stays silent without WebAudio.
+   */
+  playPop(): void {
+    if (!this.enabled || !this.ensureCtx()) return;
+    try {
+      const ctx = this.ctx!;
+      void ctx.resume();
+      const at = ctx.currentTime;
+      // Thump: 160 → 320 Hz in 60 ms, gone by 150 ms.
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(160, at);
+      osc.frequency.exponentialRampToValueAtTime(320, at + 0.06);
+      gain.gain.setValueAtTime(0.55, at);
+      gain.gain.exponentialRampToValueAtTime(0.001, at + 0.15);
+      osc.connect(gain).connect(this.master!);
+      osc.start(at);
+      osc.stop(at + 0.17);
+      // Click transient right at the front.
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuf;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 1800;
+      const ng = ctx.createGain();
+      ng.gain.setValueAtTime(0.30, at);
+      ng.gain.exponentialRampToValueAtTime(0.001, at + 0.035);
+      src.connect(bp).connect(ng).connect(this.master!);
+      src.start(at);
+    } catch {
+      // No WebAudio — stay silent.
     }
   }
 

@@ -3,12 +3,13 @@ import {
   COURSE, COURSE_PAR_TOTAL, HOLES_PER_ROUND, MAX_STROKES_PER_HOLE, MAX_POWER,
   STEP, STOP_SPEED, CUP_CAPTURE_SPEED, CELL, GRID_W, GRID_H, CellType, WALKABLE,
   BALL_R, POST_R, MOVER_THICK,
-  initHole, stepHole, strike, dragToShot, speed, cellAt, cellAtWorld, barEndpoints,
+  initHole, stepHole, strike, dragToShot, speed, cellAt, cellAtWorld, barEndpoints, barSegments,
   parseAscii, holeToBackend, holeFromBackend, mergeCourse,
   scoreLabel, fmtMillis,
   holeFromCourseData, courseFromData, moverGeometry, TUNNEL_R,
   type HoleDef, type HoleState, type Vec,
 } from '../arcade/engine';
+import { holeFromInstructions } from '../arcade/courseInstructions';
 import { ElementKind, Speed, type CourseDataV1, type Hole as CourseHole, type Element } from '../arcade/courseData';
 
 // Tiny test hole built from ASCII: a walled 22×14 field with optional
@@ -224,7 +225,7 @@ describe('minigolf physics (voxel tiles)', () => {
   });
 
   it('windmill bar endpoints rotate over time', () => {
-    const bar = { cx: 100, cy: 100, len: 100, speed: Math.PI, phase: 0 };
+    const bar = { cx: 100, cy: 100, len: 100, speed: Math.PI, phase: 0, arms: 2 };
     const w0 = barEndpoints(bar, 0);
     const w1 = barEndpoints(bar, 1); // half a turn → endpoints swap
     expect(w0.x1).toBeCloseTo(w1.x2, 5);
@@ -652,5 +653,153 @@ describe('new element physics', () => {
     expect(a.pos).toEqual(b.pos);
     expect(a.vel).toEqual(b.vel);
     expect(a.strokes).toBe(b.strokes);
+  });
+});
+
+// =====================================================================
+// Elevation ('h'), instruction tunnels ('u'), multi-arm windmills
+// =====================================================================
+
+describe('elevation cells', () => {
+  function setCell(def: HoleDef, gx: number, gy: number, c: CellType) {
+    def.cells[gy * def.w + gx] = c;
+  }
+
+  it('is a solid wall when approached from flat ground', () => {
+    const def = asciiHole();
+    // Elevated column across the tee row's path (tee is at gx 10, gy 11).
+    for (let gy = 2; gy <= 11; gy++) setCell(def, 15, gy, CellType.Elevated);
+    const state = initHole(def);
+    strike(state, { x: MAX_POWER, y: 0 }); // fire east straight at the column
+    let sawWall = false;
+    let t = 0;
+    while (state.phase === 'rolling' && t < 30) {
+      t += STEP;
+      stepHole(state, def, t);
+      if (state.event === 'wall') sawWall = true;
+      expect(cellAtWorld(def, state.pos), 'ball occupied an elevated cell').not.toBe(CellType.Elevated);
+    }
+    expect(sawWall).toBe(true);
+    expect(state.pos.x).toBeLessThan(15 * CELL); // stayed west of the plateau
+  });
+
+  it('is entered from a walkway pushing into it, then exits freely', () => {
+    const def = asciiHole();
+    setCell(def, 14, 11, CellType.SlopeE);   // walkway ramping east…
+    setCell(def, 15, 11, CellType.Elevated); // …up onto the plateau
+    const state = initHole(def);
+    strike(state, { x: 420, y: 0 }); // east along the tee row, over the ramp
+    let entered = false;
+    let t = 0;
+    while (state.phase === 'rolling' && t < 30) {
+      t += STEP;
+      stepHole(state, def, t);
+      if (cellAtWorld(def, state.pos) === CellType.Elevated) entered = true;
+    }
+    expect(entered).toBe(true);
+    // Rolled off the far edge back onto grass (exit is always free).
+    expect(state.pos.x).toBeGreaterThan(16 * CELL);
+    expect(cellAtWorld(def, state.pos)).not.toBe(CellType.Elevated);
+  });
+
+  it('a ball already on elevation rolls anywhere on it', () => {
+    const def = asciiHole();
+    setCell(def, 14, 11, CellType.Elevated);
+    setCell(def, 15, 11, CellType.Elevated);
+    const state = initHole(def);
+    state.pos = { x: 14.5 * CELL, y: 11.5 * CELL }; // start on the plateau
+    state.preShot = { ...state.pos };
+    strike(state, { x: 250, y: 0 });
+    settle(state, def);
+    expect(state.pos.x).toBeGreaterThan(15 * CELL); // crossed the second cell
+  });
+});
+
+describe("instruction tunnels ('u')", () => {
+  // Long landing run east of mouth B so the ball settles on grass without
+  // bouncing off a wall back into a mouth (bidirectional pairs re-trigger
+  // legitimately if the ball wanders back after the cooldown).
+  const TUNNEL_HOLE = {
+    par: 3,
+    layout: [
+      '########################',
+      '#gggggggggggggggggggggg#',
+      '#gTgugggugggggggggggggg#',
+      '#gggggggggggggggggggggg#',
+      '#ggggggggggggggggggggCg#',
+      '#gggggggggggggggggggggg#',
+      '#gggggggggggggggggggggg#',
+      '########################',
+    ],
+  };
+
+  it('teleports the ball to the paired mouth with momentum, once per cooldown', () => {
+    const def = holeFromInstructions(TUNNEL_HOLE);
+    const [a, b] = [def.tunnels![0].entrance, def.tunnels![0].exit];
+    expect(a).toEqual({ x: 4.5 * CELL, y: 2.5 * CELL });
+    expect(b).toEqual({ x: 8.5 * CELL, y: 2.5 * CELL });
+    const state = initHole(def);
+    strike(state, { x: 500, y: 0 }); // east along the mouth row
+    let teleports = 0;
+    let t = 0;
+    while (state.phase === 'rolling' && t < 10) {
+      t += STEP;
+      stepHole(state, def, t);
+      if (state.event === 'tunnel') {
+        teleports += 1;
+        if (teleports === 1) {
+          // Emerged at the far mouth, still heading east (rotDelta 0).
+          expect(Math.hypot(state.pos.x - b.x, state.pos.y - b.y)).toBeLessThan(1);
+          expect(state.vel.x).toBeGreaterThan(0);
+        }
+      }
+    }
+    expect(teleports).toBe(1); // cooldown let it clear the exit mouth
+    expect(state.pos.x).toBeGreaterThan(b.x + CELL); // carried on east of mouth B
+  });
+});
+
+describe('multi-arm windmill bars', () => {
+  it('barSegments: 2 arms = the classic full bar; 3/4 arms = pivot-to-tip rotors', () => {
+    const mk = (arms: number) => ({ cx: 100, cy: 100, len: 120, speed: 1, phase: 0, arms });
+    const two = barSegments(mk(2), 0);
+    expect(two).toHaveLength(1);
+    expect(two[0]).toEqual(barEndpoints(mk(2), 0));
+    for (const arms of [3, 4]) {
+      const segs = barSegments(mk(arms), 0);
+      expect(segs).toHaveLength(arms);
+      for (const s of segs) {
+        expect(s.x1).toBe(100); // every arm starts at the pivot
+        expect(s.y1).toBe(100);
+        expect(Math.hypot(s.x2 - 100, s.y2 - 100)).toBeCloseTo(60, 6); // len/2 tips
+      }
+    }
+  });
+
+  it('an extra arm blocks a lane the classic 2-arm bar misses', () => {
+    // Frozen clock (stepHole with tSec 0): phase 0 puts the 2-arm bar flat
+    // along the x-axis at y = cy. The ball travels along y = cy − 30 — clear
+    // of the horizontal bar, but the 3-arm (arm at 240°) and 4-arm (arm at
+    // 270°) rotors both have an arm crossing that lane north of the pivot.
+    function reflected(arms: number): boolean {
+      const def = asciiHole({
+        bars: [{ cx: 12 * CELL, cy: 6 * CELL, len: 3 * CELL, speed: 1, phase: 0, arms }],
+      });
+      const state = initHole(def);
+      state.pos = { x: 5 * CELL, y: 6 * CELL - 30 };
+      state.preShot = { ...state.pos };
+      strike(state, { x: 400, y: 0 });
+      let sawReverse = false;
+      let t = 0;
+      while (state.phase === 'rolling' && t < 10) {
+        t += STEP;
+        stepHole(state, def, 0); // constant clock → bar frozen at phase 0
+        if (state.vel.x < 0) sawReverse = true;
+      }
+      return sawReverse;
+    }
+    expect(reflected(2)).toBe(false); // sails past the flat bar
+    expect(reflected(3)).toBe(true);
+    expect(reflected(4)).toBe(true);
   });
 });

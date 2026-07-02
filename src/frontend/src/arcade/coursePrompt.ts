@@ -68,7 +68,7 @@ Each hole is:
   "name": "<optional, at most ${L.NAME_LEN} characters>",
   "par": <integer>,
   "layout": [ "<row string>", ... ],
-  "windmills": [ { "x": <num>, "y": <num>, "lengthCells": <num>, "speed": <num> }, ... ]  // optional
+  "windmills": [ { "x": <num>, "y": <num>, "lengthCells": <num>, "speed": <num>, "arms": <2, 3 or 4 — optional, default 2> }, ... ]  // optional
 }
 
 HARD CONSTRAINTS (the app rejects the document if ANY is violated)
@@ -78,7 +78,8 @@ HARD CONSTRAINTS (the app rejects the document if ANY is violated)
 4. "layout" is an array of strings. All rows have the SAME length. Width and height are each between ${L.GRID_MIN} and ${L.GRID_MAX} cells.
 5. Every character in every row comes from the TERRAIN LEGEND below — nothing else.
 6. Each hole has exactly one 'T' (tee) and exactly one 'C' (cup).
-7. At most ${L.WINDMILLS_PER_HOLE} windmills per hole. A windmill's pivot (x, y) is in cell units and must lie inside the grid (fractions allowed); "lengthCells" is the full arm length, greater than 0 and no larger than the grid's bigger dimension; "speed" is in radians/second (negative spins counter-clockwise; 0.8–2.0 is a sensible range).
+7. At most ${L.WINDMILLS_PER_HOLE} windmills per hole. A windmill's pivot (x, y) is in cell units and must lie inside the grid (fractions allowed); "lengthCells" is the full arm length, greater than 0 and no larger than the grid's bigger dimension; "speed" is in radians/second (negative spins counter-clockwise; 0.8–2.0 is a sensible range); "arms" is optional and must be 2 (the classic full bar — the default), 3, or 4 (evenly spaced half-arm rotors).
+8. A hole's layout contains either ZERO 'u' tunnel cells or exactly ${L.TUNNEL_CELLS} — never one, never three or more.
 
 TERRAIN LEGEND (one character per cell)
 \`.\` void — out of bounds, no floor. The ball must never need to cross it.
@@ -91,6 +92,8 @@ TERRAIN LEGEND (one character per cell)
 \`v\` moving walkway (conveyor) carrying the ball South (down).
 \`>\` moving walkway (conveyor) carrying the ball East (right).
 \`<\` moving walkway (conveyor) carrying the ball West (left).
+\`h\` elevated plateau — the ball rolls freely ON it and can drop off any edge, but CANNOT climb onto it from level ground (the raised side bounces the ball back like a wall). The only ways up: arrive from another elevated cell, or ride a moving walkway whose direction points into the plateau (the walkway acts as a ramp).
+\`u\` tunnel hole — the ball drops into either mouth and pops out of the other with its momentum preserved (bidirectional). Use zero or exactly ${L.TUNNEL_CELLS} per hole; a pair can connect two fully separate stages.
 \`o\` post — a round bumper the ball ricochets off.
 \`T\` tee — where the ball starts (rests on grass).
 \`C\` cup — the hole (rests on grass).
@@ -98,6 +101,8 @@ TERRAIN LEGEND (one character per cell)
 DESIGN GUIDANCE
 - Surround each hole's playable area with \`#\` walls so the ball can't escape into void.
 - Guarantee a real path: the ball must be able to travel from T to C over passable ground (grass/rough/sand/walkways) without crossing void or being fully blocked by walls/water.
+- Elevation: an \`h\` plateau is unreachable unless a walkway ramps into it or the ball is already elevated — use plateaus for raised greens, guarded shortcuts, or risky drop-offs, and ALWAYS give the player a working way up if the cup (or the only route) is on top.
+- Tunnels enable TWO-STAGE holes: put the tee and one \`u\` mouth on stage one, the other mouth and the cup on a second stage — the stages may be completely separate islands divided by void \`.\`. Travel through a tunnel pair counts as a "real path" from T to C.
 - Ramp difficulty across the ${L.HOLES} holes: open early holes, tighter fairways / hazards / windmills later.
 - Total par sets the course's marketplace difficulty: Easy is 27 or less, Medium 28–44, Hard 45 or more. Pick pars to land the difficulty I asked for.
 - BE ORIGINAL. Every course is minted as an NFT, and the game fingerprints each hole's layout at mint time: if 3 or more holes match holes from ANY already-minted course — mirrored, rotated, or shifted copies count as matches — the mint is REJECTED. Do not copy the example hole below into the course; invent your own layouts.
@@ -122,8 +127,9 @@ const ERROR_COPY: Record<string, string> = {
   MULTIPLE_TEES: "Each hole needs exactly one tee ('T').",
   MULTIPLE_CUPS: "Each hole needs exactly one cup ('C').",
   TOO_MANY_MOVERS: `A hole has more than ${L.WINDMILLS_PER_HOLE} windmills.`,
-  INVALID_WINDMILL: 'A windmill has an invalid arm length or speed.',
+  INVALID_WINDMILL: 'A windmill has an invalid arm length, speed, or arm count (2, 3, or 4).',
   OFF_GRID: "A windmill's pivot sits outside its hole's grid.",
+  TUNNEL_PAIR: `Tunnels come in pairs — a hole needs either no 'u' cells or exactly ${L.TUNNEL_CELLS}.`,
 };
 
 /**

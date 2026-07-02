@@ -3,7 +3,8 @@
 // wizard that contains EVERY element a course designer can use, so a creator
 // can see each one in action before describing their course to an AI agent:
 // grass, rough, sand, water, walls, void border, posts, all four conveyor
-// walkway directions, a spinning windmill, tee and cup.
+// walkway directions, an elevated plateau (ramped by a walkway), a tunnel
+// pair, spinning windmills (3- and 4-arm rotors), tee and cup.
 //
 // Kept as a build-instructions InstructionHole (the exact format designers
 // author) and compiled with the same holeFromInstructions the Play flow uses,
@@ -14,27 +15,33 @@
 
 import type { InstructionHole } from './courseInstructions';
 
-// 24×14 open arena, zones left→right / top→bottom:
-// rough and sand blocks up top, a water pool, north/south conveyor strips,
-// east/west conveyor strips, a post column, a windmill guarding the cup.
+// 28×14 open arena, zones left→right / top→bottom:
+// rough and sand blocks up top (a 3-arm windmill spins in the gap between
+// them), a tunnel mouth just below the tee, a water pool, a south-walkway
+// strip, a north-walkway strip that ramps onto the elevated plateau beside
+// it, east/west walkway strips, posts, and a 4-arm windmill guarding the
+// cup — with the tunnel's other mouth right past it.
 export const SHOWCASE_HOLE: InstructionHole = {
   name: 'Element Demo',
   par: 3,
   layout: [
-    '........................',
-    '.######################.',
-    '.#ggggggrrrrggggssssgg#.',
-    '.#gTggggrrrrggggssssgg#.',
-    '.#ggggggrrrrggggssssgg#.',
-    '.#gggggggggggggggggggg#.',
-    '.#gwwwwggg^^ggggvvggog#.',
-    '.#gwwwwggg^^ggggvvggog#.',
-    '.#ggggggggggggggggggog#.',
-    '.#gg>>>>ggg<<<<ggggggg#.',
-    '.#gggggggggggggggggggg#.',
-    '.#ggogggggggggggggCggg#.',
-    '.######################.',
-    '........................',
+    '............................',
+    '.##########################.',
+    '.#gggggggrrrrggggssssggggg#.',
+    '.#gTgggggrrrrggggssssggggg#.',
+    '.#gggugggrrrrggggssssggggg#.',
+    '.#gggggggggggggggggghhhhgg#.',
+    '.#gwwwwggggggggggggghhhhgg#.',
+    '.#gwwwwggggggggvvgggg^^ggg#.',
+    '.#gggggggggggggvvgggg^^ggg#.',
+    '.#gg>>>>ggg<<<<gggggggoggg#.',
+    '.#gggggggggggggggggggggggg#.',
+    '.#gggogggggggggggggCgguggg#.',
+    '.##########################.',
+    '............................',
   ],
-  windmills: [{ x: 16, y: 10.5, lengthCells: 3, speed: 1.5 }],
+  windmills: [
+    { x: 16, y: 10.5, lengthCells: 3, speed: 1.5, arms: 4 },
+    { x: 15, y: 3, lengthCells: 2, speed: -1.2, arms: 3 },
+  ],
 };

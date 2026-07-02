@@ -3,7 +3,8 @@ import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import {
   parseCourseInstructions, courseFromInstructions, validateCourseInstructions,
-  decodeCourseBlob, COURSE_INSTRUCTIONS_FORMAT,
+  holeFromInstructions, decodeCourseBlob, COURSE_INSTRUCTIONS_FORMAT,
+  type CourseInstructions, type InstructionHole,
 } from '../arcade/courseInstructions';
 import { CELL, CellType, WALKABLE, cellAt, type HoleDef } from '../arcade/engine';
 import { encodeCourseData, type CourseDataV1 } from '../arcade/courseData';
@@ -102,6 +103,85 @@ describe('validateCourseInstructions error codes', () => {
     const doc = parseCourseInstructions(goodText);
     const holes = doc.holes.map((h, i) => (i === 0 ? { ...h, par: 9 } : h));
     expect(validateCourseInstructions({ ...doc, holes })).toBe('INVALID_PAR');
+  });
+});
+
+describe("new elements: elevation 'h', tunnels 'u', windmill arms", () => {
+  const BASE_LAYOUT = [
+    '########',
+    '#gggggg#',
+    '#gTgggg#',
+    '#gggggg#',
+    '#gggggg#',
+    '#ggggCg#',
+    '#gggggg#',
+    '########',
+  ];
+
+  function mkHole(layout: string[], extra: Partial<InstructionHole> = {}): InstructionHole {
+    return { par: 3, layout, ...extra };
+  }
+
+  function mkDoc(hole: InstructionHole): CourseInstructions {
+    return {
+      format: COURSE_INSTRUCTIONS_FORMAT,
+      name: 'New Elements',
+      holes: Array.from({ length: 9 }, () => hole),
+    };
+  }
+
+  function withRow(row: number, value: string): string[] {
+    return BASE_LAYOUT.map((r, i) => (i === row ? value : r));
+  }
+
+  it("accepts 'h' and compiles it to Elevated", () => {
+    const hole = mkHole(withRow(3, '#gghhgg#'));
+    expect(validateCourseInstructions(mkDoc(hole))).toBeNull();
+    const def = holeFromInstructions(hole);
+    expect(cellAt(def, 3, 3)).toBe(CellType.Elevated);
+    expect(cellAt(def, 4, 3)).toBe(CellType.Elevated);
+  });
+
+  it('rejects an unpaired tunnel mouth count (1 or 3) with TUNNEL_PAIR', () => {
+    const one = mkHole(withRow(3, '#gguggg#'));
+    expect(validateCourseInstructions(mkDoc(one))).toBe('TUNNEL_PAIR');
+    const three = mkHole(withRow(3, '#uguggu#'));
+    expect(validateCourseInstructions(mkDoc(three))).toBe('TUNNEL_PAIR');
+  });
+
+  it("compiles 2 'u' mouths to a bidirectional tunnel pair at cell centres", () => {
+    const hole = mkHole(withRow(4, '#gugggu#'));
+    expect(validateCourseInstructions(mkDoc(hole))).toBeNull();
+    const def = holeFromInstructions(hole);
+    expect(def.tunnels).toHaveLength(2);
+    const a = { x: 2.5 * CELL, y: 4.5 * CELL }; // scan order: (2,4) first
+    const b = { x: 6.5 * CELL, y: 4.5 * CELL };
+    expect(def.tunnels![0]).toEqual({ pairId: 0, entrance: a, exit: b, rotDelta: 0 });
+    expect(def.tunnels![1]).toEqual({ pairId: 1, entrance: b, exit: a, rotDelta: 0 });
+    // The floor under a mouth is plain green.
+    expect(cellAt(def, 2, 4)).toBe(CellType.Grass);
+  });
+
+  it('holes without mouths compile with no tunnels', () => {
+    expect(holeFromInstructions(mkHole(BASE_LAYOUT)).tunnels).toBeUndefined();
+  });
+
+  it('validates windmill arms (2/3/4 or absent; anything else INVALID_WINDMILL)', () => {
+    const mill = { x: 4, y: 4, lengthCells: 2, speed: 1 };
+    for (const arms of [undefined, 2, 3, 4]) {
+      const hole = mkHole(BASE_LAYOUT, { windmills: [{ ...mill, ...(arms === undefined ? {} : { arms }) }] });
+      expect(validateCourseInstructions(mkDoc(hole)), `arms ${arms}`).toBeNull();
+    }
+    for (const arms of [1, 5, 2.5]) {
+      const hole = mkHole(BASE_LAYOUT, { windmills: [{ ...mill, arms }] });
+      expect(validateCourseInstructions(mkDoc(hole)), `arms ${arms}`).toBe('INVALID_WINDMILL');
+    }
+  });
+
+  it('threads arms through to the compiled bar (default 2)', () => {
+    const mill = { x: 4, y: 4, lengthCells: 2, speed: 1 };
+    expect(holeFromInstructions(mkHole(BASE_LAYOUT, { windmills: [{ ...mill, arms: 3 }] })).bars[0].arms).toBe(3);
+    expect(holeFromInstructions(mkHole(BASE_LAYOUT, { windmills: [mill] })).bars[0].arms).toBe(2);
   });
 });
 

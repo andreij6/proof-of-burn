@@ -13,8 +13,10 @@ import {
 } from './courseData.ts';
 
 export interface Vec { x: number; y: number }
-/** Rotating windmill bar centred on (cx, cy) in world px; angle = phase + speed·t. */
-export interface MovingBar { cx: number; cy: number; len: number; speed: number; phase: number }
+/** Rotating windmill bar centred on (cx, cy) in world px; angle = phase + speed·t.
+ *  `arms`: 2 = the classic full bar through the pivot; 3 or 4 = a rotor of that
+ *  many half-length (len/2) arms at equal angular spacing. */
+export interface MovingBar { cx: number; cy: number; len: number; speed: number; phase: number; arms: number }
 
 // ── CourseDataV1 element runtime types (PB-303) ──
 // These are the *engine-side* compiled forms of CourseDataV1 elements. They are
@@ -95,10 +97,11 @@ export const CellType = {
   SlopeW: 8,
   Post: 9,   // grass with a round post voxel in the middle
   Rough: 10, // heavier-friction surface (between green and sand)
+  Elevated: 11, // raised plateau — enterable only from elevation or a walkway pushing into it; solid wall otherwise
 } as const;
 export type CellType = typeof CellType[keyof typeof CellType];
 
-export const WALKABLE: CellType[] = [CellType.Grass, CellType.SlopeN, CellType.SlopeS, CellType.SlopeE, CellType.SlopeW, CellType.Rough];
+export const WALKABLE: CellType[] = [CellType.Grass, CellType.SlopeN, CellType.SlopeS, CellType.SlopeE, CellType.SlopeW, CellType.Rough, CellType.Elevated];
 
 /** Runtime hole: compiled grid + world-px tee/cup/bars. */
 export interface HoleDef {
@@ -241,6 +244,24 @@ export function barEndpoints(bar: MovingBar, tSec: number): { x1: number; y1: nu
   return { x1: bar.cx - dx, y1: bar.cy - dy, x2: bar.cx + dx, y2: bar.cy + dy };
 }
 
+/** Instantaneous collision segments for every arm of a bar at clock `tSec`.
+ *  arms = 2 → ONE full segment identical to `barEndpoints` (compatibility);
+ *  arms = 3/4 → that many pivot-to-tip (len/2) segments spaced 2π/arms apart.
+ *  Physics and the renderer both consume this, so what spins is what deflects. */
+export function barSegments(bar: MovingBar, tSec: number): { x1: number; y1: number; x2: number; y2: number }[] {
+  if (bar.arms <= 2) return [barEndpoints(bar, tSec)];
+  const base = bar.phase + bar.speed * tSec;
+  return Array.from({ length: bar.arms }, (_, i) => {
+    const a = base + (i * 2 * Math.PI) / bar.arms;
+    return {
+      x1: bar.cx,
+      y1: bar.cy,
+      x2: bar.cx + Math.cos(a) * bar.len / 2,
+      y2: bar.cy + Math.sin(a) * bar.len / 2,
+    };
+  });
+}
+
 /** Push the ball out of a point and reflect the inbound velocity component. */
 function bounceFrom(state: HoleState, cpx: number, cpy: number, minDist: number): boolean {
   const nx = state.pos.x - cpx, ny = state.pos.y - cpy;
@@ -279,14 +300,13 @@ function collideCell(state: HoleState, gx: number, gy: number): boolean {
   return bounceFrom(state, cpx, cpy, BALL_R);
 }
 
-/** Circle vs the rotating bar (segment with thickness). */
+/** Circle vs every arm of the rotating bar (segments with thickness). */
 function collideBar(state: HoleState, bar: MovingBar, tSec: number): boolean {
-  const w = barEndpoints(bar, tSec);
-  const dx = w.x2 - w.x1, dy = w.y2 - w.y1;
-  const len2 = dx * dx + dy * dy;
-  let t = len2 === 0 ? 0 : ((state.pos.x - w.x1) * dx + (state.pos.y - w.y1) * dy) / len2;
-  t = Math.max(0, Math.min(1, t));
-  return bounceFrom(state, w.x1 + t * dx, w.y1 + t * dy, BALL_R + 4);
+  let hit = false;
+  for (const s of barSegments(bar, tSec)) {
+    hit = collideSegment(state, s.x1, s.y1, s.x2, s.y2, 4) || hit;
+  }
+  return hit;
 }
 
 // ── PB-303: canonical mover geometry (pure function of the hole clock) ──
@@ -372,6 +392,17 @@ function rotDir(rot: number): Vec {
   }
 }
 
+/** Grid direction a slope/walkway cell pushes, or null for any other cell. */
+function slopeDir(c: CellType): Vec | null {
+  switch (c) {
+    case CellType.SlopeN: return { x: 0, y: -1 };
+    case CellType.SlopeS: return { x: 0, y: 1 };
+    case CellType.SlopeE: return { x: 1, y: 0 };
+    case CellType.SlopeW: return { x: -1, y: 0 };
+    default: return null;
+  }
+}
+
 /**
  * Advance one 120 Hz step while rolling. `tSec` is the running hole clock
  * (drives the windmill). Mutates state; sets `state.event` for the renderer.
@@ -399,6 +430,18 @@ export function stepHole(state: HoleState, def: HoleDef, tSec: number): void {
   let hit = false;
   const substeps = Math.max(1, Math.ceil((speed(state.vel) * STEP) / MAX_SUBSTEP_TRAVEL));
   for (let sub = 0; sub < substeps; sub++) {
+    // Elevation gate — evaluated from this substep's SOURCE cell, before the
+    // move: on elevation → every elevated cell is open; on a walkway → only
+    // the elevated cell straight ahead of its push direction is open (the
+    // walkway ramps the ball up); from anywhere else elevated cells are solid
+    // walls. Exiting elevation is always free (the target cell stays walkable).
+    const sgx = Math.floor(state.pos.x / CELL), sgy = Math.floor(state.pos.y / CELL);
+    const srcCell = cellAt(def, sgx, sgy);
+    const rampDir = slopeDir(srcCell);
+    const elevatedOpen = (gx: number, gy: number): boolean =>
+      srcCell === CellType.Elevated
+      || (rampDir !== null && gx === sgx + rampDir.x && gy === sgy + rampDir.y);
+
     state.pos.x += state.vel.x * (STEP / substeps);
     state.pos.y += state.vel.y * (STEP / substeps);
 
@@ -407,8 +450,9 @@ export function stepHole(state: HoleState, def: HoleDef, tSec: number): void {
     for (let gy = cgy - 1; gy <= cgy + 1; gy++) {
       for (let gx = cgx - 1; gx <= cgx + 1; gx++) {
         const c = cellAt(def, gx, gy);
-        if (isSolid(c)) hit = collideCell(state, gx, gy) || hit;
-        else if (c === CellType.Post) {
+        if (isSolid(c) || (c === CellType.Elevated && !elevatedOpen(gx, gy))) {
+          hit = collideCell(state, gx, gy) || hit;
+        } else if (c === CellType.Post) {
           hit = bounceFrom(state, (gx + 0.5) * CELL, (gy + 0.5) * CELL, BALL_R + POST_R) || hit;
         }
       }
@@ -802,7 +846,7 @@ function compileHole(d: DefaultHole): HoleDef {
     tee,
     cup,
     bars: (d.bars ?? []).map(b => ({
-      cx: b.cx * CELL, cy: b.cy * CELL, len: b.lenCells * CELL, speed: b.speed, phase: 0,
+      cx: b.cx * CELL, cy: b.cy * CELL, len: b.lenCells * CELL, speed: b.speed, phase: 0, arms: 2,
     })),
   };
 }
@@ -827,6 +871,7 @@ export function holeFromBackend(b: BackendHole): HoleDef {
       len: Number(bar.len_cells) * CELL,
       speed: Number(bar.speed_mrad) / 1000,
       phase: 0,
+      arms: 2,
     })),
   };
 }

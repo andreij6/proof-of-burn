@@ -175,6 +175,8 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
               g.splash = 1;
               setStrokesNow(g.state.strokes);
             }
+            // Tunnel teleport: the jar-pop cue (event is set for one step only).
+            if (g.state.event === 'tunnel') arcadeMusic.playPop();
             // stepHole mutates phase — widen past TS's narrowing of the guard.
             if ((g.state.phase as string) === 'sunk') {
               const strokes = g.state.strokes;

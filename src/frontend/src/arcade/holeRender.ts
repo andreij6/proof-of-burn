@@ -14,9 +14,9 @@
 // ==========================================
 
 import {
-  CELL, CUP_R, POST_R, cellAt, barEndpoints, CellType,
+  CELL, CUP_R, POST_R, cellAt, cellAtWorld, barSegments, CellType,
   HAIR_COLORS, SKIN_COLORS, OUTFIT_COLORS,
-  type CharacterLook, type HoleDef, type Vec,
+  type CharacterLook, type HoleDef, type MovingBar, type Vec,
 } from './engine';
 
 /** Camera: screen = isoBase(world) · scale + (ox, oy). */
@@ -24,6 +24,9 @@ export interface IsoView { scale: number; ox: number; oy: number }
 
 /** Wall cube height (world units — ≈10 screen px at the classic 0.55 zoom). */
 export const WALL_Z = 18;
+/** Elevated-plateau height (world units) — clearly lower than a wall cube, so
+ *  walls still read as impassable while plateaus read as high ground. */
+export const ELEV_Z = 8;
 /** Flag pole top (world units — ≈52 screen px at the classic zoom). */
 export const FLAG_Z = 95;
 /**
@@ -49,8 +52,29 @@ const PAL = {
   water: '#3f9bee', waterHi: '#7fc0f6',
   wallTop: '#e0b667', wallL: '#b58a45', wallR: '#8a672e',
   postTop: '#d9a85b', postSide: '#9a743a',
+  // Elevated plateau: sunnier grass top, earthy cut-away side faces.
+  elevA: '#5fd489', elevB: '#55ca7f', elevL: '#37905c', elevR: '#2a7449',
+  // Tunnel mouth: deep-indigo void with a violet rim + swirl.
+  tunnelRim: '#6d4fc4', tunnelVoid: '#140b28', tunnelSwirl: '167, 139, 250',
   shadow: 'rgba(10, 25, 14, 0.22)',
 };
+
+/** Rotor blade accents keyed by arm count, so 2/3/4-arm mills are readable at
+ *  a glance: 2 = the classic rust bar, 3 = teal tri-rotor, 4 = violet cross. */
+export const ROTOR_PALETTES: Record<number, { top: string; left: string; right: string; tip: string }> = {
+  2: { top: '#d77b45', left: '#a3522a', right: '#7e3d1d', tip: '#f2b27a' },
+  3: { top: '#3fb8af', left: '#2a8b84', right: '#1e6b66', tip: '#8fe3dc' },
+  4: { top: '#9b6fe0', left: '#7448b8', right: '#573391', tip: '#c9aef2' },
+};
+export function rotorPalette(arms: number): (typeof ROTOR_PALETTES)[number] {
+  return ROTOR_PALETTES[arms] ?? ROTOR_PALETTES[2];
+}
+
+/** Blade cross-section vs normalized distance from the hub (0 = hub, 1 = tip):
+ *  blades taper in width AND height so each arm reads as a real rotor blade. */
+export function bladeProfile(dn: number): { half: number; zTop: number } {
+  return { half: 8.5 - 3.5 * dn, zTop: 20 - 4 * dn };
+}
 
 // Conveyor (slope) belt animation: stripe spacing (world px) and travel speed
 // (world px/s) in the push direction.
@@ -90,9 +114,10 @@ export function fitView(def: HoleDef, width: number, height: number, margin = 24
   };
 }
 
-/** Screen circle the ball is drawn as (also consumed by the contact tests). */
-export function ballSprite(view: IsoView, pos: Vec): { x: number; y: number; r: number } {
-  const p = isoP(view, pos.x, pos.y, BALL_SPRITE_Z);
+/** Screen circle the ball is drawn as (also consumed by the contact tests).
+ *  `lift` raises the sprite in world units — ELEV_Z when riding a plateau. */
+export function ballSprite(view: IsoView, pos: Vec, lift = 0): { x: number; y: number; r: number } {
+  const p = isoP(view, pos.x, pos.y, BALL_SPRITE_Z + lift);
   return { x: p.x, y: p.y, r: BALL_SPRITE_R * view.scale };
 }
 
@@ -125,6 +150,15 @@ export function renderHoleScene(ctx: CanvasRenderingContext2D, def: HoleDef, vie
 
   drawCup(ctx, def, view);
 
+  // Tunnel mouths: flat on the ground (under the ball), one per endpoint —
+  // the pair is bidirectional so both mouths look identical.
+  if (def.tunnels) {
+    for (const tp of def.tunnels) {
+      drawTunnelMouth(ctx, view, tp.entrance, tSec);
+      drawTunnelMouth(ctx, view, tp.exit, tSec);
+    }
+  }
+
   // ── Raised pass: everything with height, depth-sorted by world x+y ──
   const items: { key: number; draw: () => void }[] = [];
   for (let gy = 0; gy < def.h; gy++) {
@@ -135,28 +169,33 @@ export function renderHoleScene(ctx: CanvasRenderingContext2D, def: HoleDef, vie
       } else if (c === CellType.Post) {
         const px = (gx + 0.5) * CELL, py = (gy + 0.5) * CELL;
         items.push({ key: px + py, draw: () => drawPrism(ctx, view, px, py, POST_R, 0, WALL_Z + 2, PAL.postTop, PAL.postSide, PAL.postSide) });
+      } else if (c === CellType.Elevated) {
+        items.push({ key: (gx + 1 + gy + 1) * CELL, draw: () => drawPlateau(ctx, view, def, gx, gy) });
       }
     }
   }
-  // Windmill bars: a row of mini voxel cubes sweeping around the pivot.
+  // Windmill rotors: voxel hub + tapered blades built from barSegments.
   for (const bar of def.bars) {
-    const w = barEndpoints(bar, tSec);
-    const segs = 5;
-    for (let i = 0; i < segs; i++) {
-      const t = i / (segs - 1);
-      const x = w.x1 + (w.x2 - w.x1) * t;
-      const y = w.y1 + (w.y2 - w.y1) * t;
-      items.push({ key: x + y, draw: () => drawPrism(ctx, view, x, y, 9, 2, 20, '#d77b45', '#a3522a', '#7e3d1d') });
-    }
+    pushRotor(items, ctx, view, bar, tSec);
   }
   items.push({ key: def.cup.x + def.cup.y, draw: () => drawFlag(ctx, def, view, tSec) });
   const ball = opts.ball;
   if (ball) {
-    items.push({ key: ball.x + ball.y, draw: () => drawBall(ctx, view, ball) });
+    // On a plateau the ball rides the top (lifted sprite + shadow) and must
+    // sort after its own plateau block (whose key is the cell's far corner).
+    const lifted = cellAtWorld(def, ball) === CellType.Elevated;
+    items.push({
+      key: ball.x + ball.y + (lifted ? 2 * CELL : 0),
+      draw: () => drawBall(ctx, view, ball, lifted ? ELEV_Z : 0),
+    });
   }
   const golfer = opts.golfer;
   if (golfer) {
-    items.push({ key: golfer.stand.x + golfer.stand.y, draw: () => drawGolfer(ctx, view, golfer.stand, golfer.look, tSec, golfer.aiming) });
+    const gLifted = cellAtWorld(def, golfer.stand) === CellType.Elevated;
+    items.push({
+      key: golfer.stand.x + golfer.stand.y + (gLifted ? 2 * CELL : 0),
+      draw: () => drawGolfer(ctx, view, golfer.stand, golfer.look, tSec, golfer.aiming, gLifted ? ELEV_Z : 0),
+    });
   }
   items.sort((a, b) => a.key - b.key);
   for (const it of items) it.draw();
@@ -211,9 +250,15 @@ function beltDir(c: CellType): Vec | null {
   }
 }
 
+/** Raised blocks (wall cubes / elevated plateaus) cast the baked NW shadow. */
+function castsShadow(c: CellType): boolean {
+  return c === CellType.Wall || c === CellType.Elevated;
+}
+
 function drawGroundCell(ctx: CanvasRenderingContext2D, def: HoleDef, view: IsoView, gx: number, gy: number, tSec: number) {
   const c = cellAt(def, gx, gy);
-  if (c === CellType.Void || c === CellType.Wall) return; // walls drawn as cubes
+  // Walls + plateaus are drawn as raised blocks in the raised pass.
+  if (c === CellType.Void || c === CellType.Wall || c === CellType.Elevated) return;
   const corners = cellCorners(view, gx, gy, 0);
   const k = view.scale / REF_SCALE; // line-width / detail scale
   const belt = beltDir(c);
@@ -227,12 +272,12 @@ function drawGroundCell(ctx: CanvasRenderingContext2D, def: HoleDef, view: IsoVi
   poly(ctx, corners, fill);
 
   // Sharp baked shadows: light from the NW casts onto cells whose N or W
-  // neighbour is a wall cube.
+  // neighbour is a raised block (wall cube or elevated plateau).
   const center = isoP(view, (gx + 0.5) * CELL, (gy + 0.5) * CELL, 0);
-  if (cellAt(def, gx, gy - 1) === CellType.Wall) {
+  if (castsShadow(cellAt(def, gx, gy - 1))) {
     poly(ctx, [corners[0], corners[1], center], PAL.shadow);
   }
-  if (cellAt(def, gx - 1, gy) === CellType.Wall) {
+  if (castsShadow(cellAt(def, gx - 1, gy))) {
     poly(ctx, [corners[0], corners[3], center], PAL.shadow);
   }
 
@@ -301,6 +346,104 @@ function drawBeltCell(ctx: CanvasRenderingContext2D, view: IsoView, gx: number, 
   }
 }
 
+/**
+ * Elevated plateau block: sunny grass top at ELEV_Z with cut-away side faces.
+ * Side faces are drawn only on edges whose neighbour is NOT elevated, so a
+ * run of elevated cells reads as ONE plateau with no internal seams.
+ */
+function drawPlateau(ctx: CanvasRenderingContext2D, view: IsoView, def: HoleDef, gx: number, gy: number) {
+  const g = cellCorners(view, gx, gy, 0);
+  const t = cellCorners(view, gx, gy, ELEV_Z);
+  if (cellAt(def, gx, gy + 1) !== CellType.Elevated) {
+    poly(ctx, [t[3], t[2], g[2], g[3]], PAL.elevL); // south face
+  }
+  if (cellAt(def, gx + 1, gy) !== CellType.Elevated) {
+    poly(ctx, [t[1], t[2], g[2], g[1]], PAL.elevR); // east face
+  }
+  poly(ctx, t, (gx + gy) % 2 === 0 ? PAL.elevA : PAL.elevB);
+}
+
+/**
+ * Tunnel mouth: a deep-indigo void with a violet rim, a slow rotating swirl
+ * and a breathing glow — unmistakably "a hole that takes you somewhere", never
+ * confusable with the cup (which is white-ringed black). Flat on the ground.
+ */
+function drawTunnelMouth(ctx: CanvasRenderingContext2D, view: IsoView, pos: Vec, tSec: number) {
+  const p = isoP(view, pos.x, pos.y, 0);
+  const s = view.scale;
+  const k = view.scale / REF_SCALE;
+  const R = 16; // world units ≈ the engine's TUNNEL_R capture radius
+  const pulse = 0.5 + 0.5 * Math.sin(tSec * 2.4 + (pos.x + pos.y) * 0.01);
+
+  // Violet rim (glow breathes), then the void.
+  ctx.fillStyle = PAL.tunnelRim;
+  ctx.globalAlpha = 0.75 + 0.25 * pulse;
+  ctx.beginPath(); ctx.ellipse(p.x, p.y, R * s * 1.8, R * s * 1.0, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = PAL.tunnelVoid;
+  ctx.beginPath(); ctx.ellipse(p.x, p.y, R * s * 1.45, R * s * 0.8, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Slow swirl: two opposed arcs spiralling inward, driven by tSec.
+  ctx.strokeStyle = `rgba(${PAL.tunnelSwirl}, ${0.35 + 0.4 * pulse})`;
+  ctx.lineWidth = 1.6 * k;
+  for (let i = 0; i < 2; i++) {
+    const a0 = tSec * 1.5 + i * Math.PI;
+    const rr = 0.95 - i * 0.35;
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y, R * s * rr, R * s * rr * 0.55, 0, a0, a0 + 1.8);
+    ctx.stroke();
+  }
+}
+
+/**
+ * Windmill rotor: a steel voxel hub with a colored cap, and per barSegments
+ * segment a tapered blade of stacked mini-prisms with a lighter tip block —
+ * plus a soft swept shadow on the ground beneath each blade sample. Blade
+ * accents come from rotorPalette(arms) so arm count is readable at a glance.
+ */
+function pushRotor(
+  items: { key: number; draw: () => void }[],
+  ctx: CanvasRenderingContext2D,
+  view: IsoView,
+  bar: MovingBar,
+  tSec: number,
+) {
+  const arms = bar.arms ?? 2;
+  const pal = rotorPalette(arms);
+  const fullBar = arms <= 2;
+
+  items.push({
+    key: bar.cx + bar.cy,
+    draw: () => {
+      drawPrism(ctx, view, bar.cx, bar.cy, 7, 0, 24, '#4a4038', '#332b25', '#241e1a');
+      drawPrism(ctx, view, bar.cx, bar.cy, 3.5, 24, 27, pal.tip, pal.left, pal.right); // colored cap
+    },
+  });
+
+  for (const seg of barSegments(bar, tSec)) {
+    const n = fullBar ? 6 : 4; // samples per segment (full bar spans tip-to-tip)
+    for (let i = 0; i < n; i++) {
+      const t = (i + 0.5) / n; // sample centres, so blades never bury the hub
+      const x = seg.x1 + (seg.x2 - seg.x1) * t;
+      const y = seg.y1 + (seg.y2 - seg.y1) * t;
+      const dn = fullBar ? Math.abs(t - 0.5) * 2 : t; // 0 at hub → 1 at tip
+      const { half, zTop } = bladeProfile(dn);
+      const isTip = dn >= 0.7;
+      items.push({
+        key: x + y,
+        draw: () => {
+          const sp = isoP(view, x, y, 0);
+          ctx.fillStyle = 'rgba(10, 25, 14, 0.10)';
+          ctx.beginPath();
+          ctx.ellipse(sp.x, sp.y, half * 1.9 * view.scale, half * 0.95 * view.scale, 0, 0, Math.PI * 2);
+          ctx.fill();
+          drawPrism(ctx, view, x, y, half, 3, zTop, isTip ? pal.tip : pal.top, pal.left, pal.right);
+        },
+      });
+    }
+  }
+}
+
 function drawCup(ctx: CanvasRenderingContext2D, def: HoleDef, view: IsoView) {
   const p = isoP(view, def.cup.x, def.cup.y, 0);
   const s = view.scale;
@@ -327,9 +470,10 @@ function drawFlag(ctx: CanvasRenderingContext2D, def: HoleDef, view: IsoView, tS
   ctx.fill();
 }
 
-function drawBall(ctx: CanvasRenderingContext2D, view: IsoView, pos: Vec) {
-  const { x, y, r } = ballSprite(view, pos);
-  const sh = isoP(view, pos.x, pos.y, 0);
+function drawBall(ctx: CanvasRenderingContext2D, view: IsoView, pos: Vec, lift = 0) {
+  const { x, y, r } = ballSprite(view, pos, lift);
+  // Contact shadow sits on whatever the ball rides — the plateau top when lifted.
+  const sh = isoP(view, pos.x, pos.y, lift);
   ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.beginPath(); ctx.ellipse(sh.x, sh.y + r * 0.35, r * 1.05, r * 0.5, 0, 0, Math.PI * 2); ctx.fill();
   const grad = ctx.createRadialGradient(x - r * 0.3, y - r * 0.45, r * 0.15, x, y, r + 2);
@@ -341,14 +485,14 @@ function drawBall(ctx: CanvasRenderingContext2D, view: IsoView, pos: Vec) {
 
 /** Voxel mini-figure: stacked flat-shaded blocks, customizable palette.
  *  Authored at REF_SCALE screen pixels; scaled to the view via a transform. */
-function drawGolfer(ctx: CanvasRenderingContext2D, view: IsoView, stand: Vec, look: CharacterLook, tSec: number, aiming: boolean) {
+function drawGolfer(ctx: CanvasRenderingContext2D, view: IsoView, stand: Vec, look: CharacterLook, tSec: number, aiming: boolean, lift = 0) {
   const skin = SKIN_COLORS[look.skin] ?? SKIN_COLORS[0];
   const hair = HAIR_COLORS[look.hair] ?? HAIR_COLORS[0];
   const outfit = OUTFIT_COLORS[look.outfit] ?? OUTFIT_COLORS[0];
   const pants = shade(outfit, -60);
   const outfitDark = shade(outfit, -28);
 
-  const base = isoP(view, stand.x, stand.y, 0);
+  const base = isoP(view, stand.x, stand.y, lift);
   const bob = aiming ? 0 : Math.sin(tSec * 2.2) * 1.2;
 
   ctx.save();

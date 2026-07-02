@@ -260,7 +260,7 @@ export default function CourseCreate({
         onRoundComplete={() => { /* demo — never scored */ }}
         onExit={() => setView('wizard')}
         onGoParticipate={() => setView('wizard')}
-        submitNote="Element demo — rough & sand slow the ball, water costs a stroke, walkways carry it, posts and the windmill deflect it."
+        submitNote="Element demo — rough & sand slow the ball, water costs a stroke, walkways carry it (one ramps onto the plateau), tunnels teleport it across the hole, posts and the windmills deflect it."
       />
     );
   }
@@ -425,7 +425,9 @@ export default function CourseCreate({
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Not sure what the pieces do? <b>Try every element</b> plays a demo hole
               with all of them: grass, rough, sand, water, walls, posts, moving
-              walkways in all four directions, and a windmill.
+              walkways in all four directions, an elevated plateau you ride a
+              walkway onto, a tunnel pair that teleports the ball, and 3- and
+              4-arm windmills.
             </span>
           </div>
 
