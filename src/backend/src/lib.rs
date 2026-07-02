@@ -12648,7 +12648,9 @@ fn require_arcade_enabled() -> Result<(), String> {
     Ok(())
 }
 
-/// Each game's own kill switch (on top of the parent `arcade` flag).
+/// Each game's own kill switch. Mini-golf has its own nav page, so the per-game
+/// flags gate their endpoints independently of the parent `arcade` hub flag
+/// (which now only governs the Arcade hub page itself).
 fn arcade_game_flag(game: &str) -> &'static str {
     match game {
         ARCADE_GAME_FIELDGOAL => FLAG_ARCADE_FIELDGOAL,
@@ -12657,7 +12659,6 @@ fn arcade_game_flag(game: &str) -> &'static str {
 }
 
 fn require_arcade_game_enabled(game: &str) -> Result<(), String> {
-    require_arcade_enabled()?;
     if !feature_visible(arcade_game_flag(game), get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
@@ -12764,8 +12765,15 @@ fn get_arcade_deposit_address() -> LedgerAccount {
 #[ic_cdk::update]
 async fn get_arcade_customize_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
     require_authenticated()?;
-    require_arcade_enabled()?;
     let caller = get_caller();
+    // The quote serves both the golfer (mini-golf) and kicker (field-goal)
+    // customize flows, so allow whenever either game is enabled — independent
+    // of the parent `arcade` hub flag (mini-golf has its own page now).
+    if !(feature_visible(FLAG_ARCADE_MINIGOLF, caller)
+        || feature_visible(FLAG_ARCADE_FIELDGOAL, caller))
+    {
+        return Err("FEATURE_DISABLED".to_string());
+    }
     let config = CONFIG.with(|c| c.borrow().get().clone());
     let rate = explorer_usd_rate_e8s(token, &config).await?;
     // 1 "day" at $1/day == exactly $1 — reuse the Explorer conversion.

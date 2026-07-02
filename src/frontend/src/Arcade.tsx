@@ -223,7 +223,9 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [editorTarget, setEditorTarget] = useState<'golfer' | 'kicker'>('golfer');
   const [draft, setDraft] = useState<CharacterLook>(DEFAULT_CHARACTER);
-  const [payToken, setPayToken] = useState<ExplorerToken>(ExplorerToken.ICP);
+  // Golfer/kicker customize is ICP-only — no multi-token selector.
+  const payToken = ExplorerToken.ICP;
+  const payMeta = PAY_TOKENS[0];
   const [payQuote, setPayQuote] = useState<ExplorerQuote | null>(null);
   const [isQuoting, setIsQuoting] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
@@ -342,7 +344,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
       setEditorError("Waiting for the price quote — try again in a second.");
       return;
     }
-    const meta = PAY_TOKENS.find(t => t.token === payToken)!;
+    const meta = payMeta;
     const ledger = payTokenLedger(payToken, expInfo);
     if (!ledger) { setEditorError("Token ledger unavailable."); return; }
     const fee = payTokenFee(payToken, expInfo);
@@ -675,32 +677,18 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
               </div>
             ))}
             <div className="col" style={{ gap: 6 }}>
-              <label style={LABEL_STYLE}>Pay with · $1 at the live rate</label>
-              <span className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
-                {PAY_TOKENS.map(t => (
-                  <button key={t.label} onClick={() => { setPayToken(t.token); setEditorError(null); }}
-                    style={{
-                      background: payToken === t.token ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
-                      border: `1px solid ${payToken === t.token ? 'var(--burn)' : 'var(--border)'}`,
-                      color: payToken === t.token ? 'var(--burn-ink)' : 'var(--fg-3)',
-                      borderRadius: 999, padding: '5px 10px', fontSize: 11.5, fontWeight: 500,
-                      cursor: 'pointer', transition: 'all var(--dur-fast) var(--ease-out)',
-                    }}>
-                    {t.label}
-                  </button>
-                ))}
-              </span>
+              <label style={LABEL_STYLE}>Pay with · $1 in ICP at the live rate</label>
               <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-                {isQuoting ? 'Fetching live price…'
-                  : payQuote ? `= ${fmtTokenAmount(payQuote.amount, PAY_TOKENS.find(t => t.token === payToken)!.decimals)} ${PAY_TOKENS.find(t => t.token === payToken)!.label} · paid to the protocol treasury · rate locked 15 min`
-                  : 'Pick a token to get a price.'}
+                {isQuoting ? 'Fetching live ICP price…'
+                  : payQuote ? `= ${fmtTokenAmount(payQuote.amount, payMeta.decimals)} ${payMeta.label} · paid to the protocol treasury · rate locked 15 min`
+                  : 'Fetching live ICP price…'}
               </span>
             </div>
             {editorStep && !editorError && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>{editorStep}</span>}
             {editorError && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{editorError}</span>}
             <Btn variant="primary" disabled={editorBusy || !payQuote} onClick={executeCustomize}>
               {editorBusy ? 'Working...'
-                : payQuote ? `Pay ${fmtTokenAmount(payQuote.amount, PAY_TOKENS.find(t => t.token === payToken)!.decimals)} ${PAY_TOKENS.find(t => t.token === payToken)!.label} ($1) & save look`
+                : payQuote ? `Pay ${fmtTokenAmount(payQuote.amount, payMeta.decimals)} ${payMeta.label} ($1) & save look`
                 : 'Pay $1 & save look'}
             </Btn>
           </div>
