@@ -58,7 +58,7 @@ export default function CourseOverview({ course, courseName, onPlayRound, onPrac
       </span>
 
       {/* ── 3×3 hole grid ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
         {course.map((def, i) => (
           <HoleTile
             key={i}
