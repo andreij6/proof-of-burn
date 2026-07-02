@@ -1213,6 +1213,10 @@ service : (InitPayload) -> {
   // Admin: allocate treasury ICP into a tier pool neuron (boosts its yield —
   // and therefore the lottery pot — without belonging to any staker).
   admin_fund_tier_neuron : (StakeTier, nat64, bool) -> (Result);
+  // Admin: live cycle balance of the course_nft canister via the management
+  // canister (the backend must be a CONTROLLER of it, like the frontend
+  // getter). Errs COURSE_NFT_NOT_CONFIGURED when unwired.
+  admin_get_course_nft_cycles : () -> (Result_1);
   // Admin: the FRONTEND canister's live cycle balance, via the management
   // canister. Requires this backend to be a controller of the frontend
   // canister (ops: `icp canister update-settings frontend --add-controller
@@ -1294,6 +1298,11 @@ service : (InitPayload) -> {
   // clone-detection feature (fetches each listed course's blob from the
   // course_nft canister). Safe to re-run; returns courses fingerprinted.
   admin_backfill_course_fingerprints : () -> (nat32);
+  // Admin: one-way `deposit_cycles` top-up from the backend's balance into the
+  // course_nft canister — it receives NO burn-share/CMC top-ups of its own.
+  // The 5-min sweep also auto-forwards 0.5T whenever course_nft dips below 1T
+  // while the backend sits at/above its own 7T target.
+  admin_send_cycles_to_course_nft : (nat64) -> (Result);
   // Admin: move cycles from THIS backend into the frontend canister — a one-way
   // `deposit_cycles` top-up; the cycles are deducted from the backend's own
   // balance. Used to rebalance an over-provisioned backend.

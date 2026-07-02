@@ -110,7 +110,12 @@ ok "Early Adopters + arcade_minigolf flags enabled (local); arcade forced OFF (d
 # course_nft canister id. Both calls are idempotent.
 icp canister call course_nft set_minter "(principal \"$BACKEND_ID\")" -e "$ENV" --identity "$DEPLOY_IDENTITY" >/dev/null
 icp canister call backend admin_set_course_nft_canister "(principal \"$COURSE_NFT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-ok "CourseNFT wired (backend=$BACKEND_ID is minter; backend → course_nft=$COURSE_NFT_ID)"
+# Backend must CONTROL course_nft so admin_get_course_nft_cycles / the sweep's
+# cycle guard can read its balance (deposit_cycles itself needs no control).
+# Mirrors the mainnet ops step for the frontend canister. Idempotent.
+icp canister settings update course_nft --add-controller "$BACKEND_ID" -e "$ENV" --identity "$DEPLOY_IDENTITY" >/dev/null \
+  && ok "backend added as course_nft controller (cycle balance readable)" \
+  || note "could not add backend as course_nft controller (cycle getter will report n/a)"
 
 # Mint the genesis default/system course (PB-309) so the marketplace is never
 # empty. Idempotent: minted ONCE to the admin principal (guarded by

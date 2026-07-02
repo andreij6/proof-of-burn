@@ -165,6 +165,8 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   const [stats, setStats] = useState<GlobalStats | null>(null);
   const [cycles, setCycles] = useState<bigint | null>(null);
   const [feCycles, setFeCycles] = useState<bigint | 'unavailable' | null>(null);
+  const [nftCycles, setNftCycles] = useState<bigint | 'unavailable' | null>(null);
+  const [topupAmount, setTopupAmount] = useState('1'); // T cycles
   const [lottery, setLottery] = useState<LotteryInfo | null>(null);
   const [ea, setEa] = useState<EarlyAdopterInfo | null>(null);
   const [staking, setStaking] = useState<StakingPoolInfo | null>(null);
@@ -225,7 +227,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   const refreshHealth = async () => {
     if (!actor) return;
     const grab = async <T,>(fn: () => Promise<T>): Promise<T | null> => { try { return await fn(); } catch { return null; } };
-    const [st, cy, lot, eaInfo, stk, pl, fe] = await Promise.all([
+    const [st, cy, lot, eaInfo, stk, pl, fe, nft] = await Promise.all([
       grab<GlobalStats>(() => actor.get_global_stats()),
       grab<bigint>(() => actor.get_cycle_balance()),
       grab<LotteryInfo>(() => actor.get_lottery_info()),
@@ -233,10 +235,25 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       grab<StakingPoolInfo>(() => actor.get_staking_pool_info()),
       grab<PoolInfo>(() => actor.get_pool_info()),
       grab<{ __kind__: string; Ok?: bigint; Err?: string }>(() => actor.admin_get_frontend_cycles()),
+      grab<{ __kind__: string; Ok?: bigint; Err?: string }>(() => actor.admin_get_course_nft_cycles()),
     ]);
     setStats(st); setCycles(cy); setLottery(lot); setEa(eaInfo); setStaking(stk); setPool(pl);
     setFeCycles(fe === null ? null : fe.__kind__ === 'Ok' ? fe.Ok! : 'unavailable');
+    setNftCycles(nft === null ? null : nft.__kind__ === 'Ok' ? nft.Ok! : 'unavailable');
   };
+
+  // ── quick cycle top-ups (backend balance → target canister) ────────────────
+  const sendCycles = (target: 'frontend' | 'course_nft') => run(`cycles-${target}`, async () => {
+    const t = parseFloat(topupAmount);
+    if (isNaN(t) || t <= 0) { setError('Enter a T-cycles amount above 0.'); return null; }
+    const amount = BigInt(Math.round(t * 1e12));
+    const res = target === 'frontend'
+      ? await actor.admin_send_cycles_to_frontend(amount)
+      : await actor.admin_send_cycles_to_course_nft(amount);
+    if (res.__kind__ === 'Err') throw new Error(res.Err);
+    await refreshHealth();
+    return `Sent ${t} T cycles from the backend to the ${target === 'frontend' ? 'frontend' : 'course NFT'} canister.`;
+  });
 
   const refreshAudit = async () => {
     if (!actor) return;
@@ -596,6 +613,10 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               value={feCycles === null ? '…' : feCycles === 'unavailable' ? 'n/a' : `${(Number(feCycles) / 1e12).toFixed(2)} T`}
               tone={typeof feCycles === 'bigint' && Number(feCycles) < 1e12 ? 'bad' : undefined}
               sub={feCycles === 'unavailable' ? 'backend must control the frontend canister' : 'topped up by burn shares'} />
+            <StatCard label="Course NFT cycles"
+              value={nftCycles === null ? '…' : nftCycles === 'unavailable' ? 'n/a' : `${(Number(nftCycles) / 1e12).toFixed(2)} T`}
+              tone={typeof nftCycles === 'bigint' && Number(nftCycles) < 1e12 ? 'bad' : undefined}
+              sub={nftCycles === 'unavailable' ? 'backend must control the course_nft canister' : 'sweep auto-forwards below 1 T'} />
             <StatCard label="ICP burned" value={stats ? fmtICP(stats.total_burned_e8s) : '…'} sub={stats ? `${stats.votes_cast.toString()} NNS votes cast` : undefined} />
             <StatCard label="Voting TVL" value={stats ? `${fmtICP(stats.tvl_e8s)}` : '…'} sub={stats ? `pending burn ${fmtICP(stats.pending_burn_e8s)}` : undefined} />
           </div>
@@ -617,9 +638,30 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               <Icon name="undo" size={13} /> Refresh
             </Btn>
           </div>
+          {/* ── Quick cycle top-ups: backend balance → frontend / course_nft.
+                The backend refills itself from treasury (auto top-up), so it's
+                the hub the other canisters draw from. ── */}
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ fontSize: 10.5, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--fg-3)' }}>Send cycles from backend</span>
+            <input
+              className="burn-input"
+              value={topupAmount}
+              onChange={(e) => setTopupAmount(e.target.value)}
+              style={{ width: 70, textAlign: 'right' }}
+              inputMode="decimal"
+            />
+            <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>T cycles →</span>
+            <Btn variant="secondary" sm onClick={() => sendCycles('frontend')} disabled={busy !== null}>
+              {busy === 'cycles-frontend' ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Frontend
+            </Btn>
+            <Btn variant="secondary" sm onClick={() => sendCycles('course_nft')} disabled={busy !== null}>
+              {busy === 'cycles-course_nft' ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Course NFT
+            </Btn>
+          </div>
           <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
             The sweep is the protocol's heartbeat (also runs every 5 minutes): settlements, failed-transfer
-            retries, maturity harvests, lottery draws, cycle top-ups.
+            retries, maturity harvests, lottery draws, cycle top-ups — including auto-forwarding 0.5 T to the
+            course NFT canister whenever it dips below 1 T (it gets no burn shares of its own).
           </span>
         </>
       )}
@@ -802,12 +844,18 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               <Btn variant="ghost" sm onClick={refreshSplitNeurons} disabled={busy !== null}><Icon name="undo" size={12} /> Refresh</Btn>
             </span>
             {splitNeurons === null && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Loading…</span>}
-            {splitNeurons !== null && splitNeurons.length === 0 && (
+            {splitNeurons !== null && splitNeurons.filter(u => u.status !== UnstakeStatus.Merged).length === 0 && (
               <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No unstakes yet — nothing is dissolving.</span>
             )}
-            {splitNeurons !== null && splitNeurons.length > 0 && (
+            {splitNeurons !== null && splitNeurons.filter(u => u.status !== UnstakeStatus.Merged).length > 0 && (
               <div className="col" style={{ gap: 4, maxHeight: 380, overflowY: 'auto' }}>
                 {[...splitNeurons]
+                  // Restaked (Merged) rows are 0-stake husks the NNS leaves behind
+                  // after a merge — the stake is already back in the pool. Hide
+                  // them (matches the user-facing Payouts/Staking lists) so the
+                  // admin view only shows neurons the canister is actively
+                  // managing: splitting / dissolving / disbursed-history.
+                  .filter(u => u.status !== UnstakeStatus.Merged)
                   .sort((a, b) => {
                     const live = (u: PendingUnstake) => u.status === UnstakeStatus.Dissolving || u.status === UnstakeStatus.SplitDone ? 0 : 1;
                     return live(a) - live(b) || Number(a.dissolve_eta - b.dissolve_eta);
@@ -836,9 +884,10 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             )}
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Every unstake splits its own neuron, dissolving for the tier's full term, then
-              auto-disburses to the owner. Restaked rows are empty husks (their stake merged back
-              into a pool); disbursed rows are history. These neurons never earn maturity for the
-              protocol — their dissolve belongs entirely to the user.
+              auto-disburses to the owner. Restaked unstakes (the "changed my mind" path) are
+              hidden — their stake is already back in a pool, and the NNS leaves a 0-stake husk
+              behind that cannot be deleted. Disbursed rows are history. These neurons never earn
+              maturity for the protocol — their dissolve belongs entirely to the user.
             </span>
           </div>
         </>

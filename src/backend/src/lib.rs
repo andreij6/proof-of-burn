@@ -3648,23 +3648,35 @@ struct CanisterStatusCycles {
     cycles: candid::Nat,
 }
 
-/// Admin: the FRONTEND canister's live cycle balance, via the management
-/// canister. Requires this backend to be a controller of the frontend
-/// canister (ops: `icp canister update-settings frontend --add-controller
-/// <backend-id>`); otherwise returns the management canister's rejection.
-#[ic_cdk::update(guard = "require_admin")]
-async fn admin_get_frontend_cycles() -> Result<u64, String> {
-    let fid = frontend_canister_id();
+/// A canister's live cycle balance via the management canister's
+/// `canister_status`. Requires this backend to be a CONTROLLER of the target
+/// (ops: `icp canister update-settings <target> --add-controller <backend-id>`);
+/// otherwise returns the management canister's rejection.
+async fn canister_status_cycles(target: Principal) -> Result<u64, String> {
     let res: Result<(CanisterStatusCycles,), _> = ic_cdk::call(
         Principal::management_canister(),
         "canister_status",
-        (CanisterIdRecord { canister_id: fid },),
+        (CanisterIdRecord { canister_id: target },),
     )
     .await;
     match res {
         Ok((status,)) => Ok(u64::try_from(status.cycles.0.clone()).unwrap_or(u64::MAX)),
         Err((code, msg)) => Err(format!("STATUS_FAILED ({:?}): {}", code, msg)),
     }
+}
+
+/// Admin: the FRONTEND canister's live cycle balance (see canister_status_cycles).
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_get_frontend_cycles() -> Result<u64, String> {
+    canister_status_cycles(frontend_canister_id()).await
+}
+
+/// Admin: the COURSE NFT canister's live cycle balance (see
+/// canister_status_cycles). Errs when course_nft isn't wired in Config.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_get_course_nft_cycles() -> Result<u64, String> {
+    let cid = course_nft_canister_id().map_err(|_| "COURSE_NFT_NOT_CONFIGURED".to_string())?;
+    canister_status_cycles(cid).await
 }
 
 /// Admin: move cycles from THIS backend into the frontend canister — a one-way
@@ -3676,6 +3688,19 @@ async fn admin_send_cycles_to_frontend(amount_cycles: u64) -> Result<(), String>
         return Err("INVALID_AMOUNT".to_string());
     }
     deposit_cycles_to(frontend_canister_id(), amount_cycles as u128).await
+}
+
+/// Admin: move cycles from THIS backend into the course_nft canister — a
+/// one-way `deposit_cycles` top-up. The course_nft canister receives no
+/// burn-share/CMC top-ups of its own (the burn split funds only backend +
+/// frontend), so it depends on this and the sweep's auto-guard below.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_send_cycles_to_course_nft(amount_cycles: u64) -> Result<(), String> {
+    if amount_cycles == 0 {
+        return Err("INVALID_AMOUNT".to_string());
+    }
+    let cid = course_nft_canister_id().map_err(|_| "COURSE_NFT_NOT_CONFIGURED".to_string())?;
+    deposit_cycles_to(cid, amount_cycles as u128).await
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -4840,6 +4865,38 @@ async fn cycle_topup_check() {
     }
 }
 
+// ── Course-NFT cycle guard ────────────────────────────────────────────────────
+// The course_nft canister stores every course blob and serves the certified
+// /token pages, but receives NO burn-share/CMC top-ups (the burn split funds
+// only backend + frontend). This sweep leg forwards cycles from THIS backend
+// when course_nft runs low — only while the backend itself sits at/above its
+// own top-up target, so the money-path canister is never starved. Reading the
+// balance needs the backend to be a CONTROLLER of course_nft (like the
+// frontend getter); when it isn't, the guard silently skips and the admin
+// panel's manual top-up (deposit_cycles needs no controllership) still works.
+const COURSE_NFT_CYCLE_FLOOR: u64 = 1_000_000_000_000; // refill below 1 T
+const COURSE_NFT_TOPUP_AMOUNT: u128 = 500_000_000_000; // 0.5 T per pass
+
+async fn course_nft_cycle_guard() {
+    let Ok(cid) = course_nft_canister_id() else { return };
+    if canister_cycle_balance() < CYCLE_TOPUP_TARGET {
+        return; // backend below its own target — cycle_topup_check refills it first
+    }
+    let Ok(cycles) = canister_status_cycles(cid).await else {
+        return; // not a controller (or status failed) — manual top-up only
+    };
+    if cycles >= COURSE_NFT_CYCLE_FLOOR {
+        return;
+    }
+    match deposit_cycles_to(cid, COURSE_NFT_TOPUP_AMOUNT).await {
+        Ok(()) => canister_print(&format!(
+            "course_nft_cycle_guard: forwarded {} cycles (balance was {})",
+            COURSE_NFT_TOPUP_AMOUNT, cycles
+        )),
+        Err(e) => canister_print(&format!("course_nft_cycle_guard: deposit failed: {}", e)),
+    }
+}
+
 // ── ICP total-supply tracker (dashboard chart) ───────────────────────────────
 // Polls the ledger-api total-supply endpoint every 30 min via a NON-replicated
 // HTTPS outcall (the value ticks continuously, so 13 replicas could never agree
@@ -4985,6 +5042,7 @@ fn setup_timers() {
         delete_expired_dapps();
         expire_featured().await;
         cycle_topup_check().await;
+        course_nft_cycle_guard().await; // forward surplus cycles when the NFT canister runs low
         staking_sweep().await;
         lottery_draw_check().await;
         early_adopter_settlement_check().await;
