@@ -37,6 +37,8 @@ interface CourseMarketplaceProps {
   isLocal: boolean;
   /** Launch the engine view for a chosen course. */
   onPlay: (card: CourseCard) => void;
+  /** Launch the create-a-course flow (copy AI instructions → upload → mint). */
+  onCreate: () => void;
   onSignIn: () => void;
 }
 
@@ -53,7 +55,7 @@ const BID_TOKENS: { token: ExplorerToken; label: string; decimals: number; fallb
 
 export default function CourseMarketplace({
   actor, principal, identity, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal,
-  onPlay, onSignIn,
+  onPlay, onCreate, onSignIn,
 }: CourseMarketplaceProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
@@ -308,19 +310,22 @@ export default function CourseMarketplace({
             Play any course for fun — and earn lottery tickets when you finish a round.
             Every course is an NFT built by an AI course designer, and you can own,
             buy, and sell them.{' '}
+            {/* "0.5 ICP" mirrors the backend's MINT_FEE_E8S (lib.rs) — update together. */}
             <MoreInfo title="AI-built courses → play → earn → buy/sell">
               <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
                 <Eyebrow accent>The gist</Eyebrow>
                 <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-                  Describe the course you want and an <b>AI course designer builds it with you</b>,
-                  minted as an NFT. Owners earn lottery tickets from players — and a creator
-                  royalty forever after selling.
+                  Copy our course-designer instructions into <b>any AI agent</b>, describe the
+                  course you want, and upload the JSON it returns. Test-play it, then mint it
+                  as an NFT for 0.5 ICP. Owners earn lottery tickets from players — and a
+                  creator royalty forever after selling.
                 </p>
               </div>
               <div className="col" style={{ gap: 6 }}>
                 <Eyebrow accent>Own &amp; earn</Eyebrow>
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                  <li><b>AI-designed:</b> each NFT carries the build instructions the app compiles into its 9 holes.</li>
+                  <li><b>AI-designed:</b> each NFT carries the build-instructions JSON the app compiles into its 9 holes.</li>
+                  <li><b>Mint for 0.5 ICP</b> — your course is auto-listed on the marketplace.</li>
                   <li><b>Players earn</b> a lottery ticket for completing a round.</li>
                   <li><b>Owners earn</b> a ticket each time a player reaches hole 2.</li>
                 </ul>
@@ -336,11 +341,16 @@ export default function CourseMarketplace({
             </MoreInfo>
           </p>
         </div>
-        {signedIn && (
-          <Btn variant={mineOnly ? 'primary' : 'ghost'} sm onClick={() => setMineOnly((v) => !v)}>
-            <Icon name="list" size={12} stroke={mineOnly ? 'var(--char-950)' : 'currentColor'} /> My courses
+        <div className="row" style={{ gap: 8 }}>
+          {signedIn && (
+            <Btn variant={mineOnly ? 'primary' : 'ghost'} sm onClick={() => setMineOnly((v) => !v)}>
+              <Icon name="list" size={12} stroke={mineOnly ? 'var(--char-950)' : 'currentColor'} /> My courses
+            </Btn>
+          )}
+          <Btn variant="primary" sm onClick={() => (signedIn ? onCreate() : onSignIn())}>
+            <Icon name="spark" size={12} stroke="var(--char-950)" /> Create a course
           </Btn>
-        )}
+        </div>
       </div>
 
       {/* ── Filter bar ── */}
@@ -378,7 +388,7 @@ export default function CourseMarketplace({
         <div className="col" style={{ alignItems: 'center', gap: 12, padding: '48px 0', color: 'var(--fg-3)' }}>
           <Icon name="gamepad" size={28} stroke="var(--fg-dim)" />
           <span style={{ fontSize: 14 }}>
-            {onlyFavs ? 'No favorites yet — tap the heart on a course to save it.' : 'No courses on the marketplace yet — check back soon.'}
+            {onlyFavs ? 'No favorites yet — tap the heart on a course to save it.' : 'No courses on the marketplace yet — be the first: create one with your favorite AI agent.'}
           </span>
         </div>
       ) : (

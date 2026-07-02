@@ -9,6 +9,7 @@ import { fmtTokenAmount } from "./IdeaBoard";
 import { useErrorImpression } from "./analytics";
 import FieldGoal from "./arcade/FieldGoal";
 import CourseMarketplace from "./CourseMarketplace";
+import CourseCreate from "./CourseCreate";
 import CoursePlay from "./CoursePlay";
 import MiniGolf from "./arcade/MiniGolf";
 import type { CourseCard } from "./bindings/backend";
@@ -183,7 +184,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   // marketplace; "play" opens a course in the engine. Courses are AI-built —
   // there is no in-app editor. The active view lives in the hash (#/arcade,
   // #/arcade/course-play, …) so Back returns to the lobby, not off the page.
-  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'course-play' | 'classic-play'>('/arcade', 'lobby');
+  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'course-play' | 'classic-play' | 'create-course'>('/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
   // Lobby sub-page — one per game (its card, persona and leaderboard).
   const [tab, setTab] = useState<'minigolf' | 'fieldgoal'>('minigolf');
@@ -364,6 +365,26 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     );
   }
 
+  // Create a course — copy the AI-designer instructions, upload the JSON it
+  // returns, test-play, then mint. Exiting returns to the lobby, which
+  // remounts CourseMarketplace (it refreshes itself on mount).
+  if (view === 'create-course') {
+    return (
+      <div className="idea-board-container">
+        <CourseCreate
+          actor={actor}
+          identity={identity}
+          host={host}
+          rootKey={rootKey}
+          ledgerCanisterId={ledgerCanisterId}
+          character={myLook}
+          onExit={() => { setTab('minigolf'); setView('lobby'); }}
+          onMinted={() => { setTab('minigolf'); setView('lobby'); }}
+        />
+      </div>
+    );
+  }
+
   // Caldera Ridge — the original built-in course. No token_id / scored session;
   // it runs straight in the MiniGolf engine and is played for fun (the old
   // built-in leaderboard stayed retired with PB-309).
@@ -490,6 +511,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             backendCanisterId={backendCanisterId}
             isLocal={isLocal}
             onPlay={(card) => { setPlayCard(card); setView('course-play'); }}
+            onCreate={() => setView('create-course')}
             onSignIn={onSignIn}
           />
         </>
