@@ -30,6 +30,10 @@ interface CoursePlayProps {
   /** Spectate-only: the "View NFT" 3×3 grid — no scored round is started, no
    *  "Play the course" CTA. Preview + unscored practice still work. */
   spectateOnly?: boolean;
+  /** Skip the 3×3 overview and drop straight into the scored round — used when
+   *  the user hits "Play" on a marketplace card. The overview is still the
+   *  landing for the `course/<id>` deep link, where this is false. */
+  autoStartRound?: boolean;
 }
 
 /** Friendly copy for a complete_round `reason` code. */
@@ -48,14 +52,15 @@ function completionNote(credited: boolean, reason?: string): string {
   }
 }
 
-export default function CoursePlay({ actor, card, character, onExit, onGoParticipate, spectateOnly = false }: CoursePlayProps) {
+export default function CoursePlay({ actor, card, character, onExit, onGoParticipate, spectateOnly = false, autoStartRound = false }: CoursePlayProps) {
   const [holes, setHoles] = useState<HoleDef[] | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
   // Show a "rate this course" prompt once the player completes a round (PB-310).
   const [showRate, setShowRate] = useState(false);
   // Course map first; 'round' = the scored 9 holes, 'practice' = one unscored hole.
-  const [view, setView] = useState<'overview' | 'round' | 'practice'>('overview');
+  // `autoStartRound` (the marketplace "Play" button) drops straight into 'round'.
+  const [view, setView] = useState<'overview' | 'round' | 'practice'>(autoStartRound ? 'round' : 'overview');
   const [practiceIdx, setPracticeIdx] = useState(0);
 
   // Session id + a "scoreable" flag live in refs (never persisted — a reload

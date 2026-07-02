@@ -54,7 +54,7 @@ export default function CourseOverview({ course, courseName, onPlayRound, onPrac
         </span>
       </div>
       <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-        {hint ?? 'Play the full course to earn a lottery ticket. Preview any hole to scout it — or practice it solo (unscored).'}
+        {hint ?? 'Play the full course to earn a lottery ticket. Preview any hole to scout it — pan & zoom the fly-over, then practice that hole solo if you like.'}
       </span>
 
       {/* ── 3×3 hole grid ── */}
@@ -65,7 +65,6 @@ export default function CourseOverview({ course, courseName, onPlayRound, onPrac
             def={def}
             idx={i}
             onPreview={() => setPreviewIdx(i)}
-            onPlay={() => onPracticeHole(i)}
           />
         ))}
       </div>
@@ -81,8 +80,11 @@ export default function CourseOverview({ course, courseName, onPlayRound, onPrac
   );
 }
 
-// ── One grid tile: static thumbnail + actions ──
-function HoleTile({ def, idx, onPreview, onPlay }: { def: HoleDef; idx: number; onPreview: () => void; onPlay: () => void }) {
+// ── One grid tile: static thumbnail + a Preview fly-over. Per-hole practice
+//    used to launch from here, but the main "Play" entry now drops straight
+//    into the round, so the tile is inspection-only — Preview any hole to
+//    fly over it (the fly-over still has a "Play this hole" escape hatch). ──
+function HoleTile({ def, idx, onPreview }: { def: HoleDef; idx: number; onPreview: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -109,9 +111,6 @@ function HoleTile({ def, idx, onPreview, onPlay }: { def: HoleDef; idx: number; 
       <span className="row" style={{ gap: 6 }}>
         <Btn variant="ghost" sm onClick={onPreview} title="Fly over this hole — pan & zoom, no ball">
           <Icon name="eye" size={11} /> Preview
-        </Btn>
-        <Btn variant="secondary" sm onClick={onPlay} title="Practice this hole (not scored)">
-          <Icon name="flame" size={11} /> Play
         </Btn>
       </span>
     </div>

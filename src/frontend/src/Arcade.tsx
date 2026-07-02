@@ -194,6 +194,11 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   // dedicated Mini Golf page reuses this component with base `/mini-golf`.
   const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'classic-play' | 'create-course' | `course/${string}` | `spectate/${string}`>(minigolfMode ? '/mini-golf' : '/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
+  // `skipOverview` is set by the marketplace "Play" click so CoursePlay drops
+  // straight into the scored round, bypassing the 3×3 overview. A fresh
+  // deep-link load (reload at `#/mini-golf/course/<id>`) leaves it false, so the
+  // overview still shows for shared-link visitors. Cleared on exit.
+  const [skipOverview, setSkipOverview] = useState(false);
   // Deep-link resolution: when the hash names a course we don't have a card
   // for (a shared link, the "View NFT" grid, or a reload), fetch it. The hash
   // can be `course/<id>` (play) or `spectate/<id>` (view-only 3×3 grid).
@@ -401,7 +406,8 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             card={playCard}
             character={myLook}
             spectateOnly={spectateCourseId !== null}
-            onExit={() => { setPlayCard(null); setTab('minigolf'); setView('lobby'); }}
+            autoStartRound={skipOverview}
+            onExit={() => { setPlayCard(null); setSkipOverview(false); setTab('minigolf'); setView('lobby'); }}
             onGoParticipate={onGoParticipate}
           />
         </div>
@@ -572,7 +578,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             ledgerCanisterId={ledgerCanisterId}
             backendCanisterId={backendCanisterId}
             isLocal={isLocal}
-            onPlay={(card) => { setPlayCard(card); setView(`course/${card.token_id}`); }}
+            onPlay={(card) => { setPlayCard(card); setSkipOverview(true); setView(`course/${card.token_id}`); }}
             onViewNft={(card) => { setPlayCard(card); setView(`spectate/${card.token_id}`); }}
             onCreate={() => setView('create-course')}
             onSignIn={onSignIn}
