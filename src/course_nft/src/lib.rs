@@ -886,8 +886,10 @@ fn burn(token_id: Nat) -> Result<(), String> {
 // traps on malformed input (bad paths return a certified 404). All string fields
 // are emitted as JSON with proper escaping (no HTML is ever produced) to avoid
 // injection. Every response is bounded well under the 2 MiB message cap: per-token
-// JSON omits the raw `course_data` (it exposes only its byte length plus a separate
-// `/token/<id>/course_data` raw route), and that raw blob is itself capped at
+// JSON embeds the build-instructions `course_data` as a parsed JSON object (never
+// raw bytes — a blob that doesn't parse as JSON embeds as null, so it can't corrupt
+// the document; byte-exact/legacy access stays on the base64
+// `/token/<id>/course_data` route), and that blob is itself capped at
 // `MAX_COURSE_DATA_BYTES` (64 KiB) by `mint`.
 //
 // CERTIFICATION (PB-301 hardening): responses are certified with IC Response
@@ -1023,11 +1025,32 @@ fn token_json(id: u64, tok: &CourseToken) -> String {
     s.push_str(&format!("\"mint_fee_e8s\":{},", tok.mint_fee_e8s));
     s.push_str(&format!("\"course_data_len\":{},", tok.course_data.len()));
     s.push_str(&format!(
-        "\"course_data_url\":{}",
+        "\"course_data_url\":{},",
         json_string(&format!("/token/{}/course_data", id))
     ));
+    // The full build-instructions document, embedded as a real JSON object so
+    // the token page IS the course. Only embedded when the blob parses as JSON
+    // (re-serialized compact via serde_json, so a malformed blob can never
+    // corrupt this document); legacy CBOR blobs get null and remain readable
+    // byte-exact via the base64 `course_data_url` route. Bounded by the
+    // MAX_COURSE_DATA_BYTES mint cap.
+    s.push_str("\"course\":");
+    s.push_str(&course_json_value(&tok.course_data));
     s.push('}');
     s
+}
+
+/// The course blob as an embeddable JSON value: compact re-serialization when
+/// it parses as JSON, `"null"` otherwise (legacy CBOR / malformed data).
+fn course_json_value(course_data: &[u8]) -> String {
+    if course_data.first() == Some(&b'{') {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(course_data) {
+            if let Ok(compact) = serde_json::to_string(&v) {
+                return compact;
+            }
+        }
+    }
+    "null".to_string()
 }
 
 /// Parse a `u64` token id from a path segment without trapping. Rejects empty,
@@ -2028,6 +2051,42 @@ mod tests {
         assert!(b.contains("\"course_data_len\":4"), "{b}");
         // raw blob NOT inlined here
         assert!(!b.contains("course_data_base64"), "{b}");
+        // non-JSON blob (the 4-byte fixture) → course embeds as null.
+        assert!(b.contains("\"course\":null"), "{b}");
+    }
+
+    #[test]
+    fn http_token_embeds_course_json() {
+        fresh();
+        // Build-instructions JSON with odd whitespace/ordering — the embed is a
+        // compact re-serialization, so the token page must parse as one JSON
+        // document with the course nested inside it.
+        let course = "{ \"holes\": [ {\"par\": 3, \"layout\": [\"#T#\", \"#C#\"]} ],\n  \"name\": \"Emb \\\"Test\\\"\", \"format\": \"proof-of-burn/minigolf-course@1\" }";
+        let mut args = good_mint(p(10), "Embedded");
+        args.course_data = course.as_bytes().to_vec();
+        let id = mint(args).unwrap();
+        let r = get(&format!("/token/{id}"));
+        assert_eq!(r.status_code, 200);
+        let doc: serde_json::Value = serde_json::from_str(&body_str(&r)).unwrap();
+        assert_eq!(doc["token_id"], serde_json::json!(id));
+        assert_eq!(doc["course"]["name"], serde_json::json!("Emb \"Test\""));
+        assert_eq!(doc["course"]["format"], serde_json::json!("proof-of-burn/minigolf-course@1"));
+        assert_eq!(doc["course"]["holes"][0]["par"], serde_json::json!(3));
+        assert_eq!(doc["course"]["holes"][0]["layout"][1], serde_json::json!("#C#"));
+    }
+
+    #[test]
+    fn http_token_malformed_json_blob_embeds_null() {
+        fresh();
+        // Starts with '{' but is NOT valid JSON — must never corrupt the token
+        // document; it embeds as null and the page still parses.
+        let mut args = good_mint(p(10), "Broken");
+        args.course_data = b"{\"name\": broken".to_vec();
+        let id = mint(args).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&body_str(&get(&format!("/token/{id}")))).unwrap();
+        assert!(doc["course"].is_null());
+        assert_eq!(doc["name"], serde_json::json!("Broken"));
     }
 
     #[test]

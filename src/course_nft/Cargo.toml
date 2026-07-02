@@ -11,6 +11,7 @@ candid = "0.10"
 ic-cdk = "0.19"
 ic-stable-structures = "0.7"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 ciborium = "0.2"
 # IC HTTP Response Verification v2 certification (official DFINITY crate). Used to
 # certify the per-token / collection HTTP responses so they verify on the normal
