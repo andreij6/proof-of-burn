@@ -15478,8 +15478,23 @@ async fn charge_usd_fee_to_treasury(payer: Principal, token: ExplorerToken, usd_
     call_icrc2_transfer_from(ledger, payer, treasury, amount.saturating_sub(fee), fee).await
 }
 
+/// The seller's share of a marketplace sale. u128 intermediate — the old
+/// `amount * seller_bps` u64 multiply overflowed (and, with overflow-checks
+/// on, trapped) for large small-unit amounts like a $500 ckETH listing.
+fn marketplace_seller_amount(amount: u64, seller_bps: u64) -> u64 {
+    ((amount as u128) * (seller_bps as u128) / 10_000) as u64
+}
+
 /// Charge `usd_e8s` from `payer`, paying `seller_bps`/10_000 to `seller` and the
 /// rest to the treasury (the 80/20 marketplace split).
+///
+/// Money-safety (2026-07-02 audit): the buyer is debited ONCE, in full, into
+/// the treasury subaccount — the old two-transfer_from version could charge
+/// the 80% seller leg and then fail the treasury leg, leaving the buyer paid
+/// but without the purchase. The seller payout now leaves the treasury as a
+/// second step; if THAT leg fails the sale still stands and the seller's
+/// share stays in the treasury for manual settlement (logged) — the paying
+/// buyer is never the victim of a partial failure.
 async fn charge_usd_split_to_seller(
     payer: Principal,
     seller: Principal,
@@ -15491,12 +15506,24 @@ async fn charge_usd_split_to_seller(
     let amount = usd_to_token_amount(token, usd_e8s);
     let ledger = explorer_token_ledger(token, &config);
     let fee = explorer_token_fee(token, &config);
-    let seller_amt = amount * seller_bps / 10_000;
-    let treasury_amt = amount.saturating_sub(seller_amt);
-    let seller_acct = LedgerAccount { owner: seller, subaccount: None };
     let treasury = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-    call_icrc2_transfer_from(ledger, payer, seller_acct, seller_amt.saturating_sub(fee), fee).await?;
-    call_icrc2_transfer_from(ledger, payer, treasury, treasury_amt.saturating_sub(fee), fee).await?;
+
+    // 1) Atomic buyer debit — the full price reaches the treasury or nothing does.
+    call_icrc2_transfer_from(ledger, payer, treasury, amount.saturating_sub(fee), fee).await?;
+
+    // 2) Seller payout from the proceeds (treasury absorbs this transfer's fee).
+    let seller_amt = marketplace_seller_amount(amount, seller_bps).saturating_sub(fee);
+    if seller_amt > 0 {
+        let seller_acct = LedgerAccount { owner: seller, subaccount: None };
+        if let Err(e) =
+            call_ledger_transfer(ledger, Some(TREASURY_SUBACCOUNT), seller_acct, seller_amt, Some(fee)).await
+        {
+            canister_print(&format!(
+                "charge_usd_split_to_seller: seller payout failed — sale stands, {} {:?} units retained in treasury for manual settlement to {}: {}",
+                seller_amt, token, seller, e
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -29852,5 +29879,159 @@ mod tests {
         set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
         set_mock_ledger_transfer(Ok(200));
         assert_eq!(create_farmer(1, "blocked".into(), 7).await.unwrap_err(), "MAX_FARMERS_REACHED");
+    }
+
+    // ===== Money-path audit (2026-07-02) — coverage for the weakest flows =====
+    // Every user-pays flow was mapped to its tests; these close the gaps found:
+    // commit_token (live guard), buy_license + charge_usd_split_to_seller (the
+    // partial-payment fix), refund_registration, refund_xfarm_escrow.
+
+    #[tokio::test]
+    async fn test_commit_token_is_icp_only_and_delegates() {
+        install_staking_test_config();
+        set_mock_caller(alice());
+        // Non-ICP voting is disabled — rejected before any money moves.
+        for t in [ExplorerToken::CkBTC, ExplorerToken::CkETH, ExplorerToken::CkUSDC, ExplorerToken::CkUSDT] {
+            let err = commit_token(999_999, Stance::Adopt, t, 1_000_000).await.unwrap_err();
+            assert!(err.starts_with("TOKEN_VOTING_DISABLED"), "{t:?}: {err}");
+        }
+        // ICP delegates to the real commit path (same error surface).
+        assert_eq!(
+            commit_token(999_999, Stance::Adopt, ExplorerToken::ICP, 200_000_000).await.unwrap_err(),
+            "PROPOSAL_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn test_marketplace_seller_amount_no_overflow() {
+        // A $500 ckETH listing ≈ 2e17 small units; the old u64 multiply
+        // (amount * 8000) overflowed and trapped. u128 math must not.
+        let amount = 200_000_000_000_000_000u64;
+        assert_eq!(marketplace_seller_amount(amount, 8_000), amount / 10_000 * 8_000);
+        // Exact splits on round numbers.
+        assert_eq!(marketplace_seller_amount(10_000, 8_000), 8_000);
+        assert_eq!(marketplace_seller_amount(0, 8_000), 0);
+    }
+
+    /// Seed a marketplace listing (seller-authored crash strategy) directly.
+    fn seed_market_listing(seller: Principal, listing_id: u64, strategy_id: u64, price_usd_e8s: u64) {
+        MARKET_LISTINGS.with(|m| {
+            m.borrow_mut().insert(listing_id, Listing {
+                id: listing_id,
+                kind: MarketKind::Crash,
+                seller,
+                item_id: strategy_id,
+                title: "Strat".into(),
+                teaser: "t".into(),
+                price_usd_e8s,
+                sales: 0,
+                created_at: 1,
+                active: true,
+            });
+        });
+    }
+
+    #[tokio::test]
+    async fn test_buy_license_splits_80_20_through_real_ledger_sim() {
+        install_staking_test_config();
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_CRASH.to_string(), 1u8); });
+        acct_reset();
+        let seller = alice();
+        let buyer = bob();
+        seed_market_listing(seller, 1, 77, 100_000_000); // $1 → 0.2 ICP at the $5 test rate
+        acct_set(buyer, None, 100_000_000);
+        set_mock_caller(buyer);
+        set_mock_ledger_transfer(Ok(1));
+
+        let lic = buy_license(1, ExplorerToken::ICP).await.unwrap();
+        assert!(MARKET_LICENSES.with(|m| m.borrow().get(&lic)).is_some());
+        assert_eq!(MARKET_LISTINGS.with(|m| m.borrow().get(&1)).unwrap().sales, 1);
+
+        // $1 = 20_000_000 e8s. Buyer debited once: (amount - fee) + fee.
+        assert_eq!(acct_get(buyer, None), 100_000_000 - 20_000_000);
+        // Seller got 80% minus the two fees the path costs (buyer-debit + payout).
+        let seller_share = marketplace_seller_amount(20_000_000, MARKET_SELLER_BPS) - 10_000;
+        assert_eq!(acct_get(seller, None), seller_share);
+        // The rest sits in the treasury subaccount.
+        let treasury = acct_get(get_canister_id(), Some(TREASURY_SUBACCOUNT));
+        assert_eq!(treasury + seller_share + 2 * 10_000, 20_000_000);
+
+        // Guards: own listing + double-buy.
+        set_mock_caller(seller);
+        assert_eq!(buy_license(1, ExplorerToken::ICP).await.unwrap_err(), "CANNOT_BUY_OWN");
+        set_mock_caller(buyer);
+        assert_eq!(buy_license(1, ExplorerToken::ICP).await.unwrap_err(), "ALREADY_LICENSED");
+
+        acct_disable();
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_CRASH.to_string()); });
+        MARKET_LISTINGS.with(|m| { m.borrow_mut().remove(&1); });
+        MARKET_LICENSES.with(|m| { m.borrow_mut().remove(&lic); });
+    }
+
+    #[tokio::test]
+    async fn test_buy_license_seller_payout_failure_never_hurts_the_buyer() {
+        // The 2026-07-02 partial-payment fix: the buyer's debit is atomic; a
+        // failing SELLER payout leaves the sale standing (license granted) and
+        // the seller's share parked in the treasury — never a charged buyer
+        // with nothing to show for it (the old two-leg version's failure mode).
+        install_staking_test_config();
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_CRASH.to_string(), 1u8); });
+        acct_reset();
+        let seller = alice();
+        let buyer = bob();
+        seed_market_listing(seller, 2, 78, 100_000_000);
+        acct_set(buyer, None, 100_000_000);
+        set_mock_caller(buyer);
+        // transfer_from (buyer debit) succeeds; call_ledger_transfer (payout) fails.
+        set_mock_ledger_transfer(Err("SELLER_LEDGER_DOWN".into()));
+
+        let lic = buy_license(2, ExplorerToken::ICP).await.unwrap();
+        assert!(MARKET_LICENSES.with(|m| m.borrow().get(&lic)).is_some(), "sale stands");
+        assert_eq!(acct_get(buyer, None), 100_000_000 - 20_000_000, "buyer debited exactly once");
+        assert_eq!(acct_get(seller, None), 0, "payout leg failed");
+        // Full proceeds retained in the treasury for manual settlement.
+        assert_eq!(acct_get(get_canister_id(), Some(TREASURY_SUBACCOUNT)), 20_000_000 - 10_000);
+
+        set_mock_ledger_transfer(Ok(1));
+        acct_disable();
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_CRASH.to_string()); });
+        MARKET_LISTINGS.with(|m| { m.borrow_mut().remove(&2); });
+        MARKET_LICENSES.with(|m| { m.borrow_mut().remove(&lic); });
+    }
+
+    #[tokio::test]
+    async fn test_refund_registration_returns_escrow_once() {
+        install_staking_test_config();
+        acct_reset();
+        let user = alice();
+        set_mock_caller(user);
+        let sub = derive_subaccount(&user, REGISTRATION_SEED);
+        acct_set(get_canister_id(), Some(sub), 125_010_000); // fee deposit + ledger fee
+
+        refund_registration().await.unwrap();
+        assert_eq!(acct_get(user, None), 125_000_000, "escrow minus one ledger fee");
+        assert_eq!(acct_get(get_canister_id(), Some(sub)), 0);
+        // Nothing left → refuse (no treasury drain on repeat calls).
+        assert_eq!(refund_registration().await.unwrap_err(), "NOTHING_TO_REFUND");
+
+        acct_disable();
+    }
+
+    #[tokio::test]
+    async fn test_refund_xfarm_escrow_endpoint_returns_deposit_once() {
+        install_staking_test_config();
+        acct_reset();
+        let user = alice();
+        set_mock_caller(user);
+        let sub = derive_xfarm_subaccount(&user);
+        acct_set(get_canister_id(), Some(sub), 50_000_000);
+
+        let amt = refund_xfarm_escrow().await.unwrap();
+        assert_eq!(amt, 50_000_000 - ICP_FEE_E8S);
+        assert_eq!(acct_get(user, None), amt);
+        // Emptied escrow → 0 refund (idempotent, never over-refunds).
+        assert_eq!(refund_xfarm_escrow().await.unwrap(), 0);
+
+        acct_disable();
     }
 }
