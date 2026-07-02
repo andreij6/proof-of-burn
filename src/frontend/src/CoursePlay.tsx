@@ -3,18 +3,22 @@ import type { CourseCard, CourseRatingSummary } from './bindings/backend';
 import { Icon, Btn, LiveDot } from './ui';
 import { formatRating } from './arcade/courseMarket';
 import MiniGolf from './arcade/MiniGolf';
+import CourseOverview from './arcade/CourseOverview';
 import type { HoleDef, CharacterLook } from './arcade/engine';
 import { decodeCourseBlob } from './arcade/courseInstructions';
 
 // ==========================================
 // Course Play (PB-306 frontend wiring) — loads a chosen course's blob, decodes
-// it, and runs it in the existing MiniGolf engine while driving the signed
-// play-session pipeline:
+// it, and shows the course overview (3×3 hole map with per-hole Preview /
+// unscored practice) before the scored round runs in the existing MiniGolf
+// engine, driving the signed play-session pipeline:
 //   start_play_session(token_id)  on mount
 //   record_hole_event(sid, hole)  per hole sunk (in order)
 //   complete_round(sid)           when hole 9 is sunk
-// Ticket calls NEVER block gameplay; a backend reject (TOO_FAST / OUT_OF_ORDER)
-// just marks the round un-scoreable and the round keeps playing for fun.
+// Only the full round is scored — practice mounts MiniGolf with a single hole
+// and never touches the session. Ticket calls NEVER block gameplay; a backend
+// reject (TOO_FAST / OUT_OF_ORDER) just marks the round un-scoreable and the
+// round keeps playing for fun.
 // ==========================================
 
 interface CoursePlayProps {
@@ -47,6 +51,9 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
   // Show a "rate this course" prompt once the player completes a round (PB-310).
   const [showRate, setShowRate] = useState(false);
+  // Course map first; 'round' = the scored 9 holes, 'practice' = one unscored hole.
+  const [view, setView] = useState<'overview' | 'round' | 'practice'>('overview');
+  const [practiceIdx, setPracticeIdx] = useState(0);
 
   // Session id + a "scoreable" flag live in refs (never persisted — a reload
   // abandons the round by design, which is the replay surface we avoid).
@@ -142,9 +149,38 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
     );
   }
 
+  if (view === 'overview') {
+    return (
+      <CourseOverview
+        course={holes}
+        courseName={card.name || `Course #${card.token_id}`}
+        onPlayRound={() => setView('round')}
+        onPracticeHole={(idx) => { setPracticeIdx(idx); setView('practice'); }}
+        onExit={onExit}
+      />
+    );
+  }
+
+  if (view === 'practice') {
+    // One hole, never scored: no onHoleSunk, no complete_round, no rate modal.
+    return (
+      <MiniGolf
+        key={`practice-${practiceIdx}`}
+        course={[holes[practiceIdx]]}
+        character={character}
+        fullAccess
+        onRoundComplete={() => { /* practice — never scored */ }}
+        onExit={() => setView('overview')}
+        onGoParticipate={() => setView('overview')}
+        submitNote="Practice round — not scored."
+      />
+    );
+  }
+
   return (
     <>
       <MiniGolf
+        key="round"
         course={holes}
         character={character}
         // Course NFT play is not participation-gated at the engine level — the

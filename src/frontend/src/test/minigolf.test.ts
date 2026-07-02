@@ -2,11 +2,12 @@ import { describe, it, expect } from 'vitest';
 import {
   COURSE, COURSE_PAR_TOTAL, HOLES_PER_ROUND, MAX_STROKES_PER_HOLE, MAX_POWER,
   STEP, STOP_SPEED, CUP_CAPTURE_SPEED, CELL, GRID_W, GRID_H, CellType, WALKABLE,
+  BALL_R, POST_R, MOVER_THICK,
   initHole, stepHole, strike, dragToShot, speed, cellAt, cellAtWorld, barEndpoints,
   parseAscii, holeToBackend, holeFromBackend, mergeCourse,
   scoreLabel, fmtMillis,
   holeFromCourseData, courseFromData, moverGeometry, TUNNEL_R,
-  type HoleDef, type HoleState,
+  type HoleDef, type HoleState, type Vec,
 } from '../arcade/engine';
 import { ElementKind, Speed, type CourseDataV1, type Hole as CourseHole, type Element } from '../arcade/courseData';
 
@@ -228,6 +229,96 @@ describe('minigolf physics (voxel tiles)', () => {
     const w1 = barEndpoints(bar, 1); // half a turn → endpoints swap
     expect(w0.x1).toBeCloseTo(w1.x2, 5);
     expect(w0.y1).toBeCloseTo(w1.y2, 5);
+  });
+});
+
+describe('collision precision (substepped integration)', () => {
+  // The ball's cardinal edge samples: none may sit inside a solid cell after
+  // any stepHole return (the "ball halfway into the wall" regression guard).
+  function edgeInSolid(def: HoleDef, pos: Vec): boolean {
+    const r = BALL_R - 0.5;
+    const pts: Vec[] = [
+      pos,
+      { x: pos.x + r, y: pos.y }, { x: pos.x - r, y: pos.y },
+      { x: pos.x, y: pos.y + r }, { x: pos.x, y: pos.y - r },
+    ];
+    return pts.some(p => {
+      const c = cellAtWorld(def, p);
+      return c === CellType.Wall || c === CellType.Void;
+    });
+  }
+
+  it('max-power shots at all 4 walls never leave the ball inside a solid cell', () => {
+    const def = asciiHole();
+    const dirs: Vec[] = [
+      { x: MAX_POWER, y: 0 }, { x: -MAX_POWER, y: 0 },
+      { x: 0, y: MAX_POWER }, { x: 0, y: -MAX_POWER },
+    ];
+    for (const dir of dirs) {
+      const state = initHole(def);
+      strike(state, dir);
+      let t = 0;
+      while (state.phase === 'rolling' && t < 30) {
+        t += STEP;
+        stepHole(state, def, t);
+        expect(edgeInSolid(def, state.pos), `dir ${dir.x},${dir.y} sank into a wall at t=${t.toFixed(3)}`).toBe(false);
+      }
+      // Rested inside the playable box, a full ball radius clear of every wall
+      // face (west x=2·CELL, east x=20·CELL, north y=2·CELL, south y=12·CELL).
+      expect(state.pos.x).toBeGreaterThanOrEqual(2 * CELL + BALL_R - 1e-6);
+      expect(state.pos.x).toBeLessThanOrEqual(20 * CELL - BALL_R + 1e-6);
+      expect(state.pos.y).toBeGreaterThanOrEqual(2 * CELL + BALL_R - 1e-6);
+      expect(state.pos.y).toBeLessThanOrEqual(12 * CELL - BALL_R + 1e-6);
+    }
+  });
+
+  it('never crosses a thin wall segment at max power', () => {
+    const def = asciiHole();
+    const segX = 15 * CELL;
+    def.walls = [{ x1: segX, y1: 2 * CELL, x2: segX, y2: 12 * CELL }];
+    const state = initHole(def);
+    strike(state, { x: MAX_POWER, y: 0 }); // straight east at the segment
+    const limit = segX - BALL_R - MOVER_THICK + 1e-6;
+    let t = 0;
+    while (state.phase === 'rolling' && t < 30) {
+      t += STEP;
+      stepHole(state, def, t);
+      expect(state.pos.x, `crossed the segment at t=${t.toFixed(3)}`).toBeLessThanOrEqual(limit);
+    }
+  });
+
+  it('a post hit at max power reflects and never overlaps it', () => {
+    const rows = [
+      '......................',
+      '.####################.',
+      '.#gggggggggggggggggg#.',
+      '.#ggggggggCggggggggg#.',
+      '.#gggggggggggggggggg#.',
+      '.#gggggggggggggggggg#.',
+      '.#gggggggggggggggggg#.',
+      '.#gggggggggggggggggg#.',
+      '.#gggggggggggggggggg#.',
+      '.#gggggggggggggggggg#.',
+      '.#gggggggggggggggggg#.',
+      '.#ggggggggTggggogggg#.',
+      '.####################.',
+      '......................',
+    ];
+    const def = asciiHole({ rows });
+    const post = { x: 15.5 * CELL, y: 11.5 * CELL }; // the 'o' cell centre
+    const state = initHole(def);
+    strike(state, { x: MAX_POWER, y: 0 }); // head-on from the west
+    let minDist = Infinity;
+    let reflected = false;
+    let t = 0;
+    while (state.phase === 'rolling' && t < 30) {
+      t += STEP;
+      stepHole(state, def, t);
+      minDist = Math.min(minDist, Math.hypot(state.pos.x - post.x, state.pos.y - post.y));
+      if (state.vel.x < 0) reflected = true;
+    }
+    expect(reflected).toBe(true);
+    expect(minDist).toBeGreaterThanOrEqual(BALL_R + POST_R - 1e-6);
   });
 });
 

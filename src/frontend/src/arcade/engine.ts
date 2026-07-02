@@ -134,6 +134,10 @@ export interface BackendHole {
 // ── Physics constants (fixed 120 Hz timestep) ──
 export const STEP = 1 / 120;
 export const BALL_R = 7;
+/** Max ball travel per collision substep (px) — kept well under BALL_R so a
+ *  max-power ball (~7.9 px/step) can't overshoot into geometry before the
+ *  bounce resolves. stepHole splits each 120 Hz step into enough substeps. */
+export const MAX_SUBSTEP_TRAVEL = 3;
 export const POST_R = 12;
 export const CUP_R = 15;
 /** Max capture speed (px/s) — faster putts roll over the cup like the original. */
@@ -385,60 +389,69 @@ export function stepHole(state: HoleState, def: HoleDef, tSec: number): void {
   else if (cell === CellType.SlopeE) state.vel.x += SLOPE_ACCEL * STEP;
   else if (cell === CellType.SlopeW) state.vel.x -= SLOPE_ACCEL * STEP;
 
-  // Integrate.
-  state.pos.x += state.vel.x * STEP;
-  state.pos.y += state.vel.y * STEP;
-
-  // Solid cells around the ball (3×3 neighbourhood covers BALL_R < CELL).
+  // Integrate + resolve collisions in substeps: cap per-substep travel below
+  // BALL_R (a max-power ball moves ~7.9 px per 120 Hz step, more than
+  // BALL_R = 7) so contact resolves within ~MAX_SUBSTEP_TRAVEL px of the true
+  // surface instead of a full step's overshoot — no more visibly sinking into
+  // a wall before the bounce, and no tunneling through thin segments/bars.
+  // Slope/friction/tiles/water/cup/rest stay once-per-step (tuned per 120 Hz).
+  // Deterministic: substep count derives only from the entry speed.
   let hit = false;
-  const cgx = Math.floor(state.pos.x / CELL), cgy = Math.floor(state.pos.y / CELL);
-  for (let gy = cgy - 1; gy <= cgy + 1; gy++) {
-    for (let gx = cgx - 1; gx <= cgx + 1; gx++) {
-      const c = cellAt(def, gx, gy);
-      if (isSolid(c)) hit = collideCell(state, gx, gy) || hit;
-      else if (c === CellType.Post) {
-        hit = bounceFrom(state, (gx + 0.5) * CELL, (gy + 0.5) * CELL, BALL_R + POST_R) || hit;
-      }
-    }
-  }
-  for (const bar of def.bars) hit = collideBar(state, bar, tSec) || hit;
+  const substeps = Math.max(1, Math.ceil((speed(state.vel) * STEP) / MAX_SUBSTEP_TRAVEL));
+  for (let sub = 0; sub < substeps; sub++) {
+    state.pos.x += state.vel.x * (STEP / substeps);
+    state.pos.y += state.vel.y * (STEP / substeps);
 
-  // ── PB-303 walls (segments) ──
-  if (def.walls) {
-    for (const w of def.walls) hit = collideSegment(state, w.x1, w.y1, w.x2, w.y2, MOVER_THICK) || hit;
-  }
-
-  // ── PB-303 statics: rock/tree (box), pillar (circle), bumper (circle w/ gain) ──
-  if (def.statics) {
-    for (const s of def.statics) {
-      if (s.shape === 'box') {
-        hit = collideBox(state, s.x!, s.y!, s.w!, s.h!) || hit;
-      } else if (s.kind === 'bumper') {
-        const before = speed(state.vel);
-        if (bounceFrom(state, s.cx!, s.cy!, BALL_R + s.r!)) {
-          // Add outbound speed (restitution > 1), capped at MAX_POWER.
-          const after = speed(state.vel);
-          if (after > 0) {
-            const target = Math.min(Math.max(before, after) * BUMPER_GAIN, MAX_POWER);
-            const k = target / after;
-            state.vel.x *= k;
-            state.vel.y *= k;
-          }
-          hit = true;
-          state.event = 'bumper';
+    // Solid cells around the ball (3×3 neighbourhood covers BALL_R < CELL).
+    const cgx = Math.floor(state.pos.x / CELL), cgy = Math.floor(state.pos.y / CELL);
+    for (let gy = cgy - 1; gy <= cgy + 1; gy++) {
+      for (let gx = cgx - 1; gx <= cgx + 1; gx++) {
+        const c = cellAt(def, gx, gy);
+        if (isSolid(c)) hit = collideCell(state, gx, gy) || hit;
+        else if (c === CellType.Post) {
+          hit = bounceFrom(state, (gx + 0.5) * CELL, (gy + 0.5) * CELL, BALL_R + POST_R) || hit;
         }
-      } else {
-        hit = bounceFrom(state, s.cx!, s.cy!, BALL_R + s.r!) || hit;
       }
     }
-  }
+    for (const bar of def.bars) hit = collideBar(state, bar, tSec) || hit;
 
-  // ── PB-303 movers: windmill/pendulum/paddle (segments) + sliding (box) ──
-  if (def.movers) {
-    for (const m of def.movers) {
-      const g = moverGeometry(m, tSec);
-      if (g.box) hit = collideBox(state, g.box.x, g.box.y, g.box.w, g.box.h) || hit;
-      else hit = collideSegment(state, g.seg.x1, g.seg.y1, g.seg.x2, g.seg.y2, MOVER_THICK) || hit;
+    // ── PB-303 walls (segments) ──
+    if (def.walls) {
+      for (const w of def.walls) hit = collideSegment(state, w.x1, w.y1, w.x2, w.y2, MOVER_THICK) || hit;
+    }
+
+    // ── PB-303 statics: rock/tree (box), pillar (circle), bumper (circle w/ gain) ──
+    if (def.statics) {
+      for (const s of def.statics) {
+        if (s.shape === 'box') {
+          hit = collideBox(state, s.x!, s.y!, s.w!, s.h!) || hit;
+        } else if (s.kind === 'bumper') {
+          const before = speed(state.vel);
+          if (bounceFrom(state, s.cx!, s.cy!, BALL_R + s.r!)) {
+            // Add outbound speed (restitution > 1), capped at MAX_POWER.
+            const after = speed(state.vel);
+            if (after > 0) {
+              const target = Math.min(Math.max(before, after) * BUMPER_GAIN, MAX_POWER);
+              const k = target / after;
+              state.vel.x *= k;
+              state.vel.y *= k;
+            }
+            hit = true;
+            state.event = 'bumper';
+          }
+        } else {
+          hit = bounceFrom(state, s.cx!, s.cy!, BALL_R + s.r!) || hit;
+        }
+      }
+    }
+
+    // ── PB-303 movers: windmill/pendulum/paddle (segments) + sliding (box) ──
+    if (def.movers) {
+      for (const m of def.movers) {
+        const g = moverGeometry(m, tSec);
+        if (g.box) hit = collideBox(state, g.box.x, g.box.y, g.box.w, g.box.h) || hit;
+        else hit = collideSegment(state, g.seg.x1, g.seg.y1, g.seg.x2, g.seg.y2, MOVER_THICK) || hit;
+      }
     }
   }
 

@@ -87,17 +87,17 @@ TERRAIN LEGEND (one character per cell)
 \`r\` rough — slow.
 \`s\` sand — very slow.
 \`w\` water — hazard: the ball resets with a penalty.
-\`^\` slope pushing the ball North (up).
-\`v\` slope pushing the ball South (down).
-\`>\` slope pushing the ball East (right).
-\`<\` slope pushing the ball West (left).
+\`^\` moving walkway (conveyor) carrying the ball North (up).
+\`v\` moving walkway (conveyor) carrying the ball South (down).
+\`>\` moving walkway (conveyor) carrying the ball East (right).
+\`<\` moving walkway (conveyor) carrying the ball West (left).
 \`o\` post — a round bumper the ball ricochets off.
 \`T\` tee — where the ball starts (rests on grass).
 \`C\` cup — the hole (rests on grass).
 
 DESIGN GUIDANCE
 - Surround each hole's playable area with \`#\` walls so the ball can't escape into void.
-- Guarantee a real path: the ball must be able to travel from T to C over passable ground (grass/rough/sand/slopes) without crossing void or being fully blocked by walls/water.
+- Guarantee a real path: the ball must be able to travel from T to C over passable ground (grass/rough/sand/walkways) without crossing void or being fully blocked by walls/water.
 - Ramp difficulty across the ${L.HOLES} holes: open early holes, tighter fairways / hazards / windmills later.
 - Total par sets the course's marketplace difficulty: Easy is 27 or less, Medium 28–44, Hard 45 or more. Pick pars to land the difficulty I asked for.
 - BE ORIGINAL. Every course is minted as an NFT, and the game fingerprints each hole's layout at mint time: if 3 or more holes match holes from ANY already-minted course — mirrored, rotated, or shifted copies count as matches — the mint is REJECTED. Do not copy the example hole below into the course; invent your own layouts.
