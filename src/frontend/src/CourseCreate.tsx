@@ -6,8 +6,9 @@ import MiniGolf from './arcade/MiniGolf';
 import CourseOverview from './arcade/CourseOverview';
 import type { CharacterLook } from './arcade/engine';
 import {
-  parseCourseInstructions, courseFromInstructions, type CourseInstructions,
+  parseCourseInstructions, courseFromInstructions, holeFromInstructions, type CourseInstructions,
 } from './arcade/courseInstructions';
+import { SHOWCASE_HOLE } from './arcade/showcaseHole';
 import { difficultyBucket, courseShareUrl, courseShareIntent, type Difficulty } from './arcade/courseMarket';
 import { buildCoursePrompt, friendlyCourseError } from './arcade/coursePrompt';
 
@@ -137,8 +138,9 @@ export default function CourseCreate({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Step 3 — test play: full test round, the course-map grid (CourseOverview
-  // with per-hole preview/practice), or a single-hole practice round.
-  const [view, setView] = useState<'wizard' | 'overview' | 'play' | 'practice'>('wizard');
+  // with per-hole preview/practice), a single-hole practice round, or the
+  // step-1 element-demo hole (every authorable element in one playable hole).
+  const [view, setView] = useState<'wizard' | 'overview' | 'play' | 'practice' | 'demo'>('wizard');
   const [practiceIdx, setPracticeIdx] = useState(0);
   const [testPlayed, setTestPlayed] = useState(false);
 
@@ -245,6 +247,23 @@ export default function CourseCreate({
     if (!doc) return null;
     try { return courseFromInstructions(doc); } catch { return null; }
   }, [doc]);
+
+  // ── Element demo: one playable hole with EVERY authorable element, so a
+  //    creator can see grass/rough/sand/water/walls/posts/conveyors/windmill
+  //    in action before designing with their AI. Unscored. ──
+  if (view === 'demo') {
+    return (
+      <MiniGolf
+        course={[holeFromInstructions(SHOWCASE_HOLE)]}
+        character={character}
+        fullAccess
+        onRoundComplete={() => { /* demo — never scored */ }}
+        onExit={() => setView('wizard')}
+        onGoParticipate={() => setView('wizard')}
+        submitNote="Element demo — rough & sand slow the ball, water costs a stroke, walkways carry it, posts and the windmill deflect it."
+      />
+    );
+  }
 
   // ── Course map: the same 3×3 preview grid players get, pre-mint. ──
   if (view === 'overview' && holes && doc) {
@@ -391,7 +410,7 @@ export default function CourseCreate({
               <li>Paste them to your favorite AI (ChatGPT, Claude, …) and design the course together.</li>
               <li>Come back with the JSON document it outputs.</li>
             </ol>
-            <div className="row" style={{ gap: 8 }}>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
               <Btn variant="primary" sm onClick={copyPrompt}>
                 <Icon name="copy" size={12} stroke="var(--char-950)" />
                 {copied ? 'Copied ✓' : 'Copy AI instructions'}
@@ -399,7 +418,15 @@ export default function CourseCreate({
               <Btn variant="ghost" sm onClick={() => setShowPromptFallback(true)}>
                 <Icon name="eye" size={12} /> View
               </Btn>
+              <Btn variant="secondary" sm onClick={() => setView('demo')} title="Play one hole containing every element a course can use">
+                <Icon name="gamepad" size={12} /> Try every element
+              </Btn>
             </div>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              Not sure what the pieces do? <b>Try every element</b> plays a demo hole
+              with all of them: grass, rough, sand, water, walls, posts, moving
+              walkways in all four directions, and a windmill.
+            </span>
           </div>
 
           {/* ── Step 2: upload the course ── */}
