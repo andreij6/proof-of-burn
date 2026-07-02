@@ -10,7 +10,7 @@ import {
 const L = INSTRUCTION_LIMITS;
 
 // Every terrain character parseCourseInstructions accepts (CHAR_TO_CELL keys).
-const LEGEND_CHARS = ['.', '#', 'g', 'r', 's', 'w', '^', 'v', '>', '<', 'h', 'o', 'T', 'C'];
+const LEGEND_CHARS = ['.', '#', 'g', 'r', 's', 'w', '^', 'v', '>', '<', 'h', 'o', 'b', '*', 'N', 'E', 'S', 'W', 'T', 'C'];
 
 describe('buildCoursePrompt', () => {
   const prompt = buildCoursePrompt();
@@ -65,6 +65,7 @@ describe('friendlyCourseError', () => {
     'NAME_EMPTY', 'WRONG_HOLE_COUNT', 'INVALID_PAR', 'NAME_TOO_LONG',
     'INVALID_GRID', 'RAGGED_GRID', 'UNKNOWN_CELL', 'MULTIPLE_TEES',
     'MULTIPLE_CUPS', 'TOO_MANY_MOVERS', 'INVALID_WINDMILL', 'OFF_GRID',
+    'INVALID_PENDULUM', 'INVALID_SLIDER',
   ];
 
   it('maps every validator code to a distinct human sentence (not the code)', () => {

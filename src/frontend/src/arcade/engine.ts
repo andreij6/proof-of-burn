@@ -98,10 +98,19 @@ export const CellType = {
   Post: 9,   // grass with a round post voxel in the middle
   Rough: 10, // heavier-friction surface (between green and sand)
   Elevated: 11, // raised plateau, sloped on ALL sides — climbing the rim costs PLATEAU_CLIMB_SPEED (too slow rolls back); descending gains it
+  GateN: 12, // one-way gate — the ball ENTERS only while moving north; from any other heading it bounces off like a wall
+  GateE: 13,
+  GateS: 14,
+  GateW: 15,
+  Boost: 16, // boost pad — accelerates the ball hard along its CURRENT travel direction (capped at MAX_POWER)
 } as const;
 export type CellType = typeof CellType[keyof typeof CellType];
 
-export const WALKABLE: CellType[] = [CellType.Grass, CellType.SlopeN, CellType.SlopeS, CellType.SlopeE, CellType.SlopeW, CellType.Rough, CellType.Elevated];
+export const WALKABLE: CellType[] = [
+  CellType.Grass, CellType.SlopeN, CellType.SlopeS, CellType.SlopeE, CellType.SlopeW,
+  CellType.Rough, CellType.Elevated,
+  CellType.GateN, CellType.GateE, CellType.GateS, CellType.GateW, CellType.Boost,
+];
 
 /** Runtime hole: compiled grid + world-px tee/cup/bars. */
 export interface HoleDef {
@@ -167,6 +176,9 @@ export const SLOPE_ACCEL = 160;     // px/s²
  *  same speed is gained rolling off. Slower balls roll back down. Tuned so a
  *  ~3-cell walkway run-up from rest (√(2·SLOPE_ACCEL·120) ≈ 196) clears it. */
 export const PLATEAU_CLIMB_SPEED = 180;
+/** Boost-pad acceleration (px/s²) along the ball's current travel direction —
+ *  a hard fling (one pad roughly doubles a medium putt); capped at MAX_POWER. */
+export const BOOST_PAD_ACCEL = 1400;
 export const WALL_RESTITUTION = 0.9;
 export const STOP_SPEED = 5;        // px/s
 export const MAX_SHOT_SECONDS = 15;
@@ -396,26 +408,49 @@ function rotDir(rot: number): Vec {
   }
 }
 
+/** The direction a one-way gate cell admits, or null for any other cell. */
+function gateDir(c: CellType): Vec | null {
+  switch (c) {
+    case CellType.GateN: return { x: 0, y: -1 };
+    case CellType.GateE: return { x: 1, y: 0 };
+    case CellType.GateS: return { x: 0, y: 1 };
+    case CellType.GateW: return { x: -1, y: 0 };
+    default: return null;
+  }
+}
+
 /**
- * Plateau rim energy exchange (sloped on ALL sides). Crossing the boundary
- * between ground level and an Elevated cell trades speed along the crossing
- * axis: climbing costs PLATEAU_CLIMB_SPEED (energy model — v'² = v² ∓ c²);
- * a ball too slow to climb rolls back down (position clamped to the rim,
- * that velocity component reflected, no restitution loss). Descending gains
- * the same speed. Axes are handled independently (substeps keep per-move
- * travel ≤ ~3 px, so multi-axis crossings are rare and near-corner anyway).
+ * Terrain boundary effects, evaluated per axis on every cell crossing
+ * (substeps keep per-move travel ≤ ~3 px, so multi-axis crossings are rare
+ * and near-corner anyway):
+ *
+ * - Plateau rim (Elevated, sloped on ALL sides): crossing between ground
+ *   level and elevation trades speed along the crossing axis on an energy
+ *   model (v'² = v² ∓ PLATEAU_CLIMB_SPEED²); a ball too slow to climb rolls
+ *   back down (clamped to the rim, component reflected, no restitution loss).
+ *   Descending gains the same speed.
+ * - One-way gate (GateN/E/S/W): the ball may ENTER the gate cell only while
+ *   its velocity has a positive component along the gate's direction; from
+ *   any other heading the gate is a wall (clamped back, crossing component
+ *   reflected with WALL_RESTITUTION, event 'wall'). Leaving a gate cell is
+ *   never blocked.
  */
-function crossPlateauRim(state: HoleState, def: HoleDef, sgx: number, sgy: number): void {
+function crossBoundaryEffects(state: HoleState, def: HoleDef, sgx: number, sgy: number): void {
   const c2 = PLATEAU_CLIMB_SPEED * PLATEAU_CLIMB_SPEED;
   const elev = (gx: number, gy: number) => cellAt(def, gx, gy) === CellType.Elevated;
 
   // X axis (evaluated at the source row, isolating the axis).
   const dgx0 = Math.floor(state.pos.x / CELL);
   if (dgx0 !== sgx) {
+    const vx = state.vel.x;
+    const gd = gateDir(cellAt(def, dgx0, sgy));
     const srcE = elev(sgx, sgy);
     const dstE = elev(dgx0, sgy);
-    if (srcE !== dstE) {
-      const vx = state.vel.x;
+    if (gd && state.vel.x * gd.x + state.vel.y * gd.y <= 0) {
+      state.pos.x = Math.max(sgx, dgx0) * CELL - Math.sign(vx) * 0.5;
+      state.vel.x = -vx * WALL_RESTITUTION;
+      state.event = 'wall';
+    } else if (srcE !== dstE) {
       if (!srcE && vx * vx <= c2) {
         state.pos.x = Math.max(sgx, dgx0) * CELL - Math.sign(vx) * 0.5;
         state.vel.x = -vx;
@@ -429,10 +464,15 @@ function crossPlateauRim(state: HoleState, def: HoleDef, sgx: number, sgy: numbe
   const dgx = Math.floor(state.pos.x / CELL);
   const dgy = Math.floor(state.pos.y / CELL);
   if (dgy !== sgy) {
+    const vy = state.vel.y;
+    const gd = gateDir(cellAt(def, dgx, dgy));
     const srcE = elev(dgx, sgy);
     const dstE = elev(dgx, dgy);
-    if (srcE !== dstE) {
-      const vy = state.vel.y;
+    if (gd && state.vel.x * gd.x + state.vel.y * gd.y <= 0) {
+      state.pos.y = Math.max(sgy, dgy) * CELL - Math.sign(vy) * 0.5;
+      state.vel.y = -vy * WALL_RESTITUTION;
+      state.event = 'wall';
+    } else if (srcE !== dstE) {
       if (!srcE && vy * vy <= c2) {
         state.pos.y = Math.max(sgy, dgy) * CELL - Math.sign(vy) * 0.5;
         state.vel.y = -vy;
@@ -459,6 +499,15 @@ export function stepHole(state: HoleState, def: HoleDef, tSec: number): void {
   else if (cell === CellType.SlopeS) state.vel.y += SLOPE_ACCEL * STEP;
   else if (cell === CellType.SlopeE) state.vel.x += SLOPE_ACCEL * STEP;
   else if (cell === CellType.SlopeW) state.vel.x -= SLOPE_ACCEL * STEP;
+  else if (cell === CellType.Boost) {
+    // Boost pad: accelerate along the CURRENT travel direction (capped).
+    const sp = speed(state.vel);
+    if (sp > STOP_SPEED) {
+      const k = Math.min(MAX_POWER, sp + BOOST_PAD_ACCEL * STEP) / sp;
+      state.vel.x *= k;
+      state.vel.y *= k;
+    }
+  }
 
   // Integrate + resolve collisions in substeps: cap per-substep travel below
   // BALL_R (a max-power ball moves ~7.9 px per 120 Hz step, more than
@@ -475,9 +524,9 @@ export function stepHole(state: HoleState, def: HoleDef, tSec: number): void {
     state.pos.x += state.vel.x * (STEP / substeps);
     state.pos.y += state.vel.y * (STEP / substeps);
 
-    // Plateau rim: sloped on all sides — climbing costs speed (or rolls the
-    // ball back), descending gains it. Evaluated on every boundary crossing.
-    crossPlateauRim(state, def, sgx, sgy);
+    // Terrain boundary effects: plateau rims (climb cost / roll-back / descent
+    // boost) and one-way gates. Evaluated on every cell crossing.
+    crossBoundaryEffects(state, def, sgx, sgy);
 
     // Solid cells around the ball (3×3 neighbourhood covers BALL_R < CELL).
     const cgx = Math.floor(state.pos.x / CELL), cgy = Math.floor(state.pos.y / CELL);

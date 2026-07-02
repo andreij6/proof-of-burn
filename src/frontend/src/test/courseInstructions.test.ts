@@ -151,6 +151,48 @@ describe("new elements: elevation 'h', tunnels 'u', windmill arms", () => {
     expect(holeFromInstructions(mkHole(BASE_LAYOUT)).tunnels).toBeUndefined();
   });
 
+  it("compiles bumpers ('b'), boost pads ('*') and one-way gates (N/E/S/W)", () => {
+    const hole = mkHole(withRow(3, '#b*NESW#'));
+    expect(validateCourseInstructions(mkDoc(hole))).toBeNull();
+    const def = holeFromInstructions(hole);
+    // 'b' floors as grass and adds a springy bumper static at the cell centre.
+    expect(cellAt(def, 1, 3)).toBe(CellType.Grass);
+    expect(def.statics).toHaveLength(1);
+    expect(def.statics![0]).toMatchObject({ kind: 'bumper', shape: 'circle', cx: 1.5 * CELL, cy: 3.5 * CELL });
+    expect(cellAt(def, 2, 3)).toBe(CellType.Boost);
+    expect(cellAt(def, 3, 3)).toBe(CellType.GateN);
+    expect(cellAt(def, 4, 3)).toBe(CellType.GateE);
+    expect(cellAt(def, 5, 3)).toBe(CellType.GateS);
+    expect(cellAt(def, 6, 3)).toBe(CellType.GateW);
+  });
+
+  it('validates and compiles pendulums', () => {
+    const good = mkHole(BASE_LAYOUT, { pendulums: [{ x: 4, y: 2, lengthCells: 2, speed: 1.5 }] });
+    expect(validateCourseInstructions(mkDoc(good))).toBeNull();
+    const def = holeFromInstructions(good);
+    expect(def.movers).toHaveLength(1);
+    expect(def.movers![0]).toMatchObject({
+      kind: 'pendulum', pivot: { x: 4 * CELL, y: 2 * CELL }, len: 2 * CELL, baseSpeed: 1.5,
+    });
+    // Bad arm length / off-grid pivot.
+    expect(validateCourseInstructions(mkDoc(mkHole(BASE_LAYOUT, { pendulums: [{ x: 4, y: 2, lengthCells: 0, speed: 1 }] })))).toBe('INVALID_PENDULUM');
+    expect(validateCourseInstructions(mkDoc(mkHole(BASE_LAYOUT, { pendulums: [{ x: 99, y: 2, lengthCells: 2, speed: 1 }] })))).toBe('OFF_GRID');
+  });
+
+  it('validates and compiles sliders (cells/s → engine phase rate)', () => {
+    const good = mkHole(BASE_LAYOUT, { sliders: [{ x: 4, y: 4, axis: 'y' as const, travelCells: 3, speed: 2 }] });
+    expect(validateCourseInstructions(mkDoc(good))).toBeNull();
+    const def = holeFromInstructions(good);
+    expect(def.movers).toHaveLength(1);
+    const m = def.movers![0];
+    expect(m).toMatchObject({ kind: 'sliding', axis: 1, slideLen: (3 * CELL) / 2, len: CELL });
+    // Peak linear speed = baseSpeed · slideLen = authored cells/s · CELL.
+    expect(m.baseSpeed * m.slideLen!).toBeCloseTo(2 * CELL, 6);
+    // Bad axis / zero speed.
+    expect(validateCourseInstructions(mkDoc(mkHole(BASE_LAYOUT, { sliders: [{ x: 4, y: 4, axis: 'z' as never, travelCells: 3, speed: 2 }] })))).toBe('INVALID_SLIDER');
+    expect(validateCourseInstructions(mkDoc(mkHole(BASE_LAYOUT, { sliders: [{ x: 4, y: 4, axis: 'x' as const, travelCells: 3, speed: 0 }] })))).toBe('INVALID_SLIDER');
+  });
+
   it('validates windmill arms (2/3/4 or absent; anything else INVALID_WINDMILL)', () => {
     const mill = { x: 4, y: 4, lengthCells: 2, speed: 1 };
     for (const arms of [undefined, 2, 3, 4]) {

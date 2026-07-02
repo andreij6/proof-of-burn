@@ -758,6 +758,99 @@ describe('elevation cells (sloped rim)', () => {
   });
 });
 
+describe('one-way gates, boost pads, bumpers', () => {
+  function setCell(def: HoleDef, gx: number, gy: number, c: CellType) {
+    def.cells[gy * def.w + gx] = c;
+  }
+
+  it('gate admits the ball along its direction and walls it off against it', () => {
+    // Passing east through an E-gate.
+    const def = asciiHole();
+    setCell(def, 15, 11, CellType.GateE);
+    const state = initHole(def);
+    state.pos = { x: 14.5 * CELL, y: 11.5 * CELL };
+    state.preShot = { ...state.pos };
+    strike(state, { x: 320, y: 0 });
+    let t = 0;
+    while (state.phase === 'rolling' && t < 30) { t += STEP; stepHole(state, def, t); }
+    expect(state.pos.x).toBeGreaterThan(16 * CELL); // passed through and beyond
+
+    // Blocked heading west into the same gate.
+    const back = initHole(def);
+    back.pos = { x: 17.5 * CELL, y: 11.5 * CELL };
+    back.preShot = { ...back.pos };
+    strike(back, { x: -320, y: 0 });
+    let sawWall = false;
+    t = 0;
+    while (back.phase === 'rolling' && t < 30) {
+      t += STEP;
+      stepHole(back, def, t);
+      if (back.event === 'wall') sawWall = true;
+      expect(cellAtWorld(def, back.pos), 'ball entered the gate against its direction').not.toBe(CellType.GateE);
+    }
+    expect(sawWall).toBe(true);
+    expect(back.pos.x).toBeGreaterThan(16 * CELL); // stayed east of the gate
+  });
+
+  it('boost pad accelerates the ball along its current travel direction', () => {
+    const def = asciiHole();
+    setCell(def, 15, 11, CellType.Boost);
+    const state = initHole(def);
+    state.pos = { x: 14.5 * CELL, y: 11.5 * CELL };
+    state.preShot = { ...state.pos };
+    const v0 = 200;
+    strike(state, { x: v0, y: 0 });
+    let vMax = 0;
+    let t = 0;
+    while (state.phase === 'rolling' && t < 30) {
+      t += STEP;
+      stepHole(state, def, t);
+      vMax = Math.max(vMax, speed(state.vel));
+    }
+    expect(vMax).toBeGreaterThan(v0 + 100); // gained real speed crossing the pad
+    expect(state.pos.x).toBeGreaterThan(16 * CELL); // and it carried east
+  });
+
+  it("instruction bumpers ('b') rebound the ball faster than it arrived", () => {
+    const hole = {
+      par: 3,
+      layout: [
+        '##########',
+        '#gggggggg#',
+        '#gTgggbgg#',
+        '#gggggggg#',
+        '#ggggggCg#',
+        '#gggggggg#',
+        '#gggggggg#',
+        '##########',
+      ],
+    };
+    const def = holeFromInstructions(hole);
+    const state = initHole(def);
+    strike(state, { x: 260, y: 0 }); // straight at the bumper
+    let sawBumper = false;
+    let arrivalSpeed = 0;
+    let reboundSpeed = 0;
+    let prevSpeed = speed(state.vel);
+    let t = 0;
+    while (state.phase === 'rolling' && t < 30) {
+      t += STEP;
+      stepHole(state, def, t);
+      if (state.event === 'bumper' && !sawBumper) {
+        sawBumper = true;
+        arrivalSpeed = prevSpeed;
+        reboundSpeed = speed(state.vel);
+      }
+      prevSpeed = speed(state.vel);
+    }
+    expect(sawBumper).toBe(true);
+    // BUMPER_GAIN 1.6× (vs a plain post's 0.9 restitution): springier than
+    // it arrived, by a real margin.
+    expect(reboundSpeed).toBeGreaterThan(arrivalSpeed * 1.3);
+    expect(state.pos.x).toBeLessThan(6 * CELL); // kicked back west
+  });
+});
+
 describe('tunnel pairs (legacy CourseDataV1 portal physics)', () => {
   // The instructions format no longer authors tunnels ('u' was removed), but
   // the engine keeps TunnelPair physics for legacy CourseDataV1 courses —

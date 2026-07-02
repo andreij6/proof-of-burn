@@ -11,7 +11,7 @@ import { CellType, cellAt, CELL, WALKABLE } from '../arcade/engine';
 // The demo's whole point is FULL element coverage — every character a course
 // designer can author. If the format ever grows a new char, this list (and the
 // demo hole) must grow with it.
-const ALL_CHARS = ['.', '#', 'g', 'r', 's', 'w', '^', 'v', '>', '<', 'h', 'o', 'T', 'C'];
+const ALL_CHARS = ['.', '#', 'g', 'r', 's', 'w', '^', 'v', '>', '<', 'h', 'o', 'b', '*', 'N', 'E', 'S', 'W', 'T', 'C'];
 
 describe('SHOWCASE_HOLE (element demo)', () => {
   it('is a valid instruction hole (validates as a 9x course)', () => {
@@ -35,6 +35,16 @@ describe('SHOWCASE_HOLE (element demo)', () => {
     expect(
       SHOWCASE_HOLE.windmills?.some((w) => w.arms === 3 || w.arms === 4),
     ).toBe(true);
+  });
+
+  it('showcases a pendulum and a slider, compiled into engine movers + bumpers', () => {
+    expect(SHOWCASE_HOLE.pendulums?.length ?? 0).toBeGreaterThan(0);
+    expect(SHOWCASE_HOLE.sliders?.length ?? 0).toBeGreaterThan(0);
+    const def = holeFromInstructions(SHOWCASE_HOLE);
+    expect(def.movers?.some((m) => m.kind === 'pendulum')).toBe(true);
+    expect(def.movers?.some((m) => m.kind === 'sliding')).toBe(true);
+    // Both 'b' cells become springy bumper statics.
+    expect(def.statics?.filter((s) => s.kind === 'bumper')).toHaveLength(2);
   });
 
   // The demo deliberately keeps a DIRECT ground route from tee to cup (the

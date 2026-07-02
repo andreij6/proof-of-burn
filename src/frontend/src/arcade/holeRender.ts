@@ -14,9 +14,9 @@
 // ==========================================
 
 import {
-  CELL, CUP_R, POST_R, cellAt, cellAtWorld, barSegments, CellType,
+  CELL, CUP_R, POST_R, cellAt, cellAtWorld, barSegments, moverGeometry, CellType,
   HAIR_COLORS, SKIN_COLORS, OUTFIT_COLORS,
-  type CharacterLook, type HoleDef, type MovingBar, type Vec,
+  type CharacterLook, type HoleDef, type Mover, type MovingBar, type Vec,
 } from './engine';
 
 /** Camera: screen = isoBase(world) · scale + (ox, oy). */
@@ -56,6 +56,17 @@ const PAL = {
   // edge (lit on the NW light side, shaded on the SE side).
   elevA: '#5fd489', elevB: '#55ca7f', elevL: '#37905c', elevR: '#2a7449',
   elevRampLit: '#49b872', elevRampShade: '#318554',
+  // One-way gate: dark pad + bright static chevrons (never animated — that's
+  // what distinguishes a gate from a conveyor at a glance).
+  gatePad: '#263831', gateChevron: 'rgba(255,255,255,0.78)',
+  // Boost pad: amber energy pad with a pulsing diamond.
+  boostPad: '#8f6a1f', boostGlow: '#ffd257',
+  // Bumper: springy magenta ringed post.
+  bumperTop: '#e2447e', bumperSide: '#a32355', bumperRing: '#ffd0e2',
+  // Pendulum arm (brass) + hub, sliding block (steel).
+  armTop: '#c9a24a', armL: '#987630', armR: '#6f5520',
+  hubTop: '#b9b9b9', hubSide: '#818181',
+  sliderTop: '#8a99a8', sliderL: '#5f6d7c', sliderR: '#46525f',
   // Tunnel mouth: deep-indigo void with a violet rim + swirl.
   tunnelRim: '#6d4fc4', tunnelVoid: '#140b28', tunnelSwirl: '167, 139, 250',
   shadow: 'rgba(10, 25, 14, 0.22)',
@@ -180,6 +191,19 @@ export function renderHoleScene(ctx: CanvasRenderingContext2D, def: HoleDef, vie
   for (const bar of def.bars) {
     pushRotor(items, ctx, view, bar, tSec);
   }
+  // Bumpers ('b') — springy ringed posts from def.statics. Other legacy
+  // statics kinds (rock/tree/pillar) remain legacy-only and unrendered.
+  if (def.statics) {
+    for (const s of def.statics) {
+      if (s.kind === 'bumper' && s.shape === 'circle') {
+        items.push({ key: s.cx! + s.cy!, draw: () => drawBumper(ctx, view, s.cx!, s.cy!, s.r!, tSec) });
+      }
+    }
+  }
+  // Instruction movers: pendulum arms + sliding blocks (moverGeometry-driven).
+  if (def.movers) {
+    for (const m of def.movers) pushMover(items, ctx, view, m, tSec);
+  }
   items.push({ key: def.cup.x + def.cup.y, draw: () => drawFlag(ctx, def, view, tSec) });
   const ball = opts.ball;
   if (ball) {
@@ -252,6 +276,17 @@ function beltDir(c: CellType): Vec | null {
   }
 }
 
+/** Admit direction (unit, world) of a one-way gate cell, or null. */
+function gateDirR(c: CellType): Vec | null {
+  switch (c) {
+    case CellType.GateN: return { x: 0, y: -1 };
+    case CellType.GateE: return { x: 1, y: 0 };
+    case CellType.GateS: return { x: 0, y: 1 };
+    case CellType.GateW: return { x: -1, y: 0 };
+    default: return null;
+  }
+}
+
 /** Raised blocks (wall cubes / elevated plateaus) cast the baked NW shadow. */
 function castsShadow(c: CellType): boolean {
   return c === CellType.Wall || c === CellType.Elevated;
@@ -264,12 +299,14 @@ function drawGroundCell(ctx: CanvasRenderingContext2D, def: HoleDef, view: IsoVi
   const corners = cellCorners(view, gx, gy, 0);
   const k = view.scale / REF_SCALE; // line-width / detail scale
   const belt = beltDir(c);
+  const gate = gateDirR(c);
 
   let fill: string;
   switch (c) {
     case CellType.Sand: fill = PAL.sand; break;
     case CellType.Water: fill = PAL.water; break;
-    default: fill = belt ? PAL.belt : (gx + gy) % 2 === 0 ? PAL.grassA : PAL.grassB;
+    case CellType.Boost: fill = PAL.boostPad; break;
+    default: fill = gate ? PAL.gatePad : belt ? PAL.belt : (gx + gy) % 2 === 0 ? PAL.grassA : PAL.grassB;
   }
   poly(ctx, corners, fill);
 
@@ -302,6 +339,84 @@ function drawGroundCell(ctx: CanvasRenderingContext2D, def: HoleDef, view: IsoVi
     ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
   } else if (belt) {
     drawBeltCell(ctx, view, gx, gy, belt, tSec, k);
+  } else if (gate) {
+    // STATIC chevrons pointing the admit direction (a gate never animates —
+    // that's how it reads differently from a conveyor).
+    const cx = (gx + 0.5) * CELL, cy = (gy + 0.5) * CELL;
+    ctx.strokeStyle = PAL.gateChevron;
+    ctx.lineWidth = 1.8 * k;
+    for (const off of [-6, 4]) {
+      const bx = cx + gate.x * off, by = cy + gate.y * off;
+      const tip = isoP(view, bx + gate.x * 9, by + gate.y * 9, 0.5);
+      const l = isoP(view, bx - gate.x * 2 - gate.y * 7, by - gate.y * 2 + gate.x * 7, 0.5);
+      const r = isoP(view, bx - gate.x * 2 + gate.y * 7, by - gate.y * 2 - gate.x * 7, 0.5);
+      ctx.beginPath(); ctx.moveTo(l.x, l.y); ctx.lineTo(tip.x, tip.y); ctx.lineTo(r.x, r.y); ctx.stroke();
+    }
+  } else if (c === CellType.Boost) {
+    // Pulsing energy diamond — direction-agnostic (it boosts along travel).
+    const cx = (gx + 0.5) * CELL, cy = (gy + 0.5) * CELL;
+    const pulse = 0.5 + 0.5 * Math.sin(tSec * 4 + (gx * 3 + gy * 5) * 0.7);
+    ctx.strokeStyle = PAL.boostGlow;
+    ctx.globalAlpha = 0.45 + 0.55 * pulse;
+    ctx.lineWidth = 1.8 * k;
+    for (const rad of [6 + 4 * pulse, 12 + 4 * pulse]) {
+      const pts = [
+        isoP(view, cx, cy - rad, 0.5), isoP(view, cx + rad, cy, 0.5),
+        isoP(view, cx, cy + rad, 0.5), isoP(view, cx - rad, cy, 0.5),
+      ];
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+/** Bumper: a springy magenta ringed post with a subtle idle pulse. */
+function drawBumper(ctx: CanvasRenderingContext2D, view: IsoView, cx: number, cy: number, r: number, tSec: number) {
+  const pulse = 1 + 0.06 * Math.sin(tSec * 5 + (cx + cy) * 0.02);
+  drawPrism(ctx, view, cx, cy, r * pulse, 0, 10, PAL.bumperTop, PAL.bumperSide, PAL.bumperSide);
+  const p = isoP(view, cx, cy, 10);
+  ctx.strokeStyle = PAL.bumperRing;
+  ctx.lineWidth = 2 * (view.scale / REF_SCALE);
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y, r * pulse * view.scale * 1.25, r * pulse * view.scale * 0.7, 0, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+/** Sliding-block height (world units) — just below a wall cube. */
+const SLIDER_Z = 16;
+
+/** Pendulum arms (brass prisms from a steel hub) + sliding blocks (steel cube). */
+function pushMover(
+  items: { key: number; draw: () => void }[],
+  ctx: CanvasRenderingContext2D,
+  view: IsoView,
+  m: Mover,
+  tSec: number,
+) {
+  const g = moverGeometry(m, tSec);
+  if (g.box) {
+    const b = g.box;
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    items.push({
+      key: cx + cy + CELL,
+      draw: () => drawPrism(ctx, view, cx, cy, b.w / 2, 0, SLIDER_Z, PAL.sliderTop, PAL.sliderL, PAL.sliderR),
+    });
+    return;
+  }
+  items.push({
+    key: m.pivot.x + m.pivot.y,
+    draw: () => drawPrism(ctx, view, m.pivot.x, m.pivot.y, 6, 0, 15, PAL.hubTop, PAL.hubSide, PAL.hubSide),
+  });
+  const segs = 4;
+  for (let i = 1; i <= segs; i++) {
+    const t = i / segs;
+    const x = g.seg.x1 + (g.seg.x2 - g.seg.x1) * t;
+    const y = g.seg.y1 + (g.seg.y2 - g.seg.y1) * t;
+    items.push({ key: x + y, draw: () => drawPrism(ctx, view, x, y, 7, 2, 14, PAL.armTop, PAL.armL, PAL.armR) });
   }
 }
 

@@ -12,7 +12,10 @@
 // blobs (PB-303) so previously minted courses keep loading.
 // ==========================================
 
-import { CELL, CellType, courseFromData, type HoleDef, type MovingBar, type Vec } from './engine';
+import {
+  CELL, CellType, POST_R, courseFromData,
+  type HoleDef, type Mover, type MovingBar, type StaticObs, type Vec,
+} from './engine';
 import { decodeCourseData } from './courseData';
 
 export const COURSE_INSTRUCTIONS_FORMAT = 'proof-of-burn/minigolf-course@1';
@@ -30,12 +33,36 @@ export interface InstructionWindmill {
   arms?: number;
 }
 
+export interface InstructionPendulum {
+  /** Pivot in cell units (fractions allowed) — the arm hangs and swings below it. */
+  x: number;
+  y: number;
+  /** Arm length in cells. */
+  lengthCells: number;
+  /** Swing rate, rad/s (0.8–2.5 is a sensible range). */
+  speed: number;
+}
+
+export interface InstructionSlider {
+  /** Path centre in cell units (fractions allowed). */
+  x: number;
+  y: number;
+  /** Axis the block patrols along. */
+  axis: 'x' | 'y';
+  /** Total travel in cells (the block slides ±travelCells/2 around the centre). */
+  travelCells: number;
+  /** Patrol speed in cells/second (0.5–4 is a sensible range). */
+  speed: number;
+}
+
 export interface InstructionHole {
   name?: string;
   par: number; // 2..=5
   /** ASCII terrain grid — equal-length rows, exactly one 'T' and one 'C'. */
   layout: string[];
   windmills?: InstructionWindmill[];
+  pendulums?: InstructionPendulum[];
+  sliders?: InstructionSlider[];
 }
 
 export interface CourseInstructions {
@@ -47,7 +74,9 @@ export interface CourseInstructions {
   holes: InstructionHole[]; // exactly 9
 }
 
-// One character per terrain cell. 'T'/'C' sit on green; posts sit on green too.
+// One character per terrain cell. 'T'/'C' sit on green; posts and bumpers
+// ('o'/'b') sit on green too. Uppercase N/E/S/W are one-way gates admitting
+// the ball only while it moves in that compass direction.
 const CHAR_TO_CELL: Record<string, CellType> = {
   '.': CellType.Void,
   '#': CellType.Wall,
@@ -60,7 +89,13 @@ const CHAR_TO_CELL: Record<string, CellType> = {
   '>': CellType.SlopeE,
   '<': CellType.SlopeW,
   o: CellType.Post,
+  b: CellType.Grass, // bumper — compiled into def.statics (springy round post)
   h: CellType.Elevated,
+  '*': CellType.Boost,
+  N: CellType.GateN,
+  E: CellType.GateE,
+  S: CellType.GateS,
+  W: CellType.GateW,
   T: CellType.Grass,
   C: CellType.Grass,
 };
@@ -110,6 +145,22 @@ export function validateCourseInstructions(doc: CourseInstructions): string | nu
       if (m.lengthCells <= 0 || m.lengthCells > Math.max(width, height)) return 'INVALID_WINDMILL';
       if (m.arms !== undefined && (!Number.isInteger(m.arms) || m.arms < 2 || m.arms > 4)) return 'INVALID_WINDMILL';
     }
+    const pends = h.pendulums ?? [];
+    if (!Array.isArray(pends) || pends.length > INSTRUCTION_LIMITS.WINDMILLS_PER_HOLE) return 'TOO_MANY_MOVERS';
+    for (const p of pends) {
+      if (![p.x, p.y, p.lengthCells, p.speed].every((n) => typeof n === 'number' && Number.isFinite(n))) return 'INVALID_PENDULUM';
+      if (p.x < 0 || p.x > width || p.y < 0 || p.y > height) return 'OFF_GRID';
+      if (p.lengthCells <= 0 || p.lengthCells > Math.max(width, height)) return 'INVALID_PENDULUM';
+    }
+    const slides = h.sliders ?? [];
+    if (!Array.isArray(slides) || slides.length > INSTRUCTION_LIMITS.WINDMILLS_PER_HOLE) return 'TOO_MANY_MOVERS';
+    for (const s of slides) {
+      if (![s.x, s.y, s.travelCells, s.speed].every((n) => typeof n === 'number' && Number.isFinite(n))) return 'INVALID_SLIDER';
+      if (s.axis !== 'x' && s.axis !== 'y') return 'INVALID_SLIDER';
+      if (s.x < 0 || s.x > width || s.y < 0 || s.y > height) return 'OFF_GRID';
+      if (s.travelCells <= 0 || s.travelCells > Math.max(width, height)) return 'INVALID_SLIDER';
+      if (s.speed <= 0) return 'INVALID_SLIDER';
+    }
   }
   return null;
 }
@@ -129,12 +180,19 @@ export function holeFromInstructions(h: InstructionHole): HoleDef {
   const cells = new Uint8Array(width * height);
   let tee: Vec | null = null;
   let cup: Vec | null = null;
+  const bumpers: StaticObs[] = []; // 'b' cells — springy round posts (gain > 1)
   h.layout.forEach((row, gy) => {
     for (let gx = 0; gx < width; gx++) {
       const ch = row[gx];
       cells[gy * width + gx] = CHAR_TO_CELL[ch];
       if (ch === 'T') tee = { x: (gx + 0.5) * CELL, y: (gy + 0.5) * CELL };
       if (ch === 'C') cup = { x: (gx + 0.5) * CELL, y: (gy + 0.5) * CELL };
+      if (ch === 'b') {
+        bumpers.push({
+          kind: 'bumper', shape: 'circle',
+          cx: (gx + 0.5) * CELL, cy: (gy + 0.5) * CELL, r: POST_R,
+        });
+      }
     }
   });
   if (!tee || !cup) throw new Error('INVALID_COURSE: MISSING_TEE_OR_CUP');
@@ -146,7 +204,33 @@ export function holeFromInstructions(h: InstructionHole): HoleDef {
     phase: 0,
     arms: m.arms ?? 2,
   }));
-  return { name: h.name ?? '', par: h.par, w: width, h: height, cells, tee, cup, bars };
+  const movers: Mover[] = [
+    ...(h.pendulums ?? []).map((p): Mover => ({
+      kind: 'pendulum',
+      pivot: { x: p.x * CELL, y: p.y * CELL },
+      len: p.lengthCells * CELL,
+      baseSpeed: p.speed,
+      phase0: 0,
+    })),
+    ...(h.sliders ?? []).map((s): Mover => {
+      // Engine sliding blocks travel ±slideLen on sin(phase); convert the
+      // authored cells/s patrol speed into the phase rate that peaks at it.
+      const slideLen = (s.travelCells * CELL) / 2;
+      return {
+        kind: 'sliding',
+        pivot: { x: s.x * CELL, y: s.y * CELL },
+        len: CELL,
+        baseSpeed: (s.speed * CELL) / slideLen,
+        phase0: 0,
+        axis: s.axis === 'y' ? 1 : 0,
+        slideLen,
+      };
+    }),
+  ];
+  const def: HoleDef = { name: h.name ?? '', par: h.par, w: width, h: height, cells, tee, cup, bars };
+  if (bumpers.length) def.statics = bumpers;
+  if (movers.length) def.movers = movers;
+  return def;
 }
 
 /** Compile a full validated instructions document into runtime HoleDefs. */

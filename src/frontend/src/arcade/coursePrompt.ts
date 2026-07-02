@@ -68,7 +68,9 @@ Each hole is:
   "name": "<optional, at most ${L.NAME_LEN} characters>",
   "par": <integer>,
   "layout": [ "<row string>", ... ],
-  "windmills": [ { "x": <num>, "y": <num>, "lengthCells": <num>, "speed": <num>, "arms": <2, 3 or 4 — optional, default 2> }, ... ]  // optional
+  "windmills": [ { "x": <num>, "y": <num>, "lengthCells": <num>, "speed": <num>, "arms": <2, 3 or 4 — optional, default 2> }, ... ],  // optional
+  "pendulums": [ { "x": <num>, "y": <num>, "lengthCells": <num>, "speed": <num> }, ... ],  // optional — arm hangs below the pivot and swings
+  "sliders": [ { "x": <num>, "y": <num>, "axis": "x" | "y", "travelCells": <num>, "speed": <num> }, ... ]  // optional — a solid block patrolling back and forth
 }
 
 HARD CONSTRAINTS (the app rejects the document if ANY is violated)
@@ -79,6 +81,8 @@ HARD CONSTRAINTS (the app rejects the document if ANY is violated)
 5. Every character in every row comes from the TERRAIN LEGEND below — nothing else.
 6. Each hole has exactly one 'T' (tee) and exactly one 'C' (cup).
 7. At most ${L.WINDMILLS_PER_HOLE} windmills per hole. A windmill's pivot (x, y) is in cell units and must lie inside the grid (fractions allowed); "lengthCells" is the full arm length, greater than 0 and no larger than the grid's bigger dimension; "speed" is in radians/second (negative spins counter-clockwise; 0.8–2.0 is a sensible range); "arms" is optional and must be 2 (the classic full bar — the default), 3, or 4 (evenly spaced half-arm rotors).
+8. At most ${L.WINDMILLS_PER_HOLE} pendulums per hole. A pendulum's (x, y) pivot is in cell units inside the grid; its arm ("lengthCells" > 0, no larger than the grid's bigger dimension) hangs BELOW the pivot and swings side to side; "speed" is the swing rate in radians/second (0.8–2.5 sensible).
+9. At most ${L.WINDMILLS_PER_HOLE} sliders per hole. A slider is a solid one-cell block patrolling through its (x, y) path centre along "axis" ("x" or "y"), covering "travelCells" total cells (> 0, within the grid) at "speed" cells/second (> 0; 0.5–4 sensible). Keep its path clear of walls.
 
 TERRAIN LEGEND (one character per cell)
 \`.\` void — out of bounds, no floor. The ball must never need to cross it.
@@ -92,7 +96,13 @@ TERRAIN LEGEND (one character per cell)
 \`>\` moving walkway (conveyor) carrying the ball East (right).
 \`<\` moving walkway (conveyor) carrying the ball West (left).
 \`h\` elevated plateau — raised ground with a sloped rim on ALL sides. The ball climbs the slope from any direction if it has enough speed (a slow ball rolls back down), rolls normally on top, and speeds up rolling off any edge. A moving walkway pointed at the rim gives a reliable run-up.
-\`o\` post — a round bumper the ball ricochets off.
+\`o\` post — a round obstacle the ball ricochets off (no speed change).
+\`b\` bumper — a springy round post: the ball rebounds FASTER than it arrived (pinball kicker).
+\`*\` boost pad — accelerates the ball hard in whatever direction it is ALREADY moving (unlike a walkway, which pushes a fixed direction).
+\`N\` one-way gate — the ball can enter only while moving North (up); from any other heading it bounces off like a wall.
+\`E\` one-way gate, passable only moving East (right).
+\`S\` one-way gate, passable only moving South (down).
+\`W\` one-way gate, passable only moving West (left).
 \`T\` tee — where the ball starts (rests on grass).
 \`C\` cup — the hole (rests on grass).
 
@@ -100,6 +110,10 @@ DESIGN GUIDANCE
 - Surround each hole's playable area with \`#\` walls so the ball can't escape into void.
 - Guarantee a real path: the ball must be able to travel from T to C over passable ground (grass/rough/sand/walkways) without crossing void or being fully blocked by walls/water.
 - Elevation: an \`h\` plateau demands pace — a firm putt (or a walkway run-up) climbs the sloped rim, a timid one rolls back down. Use plateaus for raised greens, guarded shortcuts, and risky drop-offs; remember the ball accelerates coming off the edge.
+- Bumpers (\`b\`) add chaos and speed — line a corridor with them for a pinball alley, but never crowd the cup with them.
+- One-way gates (\`N\`/\`E\`/\`S\`/\`W\`) enforce routing: a shortcut the ball can drop into but not back out of, or a loop the player must commit to. Point the gate the way you want play to flow.
+- Boost pads (\`*\`) reward a good line — place them on long straights, before a plateau rim, or before water for a risky carry. The boost follows the ball's current direction.
+- Pendulums and sliders are TIMING hazards: a pendulum guards the mouth of a passage from above it; a slider blocks a corridor on a rhythm. Give each a clear passing window and keep slider paths free of walls.
 - Ramp difficulty across the ${L.HOLES} holes: open early holes, tighter fairways / hazards / windmills later.
 - Total par sets the course's marketplace difficulty: Easy is 27 or less, Medium 28–44, Hard 45 or more. Pick pars to land the difficulty I asked for.
 - BE ORIGINAL. Every course is minted as an NFT, and the game fingerprints each hole's layout at mint time: if 3 or more holes match holes from ANY already-minted course — mirrored, rotated, or shifted copies count as matches — the mint is REJECTED. Do not copy the example hole below into the course; invent your own layouts.
@@ -123,9 +137,11 @@ const ERROR_COPY: Record<string, string> = {
   UNKNOWN_CELL: "A hole's layout uses a character that isn't in the terrain legend.",
   MULTIPLE_TEES: "Each hole needs exactly one tee ('T').",
   MULTIPLE_CUPS: "Each hole needs exactly one cup ('C').",
-  TOO_MANY_MOVERS: `A hole has more than ${L.WINDMILLS_PER_HOLE} windmills.`,
+  TOO_MANY_MOVERS: `A hole has more than ${L.WINDMILLS_PER_HOLE} of one mover type (windmills, pendulums, or sliders).`,
   INVALID_WINDMILL: 'A windmill has an invalid arm length, speed, or arm count (2, 3, or 4).',
-  OFF_GRID: "A windmill's pivot sits outside its hole's grid.",
+  INVALID_PENDULUM: 'A pendulum has an invalid arm length or swing speed.',
+  INVALID_SLIDER: 'A slider needs axis "x" or "y", a positive travel within the grid, and a positive speed.',
+  OFF_GRID: "A mover's pivot sits outside its hole's grid.",
 };
 
 /**

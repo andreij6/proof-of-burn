@@ -326,7 +326,7 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
         )}
       </div>
       <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-        Drag back from the ball to aim — farther = harder. Sand slows, water costs a stroke, moving walkways carry the ball, 12-stroke pickup.
+        Drag back from the ball to aim — farther = harder. Sand slows, water costs a stroke, walkways carry the ball, bumpers spring it, 12-stroke pickup.
       </span>
     </div>
   );
