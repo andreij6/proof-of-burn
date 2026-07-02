@@ -619,6 +619,22 @@ function ManageModal({ actor, card, onClose, onDone }: {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Live sale-split preview (mirrors the backend `compute_sale_split` exactly:
+  // 75% seller / 10% creator royalty / 15% protocol — the protocol leg bundles
+  // the 5% cycles + 5% frontend + ~5% treasury legs, so the three displayed
+  // rows always sum to the full price). When the seller IS the original creator
+  // the backend coalesces the royalty into the seller payout (85% / 0% / 15%),
+  // so we drop the royalty row and relabel the seller's share.
+  const isCreator = !!(card.creator && card.owner && card.creator.toString() === card.owner.toString());
+  const previewE8s = parseTokenAmount(priceInput, ICP_E8S);
+  const hasPrice = previewE8s !== null && previewE8s > 0n;
+  const price = hasPrice ? (previewE8s as bigint) : 0n;
+  const sellerShare = (price * 7500n) / 10000n;
+  const royalty = (price * 1000n) / 10000n;
+  const protocolShare = price - sellerShare - royalty;
+  const sellerReceive = isCreator ? sellerShare + royalty : sellerShare;
+  const amt = (v: bigint) => hasPrice ? `${fmtICP(v)} ICP` : '—';
+
   const submit = async (action: 'list' | 'delist') => {
     if (busy) return;
     setErr(null);
@@ -654,10 +670,30 @@ function ManageModal({ actor, card, onClose, onDone }: {
           inputMode="decimal"
         />
       </div>
-      <p style={{ fontSize: 11.5, color: 'var(--fg-3)', margin: 0 }}>
-        On a sale, 75% goes to you, 10% to the original creator (royalty), and 15% to the
-        protocol. Delist any time at no cost.
-      </p>
+      <div className="col" style={{ gap: 6, padding: 10, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface)' }}>
+        <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>On a sale, the buyer's ICP splits as:</span>
+        <div className="col" style={{ gap: 4, fontSize: 12.5 }}>
+          <span className="row" style={{ justifyContent: 'space-between' }}>
+            <span>{isCreator ? 'You (seller + creator royalty, 85%)' : 'You — seller (75%)'}</span>
+            <span className="mono" style={{ color: 'var(--fg-2)' }}>{amt(sellerReceive)}</span>
+          </span>
+          {!isCreator && (
+            <span className="row" style={{ justifyContent: 'space-between' }}>
+              <span>Original creator — royalty (10%)</span>
+              <span className="mono" style={{ color: 'var(--fg-3)' }}>{amt(royalty)}</span>
+            </span>
+          )}
+          <span className="row" style={{ justifyContent: 'space-between' }}>
+            <span>Protocol — cycles + treasury (15%)</span>
+            <span className="mono" style={{ color: 'var(--fg-3)' }}>{amt(protocolShare)}</span>
+          </span>
+        </div>
+        <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+          {hasPrice
+            ? <>Buyer pays <b className="mono">{fmtICP(price)} ICP</b> · you receive <b className="mono" style={{ color: 'var(--ok)' }}>{fmtICP(sellerReceive)} ICP</b>.</>
+            : 'Enter a price to see exactly how much you keep. Delist any time at no cost.'}
+        </span>
+      </div>
       {err && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{err}</span>}
       <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
         {forSale ? (
