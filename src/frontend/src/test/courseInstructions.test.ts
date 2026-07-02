@@ -142,27 +142,12 @@ describe("new elements: elevation 'h', tunnels 'u', windmill arms", () => {
     expect(cellAt(def, 4, 3)).toBe(CellType.Elevated);
   });
 
-  it('rejects an unpaired tunnel mouth count (1 or 3) with TUNNEL_PAIR', () => {
-    const one = mkHole(withRow(3, '#gguggg#'));
-    expect(validateCourseInstructions(mkDoc(one))).toBe('TUNNEL_PAIR');
-    const three = mkHole(withRow(3, '#uguggu#'));
-    expect(validateCourseInstructions(mkDoc(three))).toBe('TUNNEL_PAIR');
+  it("rejects 'u' (tunnels were removed from the format) as UNKNOWN_CELL", () => {
+    const hole = mkHole(withRow(3, '#gguggg#'));
+    expect(validateCourseInstructions(mkDoc(hole))).toBe('UNKNOWN_CELL');
   });
 
-  it("compiles 2 'u' mouths to a bidirectional tunnel pair at cell centres", () => {
-    const hole = mkHole(withRow(4, '#gugggu#'));
-    expect(validateCourseInstructions(mkDoc(hole))).toBeNull();
-    const def = holeFromInstructions(hole);
-    expect(def.tunnels).toHaveLength(2);
-    const a = { x: 2.5 * CELL, y: 4.5 * CELL }; // scan order: (2,4) first
-    const b = { x: 6.5 * CELL, y: 4.5 * CELL };
-    expect(def.tunnels![0]).toEqual({ pairId: 0, entrance: a, exit: b, rotDelta: 0 });
-    expect(def.tunnels![1]).toEqual({ pairId: 1, entrance: b, exit: a, rotDelta: 0 });
-    // The floor under a mouth is plain green.
-    expect(cellAt(def, 2, 4)).toBe(CellType.Grass);
-  });
-
-  it('holes without mouths compile with no tunnels', () => {
+  it('instruction holes never compile with tunnels', () => {
     expect(holeFromInstructions(mkHole(BASE_LAYOUT)).tunnels).toBeUndefined();
   });
 

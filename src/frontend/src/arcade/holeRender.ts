@@ -52,8 +52,10 @@ const PAL = {
   water: '#3f9bee', waterHi: '#7fc0f6',
   wallTop: '#e0b667', wallL: '#b58a45', wallR: '#8a672e',
   postTop: '#d9a85b', postSide: '#9a743a',
-  // Elevated plateau: sunnier grass top, earthy cut-away side faces.
+  // Elevated plateau: sunnier grass top; sloped rim aprons on every exposed
+  // edge (lit on the NW light side, shaded on the SE side).
   elevA: '#5fd489', elevB: '#55ca7f', elevL: '#37905c', elevR: '#2a7449',
+  elevRampLit: '#49b872', elevRampShade: '#318554',
   // Tunnel mouth: deep-indigo void with a violet rim + swirl.
   tunnelRim: '#6d4fc4', tunnelVoid: '#140b28', tunnelSwirl: '167, 139, 250',
   shadow: 'rgba(10, 25, 14, 0.22)',
@@ -347,20 +349,38 @@ function drawBeltCell(ctx: CanvasRenderingContext2D, view: IsoView, gx: number, 
 }
 
 /**
- * Elevated plateau block: sunny grass top at ELEV_Z with cut-away side faces.
- * Side faces are drawn only on edges whose neighbour is NOT elevated, so a
- * run of elevated cells reads as ONE plateau with no internal seams.
+ * Elevated plateau block, sloped on ALL sides (matches the physics: any rim
+ * can be climbed with enough speed). The sunny top face is inset on every
+ * exposed edge (neighbour not elevated) and an apron quad slopes from the
+ * inset top edge down to the cell edge at ground level — NW-facing aprons lit,
+ * SE-facing shaded. Shared edges get no apron/inset, so a run of elevated
+ * cells reads as ONE plateau with no internal seams; adjacent rim aprons share
+ * their corner vertex, so corners close cleanly.
  */
+const PLATEAU_APRON = 10; // world px of sloped rim on exposed edges
+
 function drawPlateau(ctx: CanvasRenderingContext2D, view: IsoView, def: HoleDef, gx: number, gy: number) {
-  const g = cellCorners(view, gx, gy, 0);
-  const t = cellCorners(view, gx, gy, ELEV_Z);
-  if (cellAt(def, gx, gy + 1) !== CellType.Elevated) {
-    poly(ctx, [t[3], t[2], g[2], g[3]], PAL.elevL); // south face
-  }
-  if (cellAt(def, gx + 1, gy) !== CellType.Elevated) {
-    poly(ctx, [t[1], t[2], g[2], g[1]], PAL.elevR); // east face
-  }
-  poly(ctx, t, (gx + gy) % 2 === 0 ? PAL.elevA : PAL.elevB);
+  const x0 = gx * CELL, y0 = gy * CELL, x1 = x0 + CELL, y1 = y0 + CELL;
+  const rimN = cellAt(def, gx, gy - 1) !== CellType.Elevated;
+  const rimS = cellAt(def, gx, gy + 1) !== CellType.Elevated;
+  const rimW = cellAt(def, gx - 1, gy) !== CellType.Elevated;
+  const rimE = cellAt(def, gx + 1, gy) !== CellType.Elevated;
+  const ix0 = x0 + (rimW ? PLATEAU_APRON : 0), iy0 = y0 + (rimN ? PLATEAU_APRON : 0);
+  const ix1 = x1 - (rimE ? PLATEAU_APRON : 0), iy1 = y1 - (rimS ? PLATEAU_APRON : 0);
+  const P = (x: number, y: number, z: number) => isoP(view, x, y, z);
+
+  // Rim aprons first (the top face overlaps their inner edges).
+  if (rimN) poly(ctx, [P(ix0, iy0, ELEV_Z), P(ix1, iy0, ELEV_Z), P(x1, y0, 0), P(x0, y0, 0)], PAL.elevRampLit);
+  if (rimW) poly(ctx, [P(ix0, iy0, ELEV_Z), P(ix0, iy1, ELEV_Z), P(x0, y1, 0), P(x0, y0, 0)], PAL.elevRampLit);
+  if (rimS) poly(ctx, [P(ix0, iy1, ELEV_Z), P(ix1, iy1, ELEV_Z), P(x1, y1, 0), P(x0, y1, 0)], PAL.elevRampShade);
+  if (rimE) poly(ctx, [P(ix1, iy0, ELEV_Z), P(ix1, iy1, ELEV_Z), P(x1, y1, 0), P(x1, y0, 0)], PAL.elevRampShade);
+
+  // Inset top face.
+  poly(
+    ctx,
+    [P(ix0, iy0, ELEV_Z), P(ix1, iy0, ELEV_Z), P(ix1, iy1, ELEV_Z), P(ix0, iy1, ELEV_Z)],
+    (gx + gy) % 2 === 0 ? PAL.elevA : PAL.elevB,
+  );
 }
 
 /**

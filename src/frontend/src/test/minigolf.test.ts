@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  COURSE, COURSE_PAR_TOTAL, HOLES_PER_ROUND, MAX_STROKES_PER_HOLE, MAX_POWER,
+  COURSE, COURSE_PAR_TOTAL, HOLES_PER_ROUND, MAX_STROKES_PER_HOLE, MAX_POWER, PLATEAU_CLIMB_SPEED,
   STEP, STOP_SPEED, CUP_CAPTURE_SPEED, CELL, GRID_W, GRID_H, CellType, WALKABLE,
   BALL_R, POST_R, MOVER_THICK,
   initHole, stepHole, strike, dragToShot, speed, cellAt, cellAtWorld, barEndpoints, barSegments,
@@ -657,30 +657,73 @@ describe('new element physics', () => {
 });
 
 // =====================================================================
-// Elevation ('h'), instruction tunnels ('u'), multi-arm windmills
+// Elevation ('h', sloped rim on all sides), tunnel pairs, multi-arm windmills
 // =====================================================================
 
-describe('elevation cells', () => {
+describe('elevation cells (sloped rim)', () => {
   function setCell(def: HoleDef, gx: number, gy: number, c: CellType) {
     def.cells[gy * def.w + gx] = c;
   }
 
-  it('is a solid wall when approached from flat ground', () => {
+  it('rolls a too-slow ball back down the rim (never occupies the plateau)', () => {
     const def = asciiHole();
-    // Elevated column across the tee row's path (tee is at gx 10, gy 11).
     for (let gy = 2; gy <= 11; gy++) setCell(def, 15, gy, CellType.Elevated);
     const state = initHole(def);
-    strike(state, { x: MAX_POWER, y: 0 }); // fire east straight at the column
-    let sawWall = false;
+    state.pos = { x: 14.5 * CELL, y: 11.5 * CELL }; // one cell west of the rim
+    state.preShot = { ...state.pos };
+    strike(state, { x: PLATEAU_CLIMB_SPEED - 30, y: 0 }); // too slow to climb
+    let reversed = false;
     let t = 0;
     while (state.phase === 'rolling' && t < 30) {
       t += STEP;
       stepHole(state, def, t);
-      if (state.event === 'wall') sawWall = true;
+      if (state.vel.x < 0) reversed = true;
       expect(cellAtWorld(def, state.pos), 'ball occupied an elevated cell').not.toBe(CellType.Elevated);
     }
-    expect(sawWall).toBe(true);
-    expect(state.pos.x).toBeLessThan(15 * CELL); // stayed west of the plateau
+    expect(reversed).toBe(true); // rolled back down, west
+    expect(state.pos.x).toBeLessThan(15 * CELL);
+  });
+
+  it('climbs the rim from flat ground with enough speed, losing the climb cost', () => {
+    const def = asciiHole();
+    for (let gy = 2; gy <= 11; gy++) setCell(def, 15, gy, CellType.Elevated);
+    const state = initHole(def);
+    state.pos = { x: 14.5 * CELL, y: 11.5 * CELL };
+    state.preShot = { ...state.pos };
+    const v0 = 400;
+    strike(state, { x: v0, y: 0 });
+    let climbSpeed = 0;
+    let t = 0;
+    while (state.phase === 'rolling' && t < 30) {
+      t += STEP;
+      stepHole(state, def, t);
+      if (climbSpeed === 0 && cellAtWorld(def, state.pos) === CellType.Elevated) {
+        climbSpeed = state.vel.x;
+      }
+    }
+    expect(climbSpeed).toBeGreaterThan(0); // it got up
+    // Energy model: v' ≈ √(v² − c²), well below the approach speed.
+    expect(climbSpeed).toBeLessThan(Math.sqrt(v0 * v0 - PLATEAU_CLIMB_SPEED * PLATEAU_CLIMB_SPEED) + 15);
+  });
+
+  it('accelerates rolling off the rim (descent gains the climb cost)', () => {
+    const def = asciiHole();
+    setCell(def, 14, 11, CellType.Elevated);
+    const state = initHole(def);
+    state.pos = { x: 14.5 * CELL, y: 11.5 * CELL }; // on the plateau
+    state.preShot = { ...state.pos };
+    const v0 = 120; // below the climb cost — exiting must still be free
+    strike(state, { x: v0, y: 0 });
+    let exitSpeed = 0;
+    let t = 0;
+    while (state.phase === 'rolling' && t < 30) {
+      t += STEP;
+      stepHole(state, def, t);
+      if (exitSpeed === 0 && cellAtWorld(def, state.pos) !== CellType.Elevated) {
+        exitSpeed = state.vel.x;
+      }
+    }
+    expect(exitSpeed).toBeGreaterThan(PLATEAU_CLIMB_SPEED); // boosted downhill
   });
 
   it('is entered from a walkway pushing into it, then exits freely', () => {
@@ -715,16 +758,18 @@ describe('elevation cells', () => {
   });
 });
 
-describe("instruction tunnels ('u')", () => {
-  // Long landing run east of mouth B so the ball settles on grass without
-  // bouncing off a wall back into a mouth (bidirectional pairs re-trigger
-  // legitimately if the ball wanders back after the cooldown).
+describe('tunnel pairs (legacy CourseDataV1 portal physics)', () => {
+  // The instructions format no longer authors tunnels ('u' was removed), but
+  // the engine keeps TunnelPair physics for legacy CourseDataV1 courses —
+  // build the pair directly on the def. Long landing run east of mouth B so
+  // the ball settles on grass without wandering back into a mouth (pairs
+  // legitimately re-trigger after the cooldown).
   const TUNNEL_HOLE = {
     par: 3,
     layout: [
       '########################',
       '#gggggggggggggggggggggg#',
-      '#gTgugggugggggggggggggg#',
+      '#gTgggggggggggggggggggg#',
       '#gggggggggggggggggggggg#',
       '#ggggggggggggggggggggCg#',
       '#gggggggggggggggggggggg#',
@@ -735,9 +780,12 @@ describe("instruction tunnels ('u')", () => {
 
   it('teleports the ball to the paired mouth with momentum, once per cooldown', () => {
     const def = holeFromInstructions(TUNNEL_HOLE);
-    const [a, b] = [def.tunnels![0].entrance, def.tunnels![0].exit];
-    expect(a).toEqual({ x: 4.5 * CELL, y: 2.5 * CELL });
-    expect(b).toEqual({ x: 8.5 * CELL, y: 2.5 * CELL });
+    const a = { x: 4.5 * CELL, y: 2.5 * CELL };
+    const b = { x: 8.5 * CELL, y: 2.5 * CELL };
+    def.tunnels = [
+      { pairId: 0, entrance: a, exit: b, rotDelta: 0 },
+      { pairId: 1, entrance: b, exit: a, rotDelta: 0 },
+    ];
     const state = initHole(def);
     strike(state, { x: 500, y: 0 }); // east along the mouth row
     let teleports = 0;

@@ -11,7 +11,7 @@ import { CellType, cellAt, CELL, WALKABLE } from '../arcade/engine';
 // The demo's whole point is FULL element coverage — every character a course
 // designer can author. If the format ever grows a new char, this list (and the
 // demo hole) must grow with it.
-const ALL_CHARS = ['.', '#', 'g', 'r', 's', 'w', '^', 'v', '>', '<', 'h', 'u', 'o', 'T', 'C'];
+const ALL_CHARS = ['.', '#', 'g', 'r', 's', 'w', '^', 'v', '>', '<', 'h', 'o', 'T', 'C'];
 
 describe('SHOWCASE_HOLE (element demo)', () => {
   it('is a valid instruction hole (validates as a 9x course)', () => {
@@ -29,11 +29,6 @@ describe('SHOWCASE_HOLE (element demo)', () => {
       expect(all.includes(ch), `missing element '${ch}'`).toBe(true);
     }
     expect(SHOWCASE_HOLE.windmills?.length ?? 0).toBeGreaterThan(0);
-  });
-
-  it('has exactly one tunnel pair (2 mouths)', () => {
-    const all = SHOWCASE_HOLE.layout.join('');
-    expect(all.split('u').length - 1).toBe(2);
   });
 
   it('showcases a multi-arm windmill (3 or 4 arms)', () => {

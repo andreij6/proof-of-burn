@@ -10,7 +10,7 @@ import {
 const L = INSTRUCTION_LIMITS;
 
 // Every terrain character parseCourseInstructions accepts (CHAR_TO_CELL keys).
-const LEGEND_CHARS = ['.', '#', 'g', 'r', 's', 'w', '^', 'v', '>', '<', 'h', 'u', 'o', 'T', 'C'];
+const LEGEND_CHARS = ['.', '#', 'g', 'r', 's', 'w', '^', 'v', '>', '<', 'h', 'o', 'T', 'C'];
 
 describe('buildCoursePrompt', () => {
   const prompt = buildCoursePrompt();
@@ -32,7 +32,6 @@ describe('buildCoursePrompt', () => {
     expect(prompt).toContain(`${L.WINDMILLS_PER_HOLE} windmills per hole`);
     expect(prompt).toContain(`at most ${L.NAME_LEN} characters`);
     expect(prompt).toContain(`${COURSE_NAME_MAX_CHARS} characters`);
-    expect(prompt).toContain(`exactly ${L.TUNNEL_CELLS}`); // the 0-or-2 tunnel rule
   });
 
   it('documents the optional windmill arm count', () => {
@@ -66,7 +65,6 @@ describe('friendlyCourseError', () => {
     'NAME_EMPTY', 'WRONG_HOLE_COUNT', 'INVALID_PAR', 'NAME_TOO_LONG',
     'INVALID_GRID', 'RAGGED_GRID', 'UNKNOWN_CELL', 'MULTIPLE_TEES',
     'MULTIPLE_CUPS', 'TOO_MANY_MOVERS', 'INVALID_WINDMILL', 'OFF_GRID',
-    'TUNNEL_PAIR',
   ];
 
   it('maps every validator code to a distinct human sentence (not the code)', () => {

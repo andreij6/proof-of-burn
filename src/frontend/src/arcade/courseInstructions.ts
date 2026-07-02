@@ -33,8 +33,7 @@ export interface InstructionWindmill {
 export interface InstructionHole {
   name?: string;
   par: number; // 2..=5
-  /** ASCII terrain grid — equal-length rows, exactly one 'T' and one 'C',
-   *  and either zero or exactly two 'u' tunnel mouths (a linked pair). */
+  /** ASCII terrain grid — equal-length rows, exactly one 'T' and one 'C'. */
   layout: string[];
   windmills?: InstructionWindmill[];
 }
@@ -48,8 +47,7 @@ export interface CourseInstructions {
   holes: InstructionHole[]; // exactly 9
 }
 
-// One character per terrain cell. 'T'/'C' sit on green; posts sit on green
-// too; 'u' is a tunnel mouth resting on green (the pair teleports the ball).
+// One character per terrain cell. 'T'/'C' sit on green; posts sit on green too.
 const CHAR_TO_CELL: Record<string, CellType> = {
   '.': CellType.Void,
   '#': CellType.Wall,
@@ -63,7 +61,6 @@ const CHAR_TO_CELL: Record<string, CellType> = {
   '<': CellType.SlopeW,
   o: CellType.Post,
   h: CellType.Elevated,
-  u: CellType.Grass,
   T: CellType.Grass,
   C: CellType.Grass,
 };
@@ -76,8 +73,6 @@ export const INSTRUCTION_LIMITS = {
   PAR_MAX: 5,
   NAME_LEN: 30,
   WINDMILLS_PER_HOLE: 4,
-  /** Tunnel mouths ('u') per hole: exactly this many, or none. */
-  TUNNEL_CELLS: 2,
 } as const;
 
 /**
@@ -97,19 +92,16 @@ export function validateCourseInstructions(doc: CourseInstructions): string | nu
     if (width < INSTRUCTION_LIMITS.GRID_MIN || width > INSTRUCTION_LIMITS.GRID_MAX) return 'INVALID_GRID';
     let tees = 0;
     let cups = 0;
-    let tunnels = 0;
     for (const row of h.layout) {
       if (typeof row !== 'string' || row.length !== width) return 'RAGGED_GRID';
       for (const ch of row) {
         if (CHAR_TO_CELL[ch] === undefined) return 'UNKNOWN_CELL';
         if (ch === 'T') tees++;
         else if (ch === 'C') cups++;
-        else if (ch === 'u') tunnels++;
       }
     }
     if (tees !== 1) return 'MULTIPLE_TEES';
     if (cups !== 1) return 'MULTIPLE_CUPS';
-    if (tunnels !== 0 && tunnels !== INSTRUCTION_LIMITS.TUNNEL_CELLS) return 'TUNNEL_PAIR';
     const mills = h.windmills ?? [];
     if (!Array.isArray(mills) || mills.length > INSTRUCTION_LIMITS.WINDMILLS_PER_HOLE) return 'TOO_MANY_MOVERS';
     for (const m of mills) {
@@ -137,14 +129,12 @@ export function holeFromInstructions(h: InstructionHole): HoleDef {
   const cells = new Uint8Array(width * height);
   let tee: Vec | null = null;
   let cup: Vec | null = null;
-  const mouths: Vec[] = []; // 'u' tunnel mouths in scan order (top→bottom, left→right)
   h.layout.forEach((row, gy) => {
     for (let gx = 0; gx < width; gx++) {
       const ch = row[gx];
       cells[gy * width + gx] = CHAR_TO_CELL[ch];
       if (ch === 'T') tee = { x: (gx + 0.5) * CELL, y: (gy + 0.5) * CELL };
       if (ch === 'C') cup = { x: (gx + 0.5) * CELL, y: (gy + 0.5) * CELL };
-      if (ch === 'u') mouths.push({ x: (gx + 0.5) * CELL, y: (gy + 0.5) * CELL });
     }
   });
   if (!tee || !cup) throw new Error('INVALID_COURSE: MISSING_TEE_OR_CUP');
@@ -156,16 +146,7 @@ export function holeFromInstructions(h: InstructionHole): HoleDef {
     phase: 0,
     arms: m.arms ?? 2,
   }));
-  const def: HoleDef = { name: h.name ?? '', par: h.par, w: width, h: height, cells, tee, cup, bars };
-  if (mouths.length === 2) {
-    // Bidirectional pair — the engine's re-entry cooldown stops the ball
-    // ping-ponging straight back through the mouth it just exited.
-    def.tunnels = [
-      { pairId: 0, entrance: mouths[0], exit: mouths[1], rotDelta: 0 },
-      { pairId: 1, entrance: mouths[1], exit: mouths[0], rotDelta: 0 },
-    ];
-  }
-  return def;
+  return { name: h.name ?? '', par: h.par, w: width, h: height, cells, tee, cup, bars };
 }
 
 /** Compile a full validated instructions document into runtime HoleDefs. */

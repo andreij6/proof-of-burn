@@ -3,8 +3,8 @@
 // wizard that contains EVERY element a course designer can use, so a creator
 // can see each one in action before describing their course to an AI agent:
 // grass, rough, sand, water, walls, void border, posts, all four conveyor
-// walkway directions, an elevated plateau (ramped by a walkway), a tunnel
-// pair, spinning windmills (3- and 4-arm rotors), tee and cup.
+// walkway directions, an elevated plateau (sloped on all sides — the walkway
+// gives a run-up), spinning windmills (3- and 4-arm rotors), tee and cup.
 //
 // Kept as a build-instructions InstructionHole (the exact format designers
 // author) and compiled with the same holeFromInstructions the Play flow uses,
@@ -17,10 +17,9 @@ import type { InstructionHole } from './courseInstructions';
 
 // 28×14 open arena, zones left→right / top→bottom:
 // rough and sand blocks up top (a 3-arm windmill spins in the gap between
-// them), a tunnel mouth just below the tee, a water pool, a south-walkway
-// strip, a north-walkway strip that ramps onto the elevated plateau beside
-// it, east/west walkway strips, posts, and a 4-arm windmill guarding the
-// cup — with the tunnel's other mouth right past it.
+// them), a water pool, a south-walkway strip, a north-walkway strip whose
+// run-up carries the ball over the plateau's sloped rim, east/west walkway
+// strips, posts, and a 4-arm windmill guarding the cup.
 export const SHOWCASE_HOLE: InstructionHole = {
   name: 'Element Demo',
   par: 3,
@@ -29,14 +28,14 @@ export const SHOWCASE_HOLE: InstructionHole = {
     '.##########################.',
     '.#gggggggrrrrggggssssggggg#.',
     '.#gTgggggrrrrggggssssggggg#.',
-    '.#gggugggrrrrggggssssggggg#.',
+    '.#gggggggrrrrggggssssggggg#.',
     '.#gggggggggggggggggghhhhgg#.',
     '.#gwwwwggggggggggggghhhhgg#.',
     '.#gwwwwggggggggvvgggg^^ggg#.',
     '.#gggggggggggggvvgggg^^ggg#.',
     '.#gg>>>>ggg<<<<gggggggoggg#.',
     '.#gggggggggggggggggggggggg#.',
-    '.#gggogggggggggggggCgguggg#.',
+    '.#gggogggggggggggggCgggggg#.',
     '.##########################.',
     '............................',
   ],

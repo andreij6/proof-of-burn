@@ -97,7 +97,7 @@ export const CellType = {
   SlopeW: 8,
   Post: 9,   // grass with a round post voxel in the middle
   Rough: 10, // heavier-friction surface (between green and sand)
-  Elevated: 11, // raised plateau — enterable only from elevation or a walkway pushing into it; solid wall otherwise
+  Elevated: 11, // raised plateau, sloped on ALL sides — climbing the rim costs PLATEAU_CLIMB_SPEED (too slow rolls back); descending gains it
 } as const;
 export type CellType = typeof CellType[keyof typeof CellType];
 
@@ -163,6 +163,10 @@ export const TUNNEL_R = 16;           // portal capture radius (px)
 export const MOVER_THICK = 4;         // half-thickness padding for mover/wall segments (px)
 export const PENDULUM_ARC = Math.PI / 2; // ± swing amplitude for a pendulum (rad)
 export const SLOPE_ACCEL = 160;     // px/s²
+/** Speed cost (px/s, energy model) to roll up a plateau's sloped rim; the
+ *  same speed is gained rolling off. Slower balls roll back down. Tuned so a
+ *  ~3-cell walkway run-up from rest (√(2·SLOPE_ACCEL·120) ≈ 196) clears it. */
+export const PLATEAU_CLIMB_SPEED = 180;
 export const WALL_RESTITUTION = 0.9;
 export const STOP_SPEED = 5;        // px/s
 export const MAX_SHOT_SECONDS = 15;
@@ -392,14 +396,50 @@ function rotDir(rot: number): Vec {
   }
 }
 
-/** Grid direction a slope/walkway cell pushes, or null for any other cell. */
-function slopeDir(c: CellType): Vec | null {
-  switch (c) {
-    case CellType.SlopeN: return { x: 0, y: -1 };
-    case CellType.SlopeS: return { x: 0, y: 1 };
-    case CellType.SlopeE: return { x: 1, y: 0 };
-    case CellType.SlopeW: return { x: -1, y: 0 };
-    default: return null;
+/**
+ * Plateau rim energy exchange (sloped on ALL sides). Crossing the boundary
+ * between ground level and an Elevated cell trades speed along the crossing
+ * axis: climbing costs PLATEAU_CLIMB_SPEED (energy model — v'² = v² ∓ c²);
+ * a ball too slow to climb rolls back down (position clamped to the rim,
+ * that velocity component reflected, no restitution loss). Descending gains
+ * the same speed. Axes are handled independently (substeps keep per-move
+ * travel ≤ ~3 px, so multi-axis crossings are rare and near-corner anyway).
+ */
+function crossPlateauRim(state: HoleState, def: HoleDef, sgx: number, sgy: number): void {
+  const c2 = PLATEAU_CLIMB_SPEED * PLATEAU_CLIMB_SPEED;
+  const elev = (gx: number, gy: number) => cellAt(def, gx, gy) === CellType.Elevated;
+
+  // X axis (evaluated at the source row, isolating the axis).
+  const dgx0 = Math.floor(state.pos.x / CELL);
+  if (dgx0 !== sgx) {
+    const srcE = elev(sgx, sgy);
+    const dstE = elev(dgx0, sgy);
+    if (srcE !== dstE) {
+      const vx = state.vel.x;
+      if (!srcE && vx * vx <= c2) {
+        state.pos.x = Math.max(sgx, dgx0) * CELL - Math.sign(vx) * 0.5;
+        state.vel.x = -vx;
+      } else {
+        state.vel.x = Math.sign(vx) * Math.sqrt(vx * vx + (srcE ? c2 : -c2));
+      }
+    }
+  }
+
+  // Y axis (column re-read after any X rollback).
+  const dgx = Math.floor(state.pos.x / CELL);
+  const dgy = Math.floor(state.pos.y / CELL);
+  if (dgy !== sgy) {
+    const srcE = elev(dgx, sgy);
+    const dstE = elev(dgx, dgy);
+    if (srcE !== dstE) {
+      const vy = state.vel.y;
+      if (!srcE && vy * vy <= c2) {
+        state.pos.y = Math.max(sgy, dgy) * CELL - Math.sign(vy) * 0.5;
+        state.vel.y = -vy;
+      } else {
+        state.vel.y = Math.sign(vy) * Math.sqrt(vy * vy + (srcE ? c2 : -c2));
+      }
+    }
   }
 }
 
@@ -430,27 +470,21 @@ export function stepHole(state: HoleState, def: HoleDef, tSec: number): void {
   let hit = false;
   const substeps = Math.max(1, Math.ceil((speed(state.vel) * STEP) / MAX_SUBSTEP_TRAVEL));
   for (let sub = 0; sub < substeps; sub++) {
-    // Elevation gate — evaluated from this substep's SOURCE cell, before the
-    // move: on elevation → every elevated cell is open; on a walkway → only
-    // the elevated cell straight ahead of its push direction is open (the
-    // walkway ramps the ball up); from anywhere else elevated cells are solid
-    // walls. Exiting elevation is always free (the target cell stays walkable).
     const sgx = Math.floor(state.pos.x / CELL), sgy = Math.floor(state.pos.y / CELL);
-    const srcCell = cellAt(def, sgx, sgy);
-    const rampDir = slopeDir(srcCell);
-    const elevatedOpen = (gx: number, gy: number): boolean =>
-      srcCell === CellType.Elevated
-      || (rampDir !== null && gx === sgx + rampDir.x && gy === sgy + rampDir.y);
 
     state.pos.x += state.vel.x * (STEP / substeps);
     state.pos.y += state.vel.y * (STEP / substeps);
+
+    // Plateau rim: sloped on all sides — climbing costs speed (or rolls the
+    // ball back), descending gains it. Evaluated on every boundary crossing.
+    crossPlateauRim(state, def, sgx, sgy);
 
     // Solid cells around the ball (3×3 neighbourhood covers BALL_R < CELL).
     const cgx = Math.floor(state.pos.x / CELL), cgy = Math.floor(state.pos.y / CELL);
     for (let gy = cgy - 1; gy <= cgy + 1; gy++) {
       for (let gx = cgx - 1; gx <= cgx + 1; gx++) {
         const c = cellAt(def, gx, gy);
-        if (isSolid(c) || (c === CellType.Elevated && !elevatedOpen(gx, gy))) {
+        if (isSolid(c)) {
           hit = collideCell(state, gx, gy) || hit;
         } else if (c === CellType.Post) {
           hit = bounceFrom(state, (gx + 0.5) * CELL, (gy + 0.5) * CELL, BALL_R + POST_R) || hit;
