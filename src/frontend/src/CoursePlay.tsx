@@ -3,8 +3,8 @@ import type { CourseCard, CourseRatingSummary } from './bindings/backend';
 import { Icon, Btn, LiveDot } from './ui';
 import { formatRating } from './arcade/courseMarket';
 import MiniGolf from './arcade/MiniGolf';
-import { courseFromData, type HoleDef, type CharacterLook } from './arcade/engine';
-import { decodeCourseData } from './arcade/courseData';
+import type { HoleDef, CharacterLook } from './arcade/engine';
+import { decodeCourseBlob } from './arcade/courseInstructions';
 
 // ==========================================
 // Course Play (PB-306 frontend wiring) — loads a chosen course's blob, decodes
@@ -61,8 +61,7 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
         const blob: Uint8Array | null = await actor.get_course_data(card.token_id);
         if (cancelled) return;
         if (!blob) { setLoadErr('This course could not be loaded.'); return; }
-        const data = decodeCourseData(blob);
-        setHoles(courseFromData(data));
+        setHoles(decodeCourseBlob(blob));
       } catch (err: any) {
         if (!cancelled) setLoadErr(err?.message || String(err));
       }

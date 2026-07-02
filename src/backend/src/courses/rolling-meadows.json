@@ -1,0 +1,210 @@
+{
+  "format": "proof-of-burn/minigolf-course@1",
+  "name": "Rolling Meadows",
+  "description": "A mid-difficulty nine of ponds, rough, slopes and twin windmills. Par 30.",
+  "instructions": {
+    "summary": "Build each of the 9 holes from its ASCII layout grid. Every row in a layout must be the same length, and each hole must contain exactly one T (tee) and one C (cup). The app rasterizes each character into a terrain cell and compiles the result into a playable hole.",
+    "legend": {
+      ".": "out of bounds (solid)",
+      "#": "wall (raised block, ball bounces off)",
+      "g": "green (normal fairway)",
+      "r": "rough (extra friction)",
+      "s": "sand (heavy friction)",
+      "w": "water (penalty stroke, ball returns to pre-shot spot)",
+      "^": "slope accelerating the ball north (up)",
+      "v": "slope accelerating the ball south (down)",
+      ">": "slope accelerating the ball east (right)",
+      "<": "slope accelerating the ball west (left)",
+      "o": "post (round bumper)",
+      "T": "tee (ball start, sits on green)",
+      "C": "cup (hole target, sits on green)"
+    },
+    "windmills": "Optional per-hole rotating bars: x and y are the pivot in cell units (fractions allowed), lengthCells is the full arm length in cells, speed is angular velocity in radians per second (negative spins the other way)."
+  },
+  "holes": [
+    {
+      "name": "Broad Green",
+      "par": 3,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggCgg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggrrrrgggggg#..",
+        "..#ggggggrrrrgggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggTggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "Twin Ponds",
+      "par": 3,
+      "layout": [
+        "......................",
+        "....##############....",
+        "....#gggggggggggg#....",
+        "....#ggCggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#wwwwggggwwww#....",
+        "....#wwwwggggwwww#....",
+        "....#gggggggggggg#....",
+        "....#ggggwwwwgggg#....",
+        "....#ggggwwwwgggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggTgg#....",
+        "....##############....",
+        "......................"
+      ]
+    },
+    {
+      "name": "The Funnel",
+      "par": 3,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggCgggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..###gggggggggggg###..",
+        "..####gggggggggg####..",
+        "..#####gggggggg#####..",
+        "..######gggggg######..",
+        "..#####gggggggg#####..",
+        "..####gggggggggg####..",
+        "..#ggggggggTggggggg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "Around the Lake",
+      "par": 4,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#gCgggggggggggggg#..",
+        "..#gggggwwwwwwwwggg#..",
+        "..#gggggwwwwwwwwggg#..",
+        "..#gggggwwwwwwwwggg#..",
+        "..#gggggwwwwwwwwggg#..",
+        "..#gggggwwwwwwwwggg#..",
+        "..#gggggwwwwwwwwggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggggggggggTg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "Boost Alley",
+      "par": 3,
+      "layout": [
+        "......................",
+        "........######........",
+        "........#gggg#........",
+        "........#Cggg#........",
+        "........#gggg#........",
+        "........#^^^^#........",
+        "........#^^^^#........",
+        "........#^^^^#........",
+        "........#^^^^#........",
+        "........#gggg#........",
+        "........#gggg#........",
+        "........#gTgg#........",
+        "........######........",
+        "......................"
+      ]
+    },
+    {
+      "name": "Double Windmill",
+      "par": 4,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggggCggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggggTggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..##################..",
+        "......................"
+      ],
+      "windmills": [
+        { "x": 7.5, "y": 5.5, "lengthCells": 3, "speed": 1.4 },
+        { "x": 14.5, "y": 7.5, "lengthCells": 3, "speed": -2.2 }
+      ]
+    },
+    {
+      "name": "Rough Ride",
+      "par": 3,
+      "layout": [
+        "......................",
+        "....##############....",
+        "....#rrrrrrrrrrrr#....",
+        "....#rCrrrrrrrrrr#....",
+        "....#rrrrrrrrrrrr#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#ssssssssssss#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#ggggggTggggg#....",
+        "....##############....",
+        "......................"
+      ]
+    },
+    {
+      "name": "The Gauntlet",
+      "par": 4,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#gCgggogggggogggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggssssggggssssgg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggoggggggogggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggssssggggssssgg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggggTggggggg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "Meadow Finale",
+      "par": 3,
+      "layout": [
+        "......................",
+        "....##############....",
+        "....#ggggggCggggg#....",
+        "....#gggggggggggg#....",
+        "....#ggwwgggggwwg#....",
+        "....#ggwwgggggwwg#....",
+        "....#gggggggggggg#....",
+        "....#gggg<<<<gggg#....",
+        "....#gggg<<<<gggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#ggggggTggggg#....",
+        "....##############....",
+        "......................"
+      ]
+    }
+  ]
+}

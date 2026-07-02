@@ -95,6 +95,9 @@ service : (InitArgs) -> {
   // Anonymous callers are rejected (also enforced by `inspect_message`). Burning a
   // nonexistent / already-burned id returns `NON_EXISTING_TOKEN`.
   burn : (nat) -> (Result_1);
+  // Raw `course_data` blobs by id — the backend's `get_course_data` passthrough
+  // the Play flow loads a course from. Batch-capped like `icrc7_token_metadata`.
+  course_data_of : (vec nat) -> (vec opt blob) query;
   custodial_transfer : (nat64, principal) -> (Result_1);
   get_nft_config : () -> (NftConfig) query;
   http_request : (HttpRequest) -> (HttpResponse) query;

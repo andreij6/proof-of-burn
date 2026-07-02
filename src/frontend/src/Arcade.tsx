@@ -9,7 +9,6 @@ import { fmtTokenAmount } from "./IdeaBoard";
 import { useErrorImpression } from "./analytics";
 import FieldGoal from "./arcade/FieldGoal";
 import CourseMarketplace from "./CourseMarketplace";
-import CourseEditor from "./CourseEditor";
 import CoursePlay from "./CoursePlay";
 import MiniGolf from "./arcade/MiniGolf";
 import type { CourseCard } from "./bindings/backend";
@@ -181,10 +180,10 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   const [boardFG, setBoardFG] = useState<ArcadeLeaderboardRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   // Mini Golf is now the Course Marketplace (PB-309): the tab shows the
-  // marketplace; "create" opens the editor; "play" opens a course in the engine.
-  // The active view lives in the hash (#/arcade, #/arcade/course-play, …) so the
-  // Back button returns to the lobby instead of leaving the page.
-  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'course-editor' | 'course-play' | 'classic-play'>('/arcade', 'lobby');
+  // marketplace; "play" opens a course in the engine. Courses are AI-built —
+  // there is no in-app editor. The active view lives in the hash (#/arcade,
+  // #/arcade/course-play, …) so Back returns to the lobby, not off the page.
+  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'course-play' | 'classic-play'>('/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
   // Lobby sub-page — one per game (its card, persona and leaderboard).
   const [tab, setTab] = useState<'minigolf' | 'fieldgoal'>('minigolf');
@@ -351,23 +350,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     }
   };
 
-  if (view === 'course-editor') {
-    return (
-      <div className="idea-board-container">
-        <CourseEditor
-          actor={actor}
-          identity={identity}
-          host={host}
-          rootKey={rootKey}
-          ledgerCanisterId={ledgerCanisterId}
-          character={myLook}
-          onMinted={() => { setTab('minigolf'); setView('lobby'); }}
-          onExit={() => { setTab('minigolf'); setView('lobby'); }}
-        />
-      </div>
-    );
-  }
-
   if (view === 'course-play' && playCard) {
     return (
       <div className="idea-board-container">
@@ -461,7 +443,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
         <>
           {/* Mini Golf is now the Course Marketplace (PB-309). A row of two
               cards sits above it: the original built-in "Caldera Ridge" course
-              (left) and the golfer persona (right). Community courses below earn
+              (left) and the golfer persona (right). Marketplace courses below earn
               tickets; Caldera Ridge plays for fun (no sale badge — it's not an NFT). */}
           <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'stretch' }}>
             {/* Caldera Ridge — original course, left of the golfer card */}
@@ -473,8 +455,8 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
                 <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>Par {CALDERA_PAR}</Chip>
               </span>
               <p style={{ fontSize: 12, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0, flex: 1 }}>
-                The original nine — the course that shipped before community courses.
-                Play it free, just for the round.
+                The original nine — the course that shipped before the course
+                marketplace. Play it free, just for the round.
               </p>
               <Btn variant="primary" sm style={{ alignSelf: 'flex-start' }} onClick={() => setView('classic-play')}>
                 <Icon name="flame" size={11} stroke="var(--char-950)" /> Play
@@ -507,7 +489,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             ledgerCanisterId={ledgerCanisterId}
             backendCanisterId={backendCanisterId}
             isLocal={isLocal}
-            onCreateCourse={() => setView('course-editor')}
             onPlay={(card) => { setPlayCard(card); setView('course-play'); }}
             onSignIn={onSignIn}
           />

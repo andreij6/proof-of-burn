@@ -724,6 +724,24 @@ fn icrc7_token_metadata(ids: Vec<Nat>) -> Vec<Option<Vec<(String, Value)>>> {
     })
 }
 
+/// Raw `course_data` blobs by id — the backend's `get_course_data` passthrough
+/// the Play flow loads a course from (PB-305 B3). Same batch cap as
+/// `icrc7_token_metadata` (the blob dominates the reply size either way).
+#[ic_cdk::query]
+fn course_data_of(ids: Vec<Nat>) -> Vec<Option<Vec<u8>>> {
+    assert!(
+        ids.len() <= MAX_METADATA_BATCH_SIZE,
+        "BATCH_TOO_LARGE: max {} ids for course_data_of",
+        MAX_METADATA_BATCH_SIZE
+    );
+    TOKENS.with(|t| {
+        let tokens = t.borrow();
+        ids.iter()
+            .map(|id| nat_to_u64(id).and_then(|id| tokens.get(&id)).map(|tok| tok.course_data.clone()))
+            .collect()
+    })
+}
+
 /// Build the ICRC-7 `Value` map per the A.3 table.
 fn token_metadata_map(tok: &CourseToken) -> Vec<(String, Value)> {
     vec![

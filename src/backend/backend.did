@@ -205,7 +205,6 @@ type Config = record {
   primary_neuron_id : nat64;
 };
 type CourseCard = record {
-  theme : nat8;
   creator : opt principal;
   is_caller_owner : bool;
   token_id : nat64;
@@ -772,7 +771,6 @@ type LotteryInfo = record {
 };
 type MarketKind = variant { Crash };
 type MarketplaceFilter = record {
-  theme : opt nat8;
   difficulty : DifficultyFilter;
   mine_only : bool;
   listed : ListedFilter;
@@ -1544,7 +1542,8 @@ service : (InitPayload) -> {
   // dev stakes and varied builtin strategies so every round has company, plus a
   // little opening chatter. Bots react to outcomes via `crash_bot_chatter`.
   dev_seed_casino_play : () -> (Result_2);
-  // Local-dev: mint up to `count` varied courses (tops up toward `count`, bounded).
+  // Local-dev: mint the 3 built-in mock courses (full playable 9-hole
+  // build-instructions blobs). Tops up by name; `count` caps how many.
   dev_seed_courses : (nat32) -> (Result_5);
   dev_seed_drafts : (nat64, nat32) -> (Result);
   dev_seed_farmer : (nat32, text) -> (Result_4);

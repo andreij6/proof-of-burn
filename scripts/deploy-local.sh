@@ -117,7 +117,7 @@ ok "CourseNFT wired (backend=$BACKEND_ID is minter; backend → course_nft=$COUR
 # SYSTEM_COURSE_MINTED), and the admin can later sell it via the normal sale
 # path. Safe to call on every deploy — re-attempts a no-op'd upgrade seed (B6).
 if icp canister call backend list_marketplace_courses \
-     '(record { difficulty = variant { Any }; theme = null; listed = variant { Any }; mine_only = false })' \
+     '(record { difficulty = variant { Any }; listed = variant { Any }; mine_only = false })' \
      --query -e "$ENV" | grep -q 'token_id = '; then
   ok "Marketplace already has ≥1 course — skipping system-course seed"
 else
@@ -126,13 +126,13 @@ else
     && ok "Default course minted + listed (admin-owned, sellable)" \
     || note "Default course seed skipped (already minted or course_nft not ready)"
 fi
-# Local-dev (PB-312): top up the marketplace with a varied set of courses so the
-# grid renders busy (themes/difficulties/owners/prices/play-counts). Idempotent:
-# dev_seed_courses tops up toward the target rather than piling up, and the call
-# is hard-gated by require_local_dev so it can never run on mainnet/staging.
-note "Seeding a busy local marketplace (dev_seed_courses)…"
-icp canister call backend dev_seed_courses '(12 : nat32)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null \
-  && ok "Local marketplace seeded (up to 12 varied courses)" \
+# Local-dev (PB-312): top up the marketplace with the 3 built-in mock courses
+# (full playable 9-hole build-instructions blobs, varied owner/price states).
+# Idempotent: dev_seed_courses tops up by name rather than piling up, and the
+# call is hard-gated by require_local_dev so it can never run on mainnet/staging.
+note "Seeding the 3 mock courses (dev_seed_courses)…"
+icp canister call backend dev_seed_courses '(3 : nat32)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null \
+  && ok "Local marketplace seeded (3 playable mock courses)" \
   || note "dev_seed_courses skipped (not local, or course_nft not ready)"
 # Casino (Crash) is DISABLED pending the SVPP/points redesign. Force the flag
 # OFF (earlier deploys may have turned it on; flags persist across upgrades) and

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { CourseCard } from '../bindings/backend';
 import {
-  difficultyBucket, themeLabel, mulberry32, shuffleSeeded, poolOrder,
+  difficultyBucket, mulberry32, shuffleSeeded, poolOrder,
   pageSlice, pageCount, GRID_PAGE_SIZE,
   isFavorite, applyFavoritesFilter, toggleFavoriteId,
   formatRating, tokenAmountUsdE8s, bidBeats, courseNftTokenUrl,
@@ -11,7 +11,6 @@ function card(id: number, overrides: Partial<CourseCard> = {}): CourseCard {
   return {
     token_id: BigInt(id),
     name: `Course ${id}`,
-    theme: 0,
     creator: undefined,
     owner: undefined,
     is_caller_owner: false,
@@ -34,15 +33,6 @@ describe('difficultyBucket', () => {
     expect(difficultyBucket(44)).toBe('Medium');
     expect(difficultyBucket(45)).toBe('Hard');
     expect(difficultyBucket(60)).toBe('Hard');
-  });
-});
-
-describe('themeLabel', () => {
-  it('maps discriminants and falls back to Custom', () => {
-    expect(themeLabel(0)).toBe('Desert');
-    expect(themeLabel(3)).toBe('Forest');
-    expect(themeLabel(4)).toBe('Custom');
-    expect(themeLabel(99)).toBe('Custom');
   });
 });
 

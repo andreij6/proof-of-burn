@@ -8,9 +8,9 @@ import { parseTokenAmount } from './IdeaBoard';
 import { parseTokenUnits, fmtUsd } from './tokens';
 import { makeApprover } from './minters';
 import {
-  difficultyBucket, themeLabel, poolOrder, pageSlice, pageCount, freshSeed,
+  difficultyBucket, mulberry32, poolOrder, pageSlice, pageCount, freshSeed,
   formatRating, tokenAmountUsdE8s, bidBeats, toggleFavoriteId, courseNftTokenUrl,
-  DIFFICULTY_OPTIONS, LISTED_OPTIONS, THEME_OPTIONS, GRID_PAGE_SIZE,
+  DIFFICULTY_OPTIONS, LISTED_OPTIONS, GRID_PAGE_SIZE,
 } from './arcade/courseMarket';
 
 // ==========================================
@@ -18,7 +18,10 @@ import {
 //   PB-307 buy/sell  · PB-311 favorites · PB-308 featured slot · PB-310 ratings
 //   PB-312 local-dev panel (Dashboard & Controls).
 // Browse/filter minted courses, Play any of them, list/delist/buy, favorite,
-// promote to the featured slot, and rate courses you've completed.
+// promote to the featured slot, and rate courses you've completed. Courses
+// are authored by the AI course builder (users describe the course they want;
+// the agent writes the NFT's build-instructions JSON) — there is no manual
+// course editor.
 // ==========================================
 
 interface CourseMarketplaceProps {
@@ -32,8 +35,6 @@ interface CourseMarketplaceProps {
   /** Backend canister id — the spender approved for buys/bids. */
   backendCanisterId: string;
   isLocal: boolean;
-  /** Route to the editor (PB-302). */
-  onCreateCourse: () => void;
   /** Launch the engine view for a chosen course. */
   onPlay: (card: CourseCard) => void;
   onSignIn: () => void;
@@ -52,12 +53,11 @@ const BID_TOKENS: { token: ExplorerToken; label: string; decimals: number; fallb
 
 export default function CourseMarketplace({
   actor, principal, identity, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal,
-  onCreateCourse, onPlay, onSignIn,
+  onPlay, onSignIn,
 }: CourseMarketplaceProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [difficulty, setDifficulty] = useState<DifficultyFilter>(DifficultyFilter.Any);
-  const [theme, setTheme] = useState<number | undefined>(undefined);
   const [listed, setListed] = useState<ListedFilter>(ListedFilter.Any);
   const [mineOnly, setMineOnly] = useState(false);
   const [onlyFavs, setOnlyFavs] = useState(false);
@@ -89,8 +89,8 @@ export default function CourseMarketplace({
   const [burnCard, setBurnCard] = useState<CourseCard | null>(null);
 
   const filter: MarketplaceFilter = useMemo(
-    () => ({ difficulty, theme, listed, mine_only: mineOnly }),
-    [difficulty, theme, listed, mineOnly],
+    () => ({ difficulty, listed, mine_only: mineOnly }),
+    [difficulty, listed, mineOnly],
   );
 
   const refresh = async () => {
@@ -135,7 +135,7 @@ export default function CourseMarketplace({
     setPage(0);
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [actor, difficulty, theme, listed, mineOnly]);
+  }, [actor, difficulty, listed, mineOnly]);
 
   useEffect(() => { refreshFeatured(); refreshFavorites(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor, signedIn]);
 
@@ -165,15 +165,14 @@ export default function CourseMarketplace({
   // already skips burned tokens), still narrowed by the other in-memory pills.
   const baseCards = useMemo(() => {
     if (!onlyFavs) return courses;
-    // narrow favorites by the active difficulty/theme/listed pills in-memory.
+    // narrow favorites by the active difficulty/listed pills in-memory.
     return favCards.filter((c) => {
-      if (theme !== undefined && c.theme !== theme) return false;
       if (difficulty !== DifficultyFilter.Any && difficultyBucket(c.par_total) !== bucketForFilter(difficulty)) return false;
       if (listed === ListedFilter.Yes && !c.listed) return false;
       if (listed === ListedFilter.No && c.listed) return false;
       return true;
     });
-  }, [onlyFavs, courses, favCards, theme, difficulty, listed]);
+  }, [onlyFavs, courses, favCards, difficulty, listed]);
 
   const featuredCard = useMemo(
     () => (featuredId === undefined || onlyFavs ? null : baseCards.find((c) => c.token_id === featuredId) ?? null),
@@ -236,8 +235,8 @@ export default function CourseMarketplace({
     <div className="col" style={{ gap: 8 }}>
       <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Course NFT · marketplace states</span>
       <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-        <Btn variant="secondary" sm disabled={devBusy !== null} onClick={() => runDev('seed', () => actor.dev_seed_courses(12))}>
-          {devBusy === 'seed' ? <LiveDot size={7} /> : <Icon name="flag" size={13} />} Seed 12 courses
+        <Btn variant="secondary" sm disabled={devBusy !== null} onClick={() => runDev('seed', () => actor.dev_seed_courses(3))}>
+          {devBusy === 'seed' ? <LiveDot size={7} /> : <Icon name="flag" size={13} />} Seed 3 mock courses
         </Btn>
         <Btn variant="secondary" sm disabled={devBusy !== null} onClick={() => runDev('clear', () => actor.dev_clear_courses())}>
           {devBusy === 'clear' ? <LiveDot size={7} /> : <Icon name="x" size={13} />} Clear all (empty state)
@@ -306,22 +305,24 @@ export default function CourseMarketplace({
             <h4 style={{ margin: 0 }}>Course Marketplace</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
-            Play any community-built course for fun — and earn lottery tickets when you
-            finish a round. Courses are NFTs you can create, own, buy, and sell.{' '}
-            <MoreInfo title="Create → mint → list → earn → buy/sell">
+            Play any course for fun — and earn lottery tickets when you finish a round.
+            Every course is an NFT built by an AI course designer, and you can own,
+            buy, and sell them.{' '}
+            <MoreInfo title="AI-built courses → play → earn → buy/sell">
               <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
                 <Eyebrow accent>The gist</Eyebrow>
                 <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-                  Build a course, <b>mint it as an NFT</b>, and earn lottery tickets from players — then
-                  list it for sale and keep earning a creator royalty forever.
+                  Describe the course you want and an <b>AI course designer builds it with you</b>,
+                  minted as an NFT. Owners earn lottery tickets from players — and a creator
+                  royalty forever after selling.
                 </p>
               </div>
               <div className="col" style={{ gap: 6 }}>
-                <Eyebrow accent>Create &amp; earn</Eyebrow>
+                <Eyebrow accent>Own &amp; earn</Eyebrow>
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                  <li><b>Build &amp; mint:</b> a 9-hole course in the editor, minted as an NFT (<b>0.5 ICP</b>), auto-listed here.</li>
+                  <li><b>AI-designed:</b> each NFT carries the build instructions the app compiles into its 9 holes.</li>
                   <li><b>Players earn</b> a lottery ticket for completing a round.</li>
-                  <li><b>You earn</b> a ticket each time a player reaches hole 2.</li>
+                  <li><b>Owners earn</b> a ticket each time a player reaches hole 2.</li>
                 </ul>
               </div>
               <div className="col" style={{ gap: 6 }}>
@@ -335,16 +336,11 @@ export default function CourseMarketplace({
             </MoreInfo>
           </p>
         </div>
-        <div className="row" style={{ gap: 8 }}>
-          {signedIn && (
-            <Btn variant={mineOnly ? 'primary' : 'ghost'} sm onClick={() => setMineOnly((v) => !v)}>
-              <Icon name="list" size={12} stroke={mineOnly ? 'var(--char-950)' : 'currentColor'} /> My courses
-            </Btn>
-          )}
-          <Btn variant="primary" sm onClick={() => (signedIn ? onCreateCourse() : onSignIn())}>
-            <Icon name="edit" size={12} stroke="var(--char-950)" /> {signedIn ? 'Create a course' : 'Sign in to create'}
+        {signedIn && (
+          <Btn variant={mineOnly ? 'primary' : 'ghost'} sm onClick={() => setMineOnly((v) => !v)}>
+            <Icon name="list" size={12} stroke={mineOnly ? 'var(--char-950)' : 'currentColor'} /> My courses
           </Btn>
-        </div>
+        )}
       </div>
 
       {/* ── Filter bar ── */}
@@ -352,11 +348,6 @@ export default function CourseMarketplace({
         <PillGroup label="Difficulty">
           {DIFFICULTY_OPTIONS.map((o) => (
             <Pill key={o.label} active={difficulty === o.value} onClick={() => setDifficulty(o.value)}>{o.label}</Pill>
-          ))}
-        </PillGroup>
-        <PillGroup label="Theme">
-          {THEME_OPTIONS.map((o) => (
-            <Pill key={o.label} active={theme === o.value} onClick={() => setTheme(o.value)}>{o.label}</Pill>
           ))}
         </PillGroup>
         <PillGroup label="Listed">
@@ -387,13 +378,8 @@ export default function CourseMarketplace({
         <div className="col" style={{ alignItems: 'center', gap: 12, padding: '48px 0', color: 'var(--fg-3)' }}>
           <Icon name="gamepad" size={28} stroke="var(--fg-dim)" />
           <span style={{ fontSize: 14 }}>
-            {onlyFavs ? 'No favorites yet — tap the heart on a course to save it.' : 'No courses minted yet — be the first to create one.'}
+            {onlyFavs ? 'No favorites yet — tap the heart on a course to save it.' : 'No courses on the marketplace yet — check back soon.'}
           </span>
-          {!onlyFavs && (
-            <Btn variant="primary" onClick={() => (signedIn ? onCreateCourse() : onSignIn())}>
-              <Icon name="edit" size={12} stroke="var(--char-950)" /> {signedIn ? 'Create a course' : 'Sign in to create'}
-            </Btn>
-          )}
         </div>
       ) : (
         <>
@@ -533,6 +519,51 @@ function bucketForFilter(d: DifficultyFilter): string {
   }
 }
 
+// ── Course art (deterministic per token id) ──
+// A stylized top-down golf-hole illustration seeded by the token id, so every
+// course gets a stable, unique banner without storing any image. Decorative
+// only (aria-hidden); greens/bunkers derive from theme tokens so both themes
+// stay coherent.
+function CourseArt({ tokenId, height }: { tokenId: bigint; height: number }) {
+  const rand = mulberry32(Number(tokenId % 0xffffffffn) || 1);
+  // Fairway blobs, a bunker, a pond — positions/sizes rolled from the seed.
+  const blobs = Array.from({ length: 3 }, () => ({
+    cx: 30 + rand() * 260,
+    cy: 18 + rand() * 60,
+    rx: 46 + rand() * 60,
+    ry: 18 + rand() * 22,
+  }));
+  const bunker = { cx: 40 + rand() * 240, cy: 24 + rand() * 48, rx: 12 + rand() * 12, ry: 7 + rand() * 6 };
+  const pond = { cx: 40 + rand() * 240, cy: 24 + rand() * 48, rx: 16 + rand() * 16, ry: 8 + rand() * 8 };
+  const flagX = 46 + rand() * 228;
+  const flagY = 30 + rand() * 34;
+  const stripes = Array.from({ length: 6 }, (_, i) => i * 56 + rand() * 20);
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 320 96"
+      preserveAspectRatio="xMidYMid slice"
+      style={{ display: 'block', width: '100%', height }}
+    >
+      <rect width="320" height="96" style={{ fill: 'color-mix(in srgb, var(--sprout) 14%, var(--surface))' }} />
+      {stripes.map((x, i) => (
+        <rect key={i} x={x} y="0" width="28" height="96" transform={`skewX(-12)`} style={{ fill: 'color-mix(in srgb, var(--sprout) 22%, transparent)', opacity: 0.35 }} />
+      ))}
+      {blobs.map((b, i) => (
+        <ellipse key={i} cx={b.cx} cy={b.cy} rx={b.rx} ry={b.ry} style={{ fill: 'color-mix(in srgb, var(--sprout) 34%, var(--surface))', opacity: 0.8 }} />
+      ))}
+      <ellipse cx={pond.cx} cy={pond.cy} rx={pond.rx} ry={pond.ry} style={{ fill: '#4f86ad', opacity: 0.55 }} />
+      <ellipse cx={bunker.cx} cy={bunker.cy} rx={bunker.rx} ry={bunker.ry} style={{ fill: 'color-mix(in srgb, var(--haze) 55%, var(--surface))', opacity: 0.9 }} />
+      {/* cup + flag */}
+      <ellipse cx={flagX} cy={flagY + 2} rx="4.5" ry="2.2" style={{ fill: 'rgba(0,0,0,0.45)' }} />
+      <line x1={flagX} y1={flagY} x2={flagX} y2={flagY - 26} style={{ stroke: 'var(--fg-3)', strokeWidth: 1.6 }} />
+      <path d={`M ${flagX} ${flagY - 26} l 14 5 l -14 5 z`} style={{ fill: 'var(--burn)' }} />
+      {/* soft top fade so overlay chips stay legible in both themes */}
+      <rect width="320" height="34" style={{ fill: 'var(--surface)', opacity: 0.28 }} />
+    </svg>
+  );
+}
+
 // ── Course card (shared by featured + pool) ──
 function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFav, courseNftId, isLocal, onPlay, onManage, onBuy, onBid, onRate, onBurn, onToggleFavorite, onSignIn }: {
   actor: any;
@@ -571,63 +602,73 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
   }, [actor, card.token_id]);
 
   return (
-    <div className="card col" style={{ gap: 10, gridColumn: featured ? '1 / -1' : undefined }}>
-      <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-        <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-          {featured ? (
-            <Chip tone="burn" style={{ height: 19, fontSize: 10 }}><LiveDot color="var(--burn-ink)" size={5} /> Featured</Chip>
-          ) : forSale ? (
-            <Chip tone="ok" style={{ height: 19, fontSize: 10 }}>For sale</Chip>
-          ) : (
-            <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>Not for sale</Chip>
-          )}
+    <div className="card col" style={{ padding: 0, overflow: 'hidden', gap: 0, gridColumn: featured ? '1 / -1' : undefined }}>
+      {/* ── Banner: generated course art + status overlay ── */}
+      <div style={{ position: 'relative', borderBottom: '1px solid var(--border)' }}>
+        <CourseArt tokenId={card.token_id} height={featured ? 128 : 92} />
+        <div className="row" style={{ position: 'absolute', top: 8, left: 10, right: 10, justifyContent: 'space-between', alignItems: 'center' }}>
+          <span className="row" style={{ gap: 6 }}>
+            {featured ? (
+              <Chip tone="burn" style={{ height: 19, fontSize: 10 }}><LiveDot color="var(--burn-ink)" size={5} /> Featured</Chip>
+            ) : forSale ? (
+              <Chip tone="ok" style={{ height: 19, fontSize: 10 }}>For sale</Chip>
+            ) : (
+              <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>Not for sale</Chip>
+            )}
+          </span>
           <button
             onClick={() => (signedIn ? onToggleFavorite(card) : onSignIn())}
             title={signedIn ? (isFav ? 'Remove from favorites' : 'Add to favorites') : 'Sign in to save favorites'}
             disabled={!signedIn}
             style={{
-              background: 'transparent', border: 'none', padding: 2, cursor: signedIn ? 'pointer' : 'not-allowed',
-              opacity: signedIn ? 1 : 0.4, display: 'flex', alignItems: 'center',
+              background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 999,
+              padding: 5, cursor: signedIn ? 'pointer' : 'not-allowed',
+              opacity: signedIn ? 1 : 0.5, display: 'flex', alignItems: 'center',
             }}
           >
             <Icon name="heart" size={14} stroke={isFav ? 'var(--burn-ink)' : 'var(--fg-3)'} fill={isFav ? 'var(--burn)' : 'none'} />
           </button>
+        </div>
+        <span className="mono" style={{
+          position: 'absolute', bottom: 8, right: 10, fontSize: 10.5, color: 'var(--fg-2)',
+          background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 999, padding: '2px 9px',
+        }}>
+          9 holes · Par {par} · {diff}
         </span>
-        <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>Par {par} · {diff}</span>
       </div>
 
-      <span className="row" style={{ gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-        <h6 style={{ margin: 0, fontSize: 16 }}>{card.name || `Course #${card.token_id}`}</h6>
-        <Chip tone="muted" style={{ height: 18, fontSize: 9.5 }}>{themeLabel(card.theme)}</Chip>
-      </span>
+      {/* ── Body ── */}
+      <div className="col" style={{ gap: 10, padding: 14 }}>
+        <div className="col" style={{ gap: 3 }}>
+          <h6 style={{ margin: 0, fontSize: featured ? 18 : 16 }}>{card.name || `Course #${card.token_id}`}</h6>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+            by {formatPrincipal(card.creator ?? null)}
+            {ownerDiffers && <span> · owned by {formatPrincipal(card.owner ?? null)}</span>}
+          </span>
+        </div>
 
-      <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-        by {formatPrincipal(card.creator ?? null)}
-        {ownerDiffers && <span style={{ color: 'var(--fg-3)' }}> · owned by {formatPrincipal(card.owner ?? null)}</span>}
-      </span>
-
-      <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-        <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>
-          <Icon name="target" size={11} /> {card.play_count.toString()} plays
-        </Chip>
-        {card.tickets_distributed > 0n && (
-          <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{card.tickets_distributed.toString()} tickets earned</Chip>
-        )}
-        {rating && rating.count > 0 && (
-          <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{formatRating(rating.avg_x10, rating.count)}</Chip>
-        )}
-      </span>
-
-      <span className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
-        <span className="mono" style={{ fontSize: 12 }}>
-          {forSale ? <b>{fmtICP(card.price_e8s)} ICP</b> : <span style={{ color: 'var(--fg-3)' }}>Not for sale</span>}
+        <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+          <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>
+            <Icon name="target" size={11} /> {card.play_count.toString()} plays
+          </Chip>
+          {card.tickets_distributed > 0n && (
+            <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{card.tickets_distributed.toString()} tickets earned</Chip>
+          )}
+          {rating && rating.count > 0 && (
+            <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{formatRating(rating.avg_x10, rating.count)}</Chip>
+          )}
         </span>
-        {featured && featuredToBeat !== undefined && (
-          <span className="mono" style={{ fontSize: 11, color: 'var(--burn-ink)' }}>Featured bid to beat: {fmtUsd(featuredToBeat)}</span>
-        )}
-      </span>
 
-      <div className="row" style={{ justifyContent: 'flex-end', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
+        <span className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+          <span className="mono" style={{ fontSize: 12 }}>
+            {forSale ? <b>{fmtICP(card.price_e8s)} ICP</b> : <span style={{ color: 'var(--fg-3)' }}>Not for sale</span>}
+          </span>
+          {featured && featuredToBeat !== undefined && (
+            <span className="mono" style={{ fontSize: 11, color: 'var(--burn-ink)' }}>Featured bid to beat: {fmtUsd(featuredToBeat)}</span>
+          )}
+        </span>
+
+        <div className="row" style={{ justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
         {nftUrl && (
           <a
             href={nftUrl}
@@ -663,6 +704,7 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
         <Btn variant="primary" sm onClick={() => (signedIn ? onPlay(card) : onSignIn())}>
           <Icon name="flame" size={11} stroke="var(--char-950)" /> {signedIn ? 'Play' : 'Sign in to play'}
         </Btn>
+        </div>
       </div>
     </div>
   );

@@ -1,0 +1,207 @@
+{
+  "format": "proof-of-burn/minigolf-course@1",
+  "name": "Ember Fields",
+  "description": "A friendly warm-up nine: open greens, gentle bunkers, one windmill. Par 25.",
+  "instructions": {
+    "summary": "Build each of the 9 holes from its ASCII layout grid. Every row in a layout must be the same length, and each hole must contain exactly one T (tee) and one C (cup). The app rasterizes each character into a terrain cell and compiles the result into a playable hole.",
+    "legend": {
+      ".": "out of bounds (solid)",
+      "#": "wall (raised block, ball bounces off)",
+      "g": "green (normal fairway)",
+      "r": "rough (extra friction)",
+      "s": "sand (heavy friction)",
+      "w": "water (penalty stroke, ball returns to pre-shot spot)",
+      "^": "slope accelerating the ball north (up)",
+      "v": "slope accelerating the ball south (down)",
+      ">": "slope accelerating the ball east (right)",
+      "<": "slope accelerating the ball west (left)",
+      "o": "post (round bumper)",
+      "T": "tee (ball start, sits on green)",
+      "C": "cup (hole target, sits on green)"
+    },
+    "windmills": "Optional per-hole rotating bars: x and y are the pivot in cell units (fractions allowed), lengthCells is the full arm length in cells, speed is angular velocity in radians per second (negative spins the other way)."
+  },
+  "holes": [
+    {
+      "name": "Warm-Up",
+      "par": 2,
+      "layout": [
+        "......................",
+        "........######........",
+        "........#gggg#........",
+        "........#gCgg#........",
+        "........#gggg#........",
+        "........#gggg#........",
+        "........#gggg#........",
+        "........#gggg#........",
+        "........#gggg#........",
+        "........#gggg#........",
+        "........#ggTg#........",
+        "........#gggg#........",
+        "........######........",
+        "......................"
+      ]
+    },
+    {
+      "name": "Left Hook",
+      "par": 2,
+      "layout": [
+        "......................",
+        "....##########........",
+        "....#gggggggg#........",
+        "....#gCgggggg#........",
+        "....#gggggggg#........",
+        "....#####ggg##........",
+        "........#ggg#.........",
+        "........#ggg#.........",
+        "........#ggg#.........",
+        "........#ggg#.........",
+        "........#gTg#.........",
+        "........#ggg#.........",
+        "........#####.........",
+        "......................"
+      ]
+    },
+    {
+      "name": "Sandtrap Row",
+      "par": 3,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#gCgggggggggggggg#..",
+        "..#ggggsssssssssggg#..",
+        "..#ggggsssssssssggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggsssssssssggg#..",
+        "..#ggggsssssssssggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggggggggTggg#..",
+        "..#gggggggggggggggg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "Post Garden",
+      "par": 3,
+      "layout": [
+        "......................",
+        "....##############....",
+        "....#gggggggggggg#....",
+        "....#ggCggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#ggogggoggogg#....",
+        "....#gggggggggggg#....",
+        "....#ggoggogggogg#....",
+        "....#gggggggggggg#....",
+        "....#ggogggoggogg#....",
+        "....#gggggggggggg#....",
+        "....#ggggggTggggg#....",
+        "....##############....",
+        "......................"
+      ]
+    },
+    {
+      "name": "Creek Crossing",
+      "par": 3,
+      "layout": [
+        "......................",
+        "....##############....",
+        "....#gggggggggggg#....",
+        "....#ggggCggggggg#....",
+        "....#gggggggggggg#....",
+        "....#wwwwwwggwwww#....",
+        "....#wwwwwwggwwww#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggTgggg#....",
+        "....##############....",
+        "......................"
+      ]
+    },
+    {
+      "name": "Uphill Battle",
+      "par": 3,
+      "layout": [
+        "......................",
+        "....##############....",
+        "....#gggggggggggg#....",
+        "....#ggggggCggggg#....",
+        "....#gggggggggggg#....",
+        "....#vvvvvvvvvvvv#....",
+        "....#vvvvvvvvvvvv#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#ggggggTggggg#....",
+        "....##############....",
+        "......................"
+      ]
+    },
+    {
+      "name": "Windmill Lane",
+      "par": 3,
+      "layout": [
+        "......................",
+        ".....############.....",
+        ".....#gggggggggg#.....",
+        ".....#gggggCgggg#.....",
+        ".....#gggggggggg#.....",
+        ".....#gggggggggg#.....",
+        ".....#gggggggggg#.....",
+        ".....#####ggg####.....",
+        ".....#gggggggggg#.....",
+        ".....#gggggggggg#.....",
+        ".....#gggggggggg#.....",
+        ".....#gggggTgggg#.....",
+        ".....############.....",
+        "......................"
+      ],
+      "windmills": [{ "x": 11.5, "y": 7.5, "lengthCells": 3, "speed": 1.9 }]
+    },
+    {
+      "name": "Horseshoe",
+      "par": 3,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggg########gggg#..",
+        "..#gggg#......#gggg#..",
+        "..#gggg#......#gggg#..",
+        "..#gggg#......#gggg#..",
+        "..#gggg#......#gggg#..",
+        "..#gggg#......#gggg#..",
+        "..#gTgg#......#gCgg#..",
+        "..#gggg#......#gggg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "Caldera Finale",
+      "par": 3,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#ggggggggwwgggggg#..",
+        "..#gCggggggwwgggggg#..",
+        "..#ggggggggwwgggogg#..",
+        "..#ggggssggwwgggggg#..",
+        "..#ggggssggggggggog#..",
+        "..#ggggssgggggggggg#..",
+        "..#ggggggggggggggog#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggTgg#..",
+        "..#gggggggggggggggg#..",
+        "..##################..",
+        "......................"
+      ]
+    }
+  ]
+}

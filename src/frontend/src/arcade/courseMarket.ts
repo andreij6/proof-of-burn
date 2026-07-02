@@ -2,8 +2,8 @@
 // Course marketplace — pure logic (PB-305 frontend).
 //
 // Extracted per the frontend-dev "pull pure logic out of the component" rule so
-// the shuffle, difficulty bucketing, theme labels, and the featured-exclusion
-// are unit-testable without React. The marketplace page (CourseMarketplace.tsx)
+// the shuffle, difficulty bucketing, and the featured-exclusion are
+// unit-testable without React. The marketplace page (CourseMarketplace.tsx)
 // is a thin shell over these.
 // ==========================================
 
@@ -18,14 +18,6 @@ export function difficultyBucket(parTotal: number): Difficulty {
   if (parTotal <= 27) return 'Easy';
   if (parTotal >= 45) return 'Hard';
   return 'Medium';
-}
-
-// ── Theme discriminant (0..=4) → label. Custom = 4. Mirrors the CourseDataV1
-//    Theme enum order in courseData.ts. ──
-export const THEME_LABELS = ['Desert', 'Ocean', 'Space', 'Forest', 'Custom'] as const;
-
-export function themeLabel(theme: number): string {
-  return THEME_LABELS[theme] ?? 'Custom';
 }
 
 // ── A seeded PRNG (mulberry32) so a page's shuffle is reproducible within a
@@ -90,16 +82,6 @@ export const LISTED_OPTIONS: { value: ListedFilter; label: string }[] = [
   { value: ListedFilter.Any, label: 'Any' },
   { value: ListedFilter.Yes, label: 'For sale' },
   { value: ListedFilter.No, label: 'Not listed' },
-];
-
-// theme filter: undefined = Any, 0..=4 selects a theme.
-export const THEME_OPTIONS: { value: number | undefined; label: string }[] = [
-  { value: undefined, label: 'Any' },
-  { value: 0, label: 'Desert' },
-  { value: 1, label: 'Ocean' },
-  { value: 2, label: 'Space' },
-  { value: 3, label: 'Forest' },
-  { value: 4, label: 'Custom' },
 ];
 
 /** A fresh page-load seed (used by the page; not pure, so kept tiny). */

@@ -368,7 +368,6 @@ describe('pageFromHash (shareable URL routing)', () => {
     // useHashScreen keeps the active sub-screen in a trailing segment; the
     // top-level router must still land on the hub page.
     expect(pageFromHash('#/casino/crash')).toBe('casino');
-    expect(pageFromHash('#/arcade/course-editor')).toBe('arcade');
     expect(pageFromHash('#/arcade/course-play')).toBe('arcade');
     expect(pageFromHash('#/lottery/staking')).toBe('lottery');
     expect(pageFromHash('#/lottery/lottery')).toBe('lottery');

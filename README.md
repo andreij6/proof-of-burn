@@ -33,8 +33,9 @@ Runs fully on-chain. Sign in with Internet Identity to participate.
 - **Dapp Explorer** — Paid daily dapp listings priced in USD via the XRC oracle.
 - **Early Adopters** — Opt into a permanent 2-year neuron stake that shares
   yield proportionally (deliberately no unstake).
-- **Arcade & Casino** — Mini Golf (with a course editor) and Field Goal, plus
-  the Crash casino game (ships dark behind a feature flag).
+- **Arcade & Casino** — Mini Golf (AI-designed course NFTs you can play, own,
+  and trade) and Field Goal, plus the Crash casino game (ships dark behind a
+  feature flag).
 - **Self-sustaining** — Burned commitments mint cycles that fund the canister,
   so the app runs longer the more it's used.
 

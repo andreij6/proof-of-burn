@@ -16045,8 +16045,6 @@ pub struct CourseListing {
     #[serde(default)]
     pub par_total: u8,
     #[serde(default)]
-    pub theme: u8, // Theme discriminant (0..=4), Custom=4
-    #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
     pub mint_fee_e8s: u64,
@@ -16123,7 +16121,6 @@ pub struct MintSaga {
     pub course_data: Vec<u8>,
     pub name: String,
     pub par_total: u8,
-    pub theme: u8,
     pub fee_e8s: u64,
     pub treasury_block: Option<u64>,
     pub cmc_block_index: Option<u64>,
@@ -16423,11 +16420,11 @@ pub enum MintError {
     AlreadyMinting,
 }
 
-/// Minimal MVP server-side validation (PB-304 B2). Full CourseDataV1 CBOR
-/// validation is owned by PB-303 (`validate_course_v1`); here we enforce the
-/// trust-boundary essentials available without importing that crate: blob size,
-/// non-empty, name bounds. Returns `(par_total, theme)` parsed best-effort.
-fn validate_course_for_mint(bytes: &[u8], name: &str) -> Result<(u8, u8), MintError> {
+/// Minimal MVP server-side validation (PB-304 B2). Full validation of the
+/// build-instructions JSON is owned by the frontend compiler; here we enforce
+/// the trust-boundary essentials: blob size, non-empty, name bounds. Returns
+/// `par_total` parsed best-effort.
+fn validate_course_for_mint(bytes: &[u8], name: &str) -> Result<u8, MintError> {
     if bytes.is_empty() {
         return Err(MintError::InvalidCourse("EMPTY_COURSE_DATA".into()));
     }
@@ -16441,38 +16438,39 @@ fn validate_course_for_mint(bytes: &[u8], name: &str) -> Result<(u8, u8), MintEr
     if chars > MAX_COURSE_NAME_CHARS {
         return Err(MintError::InvalidCourse("NAME_TOO_LONG".into()));
     }
-    let (par_total, theme) = decode_course_meta(bytes);
-    Ok((par_total, theme))
+    Ok(decode_course_meta(bytes))
 }
 
-/// Best-effort extraction of `par_total` and `theme` from the CBOR blob for the
-/// marketplace cache. Tolerant: returns conservative defaults if absent. PB-303
-/// owns the authoritative schema; this only reads two convenience fields.
-fn decode_course_meta(bytes: &[u8]) -> (u8, u8) {
+/// Best-effort extraction of `par_total` from a course blob for the
+/// marketplace cache. Current format: build-instructions JSON — par_total is
+/// the sum of `holes[].par`. Legacy format: CBOR map with a `par_total`
+/// convenience field. Tolerant: returns 0 if neither parses.
+fn decode_course_meta(bytes: &[u8]) -> u8 {
+    // JSON build instructions (current format).
+    if bytes.first() == Some(&b'{') {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
+            if let Some(holes) = v.get("holes").and_then(|h| h.as_array()) {
+                let sum: u64 = holes
+                    .iter()
+                    .filter_map(|h| h.get("par").and_then(|p| p.as_u64()))
+                    .sum();
+                return u8::try_from(sum).unwrap_or(0);
+            }
+        }
+    }
+    // Legacy CBOR blob.
     use ciborium::value::Value as Cv;
     let parsed: Result<Cv, _> = ciborium::from_reader(bytes);
-    let mut par_total: u8 = 0;
-    let mut theme: u8 = 0;
     if let Ok(Cv::Map(entries)) = parsed {
         for (k, v) in entries {
-            if let Cv::Text(key) = k {
-                match key.as_str() {
-                    "par_total" => {
-                        if let Cv::Integer(i) = v {
-                            par_total = u8::try_from(i128::from(i)).unwrap_or(0);
-                        }
-                    }
-                    "theme" => {
-                        if let Cv::Integer(i) = v {
-                            theme = u8::try_from(i128::from(i)).unwrap_or(0);
-                        }
-                    }
-                    _ => {}
+            if let (Cv::Text(key), Cv::Integer(i)) = (k, v) {
+                if key == "par_total" {
+                    return u8::try_from(i128::from(i)).unwrap_or(0);
                 }
             }
         }
     }
-    (par_total, theme)
+    0
 }
 
 #[ic_cdk::query(guard = "require_authenticated")]
@@ -16518,13 +16516,12 @@ async fn mint_course_nft_inner(
     let mut saga = match MINT_SAGAS.with(|m| m.borrow().get(&caller)) {
         Some(existing) => existing, // retry of the same course (idempotent resume)
         None => {
-            let (par_total, theme) = validate_course_for_mint(&course_data, &name)?;
+            let par_total = validate_course_for_mint(&course_data, &name)?;
             let s = MintSaga {
                 caller,
                 course_data: course_data.clone(),
                 name: name.clone(),
                 par_total,
-                theme,
                 fee_e8s: MINT_FEE_E8S,
                 treasury_block: None,
                 cmc_block_index: None,
@@ -16623,7 +16620,6 @@ async fn mint_course_nft_inner(
                     play_count: 0,
                     tickets_distributed: 0,
                     par_total: saga.par_total,
-                    theme: saga.theme,
                     created_at: saga.started_at,
                     mint_fee_e8s: MINT_FEE_E8S,
                     for_sale: false,
@@ -16680,7 +16676,6 @@ pub enum ListedFilter {
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct MarketplaceFilter {
     pub difficulty: DifficultyFilter,
-    pub theme: Option<u8>,
     pub listed: ListedFilter,
     pub mine_only: bool,
 }
@@ -16694,7 +16689,6 @@ pub struct CourseCard {
     pub par_total: u8,
     pub play_count: u64,
     pub tickets_distributed: u64,
-    pub theme: u8,
     pub listed: bool,
     pub price_e8s: u64,
     pub created_at: u64,
@@ -16719,7 +16713,6 @@ fn listing_to_card(l: &CourseListing, caller: Principal) -> CourseCard {
         par_total: l.par_total,
         play_count: l.play_count,
         tickets_distributed: l.tickets_distributed,
-        theme: l.theme,
         listed: l.listed,
         price_e8s: l.price_e8s,
         created_at: l.created_at,
@@ -16745,11 +16738,6 @@ fn listing_matches(l: &CourseListing, f: &MarketplaceFilter, caller: Principal) 
             if difficulty_bucket(l.par_total) != Difficulty::Hard {
                 return false;
             }
-        }
-    }
-    if let Some(t) = f.theme {
-        if l.theme != t {
-            return false;
         }
     }
     match f.listed {
@@ -16876,7 +16864,6 @@ async fn list_course_for_sale(token_id: u64, price_e8s: u64) -> Result<(), Strin
             play_count: 0,
             tickets_distributed: 0,
             par_total: 0,
-            theme: 0,
             created_at: current_time(),
             mint_fee_e8s: 0,
             for_sale: false,
@@ -17736,19 +17723,29 @@ fn credit_course_ticket(recipient: Principal) {
     set_lottery_state(state);
 }
 
-/// The CourseDataV1 blob for the genesis default course (the built-in 9-hole
-/// mini-golf course preserved as marketplace content, PB-309 A3/B3). MVP shape:
-/// the convenience `par_total`/`theme` fields the marketplace cache reads; the
-/// full hole geometry is owned by PB-303's CourseDataV1 conversion table.
+/// The 3 built-in mock courses. Each blob is a build-instructions JSON
+/// document (ASCII hole layouts + par + windmills) stored verbatim in the
+/// NFT's `course_data`; the app compiles it into 9 playable holes at load
+/// time. Also the format an AI course builder authors for user-commissioned
+/// courses. Kept in sync with the frontend compiler
+/// (`src/frontend/src/arcade/courseInstructions.ts`) — its vitest suite
+/// validates these exact files (grid shape, tee→cup reachability).
+const MOCK_COURSE_BLOBS: [&str; 3] = [
+    include_str!("courses/ember-fields.json"),
+    include_str!("courses/rolling-meadows.json"),
+    include_str!("courses/volcano-run.json"),
+];
+
+/// Course display name straight from the instructions JSON.
+fn decode_course_name(bytes: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string())
+}
+
+/// The blob for the genesis default course (PB-309 A3/B3): the first mock
+/// course, a full playable 9-hole instructions document.
 fn system_course_blob() -> Result<Vec<u8>, String> {
-    use ciborium::value::Value as Cv;
-    let v = Cv::Map(vec![
-        (Cv::Text("par_total".into()), Cv::Integer(27i64.into())), // 9 holes × par 3
-        (Cv::Text("theme".into()), Cv::Integer(0i64.into())),      // Desert
-    ]);
-    let mut buf = Vec::new();
-    ciborium::into_writer(&v, &mut buf).map_err(|e| format!("ENCODE: {e}"))?;
-    Ok(buf)
+    Ok(MOCK_COURSE_BLOBS[0].as_bytes().to_vec())
 }
 
 /// Genesis default course (PB-309 A7/B3). Minted exactly ONCE to the admin
@@ -17780,9 +17777,9 @@ async fn seed_system_course_inner() -> Result<u64, String> {
         canister_print("seed_system_course: course_nft not configured — skipping (will re-attempt)");
         return Err("COURSE_NFT_NOT_CONFIGURED".to_string());
     }
-    let name = "Caldera Classic".to_string();
     let course_data = system_course_blob()?;
-    let (par_total, theme) = decode_course_meta(&course_data);
+    let name = decode_course_name(&course_data).unwrap_or_else(|| "Caldera Classic".to_string());
+    let par_total = decode_course_meta(&course_data);
     let token_id = course_nft_mint(CourseMintArgs {
         to: owner,
         name: name.clone(),
@@ -17805,7 +17802,6 @@ async fn seed_system_course_inner() -> Result<u64, String> {
                 play_count: 0,
                 tickets_distributed: 0,
                 par_total,
-                theme,
                 created_at: current_time(),
                 mint_fee_e8s: 0,
                 for_sale: false, // admin lists it for sale later via the normal path
@@ -18352,47 +18348,44 @@ fn admin_clear_featured_slot() -> Result<(), String> {
 // skipped is the money (burns/approves/bids). NOT gated on the arcade flag (you
 // seed state before flipping it).
 
-const DEV_MAX_SEED_COURSES: u32 = 60;
-
 /// Deterministic, reproducible mock principal for seeded owners/buyers. Never an
 /// admin, never the caller. (29-byte body keeps it a valid opaque principal.)
 fn mock_principal(n: u8) -> Principal {
     Principal::from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, n])
 }
 
-/// Local-dev: mint up to `count` varied courses (tops up toward `count`, bounded).
+/// Local-dev: mint the 3 built-in mock courses (full playable 9-hole
+/// build-instructions blobs). Tops up by name, so re-running only mints
+/// what's missing. `count` is capped at the 3 available mock courses.
 #[ic_cdk::update]
 async fn dev_seed_courses(count: u32) -> Result<u32, String> {
     require_authenticated()?;
     require_local_dev()?;
     let caller = get_caller();
-    let count = count.min(DEV_MAX_SEED_COURSES);
-    let existing = COURSE_LISTINGS.with(|m| m.borrow().len() as u32);
-    if existing >= count {
-        return Ok(0);
-    }
-    let mut minted = 0u32;
     let now = current_time();
-    for i in existing..count {
-        // Vary theme/difficulty/owner/price/play_count off the index.
-        let theme = (i % 5) as u8; // 0..=4 (Custom=4)
-        let par_total: u8 = match i % 3 {
-            0 => 22, // Easy
-            1 => 36, // Medium
-            _ => 45, // Hard (45 = max valid par_total; 9 holes × 5; must be 18..=45)
+    let mut minted = 0u32;
+    for (i, blob) in MOCK_COURSE_BLOBS.iter().enumerate() {
+        if minted >= count {
+            break;
+        }
+        let course_data = blob.as_bytes().to_vec();
+        let name = decode_course_name(&course_data).unwrap_or_else(|| format!("Mock Course {}", i + 1));
+        let already = COURSE_LISTINGS
+            .with(|m| m.borrow().iter().any(|e| e.value().name == name));
+        if already {
+            continue; // top-up: this mock course is already on the marketplace
+        }
+        let par_total = decode_course_meta(&course_data);
+        // Vary owner/price/plays so every card state is visible: #1 owned by the
+        // caller (Manage/Burn), #2 caller-owned + for sale, #3 someone else's +
+        // for sale (Buy).
+        let to = if i == 2 { mock_principal(1) } else { caller };
+        let for_sale = i > 0;
+        let price_e8s = if for_sale {
+            MIN_SALE_PRICE_E8S + (i as u64) * 150_000_000
+        } else {
+            0
         };
-        let to = if i % 3 == 0 { caller } else { mock_principal((i % 7) as u8) };
-        let course_data = {
-            use ciborium::value::Value as Cv;
-            let v = Cv::Map(vec![
-                (Cv::Text("par_total".into()), Cv::Integer(par_total.into())),
-                (Cv::Text("theme".into()), Cv::Integer(theme.into())),
-            ]);
-            let mut buf = Vec::new();
-            ciborium::into_writer(&v, &mut buf).map_err(|e| format!("ENCODE: {e}"))?;
-            buf
-        };
-        let name = format!("Dev Course {}", i + 1);
         let token_id = course_nft_mint(CourseMintArgs {
             to,
             name: name.clone(),
@@ -18402,13 +18395,7 @@ async fn dev_seed_courses(count: u32) -> Result<u32, String> {
             mint_fee_e8s: MINT_FEE_E8S,
         })
         .await?;
-        let for_sale = i % 3 == 1;
-        let price_e8s = if for_sale {
-            MIN_SALE_PRICE_E8S + (i as u64 % 25) * 100_000_000
-        } else {
-            0
-        };
-        let play_count = if i % 2 == 0 { (i as u64) * 37 } else { 0 };
+        let play_count = (i as u64) * 41;
         if play_count > 0 {
             course_nft_increment_play(token_id).await; // cosmetic provenance bump
         }
@@ -18425,7 +18412,6 @@ async fn dev_seed_courses(count: u32) -> Result<u32, String> {
                     play_count,
                     tickets_distributed: play_count / 2,
                     par_total,
-                    theme,
                     created_at: now,
                     mint_fee_e8s: MINT_FEE_E8S,
                     for_sale,
@@ -26604,7 +26590,8 @@ mod tests {
         });
     }
 
-    /// Build a minimal CBOR course blob carrying par_total + theme.
+    /// Build a minimal LEGACY CBOR course blob carrying par_total (+ the
+    /// retired theme key, proving old blobs still decode).
     fn course_blob(par_total: u8, theme: u8) -> Vec<u8> {
         use ciborium::value::Value as Cv;
         let v = Cv::Map(vec![
@@ -26617,7 +26604,9 @@ mod tests {
     }
 
     /// Insert a listing directly (skips the mint flow) for play/marketplace tests.
-    fn seed_listing(token_id: u64, owner: Principal, par_total: u8, theme: u8, listed: bool) {
+    /// (`_theme` retained so the many call sites didn't need rewriting when the
+    /// theme concept was removed.)
+    fn seed_listing(token_id: u64, owner: Principal, par_total: u8, _theme: u8, listed: bool) {
         COURSE_LISTINGS.with(|m| {
             m.borrow_mut().insert(
                 token_id,
@@ -26631,7 +26620,6 @@ mod tests {
                     play_count: 0,
                     tickets_distributed: 0,
                     par_total,
-                    theme,
                     created_at: 1,
                     mint_fee_e8s: 0,
                     for_sale: false,
@@ -26659,7 +26647,6 @@ mod tests {
                     play_count: 0,
                     tickets_distributed: 0,
                     par_total: 27,
-                    theme: 0,
                     created_at: 1,
                     mint_fee_e8s: 0,
                     for_sale: true,
@@ -26694,7 +26681,7 @@ mod tests {
     #[test]
     fn test_validate_course_for_mint() {
         let ok = validate_course_for_mint(&course_blob(34, 2), "My Course");
-        assert_eq!(ok.unwrap(), (34, 2));
+        assert_eq!(ok.unwrap(), 34);
         assert!(matches!(
             validate_course_for_mint(&[], "x"),
             Err(MintError::InvalidCourse(_))
@@ -26728,11 +26715,10 @@ mod tests {
             .unwrap();
         assert_eq!(token_id, 1);
 
-        // Auto-listed row exists with server-computed par/theme.
+        // Auto-listed row exists with server-computed par.
         let card = get_course(token_id).unwrap();
         assert!(card.listed);
         assert_eq!(card.par_total, 34);
-        assert_eq!(card.theme, 2);
         assert_eq!(card.owner, Some(alice()));
         assert_eq!(card.creator, Some(alice()));
         assert_eq!(card.price_e8s, 0);
@@ -26842,13 +26828,12 @@ mod tests {
     fn test_marketplace_filters() {
         course_test_setup();
         set_mock_caller(alice());
-        seed_listing(1, alice(), 20, 0, true); // Easy, Desert, listed, mine
-        seed_listing(2, bob(), 34, 1, true); // Medium, Ocean, listed, not mine
-        seed_listing(3, bob(), 46, 2, false); // Hard, Space, NOT listed
+        seed_listing(1, alice(), 20, 0, true); // Easy, listed, mine
+        seed_listing(2, bob(), 34, 1, true); // Medium, listed, not mine
+        seed_listing(3, bob(), 46, 2, false); // Hard, NOT listed
 
         let any = list_marketplace_courses(MarketplaceFilter {
             difficulty: DifficultyFilter::Any,
-            theme: None,
             listed: ListedFilter::Any,
             mine_only: false,
         });
@@ -26860,25 +26845,14 @@ mod tests {
 
         let hard = list_marketplace_courses(MarketplaceFilter {
             difficulty: DifficultyFilter::Hard,
-            theme: None,
             listed: ListedFilter::Any,
             mine_only: false,
         });
         assert_eq!(hard.total, 1);
         assert_eq!(hard.courses[0].token_id, 3);
 
-        let ocean = list_marketplace_courses(MarketplaceFilter {
-            difficulty: DifficultyFilter::Any,
-            theme: Some(1),
-            listed: ListedFilter::Any,
-            mine_only: false,
-        });
-        assert_eq!(ocean.total, 1);
-        assert_eq!(ocean.courses[0].token_id, 2);
-
         let listed_only = list_marketplace_courses(MarketplaceFilter {
             difficulty: DifficultyFilter::Any,
-            theme: None,
             listed: ListedFilter::Yes,
             mine_only: false,
         });
@@ -26886,7 +26860,6 @@ mod tests {
 
         let mine = list_marketplace_courses(MarketplaceFilter {
             difficulty: DifficultyFilter::Any,
-            theme: None,
             listed: ListedFilter::Any,
             mine_only: true,
         });
@@ -27635,7 +27608,6 @@ mod tests {
 
         let page = list_marketplace_courses(MarketplaceFilter {
             difficulty: DifficultyFilter::Any,
-            theme: None,
             listed: ListedFilter::Any,
             mine_only: false,
         });
@@ -27672,7 +27644,6 @@ mod tests {
     fn any_filter() -> MarketplaceFilter {
         MarketplaceFilter {
             difficulty: DifficultyFilter::Any,
-            theme: None,
             listed: ListedFilter::Any,
             mine_only: false,
         }
@@ -28791,24 +28762,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dev_seed_courses_varied_and_bounded() {
+    async fn test_dev_seed_courses_playable_and_bounded() {
         course_test_setup();
         make_following(alice());
         set_mock_caller(alice());
         // is_local already true via install_staking_test_config.
-        let minted = dev_seed_courses(5).await.unwrap();
-        assert_eq!(minted, 5);
+        let minted = dev_seed_courses(12).await.unwrap();
+        assert_eq!(minted, 3, "exactly the 3 built-in mock courses");
         let total = COURSE_LISTINGS.with(|m| m.borrow().len());
-        assert_eq!(total, 5);
-        // Varied themes + for-sale states present.
-        let themes: std::collections::HashSet<u8> =
-            COURSE_LISTINGS.with(|m| m.borrow().iter().map(|e| e.value().theme).collect());
-        assert!(themes.len() >= 2, "varied themes: {themes:?}");
+        assert_eq!(total, 3);
+        // Every seeded course carries a full 9-hole instructions JSON with a
+        // matching par_total, and varied for-sale/owner states are present.
+        COURSE_LISTINGS.with(|m| {
+            for e in m.borrow().iter() {
+                let l = e.value();
+                assert!(l.par_total >= 18, "real par_total, got {}", l.par_total);
+                assert!(!l.name.starts_with("Mock Course"), "name parsed from JSON");
+            }
+        });
+        for blob in MOCK_COURSE_BLOBS {
+            let v: serde_json::Value = serde_json::from_str(blob).unwrap();
+            assert_eq!(v["holes"].as_array().unwrap().len(), 9);
+            assert!(decode_course_meta(blob.as_bytes()) >= 18);
+        }
         let any_for_sale = COURSE_LISTINGS.with(|m| m.borrow().iter().any(|e| e.value().for_sale));
         assert!(any_for_sale);
+        let any_foreign = COURSE_LISTINGS.with(|m| m.borrow().iter().any(|e| e.value().owner != Some(alice())));
+        assert!(any_foreign, "one mock course is owned by someone else");
         // Re-seed tops up (no new mints).
-        assert_eq!(dev_seed_courses(5).await.unwrap(), 0);
-        assert_eq!(COURSE_LISTINGS.with(|m| m.borrow().len()), 5);
+        assert_eq!(dev_seed_courses(12).await.unwrap(), 0);
+        assert_eq!(COURSE_LISTINGS.with(|m| m.borrow().len()), 3);
     }
 
     #[tokio::test]
@@ -28879,7 +28862,7 @@ mod tests {
         make_following(alice());
         set_mock_caller(alice());
         let minted = dev_seed_courses(4).await.unwrap();
-        assert_eq!(minted, 4);
+        assert_eq!(minted, 3); // capped at the 3 built-in mock courses
         // Favorite + rate + feature one of them.
         let some_id = COURSE_LISTINGS.with(|m| *m.borrow().iter().next().unwrap().key());
         dev_grant_favorite(some_id).unwrap();
@@ -28892,7 +28875,7 @@ mod tests {
         });
 
         let removed = dev_clear_courses().await.unwrap();
-        assert_eq!(removed, 4);
+        assert_eq!(removed, 3);
         assert_eq!(COURSE_LISTINGS.with(|m| m.borrow().len()), 0);
         assert!(get_featured_slot().is_none());
         assert!(my_favorite_ids().is_empty());

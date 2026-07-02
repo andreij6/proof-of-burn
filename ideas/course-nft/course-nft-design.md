@@ -1,5 +1,15 @@
 # Mini-Golf Course NFT — Design Document
 
+> **2026-07-01 pivot:** the manual course editor described below was removed.
+> Courses are now authored by an AI course builder (the user describes the
+> course; the agent writes it), and the NFT's `course_data` blob is a
+> **build-instructions JSON** document (ASCII hole layouts + par + windmills)
+> that the app compiles into 9 playable holes at load time — see
+> `src/backend/src/courses/*.json` and
+> `src/frontend/src/arcade/courseInstructions.ts`. The `theme` field was
+> retired. Everything else (marketplace, tickets, buy/sell, featured slot)
+> still applies.
+
 ## Concept
 
 Users create mini-golf courses in the existing course editor and mint them as

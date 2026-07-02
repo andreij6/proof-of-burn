@@ -1,0 +1,212 @@
+{
+  "format": "proof-of-burn/minigolf-course@1",
+  "name": "Volcano Run",
+  "description": "The toughest of the launch nines: lava carries, narrow gaps, crosswind windmills. Par 34.",
+  "instructions": {
+    "summary": "Build each of the 9 holes from its ASCII layout grid. Every row in a layout must be the same length, and each hole must contain exactly one T (tee) and one C (cup). The app rasterizes each character into a terrain cell and compiles the result into a playable hole.",
+    "legend": {
+      ".": "out of bounds (solid)",
+      "#": "wall (raised block, ball bounces off)",
+      "g": "green (normal fairway)",
+      "r": "rough (extra friction)",
+      "s": "sand (heavy friction)",
+      "w": "water (penalty stroke, ball returns to pre-shot spot)",
+      "^": "slope accelerating the ball north (up)",
+      "v": "slope accelerating the ball south (down)",
+      ">": "slope accelerating the ball east (right)",
+      "<": "slope accelerating the ball west (left)",
+      "o": "post (round bumper)",
+      "T": "tee (ball start, sits on green)",
+      "C": "cup (hole target, sits on green)"
+    },
+    "windmills": "Optional per-hole rotating bars: x and y are the pivot in cell units (fractions allowed), lengthCells is the full arm length in cells, speed is angular velocity in radians per second (negative spins the other way)."
+  },
+  "holes": [
+    {
+      "name": "Lava Lip",
+      "par": 3,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggggCggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#wwwwwwwwggwwwwww#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#wwwwwwggwwwwwwww#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggTgggggggggggg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "Cinder Steps",
+      "par": 3,
+      "layout": [
+        "......................",
+        "....##############....",
+        "....#gCgggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggg#####....",
+        "....#gggggggggggg#....",
+        "....#####gggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggg#####....",
+        "....#gggggggggggg#....",
+        "....#####gggggggg#....",
+        "....#ggggggggggTg#....",
+        "....##############....",
+        "......................"
+      ]
+    },
+    {
+      "name": "Magma Pockets",
+      "par": 4,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggCgg#..",
+        "..#ggwwggwwggwwgggg#..",
+        "..#ggwwggwwggwwgggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggwwggwwggwwgg#..",
+        "..#ggggwwggwwggwwgg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggwwggwwggwwgggg#..",
+        "..#gTgggggggggggggg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "The Cauldron",
+      "par": 4,
+      "layout": [
+        "......................",
+        "....##############....",
+        "....#ggggCggggggg#....",
+        "....#gggggggggggg#....",
+        "....#ggosssssoggg#....",
+        "....#ggsssssssggg#....",
+        "....#ggsssssssggg#....",
+        "....#ggsssssssggg#....",
+        "....#ggosssssoggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggTgggg#....",
+        "....##############....",
+        "......................"
+      ]
+    },
+    {
+      "name": "Crosswinds",
+      "par": 4,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggggCggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggTgggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..##################..",
+        "......................"
+      ],
+      "windmills": [
+        { "x": 6.5, "y": 6.5, "lengthCells": 3, "speed": 1.3 },
+        { "x": 11.5, "y": 7.5, "lengthCells": 3, "speed": -1.8 },
+        { "x": 15.5, "y": 5.5, "lengthCells": 2, "speed": 2.4 }
+      ]
+    },
+    {
+      "name": "Slope Maze",
+      "par": 4,
+      "layout": [
+        "......................",
+        "....##############....",
+        "....#gCgggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#>>>>ggg<<<<g#....",
+        "....#gggggggggggg#....",
+        "....#g>>>>ggg<<<<#....",
+        "....#gggggggggggg#....",
+        "....#>>>>ggg<<<<g#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggggg#....",
+        "....#gggggggggTgg#....",
+        "....##############....",
+        "......................"
+      ]
+    },
+    {
+      "name": "Needle's Eye",
+      "par": 4,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#ggCggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#######gg#########..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..###########gg#####..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggggggggggTg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "Ring of Fire",
+      "par": 4,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggwwwwwwwwgggg#..",
+        "..#ggggwggggggwgggg#..",
+        "..#ggggwggCgggwgggg#..",
+        "..#ggggwggggggwgggg#..",
+        "..#ggggwwwggwwwgggg#..",
+        "..#gggggggggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggggggggTggggggg#..",
+        "..##################..",
+        "......................"
+      ]
+    },
+    {
+      "name": "Eruption",
+      "par": 4,
+      "layout": [
+        "......................",
+        "..##################..",
+        "..#ggggggCggggggggg#..",
+        "..#gggggggggggggggg#..",
+        "..#ssggggggggggwwgg#..",
+        "..#ssgggoggogggwwgg#..",
+        "..#gggggggggggggggg#..",
+        "..#gg^^gggggggg^^gg#..",
+        "..#gg^^gggggggg^^gg#..",
+        "..#gggggggggggggggg#..",
+        "..#ggogggoggggogggg#..",
+        "..#ggggggggggTggggg#..",
+        "..##################..",
+        "......................"
+      ],
+      "windmills": [{ "x": 9.5, "y": 6.5, "lengthCells": 3, "speed": 2.0 }]
+    }
+  ]
+}
