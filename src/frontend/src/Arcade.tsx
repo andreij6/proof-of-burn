@@ -11,7 +11,7 @@ import FieldGoal from "./arcade/FieldGoal";
 import CourseMarketplace from "./CourseMarketplace";
 import CourseCreate from "./CourseCreate";
 import CoursePlay from "./CoursePlay";
-import { courseIdFromScreen } from "./arcade/courseMarket";
+import { courseIdFromScreen, spectateIdFromScreen } from "./arcade/courseMarket";
 import MiniGolf from "./arcade/MiniGolf";
 import type { CourseCard } from "./bindings/backend";
 import {
@@ -192,20 +192,24 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   // #/arcade/course/<id>, …) so Back returns to the lobby, not off the page —
   // and `course/<id>` doubles as each course's shareable deep link. The
   // dedicated Mini Golf page reuses this component with base `/mini-golf`.
-  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'classic-play' | 'create-course' | `course/${string}`>(minigolfMode ? '/mini-golf' : '/arcade', 'lobby');
+  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'classic-play' | 'create-course' | `course/${string}` | `spectate/${string}`>(minigolfMode ? '/mini-golf' : '/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
   // Deep-link resolution: when the hash names a course we don't have a card
-  // for (a shared link or a reload), fetch it. `deepLinkErr` = course gone.
+  // for (a shared link, the "View NFT" grid, or a reload), fetch it. The hash
+  // can be `course/<id>` (play) or `spectate/<id>` (view-only 3×3 grid).
+  // `deepLinkErr` = course gone.
   const deepLinkCourseId = courseIdFromScreen(view);
+  const spectateCourseId = spectateIdFromScreen(view);
+  const routeCourseId = deepLinkCourseId ?? spectateCourseId;
   const [deepLinkErr, setDeepLinkErr] = useState(false);
   useEffect(() => {
     setDeepLinkErr(false);
-    if (deepLinkCourseId === null || !actor) return;
-    if (playCard && playCard.token_id === deepLinkCourseId) return;
+    if (routeCourseId === null || !actor) return;
+    if (playCard && playCard.token_id === routeCourseId) return;
     let cancelled = false;
     (async () => {
       try {
-        const card = await actor.get_course(deepLinkCourseId);
+        const card = await actor.get_course(routeCourseId);
         if (cancelled) return;
         if (card) setPlayCard(card); else setDeepLinkErr(true);
       } catch {
@@ -387,14 +391,16 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
 
   // Course play — reached from the marketplace Play button OR directly via a
   // shared `#/arcade/course/<id>` link (the card is fetched by the effect above).
-  if (deepLinkCourseId !== null) {
-    if (playCard && playCard.token_id === deepLinkCourseId) {
+  // `spectate/<id>` is the View-NFT 3×3 grid: same CoursePlay, spectate-only.
+  if (routeCourseId !== null) {
+    if (playCard && playCard.token_id === routeCourseId) {
       return (
         <div className="idea-board-container">
           <CoursePlay
             actor={actor}
             card={playCard}
             character={myLook}
+            spectateOnly={spectateCourseId !== null}
             onExit={() => { setPlayCard(null); setTab('minigolf'); setView('lobby'); }}
             onGoParticipate={onGoParticipate}
           />
@@ -412,7 +418,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
         ) : (
           <div style={{ textAlign: 'center', padding: 48, color: 'var(--fg-3)' }}>
             <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
-            Loading course #{deepLinkCourseId.toString()}…
+            Loading course #{routeCourseId.toString()}…
           </div>
         )}
       </div>
@@ -567,6 +573,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             backendCanisterId={backendCanisterId}
             isLocal={isLocal}
             onPlay={(card) => { setPlayCard(card); setView(`course/${card.token_id}`); }}
+            onViewNft={(card) => { setPlayCard(card); setView(`spectate/${card.token_id}`); }}
             onCreate={() => setView('create-course')}
             onSignIn={onSignIn}
           />

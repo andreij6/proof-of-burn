@@ -27,6 +27,9 @@ interface CoursePlayProps {
   character: CharacterLook | null;
   onExit: () => void;
   onGoParticipate: () => void;
+  /** Spectate-only: the "View NFT" 3×3 grid — no scored round is started, no
+   *  "Play the course" CTA. Preview + unscored practice still work. */
+  spectateOnly?: boolean;
 }
 
 /** Friendly copy for a complete_round `reason` code. */
@@ -45,7 +48,7 @@ function completionNote(credited: boolean, reason?: string): string {
   }
 }
 
-export default function CoursePlay({ actor, card, character, onExit, onGoParticipate }: CoursePlayProps) {
+export default function CoursePlay({ actor, card, character, onExit, onGoParticipate, spectateOnly = false }: CoursePlayProps) {
   const [holes, setHoles] = useState<HoleDef[] | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
@@ -75,22 +78,25 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
     })();
 
     // Start the scored session in parallel. A failure just means the round is
-    // unscored — the game still plays.
-    (async () => {
-      try {
-        const res = await actor.start_play_session(card.token_id);
-        if (cancelled) return;
-        if (res.__kind__ === 'Ok') {
-          sessionIdRef.current = res.Ok.session_id;
-          scoreableRef.current = true;
-        } else {
+    // unscored — the game still plays. Skipped in spectate-only mode (View NFT):
+    // no scored round, no session.
+    if (!spectateOnly) {
+      (async () => {
+        try {
+          const res = await actor.start_play_session(card.token_id);
+          if (cancelled) return;
+          if (res.__kind__ === 'Ok') {
+            sessionIdRef.current = res.Ok.session_id;
+            scoreableRef.current = true;
+          } else {
+            scoreableRef.current = false;
+            setSubmitNote('Playing for fun — couldn\'t start a scored round.');
+          }
+        } catch {
           scoreableRef.current = false;
-          setSubmitNote('Playing for fun — couldn\'t start a scored round.');
         }
-      } catch {
-        scoreableRef.current = false;
-      }
-    })();
+      })();
+    }
 
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -154,9 +160,12 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
       <CourseOverview
         course={holes}
         courseName={card.name || `Course #${card.token_id}`}
-        onPlayRound={() => setView('round')}
+        onPlayRound={spectateOnly ? undefined : () => setView('round')}
         onPracticeHole={(idx) => { setPracticeIdx(idx); setView('practice'); }}
         onExit={onExit}
+        hint={spectateOnly
+          ? 'Spectating only — preview any hole to fly over it, or practice a single hole (unscored). Start a scored round from the marketplace.'
+          : undefined}
       />
     );
   }

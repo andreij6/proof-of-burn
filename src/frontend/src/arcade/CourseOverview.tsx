@@ -19,8 +19,9 @@ const ZOOM_MIN = 0.5, ZOOM_MAX = 4; // × the fitted scale
 interface CourseOverviewProps {
   course: HoleDef[];
   courseName: string;
-  /** Start the normal scored round (the ticket-earning path). */
-  onPlayRound: () => void;
+  /** Start the normal scored round (the ticket-earning path). When omitted the
+   *  overview is spectate-only (the "View NFT" grid) — no "Play the course" CTA. */
+  onPlayRound?: () => void;
   /** Unscored single-hole practice. */
   onPracticeHole: (idx: number) => void;
   /** Back to the marketplace. */
@@ -45,9 +46,11 @@ export default function CourseOverview({ course, courseName, onPlayRound, onPrac
         </div>
         <span className="row" style={{ gap: 8 }}>
           <Btn variant="ghost" sm onClick={onExit}><Icon name="chevLeft" size={12} /> Back</Btn>
-          <Btn variant="primary" onClick={onPlayRound}>
-            <Icon name="flame" size={13} stroke="var(--char-950)" /> Play the course
-          </Btn>
+          {onPlayRound && (
+            <Btn variant="primary" onClick={onPlayRound}>
+              <Icon name="flame" size={13} stroke="var(--char-950)" /> Play the course
+            </Btn>
+          )}
         </span>
       </div>
       <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>

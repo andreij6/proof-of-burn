@@ -192,3 +192,10 @@ export function courseIdFromScreen(screen: string): bigint | null {
   const m = /^course\/(\d+)$/.exec(screen);
   return m ? BigInt(m[1]) : null;
 }
+
+/** Parse a `spectate/<id>` sub-screen (the "View NFT" 3×3 hole grid, no scored
+ *  round) into a token id, or null. Deep-linkable like `course/<id>`. */
+export function spectateIdFromScreen(screen: string): bigint | null {
+  const m = /^spectate\/(\d+)$/.exec(screen);
+  return m ? BigInt(m[1]) : null;
+}

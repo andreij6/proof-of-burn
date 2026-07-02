@@ -8,7 +8,7 @@ import { parseTokenAmount } from './IdeaBoard';
 import { makeApprover } from './minters';
 import {
   difficultyBucket, mulberry32, poolOrder, pageSlice, pageCount, freshSeed,
-  formatRating, toggleFavoriteId, courseNftTokenUrl,
+  formatRating, toggleFavoriteId,
   courseShareUrl, DIFFICULTY_OPTIONS, LISTED_OPTIONS, GRID_PAGE_SIZE,
 } from './arcade/courseMarket';
 
@@ -36,6 +36,8 @@ interface CourseMarketplaceProps {
   isLocal: boolean;
   /** Launch the engine view for a chosen course. */
   onPlay: (card: CourseCard) => void;
+  /** Open the spectate-only 3×3 hole grid ("View NFT") for a course. */
+  onViewNft: (card: CourseCard) => void;
   /** Launch the create-a-course flow (copy AI instructions → upload → mint). */
   onCreate: () => void;
   onSignIn: () => void;
@@ -46,7 +48,7 @@ const ICP_FEE_E8S = 10_000n;
 
 export default function CourseMarketplace({
   actor, principal, identity, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal,
-  onPlay, onCreate, onSignIn,
+  onPlay, onViewNft, onCreate, onSignIn,
 }: CourseMarketplaceProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
@@ -63,11 +65,6 @@ export default function CourseMarketplace({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   useErrorImpression(error, 'course_market');
-
-  // course_nft canister id (for "View NFT ↗" per-token links). `opt principal`:
-  // decoded to `Config.course_nft_canister?: Principal` — undefined ⇒ None ⇒
-  // the link is hidden (no dead anchors). Fetched once.
-  const [courseNftId, setCourseNftId] = useState<string | undefined>(undefined);
 
   // A fresh shuffle seed per load + per filter change (PB-305 A5).
   const seedRef = useRef<number>(freshSeed());
@@ -119,20 +116,6 @@ export default function CourseMarketplace({
   }, [actor, difficulty, listed, mineOnly]);
 
   useEffect(() => { refreshFavorites(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor, signedIn]);
-
-  // course_nft canister id for the per-token "View NFT ↗" links. The wrapper
-  // layer decodes `opt principal` to `course_nft_canister?: Principal`; None ⇒
-  // undefined ⇒ the links stay hidden.
-  useEffect(() => {
-    if (!actor) return;
-    let cancelled = false;
-    actor.get_config()
-      .then((cfg: { course_nft_canister?: Principal }) => {
-        if (!cancelled) setCourseNftId(cfg.course_nft_canister?.toString());
-      })
-      .catch(() => { /* link is best-effort; hidden if config unavailable */ });
-    return () => { cancelled = true; };
-  }, [actor]);
 
   // The Favorites filter re-rolls the shuffle + resets paging like other pills.
   const setFavFilter = (on: boolean) => {
@@ -376,9 +359,8 @@ export default function CourseMarketplace({
                 card={card}
                 principal={principal}
                 isFav={favoriteIds.has(card.token_id)}
-                courseNftId={courseNftId}
-                isLocal={isLocal}
                 onPlay={onPlay}
+                onViewNft={onViewNft}
                 onManage={setManageCard}
                 onBuy={setBuyCard}
                 onBurn={setBurnCard}
@@ -495,15 +477,13 @@ function CourseArt({ tokenId, height }: { tokenId: bigint; height: number }) {
 }
 
 // ── Course card ──
-function CourseCardView({ actor, card, principal, isFav, courseNftId, isLocal, onPlay, onManage, onBuy, onBurn, onToggleFavorite, onSignIn }: {
+function CourseCardView({ actor, card, principal, isFav, onPlay, onViewNft, onManage, onBuy, onBurn, onToggleFavorite, onSignIn }: {
   actor: any;
   card: CourseCard;
   principal: Principal | null;
   isFav: boolean;
-  /** course_nft canister id; undefined ⇒ unwired ⇒ hide the "View NFT" link. */
-  courseNftId?: string;
-  isLocal: boolean;
   onPlay: (c: CourseCard) => void;
+  onViewNft: (c: CourseCard) => void;
   onManage: (c: CourseCard) => void;
   onBuy: (c: CourseCard) => void;
   onBurn: (c: CourseCard) => void;
@@ -515,7 +495,6 @@ function CourseCardView({ actor, card, principal, isFav, courseNftId, isLocal, o
   const diff = difficultyBucket(par);
   const forSale = card.for_sale && card.price_e8s > 0n;
   const ownerDiffers = card.creator && card.owner && card.creator.toString() !== card.owner.toString();
-  const nftUrl = courseNftTokenUrl(courseNftId, card.token_id, isLocal);
 
   // Shareable deep link (#/arcade/course/<id>) — owners advertise, anyone shares.
   const [linkCopied, setLinkCopied] = useState(false);
@@ -603,17 +582,9 @@ function CourseCardView({ actor, card, principal, isFav, courseNftId, isLocal, o
         </span>
 
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
-        {nftUrl && (
-          <a
-            href={nftUrl}
-            target="_blank"
-            rel="noreferrer"
-            title="Open this course's NFT metadata in a new tab"
-            style={{ color: 'var(--fg-3)', fontSize: 11.5, display: 'inline-flex', alignItems: 'center', gap: 4, textDecoration: 'none' }}
-          >
-            View NFT <Icon name="external" size={11} stroke="var(--fg-3)" />
-          </a>
-        )}
+        <Btn variant="ghost" sm onClick={() => onViewNft(card)} title="View this course's 9 holes in a 3×3 grid">
+          <Icon name="eye" size={11} /> View NFT
+        </Btn>
         <Btn variant="ghost" sm onClick={shareCourse} title="Copy a shareable link that opens this course directly">
           <Icon name="copy" size={11} /> {linkCopied ? 'Copied ✓' : 'Share'}
         </Btn>
