@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { MintError } from './bindings/backend';
+import type { CourseUniquenessReport, MintError } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP } from './ui';
 import MiniGolf from './arcade/MiniGolf';
@@ -7,7 +7,7 @@ import type { CharacterLook, HoleDef } from './arcade/engine';
 import {
   parseCourseInstructions, courseFromInstructions, type CourseInstructions,
 } from './arcade/courseInstructions';
-import { difficultyBucket, type Difficulty } from './arcade/courseMarket';
+import { difficultyBucket, courseShareUrl, courseShareIntent, type Difficulty } from './arcade/courseMarket';
 import { buildCoursePrompt, friendlyCourseError } from './arcade/coursePrompt';
 
 // ==========================================
@@ -59,12 +59,16 @@ export function summarizeCourse(doc: CourseInstructions): CourseSummary {
 export function mintErrMessage(err: MintError): string {
   switch (err.__kind__) {
     case 'NotAuthenticated':
-      return 'Sign in and follow the leader to mint courses.';
+      return 'Sign in to mint courses.';
     case 'InsufficientDeposit':
       return `The mint escrow needs ${fmtICP(err.InsufficientDeposit.needed)} ICP but only has ${fmtICP(err.InsufficientDeposit.found)} ICP — the deposit may still be settling, try again in a moment.`;
     case 'AlreadyMinting':
       return 'A mint is already in progress — try again in a moment.';
     case 'InvalidCourse':
+      if (err.InvalidCourse.startsWith('DUPLICATE_HOLES:')) {
+        const n = err.InvalidCourse.slice('DUPLICATE_HOLES:'.length);
+        return `This course is too close to an existing course NFT — ${n} of its holes already exist on the marketplace. Redesign those holes with your AI and try again.`;
+      }
       return `The course was rejected: ${err.InvalidCourse}`;
     case 'FeeSettlementFailed':
       return `Fee settlement failed: ${err.FeeSettlementFailed}`;
@@ -141,6 +145,7 @@ export default function CourseCreate({
   const [step, setStep] = useState('');
   const [mintErr, setMintErr] = useState<string | null>(null);
   const [mintedId, setMintedId] = useState<bigint | null>(null);
+  const [shareCopied, setShareCopied] = useState(false);
 
   // Parse + validate live. `doc` is null until the JSON is a valid course.
   const parsed = useMemo((): { doc: CourseInstructions | null; error: string | null } => {
@@ -154,6 +159,24 @@ export default function CourseCreate({
   }, [jsonText]);
   const { doc, error: parseError } = parsed;
   const summary = doc ? summarizeCourse(doc) : null;
+
+  // Originality pre-check (free query) so a clone is caught BEFORE the fee is
+  // paid. The backend enforces the same rule inside mint_course_nft.
+  const [uniq, setUniq] = useState<CourseUniquenessReport | null>(null);
+  useEffect(() => {
+    setUniq(null);
+    if (!doc) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const report = await actor.check_course_uniqueness(new TextEncoder().encode(jsonText.trim()));
+        if (!cancelled) setUniq(report);
+      } catch { /* advisory — the mint call still enforces it */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc, actor]);
+  const uniqBlocked = uniq?.would_block ?? false;
 
   // Prefill the mint name whenever a valid course (re)parses.
   useEffect(() => {
@@ -264,9 +287,11 @@ export default function CourseCreate({
               <div className="col" style={{ gap: 6 }}>
                 <Eyebrow accent>Requirements</Eyebrow>
                 <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55 }}>
-                  Minting requires being signed in and following the leader, and
-                  costs {fmtICP(MINT_FEE_E8S)} ICP (+ {fmtICP(ICP_LEDGER_FEE_E8S)} ledger fee).
-                  Creators keep a permanent 10% royalty on every resale.
+                  Anyone signed in can mint — it costs {fmtICP(MINT_FEE_E8S)} ICP
+                  (+ {fmtICP(ICP_LEDGER_FEE_E8S)} ledger fee). Courses must be
+                  original: a design whose holes copy an existing course NFT
+                  (even mirrored or shifted) is rejected at mint. Creators keep a
+                  permanent 10% royalty on every resale.
                 </p>
               </div>
             </MoreInfo>
@@ -289,6 +314,36 @@ export default function CourseCreate({
             time a player reaches hole 2 — and a permanent 10% creator royalty if
             it ever resells.
           </p>
+          {/* Share: the canonical deep link opens the course directly. */}
+          <div className="col" style={{ gap: 6, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+            <span style={LABEL_STYLE}>Share your course</span>
+            <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-2)', wordBreak: 'break-all' }}>
+              {courseShareUrl(mintedId, window.location.origin)}
+            </span>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <Btn variant="secondary" sm onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(courseShareUrl(mintedId, window.location.origin));
+                  setShareCopied(true);
+                  window.clearTimeout(copiedTimer.current);
+                  copiedTimer.current = window.setTimeout(() => setShareCopied(false), 2500);
+                } catch { /* the URL is shown above for manual copy */ }
+              }}>
+                <Icon name="copy" size={12} /> {shareCopied ? 'Copied ✓' : 'Copy link'}
+              </Btn>
+              <Btn
+                variant="ghost"
+                sm
+                onClick={() => window.open(
+                  courseShareIntent(name.trim(), courseShareUrl(mintedId, window.location.origin)),
+                  '_blank',
+                  'noopener,noreferrer',
+                )}
+              >
+                <Icon name="external" size={12} /> Share on X
+              </Btn>
+            </div>
+          </div>
           <div className="row" style={{ justifyContent: 'flex-end' }}>
             <Btn variant="primary" sm onClick={onMinted}>Done</Btn>
           </div>
@@ -366,6 +421,30 @@ export default function CourseCreate({
                     </span>
                   ))}
                 </div>
+                {/* Originality verdict: pass / warn (< limit) / block (≥ limit). */}
+                {uniq && (uniq.duplicates.length === 0 ? (
+                  <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--ok)' }}>
+                    <Icon name="checkCircle" size={13} stroke="var(--ok)" /> Originality check passed — no hole matches an existing course.
+                  </span>
+                ) : uniq.would_block ? (
+                  <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--ember)', alignItems: 'flex-start' }}>
+                    <Icon name="x" size={13} stroke="var(--ember)" />
+                    <span>
+                      Too close to an existing course: {uniq.duplicates.length} of 9 holes
+                      (holes {uniq.duplicates.map((d) => d.hole_index + 1).join(', ')}) already exist
+                      — mirrored or shifted copies count too. Redesign them with your AI; minting is blocked at {uniq.limit}.
+                    </span>
+                  </span>
+                ) : (
+                  <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--haze-ink)', alignItems: 'flex-start' }}>
+                    <Icon name="info" size={13} stroke="var(--haze-ink)" />
+                    <span>
+                      Heads up: {uniq.duplicates.length === 1 ? 'hole' : 'holes'}{' '}
+                      {uniq.duplicates.map((d) => d.hole_index + 1).join(', ')} match an existing course.
+                      That's allowed (under {uniq.limit}), but more overlap would block the mint.
+                    </span>
+                  </span>
+                ))}
               </div>
             )}
           </div>
@@ -409,9 +488,9 @@ export default function CourseCreate({
               {' '}(+ {fmtICP(ICP_LEDGER_FEE_E8S)} ICP ledger fee on the deposit).
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Minting requires being signed in and following the leader. Your course
-              is auto-listed on the marketplace and earns you a lottery ticket each
-              time a player reaches hole 2.
+              Anyone signed in can mint. Your course is auto-listed on the
+              marketplace and earns you a lottery ticket each time a player
+              reaches hole 2.
             </span>
             {doc && !testPlayed && (
               <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--haze-ink)' }}>
@@ -428,11 +507,12 @@ export default function CourseCreate({
             <Btn
               variant="primary"
               sm
-              disabled={!doc || busy}
+              disabled={!doc || busy || uniqBlocked}
+              title={uniqBlocked ? 'Too many holes match an existing course — see the originality check above.' : undefined}
               style={{ alignSelf: 'flex-start' }}
               onClick={mint}
             >
-              {busy ? 'Working…' : `Mint — ${fmtICP(MINT_FEE_E8S)} ICP`}
+              {busy ? 'Working…' : uniqBlocked ? 'Blocked — too similar to an existing course' : `Mint — ${fmtICP(MINT_FEE_E8S)} ICP`}
             </Btn>
           </div>
         </>

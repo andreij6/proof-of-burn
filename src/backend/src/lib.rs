@@ -15995,6 +15995,12 @@ const MINT_FEE_E8S: u64 = 50_000_000; // 0.5 ICP
 const COURSE_NFT_HOLES: usize = 9; // exactly 9
 const MAX_COURSE_DATA_BYTES: usize = 64 * 1024; // at-mint blob cap (PB-303 owns final number)
 const MAX_COURSE_NAME_CHARS: usize = 60;
+/// Originality gate: a mint is rejected when at least this many of its hole
+/// layouts duplicate holes already minted in ANY existing course (canonical
+/// fingerprints — see `canonical_hole_fp`). 1–2 collisions are tolerated
+/// (trivial small holes can coincide honestly) and surfaced as warnings via
+/// `check_course_uniqueness`.
+const CLONE_HOLE_LIMIT: usize = 3;
 /// Mint escrow subaccount sentinel — distinct from any proposal id so a user's
 /// mint escrow never collides with a commit escrow (B.3).
 const MINT_ESCROW_TAG: u64 = u64::MAX - 304;
@@ -16160,6 +16166,15 @@ thread_local! {
     /// selling it never mint a duplicate.
     static SYSTEM_COURSE_MINTED: RefCell<StableCell<bool, Memory>> =
         MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(86)), false)));
+
+    /// MemoryId 104: originality index — canonical hole-layout fingerprint
+    /// (SHA-256 hex, see `canonical_hole_fp`) → the token_id that first minted
+    /// that layout. Written at mint/seed time (and by
+    /// `admin_backfill_course_fingerprints` for pre-existing courses); read by
+    /// the clone gate in `validate_course_for_mint`. First minter is never
+    /// overwritten.
+    static COURSE_HOLE_FPS: RefCell<StableBTreeMap<String, u64, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(104)))));
 
     /// Per-caller in-flight mint guard (heap; cleared on completion) — returns
     /// AlreadyMinting on a concurrent second call, like LotteryLock (B5).
@@ -16438,6 +16453,15 @@ fn validate_course_for_mint(bytes: &[u8], name: &str) -> Result<u8, MintError> {
     if chars > MAX_COURSE_NAME_CHARS {
         return Err(MintError::InvalidCourse("NAME_TOO_LONG".into()));
     }
+    // Originality gate: reject clones of already-minted courses (canonical
+    // hole-layout fingerprints — mirroring/rotating/shifting doesn't evade).
+    let dups = find_duplicate_holes(bytes);
+    if dups.len() >= CLONE_HOLE_LIMIT {
+        return Err(MintError::InvalidCourse(format!(
+            "DUPLICATE_HOLES:{}",
+            dups.len()
+        )));
+    }
     Ok(decode_course_meta(bytes))
 }
 
@@ -16473,6 +16497,205 @@ fn decode_course_meta(bytes: &[u8]) -> u8 {
     0
 }
 
+// ── Course originality (clone detection) ─────────────────────────────────────
+// A cloned course is rarely byte-identical: the JSON reformats, names change,
+// layouts get mirrored or shifted. So uniqueness is enforced per HOLE on a
+// canonical form of the ASCII layout: pad ragged rows with void, trim the
+// all-void border (translation invariance), then hash the lexicographically
+// smallest of the 8 dihedral transforms (rotation + mirror invariance).
+// Par, hole names and windmills deliberately do NOT contribute — tweaking the
+// par on a stolen layout is still a clone. Legacy CBOR blobs yield no
+// fingerprints and are exempt (only the pre-pivot system course).
+
+/// Layout rows → rectangular char grid (ragged rows padded with '.').
+fn layout_grid(rows: &[String]) -> Vec<Vec<char>> {
+    let width = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0);
+    rows.iter()
+        .map(|r| {
+            let mut row: Vec<char> = r.chars().collect();
+            row.resize(width, '.');
+            row
+        })
+        .collect()
+}
+
+/// Drop all-void ('.') rows/columns from every border, so shifting a layout
+/// inside a larger grid doesn't change its fingerprint.
+fn trim_void_border(grid: Vec<Vec<char>>) -> Vec<Vec<char>> {
+    let is_void_row = |row: &Vec<char>| row.iter().all(|&c| c == '.');
+    let mut rows: Vec<Vec<char>> = grid;
+    while rows.first().is_some_and(is_void_row) {
+        rows.remove(0);
+    }
+    while rows.last().is_some_and(is_void_row) {
+        rows.pop();
+    }
+    if rows.is_empty() {
+        return rows;
+    }
+    let width = rows[0].len();
+    let col_void = |c: usize| rows.iter().all(|r| r[c] == '.');
+    let mut left = 0;
+    while left < width && col_void(left) {
+        left += 1;
+    }
+    let mut right = width;
+    while right > left && col_void(right - 1) {
+        right -= 1;
+    }
+    rows.into_iter().map(|r| r[left..right].to_vec()).collect()
+}
+
+/// Rotate a rectangular grid 90° clockwise.
+fn rotate_cw(grid: &[Vec<char>]) -> Vec<Vec<char>> {
+    if grid.is_empty() {
+        return Vec::new();
+    }
+    let (h, w) = (grid.len(), grid[0].len());
+    (0..w)
+        .map(|x| (0..h).map(|y| grid[h - 1 - y][x]).collect())
+        .collect()
+}
+
+/// Mirror a grid horizontally.
+fn mirror_h(grid: &[Vec<char>]) -> Vec<Vec<char>> {
+    grid.iter()
+        .map(|r| r.iter().rev().copied().collect())
+        .collect()
+}
+
+/// Canonical fingerprint of one hole layout: SHA-256 hex of the smallest of
+/// the 8 dihedral transforms of the trimmed grid. Rotating, mirroring, or
+/// translating a layout yields the SAME fingerprint.
+fn canonical_hole_fp(rows: &[String]) -> String {
+    let base = trim_void_border(layout_grid(rows));
+    let mut best: Option<String> = None;
+    let mut g = base;
+    for _ in 0..2 {
+        for _ in 0..4 {
+            let s = g
+                .iter()
+                .map(|r| r.iter().collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if best.as_ref().is_none_or(|b| s < *b) {
+                best = Some(s);
+            }
+            g = rotate_cw(&g);
+        }
+        g = mirror_h(&g);
+    }
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(best.unwrap_or_default().as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
+/// All hole fingerprints of a build-instructions JSON blob, in hole order.
+/// Non-JSON (legacy CBOR) or malformed docs yield an empty vec — exempt.
+fn course_hole_fps(bytes: &[u8]) -> Vec<String> {
+    if bytes.first() != Some(&b'{') {
+        return Vec::new();
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(holes) = v.get("holes").and_then(|h| h.as_array()) else {
+        return Vec::new();
+    };
+    holes
+        .iter()
+        .filter_map(|h| h.get("layout").and_then(|l| l.as_array()))
+        .map(|layout| {
+            let rows: Vec<String> = layout
+                .iter()
+                .filter_map(|r| r.as_str().map(|s| s.to_string()))
+                .collect();
+            canonical_hole_fp(&rows)
+        })
+        .collect()
+}
+
+/// (hole_index, existing token_id) for every hole of `bytes` whose canonical
+/// layout is already minted in some course.
+fn find_duplicate_holes(bytes: &[u8]) -> Vec<(u8, u64)> {
+    let fps = course_hole_fps(bytes);
+    COURSE_HOLE_FPS.with(|m| {
+        let map = m.borrow();
+        fps.iter()
+            .enumerate()
+            .filter_map(|(i, fp)| map.get(fp).map(|tid| (i as u8, tid)))
+            .collect()
+    })
+}
+
+/// Register a freshly minted/seeded course's hole layouts. First minter wins:
+/// existing fingerprints are never overwritten. Idempotent.
+fn register_course_fps(bytes: &[u8], token_id: u64) {
+    let fps = course_hole_fps(bytes);
+    COURSE_HOLE_FPS.with(|m| {
+        let mut map = m.borrow_mut();
+        for fp in fps {
+            if map.get(&fp).is_none() {
+                map.insert(fp, token_id);
+            }
+        }
+    });
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct DuplicateHole {
+    pub hole_index: u8,
+    pub token_id: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct CourseUniquenessReport {
+    pub duplicates: Vec<DuplicateHole>,
+    pub would_block: bool,
+    pub limit: u8,
+}
+
+/// Pre-mint originality check (free, anonymous-callable) so the create flow
+/// can warn BEFORE the user pays the mint fee. The same rule is enforced
+/// server-side in `validate_course_for_mint` — this query is advisory UX.
+#[ic_cdk::query]
+fn check_course_uniqueness(course_data: Vec<u8>) -> CourseUniquenessReport {
+    let duplicates: Vec<DuplicateHole> = find_duplicate_holes(&course_data)
+        .into_iter()
+        .map(|(hole_index, token_id)| DuplicateHole {
+            hole_index,
+            token_id,
+        })
+        .collect();
+    CourseUniquenessReport {
+        would_block: duplicates.len() >= CLONE_HOLE_LIMIT,
+        limit: CLONE_HOLE_LIMIT as u8,
+        duplicates,
+    }
+}
+
+/// Backfill the originality index for courses minted before this feature
+/// (their blobs live in the course_nft canister). Safe to re-run; returns how
+/// many courses were fingerprinted.
+#[ic_cdk::update(guard = "require_admin")]
+async fn admin_backfill_course_fingerprints() -> u32 {
+    let ids: Vec<u64> =
+        COURSE_LISTINGS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+    let mut done = 0u32;
+    for token_id in ids {
+        if let Some(blob) = get_course_data(token_id).await {
+            register_course_fps(&blob, token_id);
+            done += 1;
+        }
+    }
+    done
+}
+
 #[ic_cdk::query(guard = "require_authenticated")]
 fn get_mint_deposit_address() -> LedgerAccount {
     LedgerAccount {
@@ -16487,10 +16710,8 @@ async fn mint_course_nft(course_data: Vec<u8>, name: String) -> Result<u64, Mint
     if caller == Principal::anonymous() {
         return Err(MintError::NotAuthenticated);
     }
-    // Tier gate: minting requires Tier 2+ (signed in + following the leader).
-    if course_caller_tier(caller) < 2 {
-        return Err(MintError::NotAuthenticated);
-    }
+    // No tier gate (owner decision 2026-07-01): any signed-in user with the
+    // ICP fee can mint. Playing for TICKETS stays tier-gated elsewhere.
 
     // Concurrency guard (B5).
     let acquired = MINTING_IN_FLIGHT.with(|s| s.borrow_mut().insert(caller));
@@ -16602,6 +16823,9 @@ async fn mint_course_nft_inner(
         MINT_SAGAS.with(|m| {
             m.borrow_mut().insert(caller, saga.clone());
         });
+        // Originality index: claim these hole layouts for this token so later
+        // mints of the same (or mirrored/shifted) holes are detected.
+        register_course_fps(&saga.course_data, token_id);
     }
     let token_id = saga.minted_token_id.unwrap();
 
@@ -17784,11 +18008,12 @@ async fn seed_system_course_inner() -> Result<u64, String> {
         to: owner,
         name: name.clone(),
         creator: owner,
-        course_data,
+        course_data: course_data.clone(),
         par_total: par_total as u16,
         mint_fee_e8s: 0, // system mint: fee waived (B3)
     })
     .await?;
+    register_course_fps(&course_data, token_id);
     COURSE_LISTINGS.with(|m| {
         m.borrow_mut().insert(
             token_id,
@@ -18390,11 +18615,12 @@ async fn dev_seed_courses(count: u32) -> Result<u32, String> {
             to,
             name: name.clone(),
             creator: caller, // creator = caller so owner-vs-creator lines are visible
-            course_data,
+            course_data: course_data.clone(),
             par_total: par_total as u16,
             mint_fee_e8s: MINT_FEE_E8S,
         })
         .await?;
+        register_course_fps(&course_data, token_id);
         let play_count = (i as u64) * 41;
         if play_count > 0 {
             course_nft_increment_play(token_id).await; // cosmetic provenance bump
@@ -26549,6 +26775,13 @@ mod tests {
                 map.remove(&k);
             }
         });
+        COURSE_HOLE_FPS.with(|m| {
+            let keys: Vec<String> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut map = m.borrow_mut();
+            for k in keys {
+                map.remove(&k);
+            }
+        });
         FAVORITE_COURSES.with(|m| {
             let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
             let mut map = m.borrow_mut();
@@ -26781,12 +27014,172 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mint_rejects_tier_below_2() {
+    async fn test_mint_allows_signed_in_without_following() {
+        // Owner decision 2026-07-01: no tier gate — any signed-in user with
+        // the ICP fee can mint (following the leader is NOT required).
         course_test_setup();
         set_mock_caller(alice()); // authenticated but NOT following → Tier 1
         set_mock_ledger_balance(MINT_FEE_E8S);
-        let err = mint_course_nft(course_blob(34, 2), "x".into()).await.unwrap_err();
-        assert!(matches!(err, MintError::NotAuthenticated));
+        set_mock_ledger_transfer(Ok(1));
+        let token_id = mint_course_nft(course_blob(34, 2), "Tier1 Mint".into())
+            .await
+            .unwrap();
+        assert_eq!(token_id, 1);
+    }
+
+    // ── Course originality (clone detection) ─────────────────────────────────
+
+    /// A 10×10 bordered hole layout made unique per (seed ≤ 6, hole ≤ 8) by a
+    /// sand run + water cell (keyed to `hole`) and a rough run (keyed to `seed`).
+    fn test_layout(seed: u8, hole: u8) -> Vec<String> {
+        assert!(seed <= 6 && hole <= 8);
+        let mut rows: Vec<Vec<char>> = vec![vec!['g'; 10]; 10];
+        for x in 0..10 {
+            rows[0][x] = '#';
+            rows[9][x] = '#';
+        }
+        for row in rows.iter_mut().take(9).skip(1) {
+            row[0] = '#';
+            row[9] = '#';
+        }
+        rows[1][1] = 'T';
+        rows[8][8] = 'C';
+        for x in 2..(3 + (hole as usize % 4)) {
+            rows[2][x] = 's';
+        }
+        rows[5][2 + hole as usize / 4] = 'w';
+        for x in 2..(2 + seed as usize) {
+            rows[3][x] = 'r';
+        }
+        rows.into_iter().map(|r| r.into_iter().collect()).collect()
+    }
+
+    fn test_course_json(name: &str, layouts: &[Vec<String>]) -> Vec<u8> {
+        let holes: Vec<serde_json::Value> = layouts
+            .iter()
+            .map(|l| serde_json::json!({ "par": 3, "layout": l }))
+            .collect();
+        serde_json::to_vec(&serde_json::json!({
+            "format": "proof-of-burn/minigolf-course@1",
+            "name": name,
+            "holes": holes,
+        }))
+        .unwrap()
+    }
+
+    fn test_course(seed: u8, name: &str) -> Vec<u8> {
+        let layouts: Vec<Vec<String>> = (0..9).map(|h| test_layout(seed, h)).collect();
+        test_course_json(name, &layouts)
+    }
+
+    #[test]
+    fn test_hole_fp_dihedral_and_translation_invariance() {
+        let base = test_layout(1, 4);
+        let fp = canonical_hole_fp(&base);
+
+        // Mirror (reverse every row) → same fingerprint.
+        let mirrored: Vec<String> = base.iter().map(|r| r.chars().rev().collect()).collect();
+        assert_eq!(canonical_hole_fp(&mirrored), fp, "mirroring must not evade");
+
+        // Rotate 180° (reverse rows and each row) → same fingerprint.
+        let rotated: Vec<String> = base
+            .iter()
+            .rev()
+            .map(|r| r.chars().rev().collect())
+            .collect();
+        assert_eq!(canonical_hole_fp(&rotated), fp, "rotating must not evade");
+
+        // Translate: embed in a larger grid padded with void → same fingerprint.
+        let mut shifted: Vec<String> = vec![".".repeat(14), ".".repeat(14)];
+        shifted.extend(base.iter().map(|r| format!("..{}..", r)));
+        shifted.push(".".repeat(14));
+        assert_eq!(canonical_hole_fp(&shifted), fp, "shifting must not evade");
+
+        // A genuinely different layout differs.
+        assert_ne!(canonical_hole_fp(&test_layout(1, 5)), fp);
+    }
+
+    #[tokio::test]
+    async fn test_mint_rejects_mirrored_clone() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        set_mock_ledger_balance(MINT_FEE_E8S);
+        set_mock_ledger_transfer(Ok(1));
+        let original = test_course(0, "Original Nine");
+        let token_id = mint_course_nft(original.clone(), "Original Nine".into())
+            .await
+            .unwrap();
+
+        // Bob re-submits the same course mirrored, renamed, and reformatted —
+        // every hole matches, so the mint is rejected before any fee moves.
+        let mirrored_layouts: Vec<Vec<String>> = (0..9)
+            .map(|h| {
+                test_layout(0, h)
+                    .iter()
+                    .map(|r| r.chars().rev().collect())
+                    .collect()
+            })
+            .collect();
+        let clone_blob = test_course_json("Totally New Course", &mirrored_layouts);
+
+        // The advisory query sees it too (what the create flow shows pre-fee).
+        let report = check_course_uniqueness(clone_blob.clone());
+        assert!(report.would_block);
+        assert_eq!(report.duplicates.len(), 9);
+        assert!(report.duplicates.iter().all(|d| d.token_id == token_id));
+
+        make_following(bob());
+        set_mock_caller(bob());
+        let err = mint_course_nft(clone_blob, "Totally New Course".into())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, MintError::InvalidCourse(code) if code == "DUPLICATE_HOLES:9"),
+            "got {:?}",
+            err
+        );
+
+        // A genuinely fresh course still mints.
+        set_mock_caller(bob());
+        let fresh = test_course(3, "Fresh Nine");
+        assert!(mint_course_nft(fresh, "Fresh Nine".into()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mint_partial_overlap_below_limit_allowed() {
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        set_mock_ledger_balance(MINT_FEE_E8S);
+        set_mock_ledger_transfer(Ok(1));
+        mint_course_nft(test_course(0, "First"), "First".into())
+            .await
+            .unwrap();
+
+        // 2 copied holes (below CLONE_HOLE_LIMIT) → allowed, but reported.
+        let mut layouts: Vec<Vec<String>> = (0..9).map(|h| test_layout(5, h)).collect();
+        layouts[0] = test_layout(0, 0);
+        layouts[1] = test_layout(0, 1);
+        let two_copied = test_course_json("Two Borrowed", &layouts);
+        let report = check_course_uniqueness(two_copied.clone());
+        assert_eq!(report.duplicates.len(), 2);
+        assert!(!report.would_block);
+        make_following(bob());
+        set_mock_caller(bob());
+        assert!(mint_course_nft(two_copied, "Two Borrowed".into()).await.is_ok());
+
+        // 3 copied holes (at the limit) → rejected.
+        let mut layouts: Vec<Vec<String>> = (0..9).map(|h| test_layout(6, h)).collect();
+        layouts[0] = test_layout(0, 2);
+        layouts[1] = test_layout(0, 3);
+        layouts[2] = test_layout(0, 4);
+        let three_copied = test_course_json("Three Borrowed", &layouts);
+        set_mock_caller(alice());
+        let err = mint_course_nft(three_copied, "Three Borrowed".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, MintError::InvalidCourse(code) if code == "DUPLICATE_HOLES:3"));
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ import { makeApprover } from './minters';
 import {
   difficultyBucket, mulberry32, poolOrder, pageSlice, pageCount, freshSeed,
   formatRating, tokenAmountUsdE8s, bidBeats, toggleFavoriteId, courseNftTokenUrl,
-  DIFFICULTY_OPTIONS, LISTED_OPTIONS, GRID_PAGE_SIZE,
+  courseShareUrl, DIFFICULTY_OPTIONS, LISTED_OPTIONS, GRID_PAGE_SIZE,
 } from './arcade/courseMarket';
 
 // ==========================================
@@ -325,7 +325,9 @@ export default function CourseMarketplace({
                 <Eyebrow accent>Own &amp; earn</Eyebrow>
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
                   <li><b>AI-designed:</b> each NFT carries the build-instructions JSON the app compiles into its 9 holes.</li>
-                  <li><b>Mint for 0.5 ICP</b> — your course is auto-listed on the marketplace.</li>
+                  <li><b>Mint for 0.5 ICP</b> — anyone signed in can mint; your course is auto-listed on the marketplace.</li>
+                  <li><b>One of a kind:</b> hole layouts are fingerprinted at mint — clones of an existing course (even mirrored or shifted) are rejected.</li>
+                  <li><b>Advertise it:</b> every course has a shareable link (the Share button) that opens it directly.</li>
                   <li><b>Players earn</b> a lottery ticket for completing a round.</li>
                   <li><b>Owners earn</b> a ticket each time a player reaches hole 2.</li>
                 </ul>
@@ -601,6 +603,19 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
   const ownerDiffers = card.creator && card.owner && card.creator.toString() !== card.owner.toString();
   const nftUrl = courseNftTokenUrl(courseNftId, card.token_id, isLocal);
 
+  // Shareable deep link (#/arcade/course/<id>) — owners advertise, anyone shares.
+  const [linkCopied, setLinkCopied] = useState(false);
+  const shareCourse = async () => {
+    const url = courseShareUrl(card.token_id, window.location.origin);
+    try {
+      await navigator.clipboard.writeText(url);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 2000);
+    } catch {
+      window.prompt('Copy this course link:', url);
+    }
+  };
+
   // Per-card rating aggregate (cheap query, one per rendered card).
   const [rating, setRating] = useState<CourseRatingSummary | null>(null);
   useEffect(() => {
@@ -690,6 +705,9 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
             View NFT <Icon name="external" size={11} stroke="var(--fg-3)" />
           </a>
         )}
+        <Btn variant="ghost" sm onClick={shareCourse} title="Copy a shareable link that opens this course directly">
+          <Icon name="copy" size={11} /> {linkCopied ? 'Copied ✓' : 'Share'}
+        </Btn>
         {signedIn && (
           <Btn variant="ghost" sm onClick={() => onBid(card)} title="Promote this course to the featured slot">
             <Icon name="spark" size={11} /> Feature

@@ -134,6 +134,11 @@ note "Seeding the 3 mock courses (dev_seed_courses)…"
 icp canister call backend dev_seed_courses '(3 : nat32)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null \
   && ok "Local marketplace seeded (3 playable mock courses)" \
   || note "dev_seed_courses skipped (not local, or course_nft not ready)"
+# Originality index: fingerprint any course minted before clone detection
+# shipped (new mints/seeds self-register). Idempotent; safe every deploy.
+icp canister call backend admin_backfill_course_fingerprints '()' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null \
+  && ok "Course originality fingerprints backfilled" \
+  || note "fingerprint backfill skipped (course_nft not ready)"
 # Casino (Crash) is DISABLED pending the SVPP/points redesign. Force the flag
 # OFF (earlier deploys may have turned it on; flags persist across upgrades) and
 # skip casino seeding. Re-enable here once the new point system lands.

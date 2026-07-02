@@ -5,6 +5,7 @@ import {
   pageSlice, pageCount, GRID_PAGE_SIZE,
   isFavorite, applyFavoritesFilter, toggleFavoriteId,
   formatRating, tokenAmountUsdE8s, bidBeats, courseNftTokenUrl,
+  courseShareUrl, courseShareIntent, courseIdFromScreen,
 } from '../arcade/courseMarket';
 
 function card(id: number, overrides: Partial<CourseCard> = {}): CourseCard {
@@ -186,5 +187,33 @@ describe('courseNftTokenUrl', () => {
     expect(courseNftTokenUrl(null, 1n, true)).toBeNull();
     expect(courseNftTokenUrl('', 1n, false)).toBeNull();
     expect(courseNftTokenUrl('   ', 1n, true)).toBeNull();
+  });
+});
+
+describe('course share links', () => {
+  it('builds the canonical deep link from the origin', () => {
+    expect(courseShareUrl(7n, 'https://kyclk-5qaaa-aaaap-quthq-cai.icp0.io'))
+      .toBe('https://kyclk-5qaaa-aaaap-quthq-cai.icp0.io/#/arcade/course/7');
+  });
+
+  it('round-trips through the arcade screen parser', () => {
+    const url = courseShareUrl(123n, 'http://frontend.local.localhost:8000');
+    const screen = url.split('#/arcade/')[1]; // what useHashScreen yields
+    expect(courseIdFromScreen(screen)).toBe(123n);
+  });
+
+  it('parses only well-formed course screens', () => {
+    expect(courseIdFromScreen('course/42')).toBe(42n);
+    expect(courseIdFromScreen('lobby')).toBeNull();
+    expect(courseIdFromScreen('course/')).toBeNull();
+    expect(courseIdFromScreen('course/abc')).toBeNull();
+    expect(courseIdFromScreen('course/1/extra')).toBeNull();
+  });
+
+  it('share intent embeds the course name and URL-encodes the link', () => {
+    const intent = courseShareIntent('Ember Fields', 'https://x.test/#/arcade/course/1');
+    expect(intent).toContain('twitter.com/intent/tweet');
+    expect(intent).toContain(encodeURIComponent('Ember Fields'));
+    expect(intent).toContain(encodeURIComponent('https://x.test/#/arcade/course/1'));
   });
 });

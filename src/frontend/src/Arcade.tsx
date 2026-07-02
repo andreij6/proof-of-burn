@@ -11,6 +11,7 @@ import FieldGoal from "./arcade/FieldGoal";
 import CourseMarketplace from "./CourseMarketplace";
 import CourseCreate from "./CourseCreate";
 import CoursePlay from "./CoursePlay";
+import { courseIdFromScreen } from "./arcade/courseMarket";
 import MiniGolf from "./arcade/MiniGolf";
 import type { CourseCard } from "./bindings/backend";
 import {
@@ -183,9 +184,31 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   // Mini Golf is now the Course Marketplace (PB-309): the tab shows the
   // marketplace; "play" opens a course in the engine. Courses are AI-built —
   // there is no in-app editor. The active view lives in the hash (#/arcade,
-  // #/arcade/course-play, …) so Back returns to the lobby, not off the page.
-  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'course-play' | 'classic-play' | 'create-course'>('/arcade', 'lobby');
+  // #/arcade/course/<id>, …) so Back returns to the lobby, not off the page —
+  // and `course/<id>` doubles as each course's shareable deep link.
+  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'classic-play' | 'create-course' | `course/${string}`>('/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
+  // Deep-link resolution: when the hash names a course we don't have a card
+  // for (a shared link or a reload), fetch it. `deepLinkErr` = course gone.
+  const deepLinkCourseId = courseIdFromScreen(view);
+  const [deepLinkErr, setDeepLinkErr] = useState(false);
+  useEffect(() => {
+    setDeepLinkErr(false);
+    if (deepLinkCourseId === null || !actor) return;
+    if (playCard && playCard.token_id === deepLinkCourseId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const card = await actor.get_course(deepLinkCourseId);
+        if (cancelled) return;
+        if (card) setPlayCard(card); else setDeepLinkErr(true);
+      } catch {
+        if (!cancelled) setDeepLinkErr(true);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, actor]);
   // Lobby sub-page — one per game (its card, persona and leaderboard).
   const [tab, setTab] = useState<'minigolf' | 'fieldgoal'>('minigolf');
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
@@ -351,16 +374,36 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     }
   };
 
-  if (view === 'course-play' && playCard) {
+  // Course play — reached from the marketplace Play button OR directly via a
+  // shared `#/arcade/course/<id>` link (the card is fetched by the effect above).
+  if (deepLinkCourseId !== null) {
+    if (playCard && playCard.token_id === deepLinkCourseId) {
+      return (
+        <div className="idea-board-container">
+          <CoursePlay
+            actor={actor}
+            card={playCard}
+            character={myLook}
+            onExit={() => { setPlayCard(null); setTab('minigolf'); setView('lobby'); }}
+            onGoParticipate={onGoParticipate}
+          />
+        </div>
+      );
+    }
     return (
       <div className="idea-board-container">
-        <CoursePlay
-          actor={actor}
-          card={playCard}
-          character={myLook}
-          onExit={() => { setPlayCard(null); setTab('minigolf'); setView('lobby'); }}
-          onGoParticipate={onGoParticipate}
-        />
+        {deepLinkErr ? (
+          <div className="col" style={{ alignItems: 'center', gap: 14, padding: '48px 0', color: 'var(--fg-3)' }}>
+            <Icon name="x" size={26} stroke="var(--ember)" />
+            <span style={{ fontSize: 14, color: 'var(--ember)' }}>This course doesn't exist (or was burned).</span>
+            <Btn variant="secondary" onClick={() => { setTab('minigolf'); setView('lobby'); }}>Browse the marketplace</Btn>
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center', padding: 48, color: 'var(--fg-3)' }}>
+            <LiveDot size={10} color="var(--burn-ink)" style={{ margin: '0 auto 12px' }} />
+            Loading course #{deepLinkCourseId.toString()}…
+          </div>
+        )}
       </div>
     );
   }
@@ -510,7 +553,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             ledgerCanisterId={ledgerCanisterId}
             backendCanisterId={backendCanisterId}
             isLocal={isLocal}
-            onPlay={(card) => { setPlayCard(card); setView('course-play'); }}
+            onPlay={(card) => { setPlayCard(card); setView(`course/${card.token_id}`); }}
             onCreate={() => setView('create-course')}
             onSignIn={onSignIn}
           />

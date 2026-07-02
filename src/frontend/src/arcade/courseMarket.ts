@@ -169,3 +169,26 @@ export function courseNftTokenUrl(
     ? `http://${id}.localhost:8000/token/${tokenId}`
     : `https://${id}.icp0.io/token/${tokenId}`;
 }
+
+// ── Course share links — every course has a canonical deep link owners can
+//    advertise. `#/arcade/course/<id>` is resolved by Arcade's hash routing
+//    (useHashScreen keeps the whole trailing segment, and App.pageFromHash
+//    already maps any `#/arcade/...` path to the arcade page), so opening the
+//    link lands straight on that course. ──
+
+/** Canonical shareable URL for a course. `origin` = window.location.origin. */
+export function courseShareUrl(tokenId: bigint, origin: string): string {
+  return `${origin}/#/arcade/course/${tokenId}`;
+}
+
+/** X (Twitter) share-intent URL for advertising a course. */
+export function courseShareIntent(courseName: string, shareUrl: string): string {
+  const text = `Play my mini-golf course "${courseName}" on Cycles of Influence — finish a round, earn a lottery ticket. ⛳🔥`;
+  return `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(shareUrl)}`;
+}
+
+/** Parse an arcade sub-screen value (`course/<id>`) into a token id, or null. */
+export function courseIdFromScreen(screen: string): bigint | null {
+  const m = /^course\/(\d+)$/.exec(screen);
+  return m ? BigInt(m[1]) : null;
+}

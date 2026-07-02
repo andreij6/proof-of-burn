@@ -100,6 +100,7 @@ DESIGN GUIDANCE
 - Guarantee a real path: the ball must be able to travel from T to C over passable ground (grass/rough/sand/slopes) without crossing void or being fully blocked by walls/water.
 - Ramp difficulty across the ${L.HOLES} holes: open early holes, tighter fairways / hazards / windmills later.
 - Total par sets the course's marketplace difficulty: Easy is 27 or less, Medium 28–44, Hard 45 or more. Pick pars to land the difficulty I asked for.
+- BE ORIGINAL. Every course is minted as an NFT, and the game fingerprints each hole's layout at mint time: if 3 or more holes match holes from ANY already-minted course — mirrored, rotated, or shifted copies count as matches — the mint is REJECTED. Do not copy the example hole below into the course; invent your own layouts.
 
 EXAMPLE HOLE (exact shape to imitate)
 ${JSON.stringify(EXAMPLE_HOLE, null, 2)}

@@ -225,6 +225,15 @@ type CourseRatingSummary = record {
   avg_x10 : nat32;
   my_stars : opt nat8;
 };
+// Originality pre-check result: which holes of a candidate course duplicate
+// already-minted layouts (canonical fingerprints — mirrored/rotated/shifted
+// copies still match), and whether minting would be blocked (>= limit dups).
+type DuplicateHole = record { hole_index : nat8; token_id : nat64 };
+type CourseUniquenessReport = record {
+  duplicates : vec DuplicateHole;
+  would_block : bool;
+  limit : nat8;
+};
 type CrashBetView = record {
   payout_x100 : nat64;
   user : principal;
@@ -1291,6 +1300,10 @@ service : (InitPayload) -> {
   // that it always exists from genesis. Admin-gated; callable from deploy-local
   // and prod to recover a no-op seed without another upgrade (B6).
   admin_seed_system_course : () -> (Result_1);
+  // Admin: backfill the originality index for courses minted before the
+  // clone-detection feature (fetches each listed course's blob from the
+  // course_nft canister). Safe to re-run; returns courses fingerprinted.
+  admin_backfill_course_fingerprints : () -> (nat32);
   // Admin: move cycles from THIS backend into the frontend canister — a one-way
   // `deposit_cycles` top-up; the cycles are deducted from the backend's own
   // balance. Used to rebalance an over-provisioned backend.
@@ -1432,6 +1445,11 @@ service : (InitPayload) -> {
   // re-notifies the same block (never double-mints); a CMC refund drops it so the
   // retry re-transfers. Records the claim only AFTER the cycles are minted.
   claim_faucet_cycles : (principal) -> (Result);
+  // Free pre-mint originality check (anonymous-callable): pass a candidate
+  // course_data blob; returns which holes duplicate already-minted layouts and
+  // whether the mint would be rejected. The same rule is enforced inside
+  // mint_course_nft (InvalidCourse "DUPLICATE_HOLES:<n>").
+  check_course_uniqueness : (blob) -> (CourseUniquenessReport) query;
   commit : (nat64, Stance, nat64) -> (Result);
   // Commit a vote in ANY supported token. The token is ESCROWED — it only
   // converts to ICP if the proposal passes its threshold and the vote is cast
@@ -1824,6 +1842,9 @@ service : (InitPayload) -> {
   // source must be a child tracked in PENDING_UNSTAKES, and is additionally
   // checked against every platform neuron id before any governance call.
   merge_unstake : (nat64, StakeTier) -> (Result);
+  // Mint a course NFT from a build-instructions blob. Open to any signed-in
+  // user (no tier gate): fund the get_mint_deposit_address escrow with the
+  // 0.5 ICP fee first. Rejects clones (InvalidCourse "DUPLICATE_HOLES:<n>").
   mint_course_nft : (blob, text) -> (Result_10);
   my_favorite_ids : () -> (vec nat64) query;
   notify_top_up : (NotifyTopUpArgs) -> (NotifyTopUpResult);
