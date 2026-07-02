@@ -25,9 +25,11 @@ interface CourseOverviewProps {
   onPracticeHole: (idx: number) => void;
   /** Back to the marketplace. */
   onExit: () => void;
+  /** Override the sub-header line (default = the marketplace ticket copy). */
+  hint?: string;
 }
 
-export default function CourseOverview({ course, courseName, onPlayRound, onPracticeHole, onExit }: CourseOverviewProps) {
+export default function CourseOverview({ course, courseName, onPlayRound, onPracticeHole, onExit, hint }: CourseOverviewProps) {
   const [previewIdx, setPreviewIdx] = useState<number | null>(null);
   const parTotal = course.reduce((s, h) => s + h.par, 0);
 
@@ -49,8 +51,7 @@ export default function CourseOverview({ course, courseName, onPlayRound, onPrac
         </span>
       </div>
       <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-        Play the full course to earn a lottery ticket. Preview any hole to scout it
-        — or practice it solo (unscored).
+        {hint ?? 'Play the full course to earn a lottery ticket. Preview any hole to scout it — or practice it solo (unscored).'}
       </span>
 
       {/* ── 3×3 hole grid ── */}

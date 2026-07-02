@@ -3,7 +3,8 @@ import type { CourseUniquenessReport, MintError } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP } from './ui';
 import MiniGolf from './arcade/MiniGolf';
-import type { CharacterLook, HoleDef } from './arcade/engine';
+import CourseOverview from './arcade/CourseOverview';
+import type { CharacterLook } from './arcade/engine';
 import {
   parseCourseInstructions, courseFromInstructions, type CourseInstructions,
 } from './arcade/courseInstructions';
@@ -135,8 +136,10 @@ export default function CourseCreate({
   const [jsonText, setJsonText] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Step 3 — test play.
-  const [view, setView] = useState<'wizard' | 'play'>('wizard');
+  // Step 3 — test play: full test round, the course-map grid (CourseOverview
+  // with per-hole preview/practice), or a single-hole practice round.
+  const [view, setView] = useState<'wizard' | 'overview' | 'play' | 'practice'>('wizard');
+  const [practiceIdx, setPracticeIdx] = useState(0);
   const [testPlayed, setTestPlayed] = useState(false);
 
   // Step 4 — mint.
@@ -237,15 +240,28 @@ export default function CourseCreate({
     }
   };
 
+  // Compiled holes for test play / the course map (null until doc is valid).
+  const holes = useMemo(() => {
+    if (!doc) return null;
+    try { return courseFromInstructions(doc); } catch { return null; }
+  }, [doc]);
+
+  // ── Course map: the same 3×3 preview grid players get, pre-mint. ──
+  if (view === 'overview' && holes && doc) {
+    return (
+      <CourseOverview
+        course={holes}
+        courseName={doc.name}
+        hint="Scout every hole before minting — preview with pan & zoom, practice a hole solo, or play the full course. Nothing here is scored."
+        onPlayRound={() => { setTestPlayed(true); setView('play'); }}
+        onPracticeHole={(idx) => { setTestPlayed(true); setPracticeIdx(idx); setView('practice'); }}
+        onExit={() => setView('wizard')}
+      />
+    );
+  }
+
   // ── Test play: the real engine, unscored (like the classic course). ──
-  if (view === 'play' && doc) {
-    let holes: HoleDef[];
-    try {
-      holes = courseFromInstructions(doc);
-    } catch {
-      setView('wizard');
-      return null;
-    }
+  if (view === 'play' && holes) {
     return (
       <MiniGolf
         course={holes}
@@ -255,6 +271,22 @@ export default function CourseCreate({
         onExit={() => setView('wizard')}
         onGoParticipate={() => setView('wizard')}
         submitNote="Test round — not scored. Head back to mint your course."
+      />
+    );
+  }
+
+  // ── Single-hole practice, entered from the course map. ──
+  if (view === 'practice' && holes) {
+    return (
+      <MiniGolf
+        key={`practice-${practiceIdx}`}
+        course={[holes[practiceIdx]]}
+        character={character}
+        fullAccess
+        onRoundComplete={() => { /* practice — never scored */ }}
+        onExit={() => setView('overview')}
+        onGoParticipate={() => setView('overview')}
+        submitNote="Practice hole — not scored. Head back to the course map."
       />
     );
   }
@@ -454,18 +486,28 @@ export default function CourseCreate({
             <StepTag n={3} done={testPlayed} />
             <b style={{ fontSize: 14 }}>Test your course</b>
             <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0 }}>
-              Play all 9 holes in the real engine before minting — free, unscored,
-              as many rounds as you like.
+              See the whole course at a glance on the course map — preview any hole
+              with pan &amp; zoom or practice it solo — then play all 9 holes in the
+              real engine. Free, unscored, as many rounds as you like.
             </p>
-            <Btn
-              variant="secondary"
-              sm
-              disabled={!doc}
-              style={{ alignSelf: 'flex-start' }}
-              onClick={() => { setTestPlayed(true); setView('play'); }}
-            >
-              <Icon name="flame" size={12} /> Test your course
-            </Btn>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <Btn
+                variant="secondary"
+                sm
+                disabled={!holes}
+                onClick={() => setView('overview')}
+              >
+                <Icon name="gamepad" size={12} /> Course map
+              </Btn>
+              <Btn
+                variant="secondary"
+                sm
+                disabled={!holes}
+                onClick={() => { setTestPlayed(true); setView('play'); }}
+              >
+                <Icon name="flame" size={12} /> Play a test round
+              </Btn>
+            </div>
           </div>
 
           {/* ── Step 4: mint ── */}
