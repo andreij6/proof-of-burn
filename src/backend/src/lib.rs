@@ -2362,12 +2362,23 @@ fn principal_to_subaccount(p: &Principal) -> [u8; 32] {
 /// the CMC memoizes the per-block result, so re-notifying a processed block
 /// returns the original Ok. `Refunded` is a hard failure — the caller must
 /// drop its stored block index and re-transfer (see CMC_REFUNDED handling).
+///
+/// LOCAL REPLICA: the notify is BEST-EFFORT — every outcome settles. Newer
+/// `icp` CLIs bootstrap the real NNS CMC locally, and it verifies blocks
+/// against the NNS ledger, NOT the locally deployed ICRC-1 test ledger the
+/// app actually transfers on — so it rejects every real local block with
+/// InvalidTransaction("Block N not found") (older local nets had no CMC at
+/// all and the call itself was rejected). Cycle minting is meaningless
+/// locally either way, so a failed notify must not fail the settlement.
+/// Mainnet (`is_local = false`) keeps every failure strict; the old
+/// `fail_on_missing_cmc` knob is retained in the signature but no longer
+/// consulted (local is always forgiving, mainnet never was).
 #[cfg(target_arch = "wasm32")]
 async fn notify_cmc_topup(
     cmc: Principal,
     target: Principal,
     block_index: u64,
-    fail_on_missing_cmc: bool,
+    _fail_on_missing_cmc: bool,
 ) -> Result<(), String> {
     let args = NotifyTopUpArgs {
         canister_id: target,
@@ -2375,11 +2386,26 @@ async fn notify_cmc_topup(
     };
     let res: Result<(NotifyTopUpResult,), _> =
         ic_cdk::call(cmc, "notify_top_up", (args,)).await;
+    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
     match res {
         // The CMC memoizes the result per block, so re-notifying an
         // already-processed block returns the original Ok — retries are
         // naturally idempotent (no AlreadyNotified variant exists).
         Ok((NotifyTopUpResult::Ok(_),)) => Ok(()),
+        Ok((NotifyTopUpResult::Err(e),)) if is_local => {
+            canister_print(&format!(
+                "notify_top_up best-effort on local (block {}): {:?}",
+                block_index, e
+            ));
+            Ok(())
+        }
+        Err((code, msg)) if is_local => {
+            canister_print(&format!(
+                "notify_top_up best-effort on local (block {}): rejected ({:?}) {}",
+                block_index, code, msg
+            ));
+            Ok(())
+        }
         Ok((NotifyTopUpResult::Err(NotifyError::Refunded { reason, .. }),)) => {
             // The CMC refused the block and sent the ICP back to the sending
             // (sub)account. Callers must drop their stored block index so the
@@ -2390,14 +2416,7 @@ async fn notify_cmc_topup(
         Ok((NotifyTopUpResult::Err(e),)) => {
             Err(format!("CMC notify error: {:?}", e))
         }
-        Err((code, msg)) => {
-            let is_local = CONFIG.with(|c| c.borrow().get().is_local);
-            if is_local && !fail_on_missing_cmc {
-                Ok(())
-            } else {
-                Err(format!("CMC call rejected ({:?}): {}", code, msg))
-            }
-        }
+        Err((code, msg)) => Err(format!("CMC call rejected ({:?}): {}", code, msg)),
     }
 }
 
@@ -16764,19 +16783,29 @@ async fn mint_course_nft_inner(
     let fee_settled = saga.treasury_block.is_some()
         && saga.cmc_block_index.is_some()
         && saga.frontend_cmc_block.is_some();
+    // Full-fee balance check only while NO leg has settled: once any split leg
+    // is journaled the escrow legitimately holds less than the fee, and
+    // settle_burn_split's own required/shortfall math (treasury fee-cover)
+    // takes over for the remaining legs — demanding the full fee again on a
+    // resume would wrongly report InsufficientDeposit mid-saga.
+    let no_leg_settled = saga.treasury_block.is_none()
+        && saga.cmc_block_index.is_none()
+        && saga.frontend_cmc_block.is_none();
     if !fee_settled {
-        let escrow = LedgerAccount {
-            owner: get_canister_id(),
-            subaccount: Some(mint_sub),
-        };
-        let balance = call_ledger_balance(ledger_id, escrow)
-            .await
-            .map_err(|e| MintError::FeeSettlementFailed(format!("ESCROW_BALANCE: {}", e)))?;
-        if balance < MINT_FEE_E8S {
-            return Err(MintError::InsufficientDeposit {
-                needed: MINT_FEE_E8S,
-                found: balance,
-            });
+        if no_leg_settled {
+            let escrow = LedgerAccount {
+                owner: get_canister_id(),
+                subaccount: Some(mint_sub),
+            };
+            let balance = call_ledger_balance(ledger_id, escrow)
+                .await
+                .map_err(|e| MintError::FeeSettlementFailed(format!("ESCROW_BALANCE: {}", e)))?;
+            if balance < MINT_FEE_E8S {
+                return Err(MintError::InsufficientDeposit {
+                    needed: MINT_FEE_E8S,
+                    found: balance,
+                });
+            }
         }
 
         // Step 3 — charge: 50/25/25 split, idempotent per leg (reuse
@@ -27011,6 +27040,40 @@ mod tests {
                 if needed == MINT_FEE_E8S && found == MINT_FEE_E8S - 1
         ));
         assert!(get_course(1).is_none(), "nothing minted");
+    }
+
+    #[tokio::test]
+    async fn test_mint_resume_after_cmc_notify_failure_completes() {
+        // The 2026-07-01 local repro: treasury + backend-CMC legs settle, the
+        // CMC notify fails (BACKEND_CMC_NOTIFY) — the escrow now legitimately
+        // holds LESS than the full fee. The retry must resume the saga (settle
+        // the remaining leg + mint), not demand a fresh 0.5 ICP deposit.
+        course_test_setup();
+        make_following(alice());
+        set_mock_caller(alice());
+        set_mock_ledger_balance(MINT_FEE_E8S);
+        set_mock_ledger_transfer(Ok(1));
+        set_mock_cmc_notify_fail(Some("CMC notify error: InvalidTransaction(\"Block 41 not found\")".into()));
+
+        let err = mint_course_nft(course_blob(34, 2), "Notify Fail".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, MintError::FeeSettlementFailed(m) if m.starts_with("BACKEND_CMC_NOTIFY")));
+        // Partial progress journaled: transfers happened, notify blocked it.
+        let saga = MINT_SAGAS.with(|m| m.borrow().get(&alice())).unwrap();
+        assert!(saga.treasury_block.is_some());
+        assert!(saga.cmc_block_index.is_some());
+        assert!(saga.minted_token_id.is_none());
+
+        // Retry: escrow depleted by the settled legs — must NOT be judged
+        // against the full fee again.
+        set_mock_cmc_notify_fail(None);
+        set_mock_ledger_balance(MINT_FEE_E8S - 25_000_000 - 12_500_000 - 20_000);
+        let token_id = mint_course_nft(course_blob(34, 2), "Notify Fail".into())
+            .await
+            .unwrap();
+        assert_eq!(token_id, 1);
+        assert!(MINT_SAGAS.with(|m| m.borrow().get(&alice())).is_none());
     }
 
     #[tokio::test]
