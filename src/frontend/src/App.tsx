@@ -1915,7 +1915,7 @@ export default function App() {
         )}
         {minigolfEnabled && (
           <Btn variant={page === 'minigolf' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('minigolf')}>
-            <Icon name="flame" size={14} stroke={page === 'minigolf' ? 'var(--char-950)' : 'currentColor'} />
+            <Icon name="golf" size={14} stroke={page === 'minigolf' ? 'var(--char-950)' : 'currentColor'} />
             Mini Golf
           </Btn>
         )}

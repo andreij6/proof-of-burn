@@ -61,6 +61,10 @@ export const iconPaths: Record<string, React.ReactNode> = {
   ticket: <><path d="M2 9a3 3 0 010 6v2a2 2 0 002 2h16a2 2 0 002-2v-2a3 3 0 010-6V7a2 2 0 00-2-2H4a2 2 0 00-2 2z" /><path d="M13 5v2" /><path d="M13 17v2" /></>,
   compass: <><circle cx="12" cy="12" r="9" /><path d="M14.8 9.2l-1.8 4.6-4.6 1.8 1.8-4.6z" /></>,
   gamepad: <><rect x="2" y="7" width="20" height="10" rx="5" /><path d="M7.5 10v4M5.5 12h4M15.5 10.5h.01M18 13h.01" /></>,
+  // Mini Golf — a flagstick planted in the cup: the literal glyph for the game.
+  // Stroke-only to match the set; the elliptical cup reads as the hole at an
+  // angle and the pennant waves off the top of the pole.
+  golf: <><path d="M10 18V4" /><path d="M10 4l8 2.5L10 9z" /><ellipse cx="10" cy="19.5" rx="3.2" ry="1.5" /></>,
   sound: <><path d="M11 5L6 9H2v6h4l5 4z" /><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13" /></>,
   soundOff: <><path d="M11 5L6 9H2v6h4l5 4z" /><path d="M22 9l-6 6M16 9l6 6" /></>,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></>,

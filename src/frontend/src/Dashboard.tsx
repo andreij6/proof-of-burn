@@ -349,7 +349,7 @@ export default function Dashboard({
         )}
 
         {flags.arcade && (
-          <HubCard eyebrow="Arcade" icon="gamepad" onClick={() => go('arcade')}
+          <HubCard eyebrow="Arcade" icon="golf" onClick={() => go('arcade')}
             chip={signedIn && !votingUsed && !stakingUsed ? <Chip tone="muted">vote or stake to unlock</Chip> : undefined}>
             <Big>Mini Golf</Big>
             <Sub>Nine isometric holes, a global leaderboard, and a custom golfer. Hole 1 is free — participation unlocks the rest.</Sub>

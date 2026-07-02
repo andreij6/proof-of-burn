@@ -477,7 +477,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
         <div className="col" style={{ gap: 6 }}>
           <Eyebrow accent>Play &amp; compete</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
-            <Icon name="gamepad" size={22} stroke="var(--burn-ink)" />
+            <Icon name={minigolfMode ? 'golf' : 'gamepad'} size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>{minigolfMode ? 'Mini Golf' : 'Arcade'}</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
@@ -496,7 +496,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
         <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
           {golfOn && (
             <Btn variant={activeTab === 'minigolf' ? 'primary' : 'ghost'} sm onClick={() => setTab('minigolf')}>
-              <Icon name="flame" size={13} stroke={activeTab === 'minigolf' ? 'var(--char-950)' : 'currentColor'} />
+              <Icon name="golf" size={13} stroke={activeTab === 'minigolf' ? 'var(--char-950)' : 'currentColor'} />
               Mini Golf
             </Btn>
           )}
