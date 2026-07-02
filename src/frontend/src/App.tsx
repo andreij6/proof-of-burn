@@ -52,7 +52,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -65,6 +65,10 @@ export const PAGE_PATH: Record<AppPage, string> = {
   lottery: '/lottery',
   explorer: '/explorer',
   arcade: '/arcade',
+  // Mini Golf has its own nav page (below Lottery) — same arcade flag gate,
+  // and `#/mini-golf/course/<id>` deep links resolve here. The Arcade hub still
+  // hosts the Mini Golf + Field Goal tabs.
+  minigolf: '/mini-golf',
   // The Course Marketplace is the arcade's mini-golf surface (PB-309); kept as
   // a deep-linkable alias that redirects to the arcade page (same flag gate).
   course_market: '/courses',
@@ -89,7 +93,7 @@ const NNS_HOTKEY_DOCS = "https://docs.internetcomputer.org/concepts/governance/#
 // /casino/crash, /arcade/course-play, /lottery/staking — see useHashScreen).
 // Resolve any such deep path back to its hub page so the top-level router stays
 // on the hub while the sub-screen changes.
-const HUB_PATHS = ['/casino', '/arcade', '/lottery'] as const;
+const HUB_PATHS = ['/casino', '/arcade', '/mini-golf', '/lottery'] as const;
 export function pageFromHash(hash: string): AppPage | null {
   const h = hash.replace(/^#/, '');
   if (/^proposal-\d+$/.test(h)) return 'voting'; // shared proposal deep link
@@ -626,6 +630,9 @@ export default function App() {
   const lotteryEnabled = featureFlags.find(f => f.key === 'lossless_lottery')?.enabled ?? false;
   const explorerEnabled = featureFlags.find(f => f.key === 'dapp_explorer')?.enabled ?? false;
   const arcadeEnabled = featureFlags.find(f => f.key === 'arcade')?.enabled ?? false;
+  // Mini Golf has its own nav page (below Lottery), gated on its per-game flag
+  // so it shows even when the full Arcade hub flag is off.
+  const minigolfEnabled = featureFlags.find(f => f.key === 'arcade_minigolf')?.enabled ?? false;
   const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
   const casinoEnabled = crashEnabled;
   const faucetEnabled = featureFlags.find(f => f.key === 'cycles_faucet')?.enabled ?? false;
@@ -1239,6 +1246,11 @@ export default function App() {
       redirect('arcade');
     }
     if (page === 'arcade' && featureFlags.length > 0 && !arcadeEnabled) {
+      redirect('dashboard');
+    }
+    // Mini Golf is a dedicated page for the arcade's mini-golf surface — gated
+    // on its own per-game flag (independent of the full Arcade hub flag).
+    if (page === 'minigolf' && featureFlags.length > 0 && !minigolfEnabled) {
       redirect('dashboard');
     }
     if (page === 'casino' && featureFlags.length > 0 && !casinoEnabled) {
@@ -1862,7 +1874,7 @@ export default function App() {
           </Btn>
         )}
 
-        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
+        {(arcadeEnabled || lotteryEnabled || casinoEnabled || minigolfEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Featured</Eyebrow>
         )}
         {arcadeEnabled && (
@@ -1899,6 +1911,12 @@ export default function App() {
                 } : {}),
               }}>{drawCountdown}</Chip>
             )}
+          </Btn>
+        )}
+        {minigolfEnabled && (
+          <Btn variant={page === 'minigolf' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('minigolf')}>
+            <Icon name="flame" size={14} stroke={page === 'minigolf' ? 'var(--char-950)' : 'currentColor'} />
+            Mini Golf
           </Btn>
         )}
 
@@ -2435,6 +2453,20 @@ export default function App() {
             />
           ) : page === 'arcade' && arcadeEnabled ? (
             <Arcade
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
+              backendCanisterId={backendCanisterId}
+              isLocal={config?.is_local ?? false}
+              onSignIn={handleLogin}
+              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+            />
+          ) : page === 'minigolf' && minigolfEnabled ? (
+            <Arcade
+              mode="minigolf"
               actor={actor}
               identity={identity}
               principal={principal}

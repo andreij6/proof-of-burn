@@ -67,6 +67,10 @@ interface ArcadeProps {
   isLocal: boolean;
   onSignIn: () => void;
   onGoParticipate: () => void;
+  /** 'arcade' = full hub (Mini Golf + Field Goal tabs). 'minigolf' = dedicated
+   *  Mini Golf page: hash base `/mini-golf`, tab locked to mini golf, Field
+   *  Goal tab/card hidden. Defaults to 'arcade'. */
+  mode?: 'arcade' | 'minigolf';
 }
 
 function shadeHex(hex: string, delta: number): string {
@@ -174,8 +178,9 @@ function payTokenFee(token: ExplorerToken, exp: ExplorerInfo | null): bigint {
   }
 }
 
-export default function Arcade({ actor, identity, principal, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal, onSignIn, onGoParticipate }: ArcadeProps) {
+export default function Arcade({ actor, identity, principal, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal, onSignIn, onGoParticipate, mode = 'arcade' }: ArcadeProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
+  const minigolfMode = mode === 'minigolf';
 
   const [info, setInfo] = useState<ArcadeInfo | null>(null);
   const [expInfo, setExpInfo] = useState<ExplorerInfo | null>(null);
@@ -185,8 +190,9 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   // marketplace; "play" opens a course in the engine. Courses are AI-built —
   // there is no in-app editor. The active view lives in the hash (#/arcade,
   // #/arcade/course/<id>, …) so Back returns to the lobby, not off the page —
-  // and `course/<id>` doubles as each course's shareable deep link.
-  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'classic-play' | 'create-course' | `course/${string}`>('/arcade', 'lobby');
+  // and `course/<id>` doubles as each course's shareable deep link. The
+  // dedicated Mini Golf page reuses this component with base `/mini-golf`.
+  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'classic-play' | 'create-course' | `course/${string}`>(minigolfMode ? '/mini-golf' : '/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
   // Deep-link resolution: when the hash names a course we don't have a card
   // for (a shared link or a reload), fetch it. `deepLinkErr` = course gone.
@@ -285,7 +291,10 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     golfOn ? 'minigolf' : null,
     fgOn ? 'fieldgoal' : null,
   ].filter(Boolean)) as ('minigolf' | 'fieldgoal')[];
-  const activeTab = enabledTabs.includes(tab) ? tab : (enabledTabs[0] ?? 'minigolf');
+  // The dedicated Mini Golf page only ever shows mini golf — lock the tab.
+  const activeTab = minigolfMode
+    ? 'minigolf'
+    : (enabledTabs.includes(tab) ? tab : (enabledTabs[0] ?? 'minigolf'));
 
   const submitScore = async (game: string, perHole: number[], millis: number, noun: string) => {
     if (!signedIn || !actor) {
@@ -446,7 +455,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     );
   }
 
-  if (view === 'fieldgoal') {
+  if (view === 'fieldgoal' && !minigolfMode) {
     return (
       <div className="idea-board-container">
         <FieldGoal
@@ -469,7 +478,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
           <Eyebrow accent>Play &amp; compete</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
             <Icon name="gamepad" size={22} stroke="var(--burn-ink)" />
-            <h4 style={{ margin: 0 }}>Arcade</h4>
+            <h4 style={{ margin: 0 }}>{minigolfMode ? 'Mini Golf' : 'Arcade'}</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
             Skill games for protocol participants. Everyone gets a free preview — stake ICP
@@ -483,20 +492,22 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
       </div>
 
       {/* ── Game sub-pages (per-game flags hide pulled titles) ── */}
-      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-        {golfOn && (
-          <Btn variant={activeTab === 'minigolf' ? 'primary' : 'ghost'} sm onClick={() => setTab('minigolf')}>
-            <Icon name="flame" size={13} stroke={activeTab === 'minigolf' ? 'var(--char-950)' : 'currentColor'} />
-            Mini Golf
-          </Btn>
-        )}
-        {fgOn && (
-          <Btn variant={activeTab === 'fieldgoal' ? 'primary' : 'ghost'} sm onClick={() => setTab('fieldgoal')}>
-            <Icon name="zap" size={13} stroke={activeTab === 'fieldgoal' ? 'var(--char-950)' : 'currentColor'} />
-            Field Goal
-          </Btn>
-        )}
-      </div>
+      {!minigolfMode && (
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+          {golfOn && (
+            <Btn variant={activeTab === 'minigolf' ? 'primary' : 'ghost'} sm onClick={() => setTab('minigolf')}>
+              <Icon name="flame" size={13} stroke={activeTab === 'minigolf' ? 'var(--char-950)' : 'currentColor'} />
+              Mini Golf
+            </Btn>
+          )}
+          {fgOn && (
+            <Btn variant={activeTab === 'fieldgoal' ? 'primary' : 'ghost'} sm onClick={() => setTab('fieldgoal')}>
+              <Icon name="zap" size={13} stroke={activeTab === 'fieldgoal' ? 'var(--char-950)' : 'currentColor'} />
+              Field Goal
+            </Btn>
+          )}
+        </div>
+      )}
 
       {isLoading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--fg-3)' }}>
