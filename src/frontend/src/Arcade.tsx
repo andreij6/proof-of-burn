@@ -11,7 +11,7 @@ import FieldGoal from "./arcade/FieldGoal";
 import CourseMarketplace from "./CourseMarketplace";
 import CourseCreate from "./CourseCreate";
 import CoursePlay from "./CoursePlay";
-import { courseIdFromScreen, spectateIdFromScreen } from "./arcade/courseMarket";
+import { courseIdFromScreen, spectateIdFromScreen, playIdFromScreen } from "./arcade/courseMarket";
 import MiniGolf from "./arcade/MiniGolf";
 import type { CourseCard } from "./bindings/backend";
 import {
@@ -192,20 +192,17 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   // #/arcade/course/<id>, …) so Back returns to the lobby, not off the page —
   // and `course/<id>` doubles as each course's shareable deep link. The
   // dedicated Mini Golf page reuses this component with base `/mini-golf`.
-  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'classic-play' | 'create-course' | `course/${string}` | `spectate/${string}`>(minigolfMode ? '/mini-golf' : '/arcade', 'lobby');
+  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'classic-play' | 'create-course' | `course/${string}` | `spectate/${string}` | `play/${string}`>(minigolfMode ? '/mini-golf' : '/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
-  // `skipOverview` is set by the marketplace "Play" click so CoursePlay drops
-  // straight into the scored round, bypassing the 3×3 overview. A fresh
-  // deep-link load (reload at `#/mini-golf/course/<id>`) leaves it false, so the
-  // overview still shows for shared-link visitors. Cleared on exit.
-  const [skipOverview, setSkipOverview] = useState(false);
   // Deep-link resolution: when the hash names a course we don't have a card
   // for (a shared link, the "View NFT" grid, or a reload), fetch it. The hash
-  // can be `course/<id>` (play) or `spectate/<id>` (view-only 3×3 grid).
-  // `deepLinkErr` = course gone.
+  // can be `course/<id>` (the overview / shareable deep link), `spectate/<id>`
+  // (the View-NFT view-only 3×3 grid), or `play/<id>` (the marketplace "Play"
+  // button — drops straight into the scored round). `deepLinkErr` = course gone.
   const deepLinkCourseId = courseIdFromScreen(view);
   const spectateCourseId = spectateIdFromScreen(view);
-  const routeCourseId = deepLinkCourseId ?? spectateCourseId;
+  const playCourseId = playIdFromScreen(view);
+  const routeCourseId = deepLinkCourseId ?? spectateCourseId ?? playCourseId;
   const [deepLinkErr, setDeepLinkErr] = useState(false);
   useEffect(() => {
     setDeepLinkErr(false);
@@ -406,8 +403,8 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             card={playCard}
             character={myLook}
             spectateOnly={spectateCourseId !== null}
-            autoStartRound={skipOverview}
-            onExit={() => { setPlayCard(null); setSkipOverview(false); setTab('minigolf'); setView('lobby'); }}
+            autoStartRound={playCourseId !== null}
+            onExit={() => { setPlayCard(null); setTab('minigolf'); setView('lobby'); }}
             onGoParticipate={onGoParticipate}
           />
         </div>
@@ -578,7 +575,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             ledgerCanisterId={ledgerCanisterId}
             backendCanisterId={backendCanisterId}
             isLocal={isLocal}
-            onPlay={(card) => { setPlayCard(card); setSkipOverview(true); setView(`course/${card.token_id}`); }}
+            onPlay={(card) => { setPlayCard(card); setView(`play/${card.token_id}`); }}
             onViewNft={(card) => { setPlayCard(card); setView(`spectate/${card.token_id}`); }}
             onCreate={() => setView('create-course')}
             onSignIn={onSignIn}

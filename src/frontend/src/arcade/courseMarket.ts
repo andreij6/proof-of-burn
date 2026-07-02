@@ -199,3 +199,12 @@ export function spectateIdFromScreen(screen: string): bigint | null {
   const m = /^spectate\/(\d+)$/.exec(screen);
   return m ? BigInt(m[1]) : null;
 }
+
+/** Parse a `play/<id>` sub-screen (the marketplace "Play" button — drops
+ *  straight into the scored round, bypassing the 3×3 overview) into a token
+ *  id, or null. Using a dedicated route (rather than a lingering flag) keeps
+ *  "Play → game" and "View NFT → grid" independent of navigation history. */
+export function playIdFromScreen(screen: string): bigint | null {
+  const m = /^play\/(\d+)$/.exec(screen);
+  return m ? BigInt(m[1]) : null;
+}

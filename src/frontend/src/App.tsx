@@ -66,8 +66,9 @@ export const PAGE_PATH: Record<AppPage, string> = {
   explorer: '/explorer',
   arcade: '/arcade',
   // Mini Golf has its own nav page (below Lottery) — same arcade flag gate,
-  // and `#/mini-golf/course/<id>` deep links resolve here. The Arcade hub still
-  // hosts the Mini Golf + Field Goal tabs.
+  // and `#/mini-golf/course/<id>`, `#/mini-golf/spectate/<id>`, `#/mini-golf/play/<id>`
+  // deep links resolve here. The Arcade hub still hosts the Mini Golf + Field
+  // Goal tabs.
   minigolf: '/mini-golf',
   // The Course Marketplace is the arcade's mini-golf surface (PB-309); kept as
   // a deep-linkable alias that redirects to the arcade page (same flag gate).
