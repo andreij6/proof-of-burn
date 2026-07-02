@@ -595,14 +595,6 @@ type FeaturedInfo = record {
   price_per_day_usd_e8s : nat64;
   slots_open : nat32;
 };
-type FeaturedSlot = record {
-  at : nat64;
-  token : IdeaToken;
-  token_id : nat64;
-  usd_value_e8s : nat64;
-  amount : nat64;
-  bidder : principal;
-};
 type FeaturedStatus = variant { Active; Rejected; Expired; Pending };
 // A featured placement joined to its listing — what the UI renders.
 type FeaturedView = record { listing : DappListing; featured : FeaturedDapp };
@@ -788,7 +780,6 @@ type MarketplacePage = record {
   total : nat64;
   courses : vec CourseCard;
   seed : nat64;
-  featured_token_id : opt nat64;
 };
 type MaturityDisbursement = record {
   amount_e8s : nat64;
@@ -1204,7 +1195,6 @@ service : (InitPayload) -> {
   // (the three staking tiers + the early-adopter neuron), read from NNS
   // governance. Answers "are our neurons actually following the primary?".
   admin_check_neuron_following : () -> (vec NeuronFollowStatus);
-  admin_clear_featured_slot : () -> (Result);
   // Admin: force ONE stuck commitment (FailedBurn / FailedRefund / StuckFunds)
   // to a terminal `Burned` state so the 5-minute settlement retry sweep stops
   // re-attempting it forever. Use only when the escrow is verified empty and the
@@ -1405,7 +1395,6 @@ service : (InitPayload) -> {
   // premium moves to the treasury; the application is Pending until an admin
   // approves it (rejection refunds). One active/pending placement per listing.
   apply_featured : (nat64, IdeaToken, nat64) -> (Result_1);
-  bid_featured_slot : (nat64, IdeaToken, nat64) -> (Result);
   // Owner-initiated burn of a course NFT, with backend marketplace cleanup
   // (PB-3xx). Destructive + a security boundary, so:
   // 1. Reject anonymous.
@@ -1513,8 +1502,6 @@ service : (InitPayload) -> {
   // state. Returns how many listings were removed.
   dev_clear_courses : () -> (Result_1);
   dev_clear_farmers : () -> (Result);
-  // Local-dev: vacate the featured slot.
-  dev_clear_featured : () -> (Result);
   dev_clear_featured_dapps : () -> (Result);
   // Local-dev: wipe all threads, comments, votes, and reward markers. Local only.
   dev_clear_threads : () -> (Result);
@@ -1593,8 +1580,6 @@ service : (InitPayload) -> {
   // 6-month history + a claimable share for the caller, 2 = membership
   // closed (same history plus the 2,000+ ICP month that latched it).
   dev_set_early_adopter_preset : (nat8) -> (Result);
-  // Local-dev: pin a course in the featured slot WITHOUT a real ck-token bid.
-  dev_set_featured : (nat64) -> (Result);
   // Local-dev: set a course's play_count (and cosmetic tickets_distributed).
   dev_set_play_count : (nat64, nat64) -> (Result);
   // Local-dev: insert a finished winning-draw record with the CALLER as the winner
@@ -1694,7 +1679,6 @@ service : (InitPayload) -> {
   // Quote `days` of featured placement in `token` at the live USD rate; locks the
   // price for the caller for 15 minutes (separate from the listing quote).
   get_featured_quote : (IdeaToken, nat64) -> (Result_6);
-  get_featured_slot : () -> (opt FeaturedSlot) query;
   // App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
   // cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
   // the count of distinct NNS proposals this app has cast a vote on.

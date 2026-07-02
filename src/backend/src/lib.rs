@@ -15998,7 +15998,7 @@ fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
 // 05-marketplace.md (PB-305), 06-play-to-earn-and-anticheat.md (PB-306),
 // 09-leaderboard-removal-and-arcade-migration.md (PB-309).
 //
-// MemoryIds (00 §5): 77 COURSE_LISTINGS, 78 FEATURED_SLOT (PB-308),
+// MemoryIds (00 §5): 77 COURSE_LISTINGS,
 // 79 PLAY_SESSIONS, 80 COURSE_TICKET_CAPS, 81 COURSE_RATINGS (PB-310),
 // 82 NEXT_SESSION_ID, 83 MINT_SAGAS, 84 COURSE_SALES, 85 COURSE_PAIR_CAPS,
 // 86 SYSTEM_COURSE_MINTED, 87 FAVORITE_COURSES (PB-311).
@@ -16952,7 +16952,6 @@ pub struct CourseCard {
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct MarketplacePage {
     pub courses: Vec<CourseCard>,
-    pub featured_token_id: Option<u64>,
     pub seed: u64,
     pub total: u64,
 }
@@ -17020,30 +17019,20 @@ fn list_marketplace_courses(filter: MarketplaceFilter) -> MarketplacePage {
     if require_arcade_game_enabled(ARCADE_GAME_MINIGOLF).is_err() {
         return MarketplacePage {
             courses: vec![],
-            featured_token_id: None,
             seed: 0,
             total: 0,
         };
     }
-    // PB-308: pin the featured course (dropping a dangling slot via get_featured_slot).
-    let mut featured_token_id: Option<u64> = get_featured_slot().map(|s| s.token_id);
     // Moderation visibility (PB-3xx): hidden courses must vanish from public
-    // browsing — both from the card list AND from the featured pin. Direct
-    // resolution by token id (get_course / get_course_data) is intentionally
-    // left intact so the owner of a hidden course isn't fully locked out.
-    if let Some(ft) = featured_token_id {
-        let ft_hidden = COURSE_LISTINGS.with(|m| m.borrow().get(&ft).map(|l| l.hidden).unwrap_or(false));
-        if ft_hidden {
-            featured_token_id = None;
-        }
-    }
+    // browsing. Direct resolution by token id (get_course / get_course_data)
+    // is intentionally left intact so the owner of a hidden course isn't fully
+    // locked out.
     let mut matched: Vec<CourseCard> = COURSE_LISTINGS.with(|m| {
         m.borrow()
             .iter()
             .map(|e| e.value())
             .filter(|l| !l.hidden)
             .filter(|l| listing_matches(l, &filter, caller))
-            .filter(|l| Some(l.token_id) != featured_token_id)
             .map(|l| listing_to_card(&l, caller))
             .collect()
     });
@@ -17052,7 +17041,6 @@ fn list_marketplace_courses(filter: MarketplaceFilter) -> MarketplacePage {
     let seed = current_time(); // cheap shuffle hint; FE re-rolls its own seed.
     MarketplacePage {
         courses: matched,
-        featured_token_id,
         seed,
         total,
     }
@@ -17186,10 +17174,10 @@ async fn refresh_course_listing(token_id: u64) -> Result<(), String> {
 ///      backend is the allowlisted minter, which the canister also accepts for
 ///      burn). A "token already gone" reject is treated as success by the
 ///      wrapper so the path is idempotent.
-///   4. Clean up backend state: drop the COURSE_LISTINGS row and clear
-///      FEATURED_SLOT if it pointed at this token. Favorites are per-user lists
-///      that already skip missing tokens (list_my_favorite_courses), so they are
-///      left to lazy cleanup rather than scanned here.
+///   4. Clean up backend state: drop the COURSE_LISTINGS row. Favorites are
+///      per-user lists that already skip missing tokens
+///      (list_my_favorite_courses), so they are left to lazy cleanup rather
+///      than scanned here.
 #[ic_cdk::update(guard = "require_authenticated")]
 async fn burn_course_nft(token_id: u64) -> Result<(), String> {
     require_arcade_game_enabled(ARCADE_GAME_MINIGOLF)?;
@@ -17214,16 +17202,13 @@ async fn burn_course_nft(token_id: u64) -> Result<(), String> {
 }
 
 /// Shared marketplace cleanup after a token is burned (owner-initiated via
-/// `burn_course_nft` or admin-forced via `admin_burn_course`). Safe if the row /
-/// featured slot are already absent. Favorites are left to lazy cleanup
+/// `burn_course_nft` or admin-forced via `admin_burn_course`). Safe if the row
+/// is already absent. Favorites are left to lazy cleanup
 /// (list_my_favorite_courses skips missing tokens).
 fn course_burn_cleanup(token_id: u64, caller: Principal) {
     COURSE_LISTINGS.with(|m| {
         m.borrow_mut().remove(&token_id);
     });
-    if featured_slot_get().map(|s| s.token_id) == Some(token_id) {
-        featured_slot_set(None);
-    }
     log_dapp_event("course_burn", token_id, caller, 0);
 }
 
@@ -18442,157 +18427,6 @@ fn admin_remove_rating(token_id: u64, rater: Principal) -> Result<(), String> {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// 20.C Featured slot auction (PB-308, Phase 3). MemoryId 78.
-// ════════════════════════════════════════════════════════════════════════════
-//
-// One global slot, perpetual highest-bid auction. Bids in ckBTC/ckETH/ckUSDT/
-// ckUSDC only, compared in USD via the XRC oracle; a bid wins iff its fresh USD
-// value strictly exceeds the stored holder's USD value. 100% to treasury,
-// non-refundable, single-leg pull. Slot RETAINED on delist/sale; admin clears it.
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct FeaturedSlot {
-    pub token_id: u64,
-    pub bidder: Principal,
-    pub token: ExplorerToken,
-    pub amount: u64,         // token smallest-units actually collected
-    pub usd_value_e8s: u64, // amount valued in USD (e8s) at bid time
-    pub at: u64,
-}
-
-/// Newtype so the `Option` can carry the `impl_storable!` CBOR codec inside a
-/// `StableCell` (Rust orphan rules forbid impling `Storable` on `Option`).
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
-pub struct FeaturedSlotCell(pub Option<FeaturedSlot>);
-impl_storable!(FeaturedSlotCell);
-
-thread_local! {
-    static FEATURED_SLOT: RefCell<StableCell<FeaturedSlotCell, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(
-            StableCell::init(mm.borrow().get(MemoryId::new(78)), FeaturedSlotCell(None))));
-
-    /// Lightweight in-flight bid lock (heap; PB-308 B4) so two concurrent bids
-    /// serialize and the second re-reads the current holder before collecting.
-    static FEATURED_BID_LOCK: RefCell<bool> = const { RefCell::new(false) };
-}
-
-fn featured_slot_get() -> Option<FeaturedSlot> {
-    FEATURED_SLOT.with(|c| c.borrow().get().0.clone())
-}
-fn featured_slot_set(slot: Option<FeaturedSlot>) {
-    FEATURED_SLOT.with(|c| {
-        let _ = c.borrow_mut().set(FeaturedSlotCell(slot));
-    });
-}
-
-/// USD (e8s) value of `amount` smallest-units of `token`, at the current oracle
-/// rate (async, oracle-refreshing form — PB-308 B2).
-async fn token_amount_usd_e8s_live(
-    token: ExplorerToken,
-    amount: u64,
-    cfg: &Config,
-) -> Result<u64, String> {
-    let rate = explorer_usd_rate_e8s(token, cfg).await?; // USD-e8s per whole token
-    let scale = 10u128.pow(explorer_token_decimals(token));
-    Ok(u64::try_from((amount as u128) * (rate as u128) / scale).unwrap_or(u64::MAX))
-}
-
-struct FeaturedBidLock;
-impl Drop for FeaturedBidLock {
-    fn drop(&mut self) {
-        FEATURED_BID_LOCK.with(|l| *l.borrow_mut() = false);
-    }
-}
-
-#[ic_cdk::update(guard = "require_authenticated")]
-async fn bid_featured_slot(
-    token_id: u64,
-    token: ExplorerToken,
-    amount: u64,
-) -> Result<(), String> {
-    require_arcade_game_enabled(ARCADE_GAME_MINIGOLF)?;
-    let bidder = get_caller();
-    if matches!(token, ExplorerToken::ICP) {
-        return Err("UNSUPPORTED_TOKEN".to_string());
-    }
-    if amount == 0 {
-        return Err("BAD_AMOUNT".to_string());
-    }
-    // course must exist + be listed/visible
-    let listing = COURSE_LISTINGS
-        .with(|m| m.borrow().get(&token_id))
-        .ok_or_else(|| "NOT_LISTABLE".to_string())?;
-    if !listing.listed {
-        return Err("NOT_LISTABLE".to_string());
-    }
-
-    // Serialize concurrent bids (B4): the second re-reads the holder before pull.
-    let acquired = FEATURED_BID_LOCK.with(|l| {
-        if *l.borrow() {
-            false
-        } else {
-            *l.borrow_mut() = true;
-            true
-        }
-    });
-    if !acquired {
-        return Err("BID_IN_PROGRESS".to_string());
-    }
-    let _lock = FeaturedBidLock;
-
-    let cfg = get_config();
-    let usd = token_amount_usd_e8s_live(token, amount, &cfg).await?;
-
-    // Must strictly beat the stored current holder's USD value.
-    if let Some(cur) = featured_slot_get() {
-        if usd <= cur.usd_value_e8s {
-            return Err(format!("BID_TOO_LOW:{}", cur.usd_value_e8s));
-        }
-    }
-
-    // Collect 100% to treasury (single-leg pull; non-refundable).
-    let ledger = explorer_token_ledger(token, &cfg);
-    let fee = explorer_token_fee(token, &cfg);
-    let treasury = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(TREASURY_SUBACCOUNT),
-    };
-    call_icrc2_transfer_from(ledger, bidder, treasury, amount.saturating_sub(fee), fee)
-        .await
-        .map_err(|e| format!("PAYMENT_FAILED: {}", e))?;
-
-    // Win: set the slot immediately after collecting (no intervening await — B4).
-    featured_slot_set(Some(FeaturedSlot {
-        token_id,
-        bidder,
-        token,
-        amount,
-        usd_value_e8s: usd,
-        at: current_time(),
-    }));
-    log_dapp_event("course_featured_bid", token_id, bidder, usd);
-    Ok(())
-}
-
-#[ic_cdk::query]
-fn get_featured_slot() -> Option<FeaturedSlot> {
-    let slot = featured_slot_get()?;
-    // Drop a dangling slot whose token_id no longer resolves (A4 edge).
-    let exists = COURSE_LISTINGS.with(|m| m.borrow().contains_key(&slot.token_id));
-    if exists {
-        Some(slot)
-    } else {
-        None
-    }
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_clear_featured_slot() -> Result<(), String> {
-    featured_slot_set(None);
-    Ok(())
-}
-
-// ════════════════════════════════════════════════════════════════════════════
 // 20.D Local-dev visualisation helpers (require_local_dev) — PB-312.
 // ════════════════════════════════════════════════════════════════════════════
 //
@@ -18760,37 +18594,6 @@ async fn dev_set_play_count(token_id: u64, n: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// Local-dev: pin a course in the featured slot WITHOUT a real ck-token bid.
-#[ic_cdk::update]
-fn dev_set_featured(token_id: u64) -> Result<(), String> {
-    require_authenticated()?;
-    require_local_dev()?;
-    let listing = COURSE_LISTINGS
-        .with(|m| m.borrow().get(&token_id))
-        .ok_or_else(|| "NOT_LISTABLE".to_string())?;
-    if !listing.listed {
-        return Err("NOT_LISTABLE".to_string());
-    }
-    featured_slot_set(Some(FeaturedSlot {
-        token_id,
-        bidder: get_caller(),
-        token: ExplorerToken::CkUSDC,
-        amount: 50_000_000,                // 50 ckUSDC (6 decimals)
-        usd_value_e8s: 50 * USD_E8S_PER_USD, // $50
-        at: current_time(),
-    }));
-    Ok(())
-}
-
-/// Local-dev: vacate the featured slot.
-#[ic_cdk::update]
-fn dev_clear_featured() -> Result<(), String> {
-    require_authenticated()?;
-    require_local_dev()?;
-    featured_slot_set(None);
-    Ok(())
-}
-
 /// Local-dev: add a course to the caller's favourites (real add path; capped/dedup).
 #[ic_cdk::update]
 fn dev_grant_favorite(token_id: u64) -> Result<(), String> {
@@ -18799,9 +18602,9 @@ fn dev_grant_favorite(token_id: u64) -> Result<(), String> {
     favorite_add(get_caller(), token_id).map(|_| ())
 }
 
-/// Local-dev: wipe all course listings, ratings, sales, the featured slot, and
-/// favourites referencing removed tokens, so the marketplace shows its empty
-/// state. Returns how many listings were removed.
+/// Local-dev: wipe all course listings, ratings, sales, and favourites
+/// referencing removed tokens, so the marketplace shows its empty state.
+/// Returns how many listings were removed.
 #[ic_cdk::update]
 async fn dev_clear_courses() -> Result<u64, String> {
     require_authenticated()?;
@@ -18851,8 +18654,6 @@ async fn dev_clear_courses() -> Result<u64, String> {
             }
         }
     });
-    // Vacate the featured slot.
-    featured_slot_set(None);
     Ok(removed)
 }
 
@@ -26825,8 +26626,6 @@ mod tests {
                 map.remove(&k);
             }
         });
-        featured_slot_set(None);
-        FEATURED_BID_LOCK.with(|l| *l.borrow_mut() = false);
     }
 
     fn enable_arcade_minigolf() {
@@ -27984,45 +27783,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_burn_clears_featured_slot_when_featured() {
-        sale_test_setup();
-        set_mock_burn_fail(false);
-        seed_listing(1, alice(), 27, 0, true);
-        seed_listing(2, alice(), 27, 0, true);
-        // Pin token 1 as the featured slot.
-        featured_slot_set(Some(FeaturedSlot {
-            token_id: 1,
-            bidder: alice(),
-            token: ExplorerToken::CkBTC,
-            amount: 1,
-            usd_value_e8s: 1,
-            at: 1,
-        }));
-        set_mock_caller(alice());
-
-        burn_course_nft(1).await.unwrap();
-        assert!(featured_slot_get().is_none(), "featured slot cleared on burn");
-
-        // Burning a DIFFERENT (non-featured) token must not disturb the slot.
-        featured_slot_set(Some(FeaturedSlot {
-            token_id: 2,
-            bidder: alice(),
-            token: ExplorerToken::CkBTC,
-            amount: 1,
-            usd_value_e8s: 1,
-            at: 1,
-        }));
-        // Re-seed token 1 so we can burn token... actually burn token 2's sibling.
-        seed_listing(3, alice(), 27, 0, true);
-        burn_course_nft(3).await.unwrap();
-        assert_eq!(
-            featured_slot_get().map(|s| s.token_id),
-            Some(2),
-            "burning a non-featured token leaves the slot intact"
-        );
-    }
-
-    #[tokio::test]
     async fn test_burn_rejects_non_owner_checks_live_owner() {
         sale_test_setup();
         set_mock_burn_fail(false);
@@ -28127,28 +27887,6 @@ mod tests {
         let ids: Vec<u64> =
             list_marketplace_courses(any_filter()).courses.iter().map(|c| c.token_id).collect();
         assert!(ids.contains(&1), "unhidden course restored to browsing");
-    }
-
-    #[test]
-    fn test_admin_hide_drops_featured_pin() {
-        sale_test_setup();
-        make_admin(alice());
-        set_mock_caller(alice());
-        seed_listing(1, alice(), 27, 0, true);
-        featured_slot_set(Some(FeaturedSlot {
-            token_id: 1,
-            bidder: alice(),
-            token: ExplorerToken::CkBTC,
-            amount: 1,
-            usd_value_e8s: 1,
-            at: 1,
-        }));
-        admin_hide_course(1).unwrap();
-        // Hidden course must not surface as the featured pin either.
-        assert_eq!(
-            list_marketplace_courses(any_filter()).featured_token_id, None,
-            "hidden course not surfaced as featured"
-        );
     }
 
     #[test]
@@ -29039,128 +28777,6 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // 20.C Featured slot (PB-308)
-    // ════════════════════════════════════════════════════════════════════════
-
-    #[tokio::test]
-    async fn test_featured_usd_valuation_across_decimals() {
-        // 0.001 ckBTC ($100k) = $100 ; 50 ckUSDC = $50. ckBTC wins.
-        let cfg = get_config();
-        let btc = token_amount_usd_e8s_live(ExplorerToken::CkBTC, 100_000, &cfg).await.unwrap();
-        let usdc = token_amount_usd_e8s_live(ExplorerToken::CkUSDC, 50_000_000, &cfg).await.unwrap();
-        assert!(btc > usdc, "0.001 ckBTC ({btc}) > 50 ckUSDC ({usdc})");
-        assert_eq!(usdc, 50 * USD_E8S_PER_USD);
-        assert_eq!(btc, 100 * USD_E8S_PER_USD);
-    }
-
-    #[tokio::test]
-    async fn test_bid_featured_rejects_icp_and_unlisted() {
-        course_test_setup();
-        make_following(alice());
-        set_mock_caller(alice());
-        seed_listing(1, bob(), 27, 0, true);
-        assert_eq!(
-            bid_featured_slot(1, ExplorerToken::ICP, 1).await.unwrap_err(),
-            "UNSUPPORTED_TOKEN"
-        );
-        assert_eq!(
-            bid_featured_slot(1, ExplorerToken::CkUSDC, 0).await.unwrap_err(),
-            "BAD_AMOUNT"
-        );
-        assert_eq!(
-            bid_featured_slot(99, ExplorerToken::CkUSDC, 1).await.unwrap_err(),
-            "NOT_LISTABLE"
-        );
-        seed_listing(2, bob(), 27, 0, false); // not listed
-        assert_eq!(
-            bid_featured_slot(2, ExplorerToken::CkUSDC, 1).await.unwrap_err(),
-            "NOT_LISTABLE"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_bid_featured_strict_exceed_and_treasury_100pct() {
-        course_test_setup();
-        make_following(alice());
-        make_following(bob());
-        seed_listing(1, dave(), 27, 0, true);
-        seed_listing(2, dave(), 27, 0, true);
-
-        acct_reset();
-        let usdc_fee = explorer_token_fee(ExplorerToken::CkUSDC, &get_config());
-        // Fund alice for a 50 ckUSDC bid (+fee).
-        acct_set(alice(), None, 50_000_000 + usdc_fee);
-        set_mock_caller(alice());
-        bid_featured_slot(1, ExplorerToken::CkUSDC, 50_000_000).await.unwrap();
-        let slot = get_featured_slot().unwrap();
-        assert_eq!(slot.token_id, 1);
-        assert_eq!(slot.usd_value_e8s, 50 * USD_E8S_PER_USD);
-        // 100% (minus fee) to treasury.
-        let treasury = acct_get(get_canister_id(), Some(TREASURY_SUBACCOUNT));
-        assert_eq!(treasury, 50_000_000 - usdc_fee);
-
-        // Equal USD → BID_TOO_LOW.
-        acct_set(bob(), None, 50_000_000 + usdc_fee);
-        set_mock_caller(bob());
-        let err = bid_featured_slot(2, ExplorerToken::CkUSDC, 50_000_000).await.unwrap_err();
-        assert!(err.starts_with("BID_TOO_LOW:"), "{err}");
-        // Slot unchanged (still alice's token 1).
-        assert_eq!(get_featured_slot().unwrap().token_id, 1);
-
-        // Strictly higher → wins (0.001 ckBTC = $100 > $50).
-        let btc_fee = explorer_token_fee(ExplorerToken::CkBTC, &get_config());
-        acct_set(bob(), None, 100_000 + btc_fee);
-        bid_featured_slot(2, ExplorerToken::CkBTC, 100_000).await.unwrap();
-        assert_eq!(get_featured_slot().unwrap().token_id, 2);
-        acct_disable();
-    }
-
-    #[tokio::test]
-    async fn test_featured_retained_on_delist_and_dangling_drops() {
-        course_test_setup();
-        make_following(alice());
-        seed_listing(1, dave(), 27, 0, true);
-        acct_reset();
-        let usdc_fee = explorer_token_fee(ExplorerToken::CkUSDC, &get_config());
-        acct_set(alice(), None, 50_000_000 + usdc_fee);
-        set_mock_caller(alice());
-        bid_featured_slot(1, ExplorerToken::CkUSDC, 50_000_000).await.unwrap();
-
-        // Delist (flip listed=false): slot is RETAINED (still resolves).
-        COURSE_LISTINGS.with(|m| {
-            let mut row = m.borrow().get(&1).unwrap();
-            row.listed = false;
-            m.borrow_mut().insert(1, row);
-        });
-        assert!(get_featured_slot().is_some(), "retained on delist");
-
-        // Hard-delete the listing row → slot self-clears in the getter.
-        COURSE_LISTINGS.with(|m| {
-            m.borrow_mut().remove(&1);
-        });
-        assert!(get_featured_slot().is_none(), "dangling token_id dropped");
-        acct_disable();
-    }
-
-    #[test]
-    fn test_admin_clear_featured_slot() {
-        course_test_setup();
-        seed_listing(1, bob(), 27, 0, true);
-        featured_slot_set(Some(FeaturedSlot {
-            token_id: 1,
-            bidder: alice(),
-            token: ExplorerToken::CkUSDC,
-            amount: 1,
-            usd_value_e8s: 1,
-            at: 1,
-        }));
-        set_admins(vec![dave()]);
-        set_mock_caller(dave());
-        admin_clear_featured_slot().unwrap();
-        assert!(get_featured_slot().is_none());
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
     // 20.D Local-dev endpoints (PB-312)
     // ════════════════════════════════════════════════════════════════════════
 
@@ -29195,14 +28811,11 @@ mod tests {
         assert_eq!(dev_simulate_sale(1, bob()).await.unwrap_err(), "DEV_ONLY");
         assert_eq!(dev_give_course(1).await.unwrap_err(), "DEV_ONLY");
         assert_eq!(dev_set_play_count(1, 9).await.unwrap_err(), "DEV_ONLY");
-        assert_eq!(dev_set_featured(1).unwrap_err(), "DEV_ONLY");
-        assert_eq!(dev_clear_featured().unwrap_err(), "DEV_ONLY");
         assert_eq!(dev_grant_favorite(1).unwrap_err(), "DEV_ONLY");
         assert_eq!(dev_clear_courses().await.unwrap_err(), "DEV_ONLY");
         // Nothing mutated.
         assert!(get_course(1).unwrap().play_count == 0);
         assert!(!get_course(1).unwrap().for_sale);
-        assert!(get_featured_slot().is_none());
     }
 
     #[tokio::test]
@@ -29213,8 +28826,7 @@ mod tests {
         seed_listing(1, alice(), 27, 0, true);
         set_is_local(true);
         wire_mainnet_ledger(); // even with is_local=true
-        assert_eq!(dev_set_featured(1).unwrap_err(), "DEV_ONLY");
-        assert!(get_featured_slot().is_none());
+        assert_eq!(dev_seed_courses(1).await.unwrap_err(), "DEV_ONLY");
     }
 
     #[tokio::test]
@@ -29251,7 +28863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dev_set_course_sale_and_play_count_and_featured() {
+    async fn test_dev_set_course_sale_and_play_count() {
         course_test_setup();
         make_following(alice());
         set_mock_caller(alice());
@@ -29272,16 +28884,6 @@ mod tests {
         assert_eq!(c.tickets_distributed, 50);
         // increment_play called for the delta (capped at 1000).
         assert_eq!(TEST_MOCK_INCREMENT_PLAY.with(|v| v.borrow().len()), 100);
-
-        dev_set_featured(1).unwrap();
-        let slot = get_featured_slot().unwrap();
-        assert_eq!(slot.token_id, 1);
-        assert_eq!(slot.usd_value_e8s, 50 * USD_E8S_PER_USD);
-        dev_clear_featured().unwrap();
-        assert!(get_featured_slot().is_none());
-        // dev_set_featured on unlisted → NOT_LISTABLE.
-        seed_listing(2, alice(), 27, 0, false);
-        assert_eq!(dev_set_featured(2).unwrap_err(), "NOT_LISTABLE");
     }
 
     #[tokio::test]
@@ -29319,10 +28921,9 @@ mod tests {
         set_mock_caller(alice());
         let minted = dev_seed_courses(4).await.unwrap();
         assert_eq!(minted, 3); // capped at the 3 built-in mock courses
-        // Favorite + rate + feature one of them.
+        // Favorite + rate one of them.
         let some_id = COURSE_LISTINGS.with(|m| *m.borrow().iter().next().unwrap().key());
         dev_grant_favorite(some_id).unwrap();
-        dev_set_featured(some_id).unwrap();
         COURSE_RATINGS.with(|m| {
             m.borrow_mut().insert(
                 RatingKey { token_id: some_id, rater: alice() },
@@ -29333,7 +28934,6 @@ mod tests {
         let removed = dev_clear_courses().await.unwrap();
         assert_eq!(removed, 3);
         assert_eq!(COURSE_LISTINGS.with(|m| m.borrow().len()), 0);
-        assert!(get_featured_slot().is_none());
         assert!(my_favorite_ids().is_empty());
         assert!(list_course_reviews(some_id, 0, 10).is_empty());
     }

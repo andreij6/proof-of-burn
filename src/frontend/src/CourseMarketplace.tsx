@@ -1,24 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
-import type { CourseCard, MarketplaceFilter, FeaturedSlot, Rating, CourseRatingSummary } from './bindings/backend';
-import { DifficultyFilter, ListedFilter, ExplorerToken } from './bindings/backend';
+import type { CourseCard, MarketplaceFilter, CourseRatingSummary } from './bindings/backend';
+import { DifficultyFilter, ListedFilter } from './bindings/backend';
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal, fmtICP, usePageDevControls } from './ui';
 import { useErrorImpression } from './analytics';
 import { parseTokenAmount } from './IdeaBoard';
-import { parseTokenUnits, fmtUsd } from './tokens';
 import { makeApprover } from './minters';
 import {
   difficultyBucket, mulberry32, poolOrder, pageSlice, pageCount, freshSeed,
-  formatRating, tokenAmountUsdE8s, bidBeats, toggleFavoriteId, courseNftTokenUrl,
+  formatRating, toggleFavoriteId, courseNftTokenUrl,
   courseShareUrl, DIFFICULTY_OPTIONS, LISTED_OPTIONS, GRID_PAGE_SIZE,
 } from './arcade/courseMarket';
 
 // ==========================================
 // Course Marketplace (PB-305 + Phase 2/3) — the arcade mini-golf surface.
-//   PB-307 buy/sell  · PB-311 favorites · PB-308 featured slot · PB-310 ratings
+//   PB-307 buy/sell  · PB-311 favorites · PB-310 ratings
 //   PB-312 local-dev panel (Dashboard & Controls).
 // Browse/filter minted courses, Play any of them, list/delist/buy, favorite,
-// promote to the featured slot, and rate courses you've completed. Courses
+// and rate courses you've completed. Courses
 // are authored by the AI course builder (users describe the course they want;
 // the agent writes the NFT's build-instructions JSON) — there is no manual
 // course editor.
@@ -45,14 +44,6 @@ interface CourseMarketplaceProps {
 const ICP_E8S = 8;
 const ICP_FEE_E8S = 10_000n;
 
-// ck-token metadata for featured bids (ICP not accepted — PB-308 A2).
-const BID_TOKENS: { token: ExplorerToken; label: string; decimals: number; fallbackFee: bigint }[] = [
-  { token: ExplorerToken.CkBTC, label: 'ckBTC', decimals: 8, fallbackFee: 10n },
-  { token: ExplorerToken.CkETH, label: 'ckETH', decimals: 18, fallbackFee: 2_000_000_000_000n },
-  { token: ExplorerToken.CkUSDC, label: 'ckUSDC', decimals: 6, fallbackFee: 10_000n },
-  { token: ExplorerToken.CkUSDT, label: 'ckUSDT', decimals: 6, fallbackFee: 10_000n },
-];
-
 export default function CourseMarketplace({
   actor, principal, identity, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal,
   onPlay, onCreate, onSignIn,
@@ -65,8 +56,6 @@ export default function CourseMarketplace({
   const [onlyFavs, setOnlyFavs] = useState(false);
 
   const [courses, setCourses] = useState<CourseCard[]>([]);
-  const [featuredId, setFeaturedId] = useState<bigint | undefined>(undefined);
-  const [featuredSlot, setFeaturedSlot] = useState<FeaturedSlot | null>(null);
   const [favoriteIds, setFavoriteIds] = useState<Set<bigint>>(new Set());
   const [favCards, setFavCards] = useState<CourseCard[]>([]);
   const [total, setTotal] = useState(0);
@@ -86,8 +75,6 @@ export default function CourseMarketplace({
   // Modals.
   const [manageCard, setManageCard] = useState<CourseCard | null>(null);
   const [buyCard, setBuyCard] = useState<CourseCard | null>(null);
-  const [bidCard, setBidCard] = useState<CourseCard | null>(null);
-  const [rateCard, setRateCard] = useState<CourseCard | null>(null);
   const [burnCard, setBurnCard] = useState<CourseCard | null>(null);
 
   const filter: MarketplaceFilter = useMemo(
@@ -102,7 +89,6 @@ export default function CourseMarketplace({
     try {
       const pageRes = await actor.list_marketplace_courses(filter);
       setCourses(pageRes.courses);
-      setFeaturedId(pageRes.featured_token_id ?? undefined);
       setTotal(Number(pageRes.total));
     } catch (err: any) {
       console.error('marketplace load failed', err);
@@ -110,13 +96,6 @@ export default function CourseMarketplace({
     } finally {
       setLoading(false);
     }
-  };
-
-  // Featured slot detail (the "to beat" USD figure) — independent of the page.
-  const refreshFeatured = async () => {
-    if (!actor) return;
-    try { setFeaturedSlot((await actor.get_featured_slot()) ?? null); }
-    catch { setFeaturedSlot(null); }
   };
 
   // Favorites: read the id set once (signed in), and the resolved cards for the
@@ -139,7 +118,7 @@ export default function CourseMarketplace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [actor, difficulty, listed, mineOnly]);
 
-  useEffect(() => { refreshFeatured(); refreshFavorites(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor, signedIn]);
+  useEffect(() => { refreshFavorites(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor, signedIn]);
 
   // course_nft canister id for the per-token "View NFT ↗" links. The wrapper
   // layer decodes `opt principal` to `course_nft_canister?: Principal`; None ⇒
@@ -176,13 +155,9 @@ export default function CourseMarketplace({
     });
   }, [onlyFavs, courses, favCards, difficulty, listed]);
 
-  const featuredCard = useMemo(
-    () => (featuredId === undefined || onlyFavs ? null : baseCards.find((c) => c.token_id === featuredId) ?? null),
-    [baseCards, featuredId, onlyFavs],
-  );
   const pool = useMemo(
-    () => poolOrder(baseCards, onlyFavs ? undefined : featuredId, seedRef.current),
-    [baseCards, featuredId, onlyFavs],
+    () => poolOrder(baseCards, undefined, seedRef.current),
+    [baseCards, onlyFavs],
   );
   const pageCards = useMemo(() => pageSlice(pool, page), [pool, page]);
   const totalPages = pageCount(pool.length);
@@ -227,7 +202,7 @@ export default function CourseMarketplace({
     try {
       const res = await fn();
       if (res.__kind__ === 'Err') setError(`Dev: ${res.Err}`);
-      await refresh(); await refreshFeatured(); await refreshFavorites();
+      await refresh(); await refreshFavorites();
     } catch (e: any) { setError(`Dev: ${e?.message || String(e)}`); }
     finally { setDevBusy(null); }
   };
@@ -243,7 +218,6 @@ export default function CourseMarketplace({
         <Btn variant="secondary" sm disabled={devBusy !== null} onClick={() => runDev('clear', () => actor.dev_clear_courses())}>
           {devBusy === 'clear' ? <LiveDot size={7} /> : <Icon name="x" size={13} />} Clear all (empty state)
         </Btn>
-        <Btn variant="secondary" sm disabled={devBusy !== null} onClick={() => runDev('clearFeat', () => actor.dev_clear_featured())}>Clear featured</Btn>
       </div>
       <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         <input className="burn-input" style={{ width: 80 }} placeholder="token id" value={devToken} onChange={(e) => setDevToken(e.target.value)} inputMode="numeric" />
@@ -256,7 +230,6 @@ export default function CourseMarketplace({
       <div className="row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         <input className="burn-input" style={{ width: 90 }} placeholder="play count" value={devPlays} onChange={(e) => setDevPlays(e.target.value)} inputMode="numeric" />
         <Btn variant="secondary" sm disabled={devBusy !== null} onClick={() => runDev('plays', () => { const t = needTid(); let n = 0n; try { n = BigInt(devPlays.trim() || '0'); } catch { /* default 0 */ } return actor.dev_set_play_count(t, n); })}>Set play count</Btn>
-        <Btn variant="secondary" sm disabled={devBusy !== null} onClick={() => runDev('feat', () => actor.dev_set_featured(needTid()))}>Feature this</Btn>
         <Btn variant="secondary" sm disabled={devBusy !== null} onClick={() => runDev('fav', () => actor.dev_grant_favorite(needTid()))}>Favourite this</Btn>
       </div>
       <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
@@ -337,7 +310,6 @@ export default function CourseMarketplace({
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
                   <li><b>List, re-price, or delist</b> at any ICP price; buying transfers the earning rights.</li>
                   <li><b>Sale split:</b> 75% seller · 10% original creator (permanent royalty) · 15% protocol (cycles + treasury).</li>
-                  <li><b>Featured slot:</b> promote any course to the top with a ck-token bid.</li>
                 </ul>
               </div>
             </MoreInfo>
@@ -395,37 +367,6 @@ export default function CourseMarketplace({
         </div>
       ) : (
         <>
-          {/* Featured slot (PB-308). */}
-          {featuredCard ? (
-            <CourseCardView
-              actor={actor}
-              card={featuredCard}
-              featured
-              featuredToBeat={featuredSlot?.usd_value_e8s}
-              principal={principal}
-              isFav={favoriteIds.has(featuredCard.token_id)}
-              courseNftId={courseNftId}
-              isLocal={isLocal}
-              onPlay={onPlay}
-              onManage={setManageCard}
-              onBuy={setBuyCard}
-              onBid={setBidCard}
-              onRate={setRateCard}
-              onBurn={setBurnCard}
-              onToggleFavorite={onToggleFavorite}
-              onSignIn={onSignIn}
-            />
-          ) : !onlyFavs && (
-            <div className="card row" style={{
-              justifyContent: 'space-between', alignItems: 'center', gap: 10,
-              borderStyle: 'dashed', borderColor: 'var(--border)',
-            }}>
-              <span className="row" style={{ gap: 8, color: 'var(--fg-3)', fontSize: 12.5 }}>
-                <Icon name="spark" size={14} stroke="var(--fg-3)" /> No featured course — promote any course to the top of the marketplace
-              </span>
-            </div>
-          )}
-
           {/* Random pool grid */}
           <div className="idea-grid">
             {pageCards.map((card) => (
@@ -440,8 +381,6 @@ export default function CourseMarketplace({
                 onPlay={onPlay}
                 onManage={setManageCard}
                 onBuy={setBuyCard}
-                onBid={setBidCard}
-                onRate={setRateCard}
                 onBurn={setBurnCard}
                 onToggleFavorite={onToggleFavorite}
                 onSignIn={onSignIn}
@@ -487,34 +426,13 @@ export default function CourseMarketplace({
           onDone={() => { setBuyCard(null); refresh(); refreshFavorites(); }}
         />
       )}
-      {bidCard && (
-        <BidModal
-          actor={actor}
-          card={bidCard}
-          identity={identity}
-          host={host}
-          rootKey={rootKey}
-          backendCanisterId={backendCanisterId}
-          toBeatUsdE8s={featuredSlot?.usd_value_e8s}
-          onClose={() => setBidCard(null)}
-          onDone={() => { setBidCard(null); refresh(); refreshFeatured(); }}
-        />
-      )}
-      {rateCard && (
-        <RateModal
-          actor={actor}
-          card={rateCard}
-          onClose={() => setRateCard(null)}
-          onDone={() => { setRateCard(null); refresh(); }}
-        />
-      )}
       {burnCard && (
         <BurnModal
           actor={actor}
           card={burnCard}
           onClose={() => setBurnCard(null)}
           onError={(msg) => { setBurnCard(null); setError(msg); }}
-          onDone={() => { setBurnCard(null); refresh(); refreshFeatured(); refreshFavorites(); }}
+          onDone={() => { setBurnCard(null); refresh(); refreshFavorites(); }}
         />
       )}
     </div>
@@ -576,12 +494,10 @@ function CourseArt({ tokenId, height }: { tokenId: bigint; height: number }) {
   );
 }
 
-// ── Course card (shared by featured + pool) ──
-function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFav, courseNftId, isLocal, onPlay, onManage, onBuy, onBid, onRate, onBurn, onToggleFavorite, onSignIn }: {
+// ── Course card ──
+function CourseCardView({ actor, card, principal, isFav, courseNftId, isLocal, onPlay, onManage, onBuy, onBurn, onToggleFavorite, onSignIn }: {
   actor: any;
   card: CourseCard;
-  featured?: boolean;
-  featuredToBeat?: bigint;
   principal: Principal | null;
   isFav: boolean;
   /** course_nft canister id; undefined ⇒ unwired ⇒ hide the "View NFT" link. */
@@ -590,8 +506,6 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
   onPlay: (c: CourseCard) => void;
   onManage: (c: CourseCard) => void;
   onBuy: (c: CourseCard) => void;
-  onBid: (c: CourseCard) => void;
-  onRate: (c: CourseCard) => void;
   onBurn: (c: CourseCard) => void;
   onToggleFavorite: (c: CourseCard) => void;
   onSignIn: () => void;
@@ -627,15 +541,13 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
   }, [actor, card.token_id]);
 
   return (
-    <div className="card col" style={{ padding: 0, overflow: 'hidden', gap: 0, gridColumn: featured ? '1 / -1' : undefined }}>
+    <div className="card col" style={{ padding: 0, overflow: 'hidden', gap: 0 }}>
       {/* ── Banner: generated course art + status overlay ── */}
       <div style={{ position: 'relative', borderBottom: '1px solid var(--border)' }}>
-        <CourseArt tokenId={card.token_id} height={featured ? 128 : 92} />
+        <CourseArt tokenId={card.token_id} height={92} />
         <div className="row" style={{ position: 'absolute', top: 8, left: 10, right: 10, justifyContent: 'space-between', alignItems: 'center' }}>
           <span className="row" style={{ gap: 6 }}>
-            {featured ? (
-              <Chip tone="burn" style={{ height: 19, fontSize: 10 }}><LiveDot color="var(--burn-ink)" size={5} /> Featured</Chip>
-            ) : forSale ? (
+            {forSale ? (
               <Chip tone="ok" style={{ height: 19, fontSize: 10 }}>For sale</Chip>
             ) : (
               <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>Not for sale</Chip>
@@ -665,7 +577,7 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
       {/* ── Body ── */}
       <div className="col" style={{ gap: 10, padding: 14 }}>
         <div className="col" style={{ gap: 3 }}>
-          <h6 style={{ margin: 0, fontSize: featured ? 18 : 16 }}>{card.name || `Course #${card.token_id}`}</h6>
+          <h6 style={{ margin: 0, fontSize: 16 }}>{card.name || `Course #${card.token_id}`}</h6>
           <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
             by {formatPrincipal(card.creator ?? null)}
             {ownerDiffers && <span> · owned by {formatPrincipal(card.owner ?? null)}</span>}
@@ -688,9 +600,6 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
           <span className="mono" style={{ fontSize: 12 }}>
             {forSale ? <b>{fmtICP(card.price_e8s)} ICP</b> : <span style={{ color: 'var(--fg-3)' }}>Not for sale</span>}
           </span>
-          {featured && featuredToBeat !== undefined && (
-            <span className="mono" style={{ fontSize: 11, color: 'var(--burn-ink)' }}>Featured bid to beat: {fmtUsd(featuredToBeat)}</span>
-          )}
         </span>
 
         <div className="row" style={{ justifyContent: 'flex-end', gap: 8, paddingTop: 8, borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
@@ -708,16 +617,6 @@ function CourseCardView({ actor, card, featured, featuredToBeat, principal, isFa
         <Btn variant="ghost" sm onClick={shareCourse} title="Copy a shareable link that opens this course directly">
           <Icon name="copy" size={11} /> {linkCopied ? 'Copied ✓' : 'Share'}
         </Btn>
-        {signedIn && (
-          <Btn variant="ghost" sm onClick={() => onBid(card)} title="Promote this course to the featured slot">
-            <Icon name="spark" size={11} /> Feature
-          </Btn>
-        )}
-        {signedIn && !card.is_caller_owner && (
-          <Btn variant="ghost" sm onClick={() => onRate(card)}>
-            <Icon name="star" size={11} /> Rate
-          </Btn>
-        )}
         {card.is_caller_owner && (
           <Btn variant="ghost" sm onClick={() => onManage(card)}><Icon name="edit" size={11} /> Manage</Btn>
         )}
@@ -945,255 +844,6 @@ function saleErr(code: string): string {
     case 'CANNOT_BUY_OWN_COURSE': return 'You already own this course.';
     case 'SALE_IN_PROGRESS': return 'Another buyer is mid-purchase — try again in a moment.';
     case 'OWNERSHIP_CHANGED': return 'The owner changed during the sale — you were refunded.';
-    default: return code;
-  }
-}
-
-// ── Featured slot bid (PB-308) ──
-function BidModal({ actor, card, identity, host, rootKey, backendCanisterId, toBeatUsdE8s, onClose, onDone }: {
-  actor: any;
-  card: CourseCard;
-  identity: any;
-  host: string;
-  rootKey?: Uint8Array;
-  backendCanisterId: string;
-  toBeatUsdE8s?: bigint;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const [token, setToken] = useState<ExplorerToken>(ExplorerToken.CkUSDC);
-  const [amount, setAmount] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [step, setStep] = useState('');
-  const [err, setErr] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
-  const [rates, setRates] = useState<Map<ExplorerToken, bigint>>(new Map());
-  const [ledgers, setLedgers] = useState<Map<ExplorerToken, Principal>>(new Map());
-
-  const meta = BID_TOKENS.find((t) => t.token === token)!;
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const rs = await actor.get_usd_rates();
-        const m = new Map<ExplorerToken, bigint>();
-        for (const r of rs) m.set(r.token as unknown as ExplorerToken, r.rate_usd_e8s);
-        setRates(m);
-      } catch { /* preview is best-effort */ }
-      try {
-        const info = await actor.get_explorer_info();
-        const m = new Map<ExplorerToken, Principal>();
-        m.set(ExplorerToken.CkBTC, info.ckbtc_ledger);
-        m.set(ExplorerToken.CkETH, info.cketh_ledger);
-        m.set(ExplorerToken.CkUSDC, info.ckusdc_ledger);
-        m.set(ExplorerToken.CkUSDT, info.ckusdt_ledger);
-        setLedgers(m);
-      } catch { /* needed for approve; surfaced at submit */ }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const units = parseTokenUnits(amount, meta.decimals);
-  const rate = rates.get(token);
-  const bidUsd = units !== null && rate !== undefined ? tokenAmountUsdE8s(units, rate, meta.decimals) : null;
-  const beats = bidUsd !== null && (toBeatUsdE8s === undefined || bidBeats(bidUsd, toBeatUsdE8s));
-
-  const submit = async () => {
-    if (busy || !identity) return;
-    if (units === null || units <= 0n) { setErr('Enter an amount greater than 0.'); return; }
-    const ledger = ledgers.get(token);
-    if (!ledger) { setErr('Token ledger unavailable — try again in a moment.'); return; }
-    setBusy(true); setErr(null);
-    try {
-      setStep(`Step 1/2: Approving ${amount} ${meta.label}…`);
-      const approver = makeApprover(ledger.toString(), { host, identity, rootKey });
-      const appr = await approver.icrc2_approve({
-        from_subaccount: [],
-        spender: { owner: Principal.fromText(backendCanisterId), subaccount: [] },
-        amount: units + meta.fallbackFee,
-        expected_allowance: [], expires_at: [], fee: [], memo: [], created_at_time: [],
-      });
-      if (appr.Err !== undefined) throw new Error(`Approval failed: ${JSON.stringify(appr.Err, (_k, v) => typeof v === 'bigint' ? v.toString() : v)}`);
-
-      setStep('Step 2/2: Placing your bid…');
-      const res = await actor.bid_featured_slot(card.token_id, token, units);
-      if (res.__kind__ === 'Err') throw new Error(bidErr(res.Err));
-      setDone(true);
-    } catch (e: any) {
-      setErr(e?.message || String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <ModalShell title={`Feature "${card.name || `Course #${card.token_id}`}"`} onClose={() => !busy && onClose()}>
-      {done ? (
-        <div className="col" style={{ gap: 12 }}>
-          <span className="row" style={{ gap: 8, color: 'var(--ok)', fontSize: 13 }}>
-            <Icon name="checkCircle" size={16} stroke="var(--ok)" />
-            This course is now featured at the top of the marketplace.
-          </span>
-          <div className="row" style={{ justifyContent: 'flex-end' }}>
-            <Btn variant="primary" sm onClick={onDone}>Done</Btn>
-          </div>
-        </div>
-      ) : (
-        <>
-          <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0 }}>
-            Pin this course to the featured slot. The highest USD bid wins.
-            {toBeatUsdE8s !== undefined && (
-              <> Current bid to beat: <b className="mono" style={{ color: 'var(--burn-ink)' }}>{fmtUsd(toBeatUsdE8s)}</b>.</>
-            )}
-          </p>
-          <div className="col" style={{ gap: 6 }}>
-            <label style={{ fontSize: 11, color: 'var(--fg-3)' }}>Token</label>
-            <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
-              {BID_TOKENS.map((t) => (
-                <Pill key={t.label} active={token === t.token} onClick={() => setToken(t.token)}>{t.label}</Pill>
-              ))}
-            </div>
-          </div>
-          <div className="col" style={{ gap: 6 }}>
-            <label style={{ fontSize: 11, color: 'var(--fg-3)' }}>Amount ({meta.label})</label>
-            <input className="burn-input" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="e.g. 50" inputMode="decimal" />
-          </div>
-          {bidUsd !== null && (
-            <span className="mono" style={{ fontSize: 11.5, color: beats ? 'var(--ok)' : 'var(--fg-3)' }}>
-              ≈ {fmtUsd(bidUsd)}{!beats && toBeatUsdE8s !== undefined ? ' — below the current bid' : ''}
-            </span>
-          )}
-          <p style={{ fontSize: 11, color: 'var(--fg-3)', margin: 0 }}>100% goes to the treasury and is non-refundable, even if you're later outbid.</p>
-          {busy && step && <span className="row" style={{ gap: 8, fontSize: 12, color: 'var(--fg-2)' }}><LiveDot size={7} /> {step}</span>}
-          {err && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{err}</span>}
-          <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
-            <Btn variant="ghost" sm disabled={busy} onClick={onClose}>Cancel</Btn>
-            <Btn variant="primary" sm disabled={busy} onClick={submit}>{busy ? 'Working…' : 'Place bid'}</Btn>
-          </div>
-        </>
-      )}
-    </ModalShell>
-  );
-}
-
-function bidErr(code: string): string {
-  if (code.startsWith('BID_TOO_LOW')) {
-    const parts = code.split(':');
-    const usd = parts[1] ? fmtUsd(BigInt(parts[1])) : 'the current bid';
-    return `Your bid is too low — you must beat ${usd}.`;
-  }
-  switch (code) {
-    case 'UNSUPPORTED_TOKEN': return 'ICP is not accepted for featured bids — use a ck-token.';
-    case 'NOT_LISTABLE': return 'This course cannot be featured.';
-    case 'BAD_AMOUNT': return 'Enter a valid amount.';
-    default: return code;
-  }
-}
-
-// ── Ratings (PB-310) ──
-function RateModal({ actor, card, onClose, onDone }: {
-  actor: any;
-  card: CourseCard;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const [summary, setSummary] = useState<CourseRatingSummary | null>(null);
-  const [reviews, setReviews] = useState<Rating[]>([]);
-  const [stars, setStars] = useState(0);
-  const [text, setText] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const s: CourseRatingSummary = await actor.get_course_rating_summary(card.token_id);
-        setSummary(s);
-        if (s.my_stars !== undefined && s.my_stars !== null) setStars(s.my_stars);
-      } catch { /* ignore */ }
-      try { setReviews(await actor.list_course_reviews(card.token_id, 0n, 10n)); } catch { /* ignore */ }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const submit = async () => {
-    if (busy) return;
-    if (stars < 1 || stars > 5) { setErr('Pick 1–5 stars.'); return; }
-    if (text.length > 280) { setErr('Review must be 280 characters or fewer.'); return; }
-    setBusy(true); setErr(null);
-    try {
-      const res = await actor.rate_course(card.token_id, stars, text.trim() ? text.trim() : null);
-      if (res.__kind__ === 'Err') throw new Error(rateErr(res.Err));
-      setDone(true);
-      onDone();
-    } catch (e: any) { setErr(e?.message || String(e)); } finally { setBusy(false); }
-  };
-
-  return (
-    <ModalShell title={`Rate "${card.name || `Course #${card.token_id}`}"`} onClose={() => !busy && onClose()}>
-      {summary && (
-        <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>{formatRating(summary.avg_x10, summary.count)}</span>
-      )}
-      {done ? (
-        <span className="row" style={{ gap: 8, color: 'var(--ok)', fontSize: 13 }}>
-          <Icon name="checkCircle" size={16} stroke="var(--ok)" /> Thanks — your rating was saved.
-        </span>
-      ) : (
-        <>
-          <div className="row" style={{ gap: 4 }}>
-            {[1, 2, 3, 4, 5].map((n) => (
-              <button key={n} onClick={() => setStars(n)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 2 }} title={`${n} star${n === 1 ? '' : 's'}`}>
-                <Icon name="star" size={22} stroke="var(--burn-ink)" fill={n <= stars ? 'var(--burn)' : 'none'} />
-              </button>
-            ))}
-          </div>
-          <div className="col" style={{ gap: 4 }}>
-            <textarea
-              className="burn-input"
-              value={text}
-              onChange={(e) => setText(e.target.value.slice(0, 280))}
-              placeholder="Optional — a short review (≤ 280 chars)"
-              rows={3}
-              style={{ resize: 'vertical' }}
-            />
-            <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', alignSelf: 'flex-end' }}>{text.length}/280</span>
-          </div>
-          <p style={{ fontSize: 11, color: 'var(--fg-3)', margin: 0 }}>You can rate a course once you've completed a full round of it.</p>
-          {err && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{err}</span>}
-          <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
-            <Btn variant="ghost" sm disabled={busy} onClick={onClose}>Cancel</Btn>
-            <Btn variant="primary" sm disabled={busy} onClick={submit}>{busy ? 'Saving…' : summary?.my_stars ? 'Update rating' : 'Submit rating'}</Btn>
-          </div>
-        </>
-      )}
-
-      {reviews.length > 0 && (
-        <div className="col" style={{ gap: 8, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
-          {reviews.map((r, i) => (
-            <div key={i} className="col" style={{ gap: 2 }}>
-              <span className="row" style={{ gap: 4 }}>
-                {Array.from({ length: 5 }, (_, n) => (
-                  <Icon key={n} name="star" size={11} stroke="var(--burn-ink)" fill={n < r.stars ? 'var(--burn)' : 'none'} />
-                ))}
-                <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>{formatPrincipal(r.rater)}</span>
-              </span>
-              {r.text && <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>{r.text}</span>}
-            </div>
-          ))}
-        </div>
-      )}
-    </ModalShell>
-  );
-}
-
-function rateErr(code: string): string {
-  switch (code) {
-    case 'MUST_COMPLETE_ROUND': return 'Finish a full round of this course before rating it.';
-    case 'CANNOT_RATE_OWN_COURSE': return 'You cannot rate a course you created or own.';
-    case 'BAD_STARS': return 'Pick 1–5 stars.';
-    case 'TEXT_TOO_LONG': return 'Review must be 280 characters or fewer.';
-    case 'NO_COURSE': return 'This course no longer exists.';
     default: return code;
   }
 }
