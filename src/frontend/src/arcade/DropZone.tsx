@@ -396,8 +396,8 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
     const horizon = project(cam, cam.x + path.hx * 6000, 0, cam.z + path.hz * 6000);
     const hy = Math.max(0, Math.min(H, horizon ? horizon.sy : 0));
     const sky = ctx.createLinearGradient(0, 0, 0, Math.max(1, hy));
-    sky.addColorStop(0, '#c9c9c9');
-    sky.addColorStop(1, '#f3f3f3');
+    sky.addColorStop(0, '#7fb2dd');
+    sky.addColorStop(1, '#dceefa');
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, hy);
     const ground = ctx.createLinearGradient(0, hy, 0, H);
@@ -495,14 +495,14 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
           ctx.fillStyle = fill; ctx.fill();
           ctx.strokeStyle = INK; ctx.lineWidth = 1.8; ctx.stroke();
         };
-        ring(TARGET_RINGS_M[2], '#b9b9b3');
+        ring(TARGET_RINGS_M[2], '#e05252');
         ring(TARGET_RINGS_M[1], '#f7f7f4');
-        ring(TARGET_RINGS_M[0], '#3a3a3a');
+        ring(TARGET_RINGS_M[0], '#b02a2a');
         const top = project(cam, sc.targetX, 16, sc.targetZ);
         if (top) {
           ctx.lineWidth = 2.4;
           ctx.beginPath(); ctx.moveTo(c.sx, c.sy); ctx.lineTo(top.sx, top.sy); ctx.stroke();
-          ctx.fillStyle = '#2c2c2c';
+          ctx.fillStyle = '#c93b3b';
           ctx.beginPath(); ctx.moveTo(top.sx, top.sy); ctx.lineTo(top.sx + 22, top.sy + 6); ctx.lineTo(top.sx, top.sy + 12); ctx.closePath(); ctx.fill();
         }
       }});
@@ -548,11 +548,11 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
           a === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
         }
         ctx.closePath();
-        ctx.fillStyle = i % 3 === 0 ? '#c2c2ba' : '#d4d4cc';
+        ctx.fillStyle = i % 3 === 0 ? '#5f9e63' : '#7cb877';
         ctx.fill();
         ctx.strokeStyle = '#2e2e2e'; ctx.lineWidth = 1.5; ctx.stroke();
         // Canopy hatch scribbles.
-        ctx.strokeStyle = 'rgba(50,50,50,0.35)'; ctx.lineWidth = 0.9;
+        ctx.strokeStyle = 'rgba(25,70,30,0.45)'; ctx.lineWidth = 0.9;
         ctx.beginPath();
         ctx.moveTo(top.sx - rr * 0.5, top.sy + rr * 0.2); ctx.lineTo(top.sx + rr * 0.1, top.sy - rr * 0.4);
         ctx.moveTo(top.sx - rr * 0.1, top.sy + rr * 0.5); ctx.lineTo(top.sx + rr * 0.5, top.sy - rr * 0.1);
@@ -779,8 +779,9 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
         ctx.textAlign = 'center';
         ctx.globalAlpha = 0.65 + 0.35 * Math.sin(game.t * 9);
         ctx.font = '700 22px ui-monospace, monospace';
-        ctx.fillStyle = INK;
+        ctx.fillStyle = p.y >= SAFE_DEPLOY_ALT ? INK : '#b02a2a';
         ctx.fillText(p.y >= SAFE_DEPLOY_ALT ? 'SPACE — DEPLOY!' : 'TOO LOW…', W / 2, H * 0.12);
+        ctx.fillStyle = INK;
         ctx.globalAlpha = 1;
         ctx.textAlign = 'left';
         ctx.font = '600 13px ui-monospace, monospace';
@@ -797,8 +798,9 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
     ctx.fillStyle = 'rgba(90,90,90,0.4)';
     game.decor.houses.forEach((hs) => { const pt = mm(hs.x, hs.z); ctx.fillRect(pt.x - 1.5, pt.y - 1.5, 3, 3); });
     const tg = mm(game.scenario.targetX, game.scenario.targetZ);
-    ctx.strokeStyle = INK; ctx.lineWidth = 2;
+    ctx.strokeStyle = '#c93b3b'; ctx.lineWidth = 2.2;
     ctx.beginPath(); ctx.moveTo(tg.x - 5, tg.y - 5); ctx.lineTo(tg.x + 5, tg.y + 5); ctx.moveTo(tg.x + 5, tg.y - 5); ctx.lineTo(tg.x - 5, tg.y + 5); ctx.stroke();
+    ctx.strokeStyle = INK;
     const me = mm(p.x, p.z);
     ctx.fillStyle = INK;
     if (inPlane) {
