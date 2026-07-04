@@ -41,8 +41,10 @@ function completionNote(credited: boolean, reason?: string): string {
   if (credited) return '+1 lottery ticket earned!';
   switch (reason) {
     case 'ANON':
-    case 'TIER_TOO_LOW':
-      return 'Sign in and follow the leader to earn a lottery ticket.';
+      return 'Sign in — and stake ICP — to earn lottery tickets.';
+    case 'NOT_STAKED':
+    case 'TIER_TOO_LOW': // legacy code from pre-2026-07-04 backends
+      return 'Lottery tickets are for stakers — stake any amount of ICP to earn while you play.';
     case 'DAILY_CAP':
       return 'Daily ticket cap reached — play for fun, no ticket this round.';
     case 'ADMIN_EXCLUDED':
@@ -56,6 +58,9 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
   const [holes, setHoles] = useState<HoleDef[] | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
+  // Set when the round earned no ticket for a staking-fixable reason — renders
+  // a "Stake ICP" CTA next to the note, linking straight to staking.
+  const [needsStake, setNeedsStake] = useState(false);
   // Show a "rate this course" prompt once the player completes a round (PB-310).
   const [showRate, setShowRate] = useState(false);
   // Course map first; 'round' = the scored 9 holes, 'practice' = one unscored hole.
@@ -133,6 +138,7 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
       const res = await actor.complete_round(sid);
       if (res.__kind__ === 'Ok') {
         setSubmitNote(completionNote(res.Ok.player_credited, res.Ok.reason));
+        setNeedsStake(!res.Ok.player_credited && (res.Ok.reason === 'NOT_STAKED' || res.Ok.reason === 'ANON'));
       } else {
         setSubmitNote('Round complete — no ticket this round.');
       }
@@ -205,6 +211,7 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
         onExit={onExit}
         onGoParticipate={onGoParticipate}
         submitNote={submitNote}
+        submitAction={needsStake ? { label: 'Stake ICP →', onClick: onGoParticipate } : undefined}
       />
       {showRate && (
         <CompletionRateModal actor={actor} card={card} onClose={() => setShowRate(false)} />

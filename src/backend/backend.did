@@ -1837,7 +1837,8 @@ service : (InitPayload) -> {
   merge_unstake : (nat64, StakeTier) -> (Result);
   // Mint a course NFT from a build-instructions blob. Open to any signed-in
   // user (no tier gate): fund the get_mint_deposit_address escrow with the
-  // 0.5 ICP fee first. Rejects clones (InvalidCourse "DUPLICATE_HOLES:<n>").
+  // 2 ICP fee first (split 50% treasury / 25% backend cycles / 25% course_nft
+  // cycles). Rejects clones (InvalidCourse "DUPLICATE_HOLES:<n>").
   mint_course_nft : (blob, text) -> (Result_10);
   my_favorite_ids : () -> (vec nat64) query;
   notify_top_up : (NotifyTopUpArgs) -> (NotifyTopUpResult);

@@ -2527,6 +2527,21 @@ async fn settle_burn_split(
     amount_e8s: u64,
     commitment: &mut Commitment,
 ) -> Result<(), String> {
+    settle_burn_split_with_target(ledger_id, from_subaccount, amount_e8s, commitment, frontend_canister_id()).await
+}
+
+/// The burn split with a configurable THIRD leg: 50% treasury / 25% backend
+/// cycles / 25% cycles to `third_cycles_target`. Vote burns keep the frontend
+/// as the third leg (settle_burn_split above); the course-mint and arcade
+/// customize fees route their 25% to the course_nft canister instead (owner
+/// decision 2026-07-04 — it earns no burn shares of its own otherwise).
+async fn settle_burn_split_with_target(
+    ledger_id: Principal,
+    from_subaccount: [u8; 32],
+    amount_e8s: u64,
+    commitment: &mut Commitment,
+    third_cycles_target: Principal,
+) -> Result<(), String> {
     let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
     let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
 
@@ -2595,12 +2610,14 @@ async fn settle_burn_split(
         return Err(format!("BACKEND_CMC_NOTIFY: {}", e));
     }
 
-    // 25% → frontend cycles (burns ICP → cycles via the CMC)
+    // 25% → cycles for the third-leg target (frontend for vote burns;
+    // course_nft for mint/customize fees). Journaled in frontend_cmc_block
+    // regardless of target (the field is the third-leg slot).
     if commitment.frontend_cmc_block.is_none() {
         let b = call_cmc_topup_transfer(
             ledger_id,
             Some(from_subaccount),
-            frontend_canister_id(),
+            third_cycles_target,
             frontend_amt,
             10_000,
         )
@@ -2610,7 +2627,7 @@ async fn settle_burn_split(
     }
     if let Err(e) = notify_cmc_topup(
         cmc,
-        frontend_canister_id(),
+        third_cycles_target,
         commitment.frontend_cmc_block.unwrap(),
         commitment.proposal_id != 138388,
     )
@@ -6390,6 +6407,13 @@ fn grant_lottery_tickets(user: Principal, count: u64) -> u64 {
     // that routes here — as a no-op so an admin can never be granted tickets
     // and therefore can never win.
     if is_admin_principal(user) {
+        return LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).map(|e| e.count).unwrap_or(0);
+    }
+    // Owner decision 2026-07-04: ONLY stakers earn lottery tickets. Any award
+    // path routing here (course play/ownership, upvote rewards, daily claims)
+    // is a no-op for principals with no active stake (term tiers or Early
+    // Adopters). Mirrored in credit_course_ticket for the course paths.
+    if !author_is_staked(user) {
         return LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).map(|e| e.count).unwrap_or(0);
     }
     if count == 0 {
@@ -12588,7 +12612,14 @@ fn admin_set_usd_rate(token: ExplorerToken, rate_usd_e8s: u64) -> Result<(), Str
 
 /// $1 (USD e8s) per character change — payable in any supported token at
 /// the live oracle rate (stables pinned at $1).
+/// Legacy USD figure still exposed in ArcadeInfo for candid compatibility;
+/// the ACTUAL price is the flat ICP fee below (owner decision 2026-07-04).
 const ARCADE_CUSTOMIZE_FEE_USD_E8S: u64 = 100_000_000;
+/// Flat customization price: 0.5 ICP, ICP only (was $1 at the oracle rate).
+const ARCADE_CUSTOMIZE_FEE_E8S: u64 = 50_000_000;
+/// Commitment tag for the customize-fee burn split (distinct from proposal
+/// ids and the mint/sale escrow tags).
+const ARCADE_FEE_TAG: u64 = u64::MAX - 308;
 /// "Voted recently" window for full access.
 const ARCADE_VOTE_WINDOW_NANOS: u64 = 30 * DAY_NANOS;
 const ARCADE_GAME_MINIGOLF: &str = "minigolf";
@@ -12795,7 +12826,10 @@ fn get_arcade_info() -> ArcadeInfo {
         enabled: feature_visible(FLAG_ARCADE, get_caller()),
         minigolf_enabled: feature_visible(FLAG_ARCADE_MINIGOLF, get_caller()),
         fieldgoal_enabled: feature_visible(FLAG_ARCADE_FIELDGOAL, get_caller()),
-        full_access: has_stake || voted_recently,
+        // Owner decision 2026-07-04: every SIGNED-IN user plays every game in
+        // full — no stake/vote gate. Staking now only gates lottery tickets
+        // (has_stake stays exposed so the UI can message that).
+        full_access: caller != Principal::anonymous(),
         has_stake,
         voted_recently,
         customize_fee_usd_e8s: ARCADE_CUSTOMIZE_FEE_USD_E8S,
@@ -12818,8 +12852,9 @@ fn get_arcade_deposit_address() -> LedgerAccount {
     }
 }
 
-/// Price the $1 customization in `token` at the live oracle rate and lock
-/// it for the caller for 15 minutes (same pattern as Explorer quotes).
+/// Price the customization: a FLAT 0.5 ICP (owner decision 2026-07-04 — was
+/// $1 at the oracle rate, any token). ICP only; no oracle involved. Still
+/// returns an ExplorerQuote (locked 15 min) so the deposit flow is unchanged.
 #[ic_cdk::update]
 async fn get_arcade_customize_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
     require_authenticated()?;
@@ -12832,17 +12867,16 @@ async fn get_arcade_customize_quote(token: ExplorerToken) -> Result<ExplorerQuot
     {
         return Err("FEATURE_DISABLED".to_string());
     }
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let rate = explorer_usd_rate_e8s(token, &config).await?;
-    // 1 "day" at $1/day == exactly $1 — reuse the Explorer conversion.
-    let (amount, usd_total_e8s) = explorer_quote_amount(1, rate, explorer_token_decimals(token))?;
+    if token != ExplorerToken::ICP {
+        return Err("ICP_ONLY".to_string());
+    }
     let now = current_time();
     let quote = ExplorerQuote {
         token,
         days: 1,
-        amount,
-        rate_usd_e8s: rate,
-        usd_total_e8s,
+        amount: ARCADE_CUSTOMIZE_FEE_E8S,
+        rate_usd_e8s: 0,   // flat ICP price — no oracle
+        usd_total_e8s: 0,
         created_at: now,
         expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
     };
@@ -12852,8 +12886,35 @@ async fn get_arcade_customize_quote(token: ExplorerToken) -> Result<ExplorerQuot
     Ok(quote)
 }
 
-/// Change the golfer's look (palette indices) for $1, paid in any supported
-/// token (ICP / ckBTC / ckETH / ckUSDC / ckUSDT) at the quoted rate.
+/// Settle the flat customize fee: 50% treasury / 25% backend cycles /
+/// 25% course_nft canister cycles (owner decision 2026-07-04) — the same
+/// split engine as mint/vote burns, with the NFT canister as the third leg.
+/// Single-shot (no stored saga): a partial failure leaves the remainder in
+/// the caller's arcade escrow and the split's treasury fee-cover keeps a
+/// retry exact.
+async fn settle_arcade_fee(caller: Principal, ledger_id: Principal, sub: [u8; 32], amount: u64) -> Result<(), String> {
+    let nft_target = course_nft_canister_id().map_err(|_| "COURSE_NFT_NOT_CONFIGURED".to_string())?;
+    let mut commitment = Commitment {
+        proposal_id: ARCADE_FEE_TAG,
+        principal: caller,
+        amount_e8s: amount,
+        status: CommitmentStatus::Pending,
+        created_at: current_time(),
+        stance: Stance::Adopt,
+        subaccount: sub,
+        settled_at: None,
+        cmc_block_index: None,
+        treasury_block: None,
+        frontend_cmc_block: None,
+        token: None,
+        token_amount: None,
+        swapped_icp_e8s: None,
+    };
+    settle_burn_split_with_target(ledger_id, sub, amount, &mut commitment, nft_target).await
+}
+
+/// Change the golfer's look (palette indices) for a flat 0.5 ICP, split
+/// 50% treasury / 25% backend cycles / 25% course_nft cycles.
 #[ic_cdk::update]
 async fn customize_character(hair: u8, skin: u8, outfit: u8, token: ExplorerToken) -> Result<(), String> {
     require_authenticated()?;
@@ -12863,6 +12924,9 @@ async fn customize_character(hair: u8, skin: u8, outfit: u8, token: ExplorerToke
 
     if hair >= CHARACTER_HAIR_OPTIONS || skin >= CHARACTER_SKIN_OPTIONS || outfit >= CHARACTER_OUTFIT_OPTIONS {
         return Err("INVALID_CHARACTER_OPTION".to_string());
+    }
+    if token != ExplorerToken::ICP {
+        return Err("ICP_ONLY".to_string());
     }
     let now = current_time();
     let quote = ARCADE_QUOTES
@@ -12887,11 +12951,7 @@ async fn customize_character(hair: u8, skin: u8, outfit: u8, token: ExplorerToke
     if balance < quote.amount.saturating_add(fee) {
         return Err("INSUFFICIENT_DEPOSIT".to_string());
     }
-    let treasury_dest = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(TREASURY_SUBACCOUNT),
-    };
-    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
+    settle_arcade_fee(caller, ledger_id, sub, quote.amount)
         .await
         .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
 
@@ -12915,9 +12975,8 @@ async fn customize_character(hair: u8, skin: u8, outfit: u8, token: ExplorerToke
     Ok(())
 }
 
-/// Change the Field Goal kicker's look for $1, paid in any supported token
-/// at the quoted rate — the same quote + deposit flow as the golfer
-/// (get_arcade_customize_quote / get_arcade_deposit_address).
+/// Change the Field Goal kicker's look for a flat 0.5 ICP (same quote +
+/// deposit flow and 50/25/25 split as the golfer).
 #[ic_cdk::update]
 async fn customize_kicker(helmet: u8, skin: u8, jersey: u8, token: ExplorerToken) -> Result<(), String> {
     require_authenticated()?;
@@ -12927,6 +12986,9 @@ async fn customize_kicker(helmet: u8, skin: u8, jersey: u8, token: ExplorerToken
 
     if helmet >= KICKER_HELMET_OPTIONS || skin >= CHARACTER_SKIN_OPTIONS || jersey >= KICKER_JERSEY_OPTIONS {
         return Err("INVALID_CHARACTER_OPTION".to_string());
+    }
+    if token != ExplorerToken::ICP {
+        return Err("ICP_ONLY".to_string());
     }
     let now = current_time();
     let quote = ARCADE_QUOTES
@@ -12951,11 +13013,7 @@ async fn customize_kicker(helmet: u8, skin: u8, jersey: u8, token: ExplorerToken
     if balance < quote.amount.saturating_add(fee) {
         return Err("INSUFFICIENT_DEPOSIT".to_string());
     }
-    let treasury_dest = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(TREASURY_SUBACCOUNT),
-    };
-    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
+    settle_arcade_fee(caller, ledger_id, sub, quote.amount)
         .await
         .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
 
@@ -12987,11 +13045,9 @@ fn submit_arcade_score(game: String, millis: u64, per_hole: Vec<u8>) -> Result<u
     require_authenticated()?;
     require_arcade_enabled()?;
     let caller = get_caller();
-
-    let (has_stake, voted_recently) = arcade_access(caller);
-    if !has_stake && !voted_recently {
-        return Err("PARTICIPATION_REQUIRED".to_string());
-    }
+    // Owner decision 2026-07-04: any signed-in user can play + rank — the old
+    // stake-or-voted PARTICIPATION_REQUIRED gate is gone (staking only gates
+    // lottery tickets now).
     match game.as_str() {
         ARCADE_GAME_MINIGOLF => {
             // PB-309 (D4): the global mini-golf leaderboard is retired — the
@@ -16102,7 +16158,7 @@ fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const MINT_FEE_E8S: u64 = 50_000_000; // 0.5 ICP
+const MINT_FEE_E8S: u64 = 200_000_000; // 2 ICP (owner decision 2026-07-04; was 0.5)
 #[allow(dead_code)]
 const COURSE_NFT_HOLES: usize = 9; // exactly 9
 const MAX_COURSE_DATA_BYTES: usize = 64 * 1024; // at-mint blob cap (PB-303 owns final number)
@@ -16918,7 +16974,12 @@ async fn mint_course_nft_inner(
             token: None,
             token_amount: None,
             swapped_icp_e8s: None,        };
-        let settle = settle_burn_split(ledger_id, mint_sub, MINT_FEE_E8S, &mut commitment).await;
+        // Third leg → the course_nft canister's cycles (owner decision
+        // 2026-07-04): minting a course funds the canister that stores it.
+        let nft_target = course_nft_canister_id()
+            .map_err(|_| MintError::FeeSettlementFailed("COURSE_NFT_NOT_CONFIGURED".into()))?;
+        let settle =
+            settle_burn_split_with_target(ledger_id, mint_sub, MINT_FEE_E8S, &mut commitment, nft_target).await;
         // Mirror block indices back regardless of outcome (partial progress).
         saga.treasury_block = commitment.treasury_block;
         saga.cmc_block_index = commitment.cmc_block_index;
@@ -17939,16 +18000,12 @@ fn complete_round(session_id: u64) -> Result<CompleteRoundOk, String> {
         m.borrow_mut().insert(session_id, s.clone());
     });
 
-    // Player ticket: Tier 2+ only, per-player daily cap, admin-excluded.
-    let (player_credited, reason) = if course_caller_tier(caller) < 2 {
-        (
-            false,
-            Some(if caller == Principal::anonymous() {
-                "ANON".to_string()
-            } else {
-                "TIER_TOO_LOW".to_string()
-            }),
-        )
+    // Player ticket: STAKERS only (owner decision 2026-07-04 — replaces the
+    // old Tier-2/follow gate), per-player daily cap, admin-excluded.
+    let (player_credited, reason) = if caller == Principal::anonymous() {
+        (false, Some("ANON".to_string()))
+    } else if !author_is_staked(caller) {
+        (false, Some("NOT_STAKED".to_string()))
     } else if is_admin_principal(caller) {
         (false, Some("ADMIN_EXCLUDED".to_string()))
     } else if !try_increment_player_cap(caller, now) {
@@ -17973,6 +18030,11 @@ fn epoch_day(now: u64) -> u32 {
 /// credited. Cap/admin rejection is silent (the play still succeeds).
 fn try_credit_owner_ticket(owner: Principal, player: Principal, token_id: u64, now: u64) -> bool {
     if is_admin_principal(owner) {
+        return false;
+    }
+    // Only staked owners earn tickets from their courses (owner decision
+    // 2026-07-04) — buying an NFT without an active stake earns nothing.
+    if !author_is_staked(owner) {
         return false;
     }
     let day = epoch_day(now);
@@ -18022,9 +18084,14 @@ fn try_increment_player_cap(player: Principal, now: u64) -> bool {
 }
 
 /// Credit 1 ticket to `recipient` in the CURRENT lottery round (models
-/// `dev_grant_lottery_tickets`). Admin-excluded recipients are silently skipped.
+/// `dev_grant_lottery_tickets`). Admin-excluded and NON-STAKED recipients are
+/// silently skipped (only stakers earn lottery tickets — owner decision
+/// 2026-07-04; mirrors the grant_lottery_tickets gate).
 fn credit_course_ticket(recipient: Principal) {
     if is_admin_principal(recipient) {
+        return;
+    }
+    if !author_is_staked(recipient) {
         return;
     }
     let now = current_time();
@@ -22523,13 +22590,17 @@ mod tests {
         let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
         CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
 
-        // Ineligible players can't land on the leaderboard (gate runs before the
-        // game-specific arm; use fieldgoal since minigolf is retired, PB-309).
+        // Owner decision 2026-07-04: NO participation gate — any signed-in user
+        // ranks. An unstaked player's score lands on the board (tickets, not
+        // play, are what staking now gates).
         set_mock_caller(alice);
-        let err = submit_arcade_score("fieldgoal".into(), 120_000, vec![3; FIELDGOAL_ROUNDS]).unwrap_err();
-        assert_eq!(err, "PARTICIPATION_REQUIRED");
+        assert_eq!(
+            submit_arcade_score("fieldgoal".into(), 120_000, vec![3; FIELDGOAL_ROUNDS]).unwrap(),
+            1,
+            "unstaked signed-in player ranks"
+        );
 
-        // Stake both players in.
+        // Stakes are irrelevant to scoring now, kept to mirror real players.
         for u in [alice, bob] {
             STAKES.with(|m| {
                 m.borrow_mut().insert(
@@ -22711,12 +22782,17 @@ mod tests {
             LOTTERY_TICKETS.with(|m| m.borrow().get(&admin).map(|e| e.count).unwrap_or(0)),
             0,
         );
-        // A normal user in the same round still gets tickets — proves the guard
-        // is admin-specific, not a global short-circuit.
+        // An UNSTAKED user is also skipped (stakers-only, 2026-07-04)…
         let user = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         let before2 = lottery_state().total_tickets;
+        assert_eq!(grant_lottery_tickets(user, 5), 0, "unstaked user gets nothing");
+        assert_eq!(lottery_state().total_tickets, before2);
+        // …while a STAKED user in the same round still gets tickets — proves
+        // the guards are targeted, not a global short-circuit.
+        seed_stake(StakeTier::SixMonths, user, 100_000_000);
         assert_eq!(grant_lottery_tickets(user, 5), 5);
         assert_eq!(lottery_state().total_tickets, before2 + 5);
+        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, user)); });
     }
 
     #[tokio::test]
@@ -23087,18 +23163,23 @@ mod tests {
         // A fresh matching quote is required.
         assert_eq!(customize_character(2, 3, 4, ExplorerToken::ICP).await.unwrap_err(), "NO_QUOTE");
 
-        // $1 in ICP at the local default rate ($5/ICP) = 0.2 ICP.
+        // Flat 0.5 ICP fee, ICP only (2026-07-04).
         let quote = get_arcade_customize_quote(ExplorerToken::ICP).await.unwrap();
-        assert_eq!(quote.amount, 20_000_000);
-        assert_eq!(quote.usd_total_e8s, ARCADE_CUSTOMIZE_FEE_USD_E8S);
-        assert_eq!(customize_character(2, 3, 4, ExplorerToken::CkBTC).await.unwrap_err(), "QUOTE_MISMATCH");
+        assert_eq!(quote.amount, ARCADE_CUSTOMIZE_FEE_E8S);
+        assert_eq!(quote.amount, 50_000_000);
+        assert_eq!(customize_character(2, 3, 4, ExplorerToken::CkBTC).await.unwrap_err(), "ICP_ONLY");
+        assert_eq!(
+            get_arcade_customize_quote(ExplorerToken::CkUSDT).await.unwrap_err(),
+            "ICP_ONLY"
+        );
 
         // Underfunded escrow refused.
         set_mock_ledger_balance(quote.amount); // missing the fee
         assert_eq!(customize_character(2, 3, 4, ExplorerToken::ICP).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
         assert!(ARCADE_CHARACTERS.with(|m| m.borrow().get(&user)).is_none());
 
-        // Funded: $1 of ICP moves to the treasury and the look persists.
+        // Funded: the fee settles through the 50/25/25 split (third leg → the
+        // course_nft canister; wired in test_config) and the look persists.
         set_mock_ledger_balance(quote.amount + 10_000);
         set_mock_ledger_transfer(Ok(5));
         customize_character(2, 3, 4, ExplorerToken::ICP).await.unwrap();
@@ -23106,11 +23187,6 @@ mod tests {
         assert_eq!((c.hair, c.skin, c.outfit), (2, 3, 4));
         // The quote is consumed.
         assert_eq!(customize_character(1, 1, 1, ExplorerToken::ICP).await.unwrap_err(), "NO_QUOTE");
-
-        // Stables are pinned at $1 — 1 ckUSDT == 1_000_000 micro.
-        let usdt = get_arcade_customize_quote(ExplorerToken::CkUSDT).await.unwrap();
-        assert_eq!(usdt.amount, 1_000_000);
-        assert_eq!(usdt.rate_usd_e8s, USD_E8S_PER_USD);
         clear_arcade();
     }
 
@@ -23153,7 +23229,10 @@ mod tests {
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
             lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
             default_threshold_usd_e8s: None,
-            course_nft_canister: None,
+            // Wired so fee splits with a course_nft third leg settle in tests.
+            // DISTINCT from get_canister_id()'s native mock (aaaaa-aa) so
+            // split-leg assertions can tell the two CMC subaccounts apart.
+            course_nft_canister: Some(p("qoctq-giaaa-aaaaa-aaaea-cai")),
             faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
             faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
             faucet_claim_window_ns: default_faucet_claim_window_ns(),
@@ -26909,13 +26988,14 @@ mod tests {
         assert!(c.cmc_block_index.is_some());
         assert!(c.frontend_cmc_block.is_some());
         // Arithmetic invariant of the split (matches settle_burn_split).
+        // 2 ICP mint fee (2026-07-04): 1 / 0.5 / 0.5 ICP.
         let treasury = MINT_FEE_E8S / 2;
         let backend = MINT_FEE_E8S / 4;
-        let frontend = MINT_FEE_E8S - treasury - backend;
-        assert_eq!(treasury, 25_000_000);
-        assert_eq!(backend, 12_500_000);
-        assert_eq!(frontend, 12_500_000);
-        assert_eq!(treasury + backend + frontend, MINT_FEE_E8S);
+        let third_leg = MINT_FEE_E8S - treasury - backend;
+        assert_eq!(treasury, 100_000_000);
+        assert_eq!(backend, 50_000_000);
+        assert_eq!(third_leg, 50_000_000);
+        assert_eq!(treasury + backend + third_leg, MINT_FEE_E8S);
     }
 
     #[tokio::test]
@@ -26960,7 +27040,7 @@ mod tests {
         // Retry: escrow depleted by the settled legs — must NOT be judged
         // against the full fee again.
         set_mock_cmc_notify_fail(None);
-        set_mock_ledger_balance(MINT_FEE_E8S - 25_000_000 - 12_500_000 - 20_000);
+        set_mock_ledger_balance(MINT_FEE_E8S - MINT_FEE_E8S / 2 - MINT_FEE_E8S / 4 - 20_000);
         let token_id = mint_course_nft(course_blob(34, 2), "Notify Fail".into())
             .await
             .unwrap();
@@ -27314,11 +27394,13 @@ mod tests {
     }
 
     fn make_player() -> Principal {
-        // A distinct Tier-2 player (not an admin, not the owner).
+        // A distinct STAKED player (not an admin, not the owner) — tickets are
+        // stakers-only as of 2026-07-04.
         let player = p("aaaaa-aa");
         // aaaaa-aa is management; use a real-ish self-authenticating principal.
         let player = Principal::self_authenticating(player.as_slice());
         make_following(player);
+        seed_stake(StakeTier::SixMonths, player, 100_000_000);
         player
     }
 
@@ -27336,6 +27418,7 @@ mod tests {
 
         // Change the live owner mid-session → credit goes to the NEW owner.
         let new_owner = alice();
+        seed_stake(StakeTier::SixMonths, new_owner, 100_000_000); // stakers-only tickets
         set_mock_owner(1, new_owner);
         advance(6);
         let r = record_hole_event(sid, 2).await.unwrap();
@@ -27383,6 +27466,7 @@ mod tests {
     async fn test_pair_cap_limits_owner_credits_per_course_per_player() {
         course_test_setup();
         let owner = bob();
+        seed_stake(StakeTier::SixMonths, owner, 100_000_000); // stakers-only tickets
         seed_listing(1, owner, 34, 0, true);
         let player = make_player();
         // Run MAX+1 rounds reaching hole 2; the 6th owner credit is skipped.
@@ -27501,12 +27585,12 @@ mod tests {
         assert!(!r.player_credited);
         assert_eq!(r.reason, Some("ANON".to_string()));
 
-        // Tier-1 (authed not following): no player ticket.
-        let t1 = {
+        // Signed-in but NOT staked: no player ticket (stakers-only, 2026-07-04).
+        let unstaked = {
             let q = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
             Principal::self_authenticating(q.as_slice())
         };
-        set_mock_caller(t1);
+        set_mock_caller(unstaked);
         advance(1000);
         let sid2 = start_play_session(1).unwrap().session_id;
         for h in 1..=9u8 {
@@ -27515,7 +27599,17 @@ mod tests {
         }
         let r2 = complete_round(sid2).unwrap();
         assert!(!r2.player_credited);
-        assert_eq!(r2.reason, Some("TIER_TOO_LOW".to_string()));
+        assert_eq!(r2.reason, Some("NOT_STAKED".to_string()));
+
+        // Staking flips the outcome for the same player.
+        seed_stake(StakeTier::SixMonths, unstaked, 100_000_000);
+        advance(2000);
+        let sid3 = start_play_session(1).unwrap().session_id;
+        for h in 1..=9u8 {
+            advance(2000 + (h as u64) * 4);
+            record_hole_event(sid3, h).await.unwrap();
+        }
+        assert!(complete_round(sid3).unwrap().player_credited);
     }
 
     #[tokio::test]
@@ -27564,6 +27658,7 @@ mod tests {
     fn test_owner_daily_cap() {
         course_test_setup();
         let owner = bob();
+        seed_stake(StakeTier::SixMonths, owner, 100_000_000); // stakers-only tickets
         let player = make_player();
         let now = 1_700_000_000u64 * 1_000_000_000;
         // Use distinct (player, course) to avoid the pair cap; vary token_id.
@@ -27597,6 +27692,12 @@ mod tests {
         credit_course_ticket(admin);
         assert_eq!(lottery_state().total_tickets, total, "admin credit skipped");
         assert!(LOTTERY_TICKETS.with(|m| m.borrow().get(&admin)).is_none());
+
+        // Unstaked recipient is silently skipped (stakers-only, 2026-07-04).
+        let unstaked = Principal::self_authenticating(alice().as_slice());
+        credit_course_ticket(unstaked);
+        assert_eq!(lottery_state().total_tickets, total, "unstaked credit skipped");
+        assert!(LOTTERY_TICKETS.with(|m| m.borrow().get(&unstaked)).is_none());
     }
 
     #[test]
@@ -30015,6 +30116,54 @@ mod tests {
         assert_eq!(refund_registration().await.unwrap_err(), "NOTHING_TO_REFUND");
 
         acct_disable();
+    }
+
+    #[tokio::test]
+    async fn test_customize_fee_splits_50_25_25_to_nft_canister() {
+        // 2026-07-04: the flat 0.5 ICP customize fee splits 50% treasury /
+        // 25% backend cycles / 25% course_nft canister cycles — verified leg
+        // by leg through the TEST_ACCT ledger sim.
+        install_staking_test_config();
+        acct_reset();
+        set_mock_ledger_transfer(Ok(1));
+        let user = alice();
+        let sub = derive_arcade_subaccount(&user);
+        acct_set(get_canister_id(), Some(sub), ARCADE_CUSTOMIZE_FEE_E8S);
+        acct_set(get_canister_id(), Some(TREASURY_SUBACCOUNT), 1_000_000); // fronts split fees
+        let ledger = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
+
+        settle_arcade_fee(user, ledger, sub, ARCADE_CUSTOMIZE_FEE_E8S).await.unwrap();
+
+        let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+        // 25% each burns toward backend and course_nft cycles at the CMC.
+        assert_eq!(
+            acct_get(cmc, Some(principal_to_subaccount(&get_canister_id()))),
+            ARCADE_CUSTOMIZE_FEE_E8S / 4
+        );
+        assert_eq!(
+            acct_get(cmc, Some(principal_to_subaccount(&p("qoctq-giaaa-aaaaa-aaaea-cai")))), // test course_nft id
+            ARCADE_CUSTOMIZE_FEE_E8S / 4
+        );
+        // 50% lands in the treasury, which fronted the 3 split fees + 1 cover
+        // fee (zero-fee model): +25_000_000 − 40_000 on its 1_000_000 float.
+        assert_eq!(
+            acct_get(get_canister_id(), Some(TREASURY_SUBACCOUNT)),
+            1_000_000 + ARCADE_CUSTOMIZE_FEE_E8S / 2 - 40_000
+        );
+        // Escrow fully drained.
+        assert_eq!(acct_get(get_canister_id(), Some(sub)), 0);
+        acct_disable();
+    }
+
+    #[test]
+    fn test_arcade_full_access_is_signed_in_only() {
+        // 2026-07-04: play is ungated for every signed-in user; staking only
+        // gates lottery tickets.
+        install_staking_test_config();
+        set_mock_caller(Principal::anonymous());
+        assert!(!get_arcade_info().full_access, "anonymous keeps the hole-1 preview");
+        set_mock_caller(alice()); // signed in, NOT staked, never voted
+        assert!(get_arcade_info().full_access, "any signed-in user has full access");
     }
 
     #[tokio::test]

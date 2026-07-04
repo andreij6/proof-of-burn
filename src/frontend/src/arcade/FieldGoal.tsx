@@ -121,7 +121,9 @@ class KickSfx {
 }
 const sfx = new KickSfx();
 
-export default function FieldGoal({ kicker, fullAccess, onRoundComplete, onExit, onGoParticipate, submitNote }: FieldGoalProps) {
+// onGoParticipate kept in the props for caller compatibility; the sign-in gate
+// no longer routes to Participate (2026-07-04 — play is free once signed in).
+export default function FieldGoal({ kicker, fullAccess, onRoundComplete, onExit, onGoParticipate: _onGoParticipate, submitNote }: FieldGoalProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [phase, setPhase] = useState<Phase>('intro');
   const [roundIdx, setRoundIdx] = useState(0);
@@ -396,17 +398,17 @@ export default function FieldGoal({ kicker, fullAccess, onRoundComplete, onExit,
           </Overlay>
         )}
 
-        {/* Participation gate after kick 1 */}
+        {/* Sign-in gate after kick 1 — only anonymous visitors hit this now:
+            every SIGNED-IN player has full access (2026-07-04). */}
         {phase === 'gate' && (
           <Overlay>
             <Icon name="lock" size={26} stroke="var(--haze-ink)" />
-            <h3 style={{ margin: 0 }}>That's the free preview</h3>
+            <h3 style={{ margin: 0 }}>Sign in to keep kicking</h3>
             <span style={{ color: 'var(--fg-2)', fontSize: 13, maxWidth: 380, textAlign: 'center' }}>
-              Kicks 2–5 (and the leaderboard) unlock for protocol participants: stake any
-              amount of ICP, or vote on a proposal — a vote in the last 30 days counts.
+              Kicks 2–5 and the leaderboard are free for every signed-in player.
+              Staked players also earn lottery tickets while they play.
             </span>
             <span className="row" style={{ gap: 8 }}>
-              <Btn variant="primary" onClick={onGoParticipate}><Icon name="zap" size={13} stroke="var(--char-950)" /> Stake or vote</Btn>
               <Btn variant="secondary" onClick={onExit}>Back to Arcade</Btn>
             </span>
           </Overlay>

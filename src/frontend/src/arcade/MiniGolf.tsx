@@ -40,9 +40,13 @@ interface MiniGolfProps {
   onGoParticipate: () => void;
   /** Status line rendered on the final scorecard (e.g. submit result). */
   submitNote?: string;
+  /** Optional CTA rendered next to submitNote (e.g. "Stake ICP →"). */
+  submitAction?: { label: string; onClick: () => void };
 }
 
-export default function MiniGolf({ course, character, fullAccess, onHoleSunk, onRoundComplete, onExit, onGoParticipate, submitNote }: MiniGolfProps) {
+// onGoParticipate is kept in the props for caller compatibility; the sign-in
+// gate no longer routes to Participate (2026-07-04 — play is free once signed in).
+export default function MiniGolf({ course, character, fullAccess, onHoleSunk, onRoundComplete, onExit, onGoParticipate: _onGoParticipate, submitNote, submitAction }: MiniGolfProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [phase, setPhase] = useState<Phase>('intro');
   const [holeIdx, setHoleIdx] = useState(0);
@@ -277,17 +281,17 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
           </Overlay>
         )}
 
-        {/* Participation gate after hole 1 */}
+        {/* Sign-in gate after hole 1 — only anonymous visitors hit this now:
+            every SIGNED-IN player has full access (2026-07-04). */}
         {phase === 'gate' && (
           <Overlay>
             <Icon name="lock" size={26} stroke="var(--haze-ink)" />
-            <h3 style={{ margin: 0 }}>That's the free preview</h3>
+            <h3 style={{ margin: 0 }}>Sign in to keep playing</h3>
             <span style={{ color: 'var(--fg-2)', fontSize: 13, maxWidth: 380, textAlign: 'center' }}>
-              Holes 2–9 (and the leaderboard) unlock for protocol participants: stake any
-              amount of ICP, or vote on a proposal — a vote in the last 30 days counts.
+              Holes 2–9 are free for every signed-in player. Staked players also earn
+              lottery tickets while they play.
             </span>
             <span className="row" style={{ gap: 8 }}>
-              <Btn variant="primary" onClick={onGoParticipate}><Icon name="zap" size={13} stroke="var(--char-950)" /> Stake or vote</Btn>
               <Btn variant="secondary" onClick={onExit}>Back to Arcade</Btn>
             </span>
           </Overlay>
@@ -320,7 +324,14 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
                 </tbody>
               </table>
             </div>
-            {submitNote && <span style={{ fontSize: 12.5, color: 'var(--burn-ink)' }}>{submitNote}</span>}
+            {submitNote && (
+              <span className="row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
+                <span style={{ fontSize: 12.5, color: 'var(--burn-ink)' }}>{submitNote}</span>
+                {submitAction && (
+                  <Btn variant="secondary" sm onClick={submitAction.onClick}>{submitAction.label}</Btn>
+                )}
+              </span>
+            )}
             <Btn variant="primary" onClick={onExit}>Back to Arcade</Btn>
           </Overlay>
         )}

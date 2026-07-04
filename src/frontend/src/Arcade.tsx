@@ -357,7 +357,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     setEditorBusy(true);
     setEditorError(null);
     try {
-      setEditorStep(`Step 1/2: Paying $1 in ${meta.label}...`);
+      setEditorStep('Step 1/2: Paying 0.5 ICP...');
       const acct = await actor.get_arcade_deposit_address();
       const ledgerActor = createLedgerActor(ledger, {
         agentOptions: { host, identity, rootKey }
@@ -492,14 +492,10 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             <h4 style={{ margin: 0 }}>{minigolfMode ? 'Mini Golf' : 'Arcade'}</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
-            Skill games for protocol participants. Everyone gets a free preview — stake ICP
-            or vote on a proposal (within the last 30 days) to unlock full games and the
-            leaderboards.
+            Skill games — sign in and play everything, free. Staked players also earn
+            lottery tickets while they play.
           </p>
         </div>
-        {signedIn && !fullAccess && (
-          <Chip tone="pending"><Icon name="lock" size={11} /> Free preview only — stake or vote to unlock</Chip>
-        )}
       </div>
 
       {/* ── Game sub-pages (per-game flags hide pulled titles) ── */}
@@ -561,7 +557,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
                 </span>
               </div>
               <Btn variant="secondary" sm style={{ marginLeft: 'auto' }} onClick={() => openEditor('golfer')}>
-                <Icon name="edit" size={12} /> Customize · $1 in any token
+                <Icon name="edit" size={12} /> Customize · 0.5 ICP
               </Btn>
             </div>
           </div>
@@ -578,6 +574,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             onPlay={(card) => { setPlayCard(card); setView(`play/${card.token_id}`); }}
             onViewNft={(card) => { setPlayCard(card); setView(`spectate/${card.token_id}`); }}
             onCreate={() => setView('create-course')}
+            onGoStaking={onGoParticipate}
             onSignIn={onSignIn}
           />
         </>
@@ -607,7 +604,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
               )}
               <div className="row" style={{ justifyContent: 'space-between', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
                 <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-                  {fullAccess ? 'Full game unlocked' : 'Kick 1 free preview'}
+                  {signedIn ? 'Full game — free to play' : 'Sign in to play the full game'}
                 </span>
                 <Btn variant="primary" sm onClick={() => {
                   if (!signedIn) { onSignIn(); return; }
@@ -629,7 +626,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
                 <Chip tone="muted" style={{ height: 19, fontSize: 10 }}>{JERSEY_NAMES[myKicker.jersey]} jersey</Chip>
               </span>
               <Btn variant="secondary" sm onClick={() => openEditor('kicker')}>
-                <Icon name="edit" size={12} /> Customize · $1 in any token
+                <Icon name="edit" size={12} /> Customize · 0.5 ICP
               </Btn>
             </div>
           </div>
@@ -687,19 +684,19 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
               </div>
             ))}
             <div className="col" style={{ gap: 6 }}>
-              <label style={LABEL_STYLE}>Pay with · $1 in ICP at the live rate</label>
+              <label style={LABEL_STYLE}>Price · flat 0.5 ICP</label>
               <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-                {isQuoting ? 'Fetching live ICP price…'
-                  : payQuote ? `= ${fmtTokenAmount(payQuote.amount, payMeta.decimals)} ${payMeta.label} · paid to the protocol treasury · rate locked 15 min`
-                  : 'Fetching live ICP price…'}
+                {isQuoting ? 'Preparing your quote…'
+                  : payQuote ? `${fmtTokenAmount(payQuote.amount, payMeta.decimals)} ${payMeta.label} · 50% treasury / 25% backend / 25% NFT canister`
+                  : 'Preparing your quote…'}
               </span>
             </div>
             {editorStep && !editorError && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>{editorStep}</span>}
             {editorError && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{editorError}</span>}
             <Btn variant="primary" disabled={editorBusy || !payQuote} onClick={executeCustomize}>
               {editorBusy ? 'Working...'
-                : payQuote ? `Pay ${fmtTokenAmount(payQuote.amount, payMeta.decimals)} ${payMeta.label} ($1) & save look`
-                : 'Pay $1 & save look'}
+                : payQuote ? `Pay ${fmtTokenAmount(payQuote.amount, payMeta.decimals)} ${payMeta.label} & save look`
+                : 'Pay 0.5 ICP & save look'}
             </Btn>
           </div>
         </div>

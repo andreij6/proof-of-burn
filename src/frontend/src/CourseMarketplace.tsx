@@ -40,6 +40,8 @@ interface CourseMarketplaceProps {
   onViewNft: (card: CourseCard) => void;
   /** Launch the create-a-course flow (copy AI instructions → upload → mint). */
   onCreate: () => void;
+  /** Navigate to staking — owners must stake to earn tickets (2026-07-04). */
+  onGoStaking: () => void;
   onSignIn: () => void;
 }
 
@@ -48,7 +50,7 @@ const ICP_FEE_E8S = 10_000n;
 
 export default function CourseMarketplace({
   actor, principal, identity, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal,
-  onPlay, onViewNft, onCreate, onSignIn,
+  onPlay, onViewNft, onCreate, onGoStaking, onSignIn,
 }: CourseMarketplaceProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
@@ -266,26 +268,26 @@ export default function CourseMarketplace({
             Play any course for fun — and earn lottery tickets when you finish a round.
             Every course is an NFT built by an AI course designer, and you can own,
             buy, and sell them.{' '}
-            {/* "0.5 ICP" mirrors the backend's MINT_FEE_E8S (lib.rs) — update together. */}
+            {/* "2 ICP" mirrors the backend's MINT_FEE_E8S (lib.rs) — update together. */}
             <MoreInfo title="AI-built courses → play → earn → buy/sell">
               <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
                 <Eyebrow accent>The gist</Eyebrow>
                 <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
                   Copy our course-designer instructions into <b>any AI agent</b>, describe the
                   course you want, and upload the JSON it returns. Test-play it, then mint it
-                  as an NFT for 0.5 ICP. Owners earn lottery tickets from players — and a
-                  creator royalty forever after selling.
+                  as an NFT for 2 ICP. Staked owners earn lottery tickets from
+                  players — and a creator royalty forever after selling.
                 </p>
               </div>
               <div className="col" style={{ gap: 6 }}>
                 <Eyebrow accent>Own &amp; earn</Eyebrow>
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
                   <li><b>AI-designed:</b> each NFT carries the build-instructions JSON the app compiles into its 9 holes.</li>
-                  <li><b>Mint for 0.5 ICP</b> — anyone signed in can mint; your course is auto-listed on the marketplace.</li>
+                  <li><b>Mint for 2 ICP</b> — anyone signed in can mint; your course is auto-listed on the marketplace.</li>
                   <li><b>One of a kind:</b> hole layouts are fingerprinted at mint — clones of an existing course (even mirrored or shifted) are rejected.</li>
                   <li><b>Advertise it:</b> every course has a shareable link (the Share button) that opens it directly.</li>
-                  <li><b>Players earn</b> a lottery ticket for completing a round.</li>
-                  <li><b>Owners earn</b> a ticket each time a player reaches hole 2.</li>
+                  <li><b>Staked players earn</b> a lottery ticket for completing a round (stake any amount of ICP).</li>
+                  <li><b>Staked owners earn</b> a ticket each time a player reaches hole 2 — buying an NFT without a stake earns nothing.</li>
                 </ul>
               </div>
               <div className="col" style={{ gap: 6 }}>
@@ -404,6 +406,7 @@ export default function CourseMarketplace({
           rootKey={rootKey}
           ledgerCanisterId={ledgerCanisterId}
           backendCanisterId={backendCanisterId}
+          onGoStaking={onGoStaking}
           onClose={() => setBuyCard(null)}
           onDone={() => { setBuyCard(null); refresh(); refreshFavorites(); }}
         />
@@ -761,7 +764,7 @@ function burnErr(code: string): string {
 }
 
 // ── Buyer: approve + buy_course_nft (PB-307) ──
-function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, backendCanisterId, onClose, onDone }: {
+function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, backendCanisterId, onGoStaking, onClose, onDone }: {
   actor: any;
   card: CourseCard;
   identity: any;
@@ -769,6 +772,7 @@ function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, back
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   backendCanisterId: string;
+  onGoStaking: () => void;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -814,9 +818,15 @@ function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, back
         <div className="col" style={{ gap: 12 }}>
           <span className="row" style={{ gap: 8, color: 'var(--ok)', fontSize: 13 }}>
             <Icon name="checkCircle" size={16} stroke="var(--ok)" />
-            You now own {card.name || `Course #${card.token_id}`} — it earns you a lottery ticket every time a player reaches hole 2.
+            You now own {card.name || `Course #${card.token_id}`}.
           </span>
-          <div className="row" style={{ justifyContent: 'flex-end' }}>
+          <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0 }}>
+            Heads up: owners earn a lottery ticket each time a player reaches
+            hole 2 <b>only while they hold an active ICP stake</b>. No stake, no
+            tickets — stake any amount to switch earnings on.
+          </p>
+          <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+            <Btn variant="secondary" sm onClick={onGoStaking}><Icon name="zap" size={12} /> Stake ICP</Btn>
             <Btn variant="primary" sm onClick={onDone}>Done</Btn>
           </div>
         </div>

@@ -18,10 +18,10 @@ import { buildCoursePrompt, friendlyCourseError } from './arcade/coursePrompt';
 // course-designer instructions, designs the course with their own AI agent
 // (ChatGPT, Claude, …), pastes the JSON it outputs back here, test-plays it in
 // the real engine, and mints it as a course NFT (PB-304 mint saga: deposit
-// 0.5 ICP into the mint escrow subaccount, then mint_course_nft).
+// the 2 ICP fee into the mint escrow subaccount, then mint_course_nft).
 // ==========================================
 
-export const MINT_FEE_E8S = 50_000_000n; // 0.5 ICP — backend MINT_FEE_E8S
+export const MINT_FEE_E8S = 200_000_000n; // 2 ICP — backend MINT_FEE_E8S (2026-07-04)
 const ICP_LEDGER_FEE_E8S = 10_000n;
 const MAX_NAME_CHARS = 60; // backend MAX_COURSE_NAME_CHARS
 
@@ -361,9 +361,11 @@ export default function CourseCreate({
             <b>"{name.trim()}" is minted — course NFT #{mintedId.toString()}.</b>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', margin: 0 }}>
-            It's live on the marketplace already. You earn a lottery ticket every
-            time a player reaches hole 2 — and a permanent 10% creator royalty if
-            it ever resells.
+            It's live on the marketplace already. While you hold an active ICP
+            stake, you earn a lottery ticket every time a player reaches hole 2 —
+            and you keep a permanent 10% creator royalty if it ever resells.
+            Not staked yet? Stake any amount under Participate → Staking to
+            switch the ticket earnings on.
           </p>
           {/* Share: the canonical deep link opens the course directly. */}
           <div className="col" style={{ gap: 6, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
@@ -561,8 +563,8 @@ export default function CourseCreate({
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Anyone signed in can mint. Your course is auto-listed on the
-              marketplace and earns you a lottery ticket each time a player
-              reaches hole 2.
+              marketplace, and staked owners earn a lottery ticket each time a
+              player reaches hole 2 (stake any amount of ICP to earn).
             </span>
             {doc && !testPlayed && (
               <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--haze-ink)' }}>
