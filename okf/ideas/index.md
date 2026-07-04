@@ -13,6 +13,7 @@ shipped.
 - [Auto-Recaps — Gemini-drafted "this week in Caldera" posts from on-chain stats](/ideas/auto-recaps/README.md) — `auto-recaps`
 - [Canister Inbox — Technical Specification](/ideas/canister-inbox/README.md) — `canister-inbox`
 - [Mini-Golf Course Editor — Design Document](/ideas/course-nft/course-editor.md) — `course-nft`
+- [Drop Zone — the target-skydive game (arcade game 4)](/ideas/drop-zone/README.md) — `drop-zone`
 - [Cycles Faucet — Build Spec (PB-400, Phase 1)](/ideas/faucet/build-spec.md) — `faucet`
 - [Featured Dapp — Spec & Task List](/ideas/featured-dapp/README.md) — `featured-dapp`
 - [ICP Feature Gap Analysis — Cycles of Influence](/ideas/icp-features-gap-analysis.md)

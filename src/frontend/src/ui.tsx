@@ -65,6 +65,8 @@ export const iconPaths: Record<string, React.ReactNode> = {
   // Stroke-only to match the set; the elliptical cup reads as the hole at an
   // angle and the pennant waves off the top of the pole.
   golf: <><path d="M10 18V4" /><path d="M10 4l8 2.5L10 9z" /><ellipse cx="10" cy="19.5" rx="3.2" ry="1.5" /></>,
+  // Parachute (Drop Zone): canopy, shroud lines, jumper.
+  parachute: <><path d="M4 10a8 8 0 0116 0" /><path d="M4 10c1.5 1.2 3 1.2 4.5 0M8.5 10c1.7 1.3 5.3 1.3 7 0M15.5 10c1.5 1.2 3 1.2 4.5 0" /><path d="M4 10l7 8M20 10l-7 8" /><circle cx="12" cy="19.5" r="1.7" /></>,
   // Poker chip (Luck-Proof): rim, inlay, and four edge spots.
   pokerchip: <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="4.5" /><path d="M12 3v3.5" /><path d="M12 17.5V21" /><path d="M3 12h3.5" /><path d="M17.5 12H21" /></>,
   sound: <><path d="M11 5L6 9H2v6h4l5 4z" /><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13" /></>,

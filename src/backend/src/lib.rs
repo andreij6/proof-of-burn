@@ -5259,6 +5259,7 @@ pub const FLAG_EARLY_ADOPTERS: &str = "early_adopters";
 pub const FLAG_ARCADE_MINIGOLF: &str = "arcade_minigolf";
 pub const FLAG_ARCADE_FIELDGOAL: &str = "arcade_fieldgoal";
 pub const FLAG_ARCADE_LUCKPROOF: &str = "arcade_luckproof";
+pub const FLAG_ARCADE_SKYDIVE: &str = "arcade_skydive";
 /// The Casino: Crash (bustabit-style multiplier game) + the shared casino VP
 /// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
 /// until the owner enables it after a playtest.
@@ -5281,10 +5282,10 @@ pub const FLAG_DASHBOARD: &str = "dashboard";
 /// Mission Statement page (`about` route). Ships dark (default OFF) until an
 /// admin enables it.
 pub const FLAG_MISSION_STATEMENT: &str = "mission_statement";
-const KNOWN_FEATURE_FLAGS: [&str; 15] = [
+const KNOWN_FEATURE_FLAGS: [&str; 16] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
-    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF,
+    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE,
     FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS, FLAG_X_FARM,
     FLAG_DASHBOARD, FLAG_MISSION_STATEMENT,
 ];
@@ -5555,6 +5556,7 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE_MINIGOLF => false,
         FLAG_ARCADE_FIELDGOAL => false,
         FLAG_ARCADE_LUCKPROOF => false,
+        FLAG_ARCADE_SKYDIVE => false,
         FLAG_X_FARM => false,
         // Dashboard + Mission Statement ship dark (default OFF) — these pages
         // were always-on before; gating them lets an admin hide either page
@@ -12714,6 +12716,7 @@ const FIELDGOAL_MAX_MILLIS: u64 = 30 * 60 * 1000; // 30 min
 // the stored run, so a submitted score can't be forged — only the decisions
 // are client input.
 const ARCADE_GAME_LUCKPROOF: &str = "luckproof";
+const ARCADE_GAME_SKYDIVE: &str = "skydive";
 const ARCADE_LEADERBOARD_LIMIT: usize = 100;
 // Palette sizes — the frontend mirrors these (index = palette entry).
 const CHARACTER_HAIR_OPTIONS: u8 = 6;
@@ -12822,6 +12825,7 @@ fn arcade_game_flag(game: &str) -> &'static str {
     match game {
         ARCADE_GAME_FIELDGOAL => FLAG_ARCADE_FIELDGOAL,
         ARCADE_GAME_LUCKPROOF => FLAG_ARCADE_LUCKPROOF,
+        ARCADE_GAME_SKYDIVE => FLAG_ARCADE_SKYDIVE,
         _ => FLAG_ARCADE_MINIGOLF,
     }
 }
@@ -13856,6 +13860,259 @@ fn complete_luckproof_daily(run_id: u64, decisions: Vec<bool>, millis: u64) -> R
         .unwrap_or(0);
 
     Ok(LuckProofResult { ev_bp, correct, bankroll_delta, outcomes, rank })
+}
+
+// ── Drop Zone (arcade game 4): the PUBG/Warzone-style target drop ────────────
+// A plane crosses the 2 km map diagonally at altitude; the player jumps (J),
+// steers the freefall (dive = faster fall, weaker steering — PUBG's ~126 vs
+// ~234 km/h trade), deploys the chute (below the 80 m safety floor = crash;
+// Warzone's "deploy higher than you think"), and is graded on DISTANCE to a
+// day-seeded target, tie-broken by time from jump to touchdown. Crashes
+// consume the attempt and never rank.
+//
+// PRACTICE is fully client-side (random target every match). The DAILY
+// COMPETITION mirrors Luck-Proof: one attempt per UTC day, stakers-only,
+// every player faces the SAME scenario (target, plane path, and scenery all
+// derive from the day), ranked distance asc → time asc. Physics runs client-
+// side (continuous — not server-rescorable like Luck-Proof's decisions), so
+// completion is bounds-validated, Field-Goal-parity trust.
+
+/// One day's shared scenario. Distances in DECIMETERS on a 20_000 dm (2 km)
+/// square map; the plane flies one of the 4 diagonals at 1_000 m.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SkydiveScenario {
+    pub target_x_dm: u32,
+    pub target_z_dm: u32,
+    /// 0..=3: which corner the plane enters from (opposite corner exit).
+    pub plane_dir: u8,
+    /// Seed for the client's deterministic scenery (trees/houses/clouds).
+    pub decor_seed: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SkydiveRun {
+    pub id: u64,
+    pub player: Principal,
+    pub day: u32,
+    pub issued_at: u64,
+    pub completed: bool,
+}
+impl_storable!(SkydiveRun);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SkydiveDailyEntry {
+    pub day: u32,
+    pub player: Principal,
+    /// Horizontal distance from target center at touchdown (decimeters).
+    pub distance_dm: u32,
+    /// Jump → touchdown, milliseconds.
+    pub millis: u64,
+    /// Chute deployed above the safety floor. Crashes never rank.
+    pub safe: bool,
+    pub submitted_at: u64,
+}
+impl_storable!(SkydiveDailyEntry);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SkydiveDayKey {
+    pub day: u32,
+    pub player: Principal,
+}
+impl_storable!(SkydiveDayKey);
+
+thread_local! {
+    /// MemoryId 112: in-flight + completed daily drop runs.
+    static SKYDIVE_RUNS: RefCell<StableBTreeMap<u64, SkydiveRun, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(112)))));
+    /// MemoryId 113: next run id.
+    static NEXT_SKYDIVE_ID: RefCell<StableCell<u64, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(113)), 1u64)));
+    /// MemoryId 114: (day, player) → daily result.
+    static SKYDIVE_DAILY: RefCell<StableBTreeMap<SkydiveDayKey, SkydiveDailyEntry, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(114)))));
+}
+
+const SKYDIVE_MAP_DM: u32 = 20_000; // 2 km square
+const SKYDIVE_RUN_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
+const SKYDIVE_MIN_MILLIS: u64 = 3_000; // 1 km of freefall can't finish faster
+const SKYDIVE_MAX_MILLIS: u64 = 10 * 60 * 1000;
+/// Longest possible landing error: the map diagonal (√2 · 20_000 dm).
+const SKYDIVE_MAX_DISTANCE_DM: u32 = 28_285;
+const SKYDIVE_BOARD_LIMIT: usize = 100;
+
+fn skydive_day_seed(day: u32) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"skydive_daily_v1");
+    h.update(day.to_le_bytes());
+    let d = h.finalize();
+    let mut s = [0u8; 32];
+    s.copy_from_slice(&d);
+    s
+}
+
+/// The day's scenario: target in the central 60% of the map (a drop that's
+/// always reachable from the diagonal), plane on one of the 4 diagonals.
+fn skydive_scenario(day: u32) -> SkydiveScenario {
+    let seed = skydive_day_seed(day);
+    let r0 = luckproof_rand(&seed, 0, 0);
+    let r1 = luckproof_rand(&seed, 1, 0);
+    let r2 = luckproof_rand(&seed, 2, 0);
+    let span = SKYDIVE_MAP_DM as u64 * 6 / 10; // central 60%
+    let margin = SKYDIVE_MAP_DM as u64 * 2 / 10;
+    SkydiveScenario {
+        target_x_dm: (margin + r0 % span) as u32,
+        target_z_dm: (margin + r1 % span) as u32,
+        plane_dir: (r2 % 4) as u8,
+        decor_seed: luckproof_rand(&seed, 3, 0),
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SkydiveRunStart {
+    pub run_id: u64,
+    pub day: u32,
+    pub scenario: SkydiveScenario,
+    pub issued_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SkydiveDailyRow {
+    pub rank: u32,
+    pub player: Principal,
+    pub distance_dm: u32,
+    pub millis: u64,
+    pub safe: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SkydiveDailyStatus {
+    pub day: u32,
+    pub eligible: bool,
+    pub played: bool,
+    pub my_entry: Option<SkydiveDailyEntry>,
+    pub players_today: u32,
+}
+
+/// Board for `day` (default today): safe landings first (distance asc →
+/// time asc → earlier submission), crashes trail unranked-last.
+#[ic_cdk::query]
+fn get_skydive_daily_board(day: Option<u32>) -> Vec<SkydiveDailyRow> {
+    let day = day.unwrap_or_else(|| epoch_day(current_time()));
+    let mut rows: Vec<SkydiveDailyEntry> = SKYDIVE_DAILY.with(|m| {
+        m.borrow().iter().map(|e| e.value()).filter(|e| e.day == day).collect()
+    });
+    rows.sort_by(|a, b| {
+        b.safe.cmp(&a.safe)
+            .then(a.distance_dm.cmp(&b.distance_dm))
+            .then(a.millis.cmp(&b.millis))
+            .then(a.submitted_at.cmp(&b.submitted_at))
+    });
+    rows.into_iter()
+        .take(SKYDIVE_BOARD_LIMIT)
+        .enumerate()
+        .map(|(i, e)| SkydiveDailyRow {
+            rank: i as u32 + 1,
+            player: e.player,
+            distance_dm: e.distance_dm,
+            millis: e.millis,
+            safe: e.safe,
+        })
+        .collect()
+}
+
+#[ic_cdk::query]
+fn get_skydive_daily_status() -> SkydiveDailyStatus {
+    let caller = get_caller();
+    let day = epoch_day(current_time());
+    let my_entry = SKYDIVE_DAILY.with(|m| m.borrow().get(&SkydiveDayKey { day, player: caller }));
+    let players_today = SKYDIVE_DAILY.with(|m| {
+        m.borrow().iter().filter(|e| e.value().day == day).count() as u32
+    });
+    SkydiveDailyStatus {
+        day,
+        eligible: caller != Principal::anonymous() && author_is_staked(caller),
+        played: my_entry.is_some(),
+        my_entry,
+        players_today,
+    }
+}
+
+/// Enter today's drop. One attempt per UTC day; starting consumes it (a
+/// crash or abandoned run does not refund). Stakers only, like Luck-Proof.
+#[ic_cdk::update]
+fn start_skydive_daily() -> Result<SkydiveRunStart, String> {
+    require_authenticated()?;
+    require_arcade_game_enabled(ARCADE_GAME_SKYDIVE)?;
+    let caller = get_caller();
+    if !author_is_staked(caller) {
+        return Err("NOT_STAKED".to_string());
+    }
+    let now = current_time();
+    let day = epoch_day(now);
+    if SKYDIVE_DAILY.with(|m| m.borrow().contains_key(&SkydiveDayKey { day, player: caller })) {
+        return Err("ALREADY_PLAYED_TODAY".to_string());
+    }
+    let in_flight = SKYDIVE_RUNS.with(|m| {
+        m.borrow().iter().any(|e| {
+            let r = e.value();
+            r.player == caller && r.day == day
+        })
+    });
+    if in_flight {
+        return Err("ALREADY_PLAYED_TODAY".to_string());
+    }
+    let id = NEXT_SKYDIVE_ID.with(|c| {
+        let v = *c.borrow().get();
+        let _ = c.borrow_mut().set(v + 1);
+        v
+    });
+    SKYDIVE_RUNS.with(|m| {
+        m.borrow_mut().insert(id, SkydiveRun { id, player: caller, day, issued_at: now, completed: false });
+    });
+    Ok(SkydiveRunStart { run_id: id, day, scenario: skydive_scenario(day), issued_at: now })
+}
+
+/// Submit the landing. Physics is client-side (continuous), so this is
+/// bounds-validated Field-Goal-parity trust: ownership, TTL, one-shot,
+/// distance/time plausibility. Crashes are recorded (attempt consumed) but
+/// never rank above a safe landing.
+#[ic_cdk::update]
+fn complete_skydive_daily(run_id: u64, distance_dm: u32, millis: u64, safe: bool) -> Result<u32, String> {
+    require_authenticated()?;
+    require_arcade_game_enabled(ARCADE_GAME_SKYDIVE)?;
+    let caller = get_caller();
+    let now = current_time();
+    let mut run = SKYDIVE_RUNS.with(|m| m.borrow().get(&run_id)).ok_or("RUN_NOT_FOUND")?;
+    if run.player != caller {
+        return Err("NOT_YOUR_RUN".to_string());
+    }
+    if run.completed {
+        return Err("ALREADY_COMPLETED".to_string());
+    }
+    if now.saturating_sub(run.issued_at) > SKYDIVE_RUN_TTL_NS {
+        return Err("RUN_EXPIRED".to_string());
+    }
+    if distance_dm > SKYDIVE_MAX_DISTANCE_DM {
+        return Err("INVALID_DISTANCE".to_string());
+    }
+    if !(SKYDIVE_MIN_MILLIS..=SKYDIVE_MAX_MILLIS).contains(&millis) {
+        return Err("INVALID_TIME".to_string());
+    }
+    run.completed = true;
+    SKYDIVE_RUNS.with(|m| { m.borrow_mut().insert(run_id, run.clone()); });
+    SKYDIVE_DAILY.with(|m| {
+        m.borrow_mut().insert(
+            SkydiveDayKey { day: run.day, player: caller },
+            SkydiveDailyEntry { day: run.day, player: caller, distance_dm, millis, safe, submitted_at: now },
+        );
+    });
+    let rank = get_skydive_daily_board(Some(run.day))
+        .into_iter()
+        .find(|r| r.player == caller)
+        .map(|r| r.rank)
+        .unwrap_or(0);
+    Ok(rank)
 }
 
 // ==========================================
@@ -30771,6 +31028,103 @@ mod tests {
         TICKET_SOURCES.with(|m| { let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
         LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
         FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_LOSSLESS_LOTTERY.to_string()); });
+    }
+
+    // ── Drop Zone (arcade game 4) ─────────────────────────────────────────
+
+    fn enable_skydive() {
+        install_staking_test_config();
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE_SKYDIVE.to_string(), 1u8); });
+    }
+
+    fn clear_skydive() {
+        SKYDIVE_RUNS.with(|m| {
+            let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        SKYDIVE_DAILY.with(|m| {
+            let keys: Vec<SkydiveDayKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_ARCADE_SKYDIVE.to_string()); });
+        set_mock_time(None);
+    }
+
+    #[test]
+    fn test_skydive_scenario_is_daily_deterministic_and_in_bounds() {
+        let a = skydive_scenario(20_700);
+        let b = skydive_scenario(20_700);
+        assert_eq!(format!("{a:?}"), format!("{b:?}"), "same day → same scenario");
+        assert_ne!(
+            format!("{:?}", skydive_scenario(20_701)),
+            format!("{a:?}"),
+            "different day → different scenario"
+        );
+        for day in 20_700..20_760 {
+            let sc = skydive_scenario(day);
+            let margin = SKYDIVE_MAP_DM * 2 / 10;
+            assert!((margin..=SKYDIVE_MAP_DM - margin).contains(&sc.target_x_dm));
+            assert!((margin..=SKYDIVE_MAP_DM - margin).contains(&sc.target_z_dm));
+            assert!(sc.plane_dir <= 3);
+        }
+    }
+
+    #[test]
+    fn test_skydive_daily_flow_gates_and_board_order() {
+        enable_skydive();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+
+        // Stakers only.
+        set_mock_caller(alice());
+        assert_eq!(start_skydive_daily().unwrap_err(), "NOT_STAKED");
+        for u in [alice(), bob(), carol()] {
+            seed_stake(StakeTier::SixMonths, u, 100_000_000);
+        }
+
+        // Alice: safe landing 12.3 m from center in 21 s.
+        let run = start_skydive_daily().unwrap();
+        assert!(run.scenario.target_x_dm > 0);
+        assert_eq!(start_skydive_daily().unwrap_err(), "ALREADY_PLAYED_TODAY");
+        // Guards.
+        set_mock_caller(bob());
+        assert_eq!(complete_skydive_daily(run.run_id, 123, 21_000, true).unwrap_err(), "NOT_YOUR_RUN");
+        set_mock_caller(alice());
+        assert_eq!(complete_skydive_daily(run.run_id, 99_999, 21_000, true).unwrap_err(), "INVALID_DISTANCE");
+        assert_eq!(complete_skydive_daily(run.run_id, 123, 1, true).unwrap_err(), "INVALID_TIME");
+        assert_eq!(complete_skydive_daily(run.run_id, 123, 21_000, true).unwrap(), 1);
+        assert_eq!(complete_skydive_daily(run.run_id, 123, 21_000, true).unwrap_err(), "ALREADY_COMPLETED");
+        assert_eq!(start_skydive_daily().unwrap_err(), "ALREADY_PLAYED_TODAY");
+
+        // Bob: closer but SLOWER submission with same distance? — farther
+        // (200 dm) lands rank 2; carol crashes → last regardless of distance.
+        set_mock_caller(bob());
+        let rb = start_skydive_daily().unwrap();
+        assert_eq!(complete_skydive_daily(rb.run_id, 200, 18_000, true).unwrap(), 2);
+        set_mock_caller(carol());
+        let rc = start_skydive_daily().unwrap();
+        assert_eq!(complete_skydive_daily(rc.run_id, 5, 9_000, false).unwrap(), 3, "crash never outranks safe");
+
+        let board = get_skydive_daily_board(None);
+        assert_eq!(board.len(), 3);
+        assert_eq!(board[0].player, alice());
+        assert_eq!(board[1].player, bob());
+        assert_eq!(board[2].player, carol());
+        assert!(!board[2].safe);
+
+        // Status + next-day reset.
+        set_mock_caller(alice());
+        let st = get_skydive_daily_status();
+        assert!(st.eligible && st.played);
+        assert_eq!(st.players_today, 3);
+        set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
+        assert!(start_skydive_daily().is_ok(), "fresh attempt after UTC rollover");
+
+        for u in [alice(), bob(), carol()] {
+            STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, u)); });
+        }
+        clear_skydive();
     }
 
     // ── Sklansky Trainer / Luck-Proof (arcade game 3) ────────────────────

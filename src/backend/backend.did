@@ -1043,6 +1043,49 @@ type LuckProofReplay = record {
 // ("daily_stake", "course_play", "course_owner", "luckproof_ev",
 // "luckproof_cash", "discussions"). Pre-tracking tickets won't appear.
 type TicketSourceRow = record { source : text; count : nat64 };
+// Drop Zone (arcade game 4) — PUBG/Warzone-style target drop. PRACTICE is
+// client-side; the DAILY mirrors Luck-Proof: once per UTC day, stakers-only,
+// same day-derived scenario for everyone, ranked distance asc then time asc,
+// crashes (chute below the 80 m floor) recorded but ranked last. Physics is
+// client-side; completion is bounds-validated (Field-Goal-parity trust).
+type SkydiveScenario = record {
+  // Decimeters on a 20_000 dm (2 km) square map.
+  target_x_dm : nat32;
+  target_z_dm : nat32;
+  // 0..3: entry corner of the plane's diagonal.
+  plane_dir : nat8;
+  decor_seed : nat64;
+};
+type SkydiveRunStart = record {
+  run_id : nat64;
+  day : nat32;
+  scenario : SkydiveScenario;
+  issued_at : nat64;
+};
+type SkydiveDailyEntry = record {
+  day : nat32;
+  player : principal;
+  distance_dm : nat32;
+  millis : nat64;
+  safe : bool;
+  submitted_at : nat64;
+};
+type SkydiveDailyRow = record {
+  rank : nat32;
+  player : principal;
+  distance_dm : nat32;
+  millis : nat64;
+  safe : bool;
+};
+type SkydiveDailyStatus = record {
+  day : nat32;
+  eligible : bool;
+  played : bool;
+  my_entry : opt SkydiveDailyEntry;
+  players_today : nat32;
+};
+type Result_18 = variant { Ok : SkydiveRunStart; Err : text };
+type Result_19 = variant { Ok : nat32; Err : text };
 type Result_16 = variant { Ok : LuckProofRunStart; Err : text };
 type Result_17 = variant { Ok : LuckProofResult; Err : text };
 type Result = variant { Ok; Err : text };
@@ -2011,6 +2054,11 @@ service : (InitPayload) -> {
   get_luckproof_daily_status : () -> (LuckProofDailyStatus) query;
   // Where the caller's current-round lottery tickets came from (largest first).
   get_my_ticket_breakdown : () -> (vec TicketSourceRow) query;
+  // Drop Zone daily: enter (stakers, once/day) → land → board/status.
+  start_skydive_daily : () -> (Result_18);
+  complete_skydive_daily : (nat64, nat32, nat64, bool) -> (Result_19);
+  get_skydive_daily_board : (opt nat32) -> (vec SkydiveDailyRow) query;
+  get_skydive_daily_status : () -> (SkydiveDailyStatus) query;
   // Replays unlock by competing: null unless the CALLER has their own entry
   // for that day (or is asking for their own run).
   get_luckproof_daily_replay : (nat32, principal) -> (opt LuckProofReplay) query;
