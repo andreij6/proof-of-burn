@@ -50,6 +50,7 @@ export function fmtTrack(startCents: number, deltaBp: number): string {
 
 export const TRACK_START = 100_000; // $1,000.00 in cents
 export const SHOT_CLOCK_MS = 3_000; // the burndown — expiry auto-declines
+export const GET_READY_SECS = 5;   // countdown before the first hand
 
 // Chart series colors — validated (dataviz six checks, dark surface):
 // CVD ΔE 101.8 protan, contrast ≥3:1, in-band lightness.
@@ -224,12 +225,40 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
   };
   const armClock = () => { decidedRef.current = false; roundStartRef.current = performance.now(); setClockPct(100); };
 
+  // How-to-play modal (practice entry) + get-ready countdown before hand 1.
+  const [showHowTo, setShowHowTo] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const inCountdown = countdown !== null;
+
+  /** 5…1, then arm the clock — and, for the daily run, start the timer only
+   *  now so the countdown never eats into the ranked completion time. */
+  const beginCountdown = () => {
+    decidedRef.current = true; // hold the shot clock until GO
+    setCountdown(GET_READY_SECS);
+    let left = GET_READY_SECS;
+    const iv = setInterval(() => {
+      left -= 1;
+      if (left > 0) { setCountdown(left); return; }
+      clearInterval(iv);
+      setCountdown(null);
+      if (runRef.current) runRef.current.startedAt = performance.now();
+      armClock();
+    }, 1000);
+  };
+
+  /** Practice click → the how-to modal; the game starts from its Ready button. */
   const startPractice = () => {
+    setErr(null);
+    setShowHowTo(true);
+  };
+
+  const launchPractice = () => {
+    setShowHowTo(false);
     resetTracks();
     runRef.current = null;
     setGamble(practiceGamble());
-    armClock();
     setMode('practice');
+    beginCountdown();
   };
 
   const startDaily = async () => {
@@ -244,8 +273,8 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
         decisions: [], startedAt: performance.now(),
       };
       setGamble(res.Ok.gambles[0]);
-      armClock();
       setMode('daily');
+      beginCountdown();
     } catch (e: any) { setErr(e?.message || String(e)); }
     finally { setBusy(false); }
   };
@@ -267,7 +296,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
   }, [mode, gamble]);
 
   const decide = (take: boolean, timedOut = false) => {
-    if (!gamble || decidedRef.current || (mode !== 'practice' && mode !== 'daily')) return;
+    if (!gamble || decidedRef.current || inCountdown || (mode !== 'practice' && mode !== 'daily')) return;
     decidedRef.current = true;
     const n = hand + 1;
     const e = edgeBp(gamble);
@@ -487,8 +516,23 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
           {/* Realtime two-track chart */}
           {series.ev.length > 1 && <TrackChart ev={series.ev} cash={series.cash} />}
 
+          {/* Get ready: 5-second countdown before the first hand. */}
+          {inCountdown && (
+            <div className="card col" style={{ gap: 8, alignItems: 'center', padding: '32px 16px' }}>
+              <span style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--fg-3)' }}>
+                Get ready — 3 seconds per hand once the clock starts
+              </span>
+              <span className="mono" style={{ fontSize: 56, fontWeight: 700, lineHeight: 1, color: 'var(--burn-ink)' }}>
+                {countdown}
+              </span>
+              <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
+                T / → take · D / ← decline
+              </span>
+            </div>
+          )}
+
           {/* Arena */}
-          {gamble && (
+          {!inCountdown && gamble && (
             <div className="card col" style={{ gap: 14, textAlign: 'center' }}>
               {/* Burndown: 3 s, expiry declines. */}
               <div style={{ height: 6, borderRadius: 3, background: 'var(--bg-alt)', overflow: 'hidden' }}>
@@ -564,7 +608,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
           </span>
           <div className="row" style={{ gap: 8 }}>
             <Btn variant="primary" onClick={() => { setMode('menu'); refreshMenu(); }}>See today's board</Btn>
-            <Btn variant="secondary" onClick={startPractice}>Keep practicing</Btn>
+            <Btn variant="secondary" onClick={launchPractice}>Keep practicing</Btn>
           </div>
         </div>
       )}
@@ -604,6 +648,50 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
           </div>
         );
       })()}
+
+      {/* ── How to play (shown on every Practice entry) ── */}
+      {showHowTo && (
+        <div onClick={() => setShowHowTo(false)} style={{
+          position: 'fixed', inset: 0, zIndex: 60, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', padding: 16, background: 'color-mix(in srgb, var(--char-950) 62%, transparent)',
+        }}>
+          <div className="card col" onClick={(e) => e.stopPropagation()} style={{
+            maxWidth: 440, width: '100%', gap: 12, background: 'var(--surface)',
+            border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)',
+          }}>
+            <span className="row" style={{ gap: 8 }}>
+              <Icon name="clover" size={16} stroke="var(--burn-ink)" />
+              <b>How to play</b>
+            </span>
+            <div className="col" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.55 }}>
+              <span>
+                Each hand offers a wager: <b style={{ color: 'var(--fg)' }}>risk</b> some dollars for a chance
+                at a <b style={{ color: 'var(--sprout-ink)' }}>reward</b> at the stated odds.
+                Taking it is worth <span className="mono">P·reward − (1−P)·risk</span>; declining
+                is always exactly $0.
+              </span>
+              <span>
+                <b style={{ color: 'var(--fg)' }}>You have 3 seconds per hand.</b> If the clock runs out,
+                you decline — hesitation is a decision too.
+              </span>
+              <span>
+                Your <b style={{ color: SKILL_COLOR }}>skill track</b> earns each decision's EV the moment
+                you choose; your <b style={{ color: LUCK_COLOR }}>luck track</b> is the actual cash. Only
+                skill ranks — a good decision that loses is still a good decision.
+              </span>
+              <span className="mono" style={{ fontSize: 11.5 }}>
+                keyboard: T / → take · D / ← decline
+              </span>
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              <Btn variant="primary" onClick={launchPractice} style={{ flex: 1, minHeight: 44 }}>
+                I'm ready
+              </Btn>
+              <Btn variant="ghost" onClick={() => setShowHowTo(false)}>Not now</Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
