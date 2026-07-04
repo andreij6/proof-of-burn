@@ -37,11 +37,13 @@ describe('scenario & scenery', () => {
     const a = buildDecor(42, 1000, 1000);
     const b = buildDecor(42, 1000, 1000);
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
-    expect(a.trees.length).toBe(70);
-    expect(a.houses.length).toBe(16);
+    expect(a.trees.length).toBe(110);
+    expect(a.houses.length).toBe(22);
+    expect(a.rocks.length).toBe(30);
     expect(a.clouds.length).toBe(12);
     for (const t of a.trees) expect(Math.hypot(t.x - 1000, t.z - 1000)).toBeGreaterThan(60);
     for (const h of a.houses) expect(Math.hypot(h.x - 1000, h.z - 1000)).toBeGreaterThan(60);
+    for (const r of a.rocks) expect(Math.hypot(r.x - 1000, r.z - 1000)).toBeGreaterThan(60);
     expect(JSON.stringify(buildDecor(43, 1000, 1000))).not.toBe(JSON.stringify(a));
   });
 });

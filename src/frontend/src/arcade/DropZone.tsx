@@ -73,6 +73,7 @@ export function planePath(dir: number): { sx: number; sz: number; hx: number; hz
 export interface Decor {
   trees: { x: number; z: number; h: number; r: number }[];
   houses: { x: number; z: number; w: number; d: number; h: number; rot: number }[];
+  rocks: { x: number; z: number; r: number }[];
   clouds: { x: number; z: number; y: number; s: number }[];
 }
 
@@ -81,20 +82,25 @@ export function buildDecor(seed: number, targetX: number, targetZ: number): Deco
   const rand = mulberry(seed);
   const clear = (x: number, z: number) => Math.hypot(x - targetX, z - targetZ) > 60;
   const trees: Decor['trees'] = [];
-  while (trees.length < 70) {
+  while (trees.length < 110) {
     const x = rand() * MAP_M, z = rand() * MAP_M;
     if (clear(x, z)) trees.push({ x, z, h: 9 + rand() * 8, r: 4 + rand() * 4 });
   }
   const houses: Decor['houses'] = [];
-  while (houses.length < 16) {
+  while (houses.length < 22) {
     const x = MAP_M * 0.1 + rand() * MAP_M * 0.8, z = MAP_M * 0.1 + rand() * MAP_M * 0.8;
     if (clear(x, z)) houses.push({ x, z, w: 12 + rand() * 10, d: 10 + rand() * 8, h: 6 + rand() * 4, rot: rand() * Math.PI });
+  }
+  const rocks: Decor['rocks'] = [];
+  while (rocks.length < 30) {
+    const x = rand() * MAP_M, z = rand() * MAP_M;
+    if (clear(x, z)) rocks.push({ x, z, r: 1.5 + rand() * 3 });
   }
   const clouds: Decor['clouds'] = [];
   for (let i = 0; i < 12; i++) {
     clouds.push({ x: rand() * MAP_M, z: rand() * MAP_M, y: 350 + rand() * 400, s: 40 + rand() * 70 });
   }
-  return { trees, houses, clouds };
+  return { trees, houses, rocks, clouds };
 }
 
 // ── Physics ──
@@ -165,9 +171,10 @@ function project(cam: Cam, wx: number, wy: number, wz: number): { sx: number; sy
   const cy = Math.cos(cam.yaw), sy_ = Math.sin(cam.yaw);
   const rx = dx * cy - dz * sy_;
   const rz = dx * sy_ + dz * cy;
+  // Pitch DOWN by cam.pitch: a point below-forward maps to screen center.
   const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
-  const ry2 = dy * cp - rz * sp;
-  const rz2 = dy * sp + rz * cp;
+  const ry2 = dy * cp + rz * sp;
+  const rz2 = rz * cp - dy * sp;
   if (rz2 < 2) return null;
   return { sx: cam.w / 2 + (cam.f * rx) / rz2, sy: cam.h / 2 - (cam.f * ry2) / rz2, d: rz2 };
 }
@@ -356,19 +363,14 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  // ── Renderer ──
+  // ── Renderer: grayscale ink — tonal fills, contact shadows, hatching ──
+  const INK = '#1a1a1a';
   const draw = (ctx: CanvasRenderingContext2D, W: number, H: number, game: NonNullable<typeof g.current>) => {
     const tick = Math.floor(game.t * 5); // line-boil clock
-    ctx.fillStyle = '#f6f4ef'; // paper
-    ctx.fillRect(0, 0, W, H);
-    ctx.strokeStyle = '#141414';
-    ctx.lineCap = 'round';
-
     const path = planePath(game.scenario.planeDir);
     const yaw = Math.atan2(path.hx, path.hz);
     const inPlane = game.phase === 'plane';
     const p = game.fall;
-    // Chase camera: above + behind, pitched down harder as you fall.
     const pitch = inPlane ? 0.55 : Math.min(1.15, 0.55 + (1 - p.y / PLANE_ALT) * 0.35);
     const back = inPlane ? 90 : 60;
     const cam: Cam = {
@@ -376,88 +378,180 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
       yaw, pitch, f: H * 0.9, w: W, h: H,
     };
 
-    // Horizon wash + ground edge.
-    const horizon = project(cam, p.x + path.hx * 4000, 0, p.z + path.hz * 4000);
-    if (horizon) {
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, W, Math.max(0, horizon.sy));
-      ctx.fillStyle = '#f6f4ef';
-      ctx.fillRect(0, Math.max(0, horizon.sy), W, H);
-      ctx.strokeStyle = '#141414'; ctx.lineWidth = 1.2;
-      ctx.beginPath(); ctx.moveTo(0, horizon.sy); ctx.lineTo(W, horizon.sy); ctx.stroke();
-    }
+    // Sky gradient → haze band → ground tone.
+    const horizon = project(cam, cam.x + path.hx * 6000, 0, cam.z + path.hz * 6000);
+    const hy = Math.max(0, Math.min(H, horizon ? horizon.sy : 0));
+    const sky = ctx.createLinearGradient(0, 0, 0, Math.max(1, hy));
+    sky.addColorStop(0, '#c9c9c9');
+    sky.addColorStop(1, '#f3f3f3');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, hy);
+    const ground = ctx.createLinearGradient(0, hy, 0, H);
+    ground.addColorStop(0, '#dcdcd8');
+    ground.addColorStop(1, '#eceae4');
+    ctx.fillStyle = ground;
+    ctx.fillRect(0, hy, W, H - hy);
+    ctx.strokeStyle = '#8a8a8a';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(0, hy); ctx.lineTo(W, hy); ctx.stroke();
+    // Distant haze band under the horizon.
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillRect(0, hy, W, 14);
+    ctx.strokeStyle = INK;
+    ctx.lineCap = 'round';
 
     // Painter's queue for world objects.
     const q: { d: number; draw: () => void }[] = [];
+    const groundShadow = (wx: number, wz: number, r: number, d: number) => {
+      q.push({ d: d + 0.5, draw: () => {
+        const c0 = project(cam, wx, 0, wz);
+        const c1 = project(cam, wx + r, 0, wz);
+        if (!c0 || !c1) return;
+        const rr = Math.abs(c1.sx - c0.sx);
+        ctx.fillStyle = 'rgba(70,70,70,0.25)';
+        ctx.beginPath(); ctx.ellipse(c0.sx + rr * 0.35, c0.sy, rr, rr * 0.32, 0, 0, Math.PI * 2); ctx.fill();
+      }});
+    };
 
-    // Ground hatching patches (sparse fields).
+    // Field patches: tonal fills + hatch (the countryside quilt).
     const fr = mulberry(game.scenario.decorSeed ^ 0x5eed);
-    for (let i = 0; i < 14; i++) {
-      const fx = fr() * MAP_M, fz = fr() * MAP_M, fs = 90 + fr() * 160, ang = fr() * Math.PI;
+    for (let i = 0; i < 22; i++) {
+      const fx = fr() * MAP_M, fz = fr() * MAP_M, fs = 90 + fr() * 200, ang = fr() * Math.PI;
+      const tone = 0.06 + fr() * 0.1;
       const c = project(cam, fx, 0, fz);
       if (!c) continue;
-      q.push({ d: c.d, draw: () => {
-        ctx.save(); ctx.globalAlpha = 0.35; ctx.lineWidth = 0.8;
-        for (let l = -3; l <= 3; l++) {
-          const ox = Math.cos(ang) * l * fs * 0.14, oz = Math.sin(ang) * l * fs * 0.14;
-          const a = project(cam, fx + ox - Math.sin(ang) * fs / 2, 0, fz + oz + Math.cos(ang) * fs / 2);
-          const b = project(cam, fx + ox + Math.sin(ang) * fs / 2, 0, fz + oz - Math.cos(ang) * fs / 2);
-          if (a && b) { ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke(); }
+      q.push({ d: c.d + 2, draw: () => {
+        const cs = Math.cos(ang), sn = Math.sin(ang);
+        const pts = [[-1, -0.7], [1, -0.7], [1, 0.7], [-1, 0.7]].map(([u, v]) =>
+          project(cam, fx + (u * cs - v * sn) * fs, 0, fz + (u * sn + v * cs) * fs));
+        if (pts.some((pt) => !pt)) return;
+        const P = pts as NonNullable<(typeof pts)[0]>[];
+        ctx.beginPath();
+        P.forEach((pt, k) => (k === 0 ? ctx.moveTo(pt.sx, pt.sy) : ctx.lineTo(pt.sx, pt.sy)));
+        ctx.closePath();
+        ctx.fillStyle = `rgba(60,60,55,${tone})`;
+        ctx.fill();
+        ctx.save(); ctx.clip();
+        ctx.strokeStyle = 'rgba(60,60,60,0.4)'; ctx.lineWidth = 0.8;
+        const minx = Math.min(...P.map((t) => t.sx)), maxx = Math.max(...P.map((t) => t.sx));
+        const miny = Math.min(...P.map((t) => t.sy)), maxy = Math.max(...P.map((t) => t.sy));
+        for (let x = minx - (maxy - miny); x < maxx; x += 6) {
+          ctx.beginPath(); ctx.moveTo(x, miny); ctx.lineTo(x + (maxy - miny), maxy); ctx.stroke();
         }
         ctx.restore();
+        ctx.strokeStyle = INK;
       }});
     }
 
-    // Target rings + flag.
+    // Two dirt roads crossing the map (gray double strokes).
+    for (let r = 0; r < 2; r++) {
+      const off = MAP_M * (0.3 + r * 0.4);
+      const c = project(cam, off, 0, MAP_M / 2);
+      if (!c) continue;
+      q.push({ d: c.d + 1.5, draw: () => {
+        ctx.strokeStyle = '#9a9a94'; ctx.lineWidth = r === 0 ? 5 : 4; ctx.globalAlpha = 0.75;
+        ctx.beginPath();
+        for (let seg = 0; seg <= 20; seg++) {
+          const tt = seg / 20;
+          const wig = Math.sin(tt * 6 + r * 3) * 60;
+          const pt = r === 0
+            ? project(cam, off + wig, 0, tt * MAP_M)
+            : project(cam, tt * MAP_M, 0, off + wig);
+          if (!pt) continue;
+          seg === 0 ? ctx.moveTo(pt.sx, pt.sy) : ctx.lineTo(pt.sx, pt.sy);
+        }
+        ctx.stroke();
+        ctx.globalAlpha = 1; ctx.strokeStyle = INK;
+      }});
+    }
+
+    // Target: filled alternating bullseye + flag.
     {
       const sc = game.scenario;
       const c = project(cam, sc.targetX, 0, sc.targetZ);
       if (c) q.push({ d: c.d, draw: () => {
-        TARGET_RINGS_M.forEach((r, ri) => {
+        const ring = (r: number, fill: string) => {
           ctx.beginPath();
-          for (let a = 0; a <= 32; a++) {
-            const th = (a / 32) * Math.PI * 2;
+          for (let a = 0; a <= 36; a++) {
+            const th = (a / 36) * Math.PI * 2;
             const pt = project(cam, sc.targetX + Math.cos(th) * r, 0, sc.targetZ + Math.sin(th) * r);
-            if (pt) { const j = boil(ri * 40 + a, tick); a === 0 ? ctx.moveTo(pt.sx + j, pt.sy) : ctx.lineTo(pt.sx + j, pt.sy); }
+            if (pt) { const j = boil(r * 3 + a, tick) * 0.6; a === 0 ? ctx.moveTo(pt.sx + j, pt.sy) : ctx.lineTo(pt.sx + j, pt.sy); }
           }
-          ctx.lineWidth = ri === 0 ? 2.4 : 1.4;
-          ctx.stroke();
-        });
-        const top = project(cam, sc.targetX, 14, sc.targetZ);
+          ctx.closePath();
+          ctx.fillStyle = fill; ctx.fill();
+          ctx.strokeStyle = INK; ctx.lineWidth = 1.8; ctx.stroke();
+        };
+        ring(TARGET_RINGS_M[2], '#b9b9b3');
+        ring(TARGET_RINGS_M[1], '#f7f7f4');
+        ring(TARGET_RINGS_M[0], '#3a3a3a');
+        const top = project(cam, sc.targetX, 16, sc.targetZ);
         if (top) {
-          ctx.lineWidth = 2;
+          ctx.lineWidth = 2.4;
           ctx.beginPath(); ctx.moveTo(c.sx, c.sy); ctx.lineTo(top.sx, top.sy); ctx.stroke();
-          ctx.fillStyle = '#141414';
-          ctx.beginPath(); ctx.moveTo(top.sx, top.sy); ctx.lineTo(top.sx + 18, top.sy + 5); ctx.lineTo(top.sx, top.sy + 10); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = '#2c2c2c';
+          ctx.beginPath(); ctx.moveTo(top.sx, top.sy); ctx.lineTo(top.sx + 22, top.sy + 6); ctx.lineTo(top.sx, top.sy + 12); ctx.closePath(); ctx.fill();
         }
       }});
     }
 
-    // Trees: trunk + scribbled canopy.
-    game.decor.trees.forEach((t, i) => {
-      const base = project(cam, t.x, 0, t.z);
-      if (!base || base.d > 1600) return;
+    // Rocks: small gray lumps.
+    game.decor.rocks.forEach((rk, i) => {
+      const base = project(cam, rk.x, 0, rk.z);
+      if (!base || base.d > 1200) return;
       q.push({ d: base.d, draw: () => {
-        const top = project(cam, t.x, t.h, t.z);
-        if (!top) return;
-        ctx.lineWidth = 1.6;
-        ctx.beginPath(); ctx.moveTo(base.sx, base.sy); ctx.lineTo(top.sx, top.sy); ctx.stroke();
-        const rr = (cam.f * t.r) / base.d;
+        const rr = Math.max(1.5, (cam.f * rk.r) / base.d);
+        ctx.fillStyle = '#a8a8a2';
         ctx.beginPath();
-        for (let a = 0; a <= 14; a++) {
-          const th = (a / 14) * Math.PI * 2;
-          const j = boil(i * 17 + a, tick);
-          const px = top.sx + Math.cos(th) * (rr + j), py = top.sy + Math.sin(th) * (rr * 0.8 + j);
+        for (let a = 0; a <= 8; a++) {
+          const th = (a / 8) * Math.PI * 2;
+          const px = base.sx + Math.cos(th) * rr * (1 + 0.3 * Math.sin(a * 3 + i));
+          const py = base.sy + Math.sin(th) * rr * 0.55;
           a === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
         }
-        ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.lineWidth = 1.4; ctx.stroke();
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = '#6d6d6d'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.strokeStyle = INK;
       }});
     });
 
-    // Houses: hatched-roof ink boxes.
+    // Trees: contact shadow, dark trunk, tonal scribble canopy.
+    game.decor.trees.forEach((t, i) => {
+      const base = project(cam, t.x, 0, t.z);
+      if (!base || base.d > 1800) return;
+      groundShadow(t.x, t.z, t.r * 1.1, base.d);
+      q.push({ d: base.d, draw: () => {
+        const top = project(cam, t.x, t.h, t.z);
+        if (!top) return;
+        ctx.strokeStyle = '#3c3c3c'; ctx.lineWidth = Math.max(1.4, (cam.f * 0.8) / base.d);
+        ctx.beginPath(); ctx.moveTo(base.sx, base.sy); ctx.lineTo(top.sx, top.sy); ctx.stroke();
+        const rr = Math.max(2.5, (cam.f * t.r) / base.d);
+        ctx.beginPath();
+        for (let a = 0; a <= 16; a++) {
+          const th = (a / 16) * Math.PI * 2;
+          const j = boil(i * 17 + a, tick);
+          const bump = 1 + 0.18 * Math.sin(a * 2.3 + i);
+          const px = top.sx + Math.cos(th) * (rr * bump + j), py = top.sy + Math.sin(th) * (rr * 0.85 * bump + j);
+          a === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fillStyle = i % 3 === 0 ? '#c2c2ba' : '#d4d4cc';
+        ctx.fill();
+        ctx.strokeStyle = '#2e2e2e'; ctx.lineWidth = 1.5; ctx.stroke();
+        // Canopy hatch scribbles.
+        ctx.strokeStyle = 'rgba(50,50,50,0.35)'; ctx.lineWidth = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(top.sx - rr * 0.5, top.sy + rr * 0.2); ctx.lineTo(top.sx + rr * 0.1, top.sy - rr * 0.4);
+        ctx.moveTo(top.sx - rr * 0.1, top.sy + rr * 0.5); ctx.lineTo(top.sx + rr * 0.5, top.sy - rr * 0.1);
+        ctx.stroke();
+        ctx.strokeStyle = INK;
+      }});
+    });
+
+    // Houses: contact shadow, two-tone walls, dark hatched roof.
     game.decor.houses.forEach((hs, i) => {
       const base = project(cam, hs.x, 0, hs.z);
-      if (!base || base.d > 1600) return;
+      if (!base || base.d > 1800) return;
+      groundShadow(hs.x, hs.z, Math.max(hs.w, hs.d) * 0.8, base.d);
       q.push({ d: base.d, draw: () => {
         const cs = Math.cos(hs.rot), sn = Math.sin(hs.rot);
         const cnr = (dx: number, dz: number, y: number) =>
@@ -465,33 +559,48 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
         const w2 = hs.w / 2, d2 = hs.d / 2;
         const pts = [cnr(-w2, -d2, 0), cnr(w2, -d2, 0), cnr(w2, d2, 0), cnr(-w2, d2, 0),
                      cnr(-w2, -d2, hs.h), cnr(w2, -d2, hs.h), cnr(w2, d2, hs.h), cnr(-w2, d2, hs.h),
-                     cnr(0, -d2, hs.h + 4), cnr(0, d2, hs.h + 4)];
+                     cnr(0, -d2, hs.h + 4.5), cnr(0, d2, hs.h + 4.5)];
         if (pts.some((pt) => !pt)) return;
         const P = pts as NonNullable<(typeof pts)[0]>[];
-        ctx.fillStyle = '#ffffff'; ctx.lineWidth = 1.5;
-        const poly = (ids: number[], hatch = false) => {
+        const poly = (ids: number[], fill: string, hatch = false) => {
           ctx.beginPath();
           ids.forEach((id, k) => {
-            const j = boil(i * 31 + id, tick);
+            const j = boil(i * 31 + id, tick) * 0.7;
             k === 0 ? ctx.moveTo(P[id].sx + j, P[id].sy) : ctx.lineTo(P[id].sx + j, P[id].sy);
           });
-          ctx.closePath(); ctx.fill(); ctx.stroke();
+          ctx.closePath();
+          ctx.fillStyle = fill; ctx.fill();
+          ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 1.5; ctx.stroke();
           if (hatch) {
-            ctx.save(); ctx.clip(); ctx.lineWidth = 0.7; ctx.globalAlpha = 0.5;
+            ctx.save(); ctx.clip();
+            ctx.strokeStyle = 'rgba(30,30,30,0.55)'; ctx.lineWidth = 0.8;
             const minx = Math.min(...ids.map((id) => P[id].sx)), maxx = Math.max(...ids.map((id) => P[id].sx));
             const miny = Math.min(...ids.map((id) => P[id].sy)), maxy = Math.max(...ids.map((id) => P[id].sy));
-            for (let x = minx - (maxy - miny); x < maxx; x += 5) {
+            for (let x = minx - (maxy - miny); x < maxx; x += 4.5) {
               ctx.beginPath(); ctx.moveTo(x, miny); ctx.lineTo(x + (maxy - miny), maxy); ctx.stroke();
             }
             ctx.restore();
           }
         };
-        poly([0, 1, 5, 4]); poly([1, 2, 6, 5]); // walls
-        poly([4, 5, 8], true); poly([5, 6, 9, 8], true); // roof
+        poly([0, 1, 5, 4], '#e8e8e2');           // lit wall
+        poly([1, 2, 6, 5], '#c4c4bc');           // shaded wall
+        poly([4, 5, 8], '#8f8f88', true);        // gable
+        poly([5, 6, 9, 8], '#7c7c74', true);     // roof plane
+        // Door + window on the lit wall.
+        const mid = (a: number, b: number, f2: number) => ({ sx: P[a].sx + (P[b].sx - P[a].sx) * f2, sy: P[a].sy + (P[b].sy - P[a].sy) * f2 });
+        const dpos = mid(0, 1, 0.28), dtop = mid(4, 5, 0.28);
+        ctx.fillStyle = '#3a3a3a';
+        ctx.fillRect(dpos.sx - 2, dpos.sy - (dpos.sy - dtop.sy) * 0.55, 4.5, (dpos.sy - dtop.sy) * 0.55);
+        const wpos = mid(0, 1, 0.68), wtop = mid(4, 5, 0.68);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(wpos.sx - 2.5, wpos.sy - (wpos.sy - wtop.sy) * 0.7, 5, (wpos.sy - wtop.sy) * 0.34);
+        ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 0.8;
+        ctx.strokeRect(wpos.sx - 2.5, wpos.sy - (wpos.sy - wtop.sy) * 0.7, 5, (wpos.sy - wtop.sy) * 0.34);
+        ctx.strokeStyle = INK;
       }});
     });
 
-    // Clouds: bumpy ink billboards (only from above or near altitude).
+    // Clouds: soft gray fills with darker underside line.
     game.decor.clouds.forEach((cl, i) => {
       const c = project(cam, cl.x, cl.y, cl.z);
       if (!c) return;
@@ -499,55 +608,113 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
         const r = (cam.f * cl.s) / c.d;
         if (r < 3) return;
         ctx.beginPath();
-        for (let a = 0; a <= 16; a++) {
-          const th = (a / 16) * Math.PI * 2;
-          const bump = 1 + 0.24 * Math.sin(a * 2.7 + i);
+        for (let a = 0; a <= 18; a++) {
+          const th = (a / 18) * Math.PI * 2;
+          const bump = 1 + 0.26 * Math.sin(a * 2.7 + i);
           const j = boil(i * 23 + a, tick);
-          const px = c.sx + Math.cos(th) * (r * bump + j), py = c.sy + Math.sin(th) * (r * 0.45 * bump + j);
+          const px = c.sx + Math.cos(th) * (r * bump + j), py = c.sy + Math.sin(th) * (r * 0.42 * bump + j);
           a === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
         }
         ctx.closePath();
-        ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.92; ctx.fill(); ctx.globalAlpha = 1;
-        ctx.lineWidth = 1.3; ctx.stroke();
+        ctx.fillStyle = 'rgba(246,246,246,0.94)'; ctx.fill();
+        ctx.strokeStyle = '#909090'; ctx.lineWidth = 1.4; ctx.stroke();
+        ctx.strokeStyle = '#787878'; ctx.lineWidth = 1.8;
+        ctx.beginPath(); ctx.moveTo(c.sx - r * 0.7, c.sy + r * 0.34); ctx.quadraticCurveTo(c.sx, c.sy + r * 0.52, c.sx + r * 0.7, c.sy + r * 0.34); ctx.stroke();
+        ctx.strokeStyle = INK;
       }});
     });
 
     q.sort((a, b) => b.d - a.d).forEach((o) => o.draw());
 
-    // ── The plane (during approach) & the jumper ──
+    // ── The plane / the jumper (drawn last — always on top) ──
     if (inPlane) {
-      const c = project(cam, p.x, PLANE_ALT, p.z)!;
-      ctx.lineWidth = 2.2; ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.ellipse(c.sx, c.sy, 34, 8, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(c.sx - 6, c.sy); ctx.lineTo(c.sx - 26, c.sy - 14); ctx.lineTo(c.sx - 12, c.sy); ctx.closePath(); ctx.fill(); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(c.sx + 28, c.sy - 2); ctx.lineTo(c.sx + 38, c.sy - 12); ctx.lineTo(c.sx + 30, c.sy - 2); ctx.stroke();
+      const c = project(cam, p.x, PLANE_ALT, p.z);
+      if (c) {
+        ctx.save();
+        ctx.translate(c.sx, c.sy);
+        ctx.strokeStyle = INK; ctx.lineWidth = 2.2;
+        // Fuselage.
+        ctx.fillStyle = '#4a4a4a';
+        ctx.beginPath(); ctx.ellipse(0, 0, 52, 11, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        // Nose cone highlight.
+        ctx.fillStyle = '#7a7a7a';
+        ctx.beginPath(); ctx.ellipse(40, 0, 12, 8, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        // Tail fin.
+        ctx.fillStyle = '#3a3a3a';
+        ctx.beginPath(); ctx.moveTo(-40, -4); ctx.lineTo(-58, -26); ctx.lineTo(-44, -4); ctx.closePath(); ctx.fill(); ctx.stroke();
+        // Wing (near side, swept).
+        ctx.fillStyle = '#5c5c5c';
+        ctx.beginPath(); ctx.moveTo(4, 2); ctx.lineTo(-18, 30); ctx.lineTo(-34, 30); ctx.lineTo(-10, 2); ctx.closePath(); ctx.fill(); ctx.stroke();
+        // Windows.
+        ctx.fillStyle = '#f2f2f2';
+        for (let wdx = -22; wdx <= 26; wdx += 12) {
+          ctx.beginPath(); ctx.arc(wdx, -3.5, 2.4, 0, Math.PI * 2); ctx.fill();
+        }
+        // Open jump door.
+        ctx.fillStyle = '#111';
+        ctx.fillRect(-8, 3, 10, 7);
+        // Prop-wash speed dashes behind.
+        ctx.strokeStyle = '#8c8c8c'; ctx.lineWidth = 1.6;
+        for (let l = 0; l < 3; l++) {
+          ctx.beginPath(); ctx.moveTo(-62 - l * 12, -4 + l * 5); ctx.lineTo(-78 - l * 12, -4 + l * 5); ctx.stroke();
+        }
+        ctx.restore();
+        ctx.strokeStyle = INK;
+      }
     } else {
       const c = project(cam, p.x, p.y, p.z);
+      // Landing marker: dashed drop-line + ground ring right below the player.
+      const gpt = project(cam, p.x, 0, p.z);
+      if (c && gpt && game.phase === 'fall') {
+        ctx.save();
+        ctx.strokeStyle = '#5a5a5a'; ctx.lineWidth = 1.4; ctx.setLineDash([6, 7]);
+        ctx.beginPath(); ctx.moveTo(c.sx, c.sy + 24); ctx.lineTo(gpt.sx, gpt.sy); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.ellipse(gpt.sx, gpt.sy, 9, 3.4, 0, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
       if (c) {
-        ctx.lineWidth = 2;
         const chute = p.chuteAt !== null;
-        if (chute) {
-          ctx.beginPath(); ctx.arc(c.sx, c.sy - 26, 20, Math.PI, 0); ctx.closePath();
-          ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(c.sx - 18, c.sy - 24); ctx.lineTo(c.sx, c.sy - 4);
-          ctx.moveTo(c.sx + 18, c.sy - 24); ctx.lineTo(c.sx, c.sy - 4); ctx.stroke();
-        }
-        // Jumper: head + spread limbs (tucked in a dive).
         const dive = game.keys['shift'] && !chute;
-        ctx.beginPath(); ctx.arc(c.sx, c.sy - (chute ? 0 : 4), 3.4, 0, Math.PI * 2); ctx.fillStyle = '#141414'; ctx.fill();
+        ctx.save();
+        ctx.translate(c.sx, c.sy);
+        ctx.strokeStyle = INK;
+        if (chute) {
+          // Canopy: gray fill, rib lines, shroud lines.
+          ctx.lineWidth = 2.2;
+          ctx.fillStyle = '#c8c8c0';
+          ctx.beginPath(); ctx.arc(0, -34, 27, Math.PI, 0); ctx.closePath(); ctx.fill(); ctx.stroke();
+          ctx.lineWidth = 1.2; ctx.strokeStyle = '#5a5a5a';
+          for (let rb = -1; rb <= 1; rb++) {
+            ctx.beginPath(); ctx.moveTo(rb * 13, -34); ctx.quadraticCurveTo(rb * 13, -52, 0, -60.5); ctx.stroke();
+          }
+          ctx.strokeStyle = INK; ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.moveTo(-25, -31); ctx.lineTo(0, -2);
+          ctx.moveTo(25, -31); ctx.lineTo(0, -2);
+          ctx.moveTo(-9, -34); ctx.lineTo(0, -2);
+          ctx.moveTo(9, -34); ctx.lineTo(0, -2);
+          ctx.stroke();
+        }
+        // Jumper: filled body, big enough to READ.
+        ctx.fillStyle = '#222';
+        ctx.beginPath(); ctx.arc(0, chute ? 2 : -6, 5, 0, Math.PI * 2); ctx.fill(); // head
+        ctx.lineWidth = 3.4;
         ctx.beginPath();
-        ctx.moveTo(c.sx, c.sy); ctx.lineTo(c.sx, c.sy + 9);
-        const spread = dive ? 3 : 8;
-        ctx.moveTo(c.sx - spread, c.sy + (dive ? 12 : 3)); ctx.lineTo(c.sx, c.sy + 4); ctx.lineTo(c.sx + spread, c.sy + (dive ? 12 : 3));
-        ctx.moveTo(c.sx - spread, c.sy + 15); ctx.lineTo(c.sx, c.sy + 9); ctx.lineTo(c.sx + spread, c.sy + 15);
+        ctx.moveTo(0, chute ? 6 : -2); ctx.lineTo(0, chute ? 20 : 12); // torso
+        const spread = dive ? 4 : 12;
+        const yArm = chute ? 9 : 1, yHand = chute ? -1 : (dive ? 13 : -6);
+        ctx.moveTo(-spread, yHand); ctx.lineTo(0, yArm); ctx.lineTo(spread, yHand); // arms
+        const yHip = chute ? 20 : 12, yFoot = chute ? 32 : (dive ? 26 : 20);
+        ctx.moveTo(-spread * 0.8, yFoot); ctx.lineTo(0, yHip); ctx.lineTo(spread * 0.8, yFoot); // legs
         ctx.stroke();
+        ctx.restore();
         // Dive speed lines — the anime touch.
         if (dive) {
-          ctx.save(); ctx.globalAlpha = 0.5; ctx.lineWidth = 1.2;
-          for (let i = 0; i < 10; i++) {
-            const a = (i / 10) * Math.PI * 2 + boil(i, tick) * 0.2;
-            const r1 = Math.min(W, H) * 0.42, r2 = r1 + 26 + boil(i + 50, tick) * 6;
+          ctx.save(); ctx.globalAlpha = 0.45; ctx.lineWidth = 1.6; ctx.strokeStyle = '#3a3a3a';
+          for (let i = 0; i < 14; i++) {
+            const a = (i / 14) * Math.PI * 2 + boil(i, tick) * 0.2;
+            const r1 = Math.min(W, H) * 0.38, r2 = r1 + 34 + boil(i + 50, tick) * 8;
             ctx.beginPath();
             ctx.moveTo(W / 2 + Math.cos(a) * r1, H / 2 + Math.sin(a) * r1);
             ctx.lineTo(W / 2 + Math.cos(a) * r2, H / 2 + Math.sin(a) * r2);
@@ -559,36 +726,47 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
     }
 
     // ── HUD ──
-    ctx.fillStyle = '#141414';
+    ctx.fillStyle = INK;
     ctx.font = '600 13px ui-monospace, monospace';
     const dist = distanceToTarget(p.x, p.z, game.scenario);
     if (inPlane) {
       ctx.textAlign = 'center';
       const pulse = 0.6 + 0.4 * Math.sin(game.t * 5);
       ctx.globalAlpha = pulse;
-      ctx.font = '700 22px ui-monospace, monospace';
-      ctx.fillText('press J to JUMP', W / 2, H * 0.2);
+      ctx.font = '700 24px ui-monospace, monospace';
+      ctx.fillText('press J to JUMP', W / 2, H * 0.14);
       ctx.globalAlpha = 1;
       ctx.font = '600 13px ui-monospace, monospace';
-      ctx.fillText(`target ${Math.round(dist)} m ${dist < 320 ? '— NOW!' : ''}`, W / 2, H * 0.2 + 22);
+      ctx.fillText(`target ${Math.round(dist)} m ${dist < 320 ? '— NOW!' : ''}`, W / 2, H * 0.14 + 22);
       ctx.textAlign = 'left';
     } else {
-      ctx.fillText(`ALT ${Math.max(0, Math.round(p.y))} m`, 12, 22);
-      ctx.fillText(`SINK ${Math.round(p.vy)} m/s`, 12, 40);
-      ctx.fillText(`TARGET ${Math.round(dist)} m`, 12, 58);
-      ctx.fillText(`T ${((game.t - game.jumpAt)).toFixed(1)} s`, 12, 76);
+      // HUD plate so the numbers read over any terrain.
+      ctx.fillStyle = 'rgba(255,255,255,0.72)';
+      ctx.fillRect(8, 8, 128, 76);
+      ctx.strokeStyle = '#8a8a8a'; ctx.lineWidth = 1; ctx.strokeRect(8, 8, 128, 76);
+      ctx.fillStyle = INK;
+      ctx.fillText(`ALT    ${Math.max(0, Math.round(p.y))} m`, 14, 24);
+      ctx.fillText(`SINK   ${Math.round(p.vy)} m/s`, 14, 42);
+      ctx.fillText(`TARGET ${Math.round(dist)} m`, 14, 60);
+      ctx.fillText(`T      ${(game.t - game.jumpAt).toFixed(1)} s`, 14, 78);
       // Altimeter with the 80 m floor marked.
       const ax = W - 26, ah = H * 0.6, ay = H * 0.2;
-      ctx.lineWidth = 1.4;
+      ctx.fillStyle = 'rgba(255,255,255,0.72)';
+      ctx.fillRect(ax - 2, ay - 2, 14, ah + 4);
+      ctx.strokeStyle = INK; ctx.lineWidth = 1.4;
       ctx.strokeRect(ax, ay, 10, ah);
       const floorY = ay + ah * (1 - SAFE_DEPLOY_ALT / PLANE_ALT);
-      ctx.beginPath(); ctx.moveTo(ax - 4, floorY); ctx.lineTo(ax + 14, floorY); ctx.stroke();
-      ctx.fillRect(ax, ay + ah * (1 - Math.max(0, p.y) / PLANE_ALT) - 2, 10, 4);
+      ctx.strokeStyle = '#555';
+      ctx.beginPath(); ctx.moveTo(ax - 5, floorY); ctx.lineTo(ax + 15, floorY); ctx.stroke();
+      ctx.strokeStyle = INK;
+      ctx.fillStyle = p.chuteAt !== null ? '#777' : INK;
+      ctx.fillRect(ax, ay + ah * (1 - Math.max(0, p.y) / PLANE_ALT) - 2.5, 10, 5);
       if (p.chuteAt === null && p.y < SAFE_DEPLOY_ALT * 2.2 && game.phase === 'fall') {
         ctx.textAlign = 'center';
         ctx.globalAlpha = 0.65 + 0.35 * Math.sin(game.t * 9);
-        ctx.font = '700 20px ui-monospace, monospace';
-        ctx.fillText(p.y >= SAFE_DEPLOY_ALT ? 'SPACE — DEPLOY!' : 'TOO LOW…', W / 2, H * 0.16);
+        ctx.font = '700 22px ui-monospace, monospace';
+        ctx.fillStyle = INK;
+        ctx.fillText(p.y >= SAFE_DEPLOY_ALT ? 'SPACE — DEPLOY!' : 'TOO LOW…', W / 2, H * 0.12);
         ctx.globalAlpha = 1;
         ctx.textAlign = 'left';
         ctx.font = '600 13px ui-monospace, monospace';
@@ -597,21 +775,26 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
 
     // ── Minimap ──
     const ms = Math.min(130, W * 0.24), mx = W - ms - 12, my = 12;
-    ctx.fillStyle = '#ffffff'; ctx.globalAlpha = 0.88;
-    ctx.fillRect(mx, my, ms, ms); ctx.globalAlpha = 1;
-    ctx.lineWidth = 1.6; ctx.strokeRect(mx, my, ms, ms);
+    ctx.fillStyle = 'rgba(250,250,248,0.9)';
+    ctx.fillRect(mx, my, ms, ms);
+    ctx.strokeStyle = INK; ctx.lineWidth = 1.6; ctx.strokeRect(mx, my, ms, ms);
     const mm = (wx: number, wz: number) => ({ x: mx + (wx / MAP_M) * ms, y: my + (wz / MAP_M) * ms });
+    // Scenery ghost dots so the minimap reads as the terrain.
+    ctx.fillStyle = 'rgba(90,90,90,0.4)';
+    game.decor.houses.forEach((hs) => { const pt = mm(hs.x, hs.z); ctx.fillRect(pt.x - 1.5, pt.y - 1.5, 3, 3); });
     const tg = mm(game.scenario.targetX, game.scenario.targetZ);
-    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = INK; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(tg.x - 5, tg.y - 5); ctx.lineTo(tg.x + 5, tg.y + 5); ctx.moveTo(tg.x + 5, tg.y - 5); ctx.lineTo(tg.x - 5, tg.y + 5); ctx.stroke();
     const me = mm(p.x, p.z);
-    ctx.fillStyle = '#141414';
+    ctx.fillStyle = INK;
     if (inPlane) {
       ctx.save(); ctx.translate(me.x, me.y); ctx.rotate(Math.atan2(path.hz, path.hx));
-      ctx.beginPath(); ctx.moveTo(7, 0); ctx.lineTo(-5, -4); ctx.lineTo(-5, 4); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(-6, -4.5); ctx.lineTo(-6, 4.5); ctx.closePath(); ctx.fill();
       ctx.restore();
     } else {
-      ctx.beginPath(); ctx.arc(me.x, me.y, 3.4, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(me.x, me.y, 3.6, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#777'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(me.x, me.y, 6.5, 0, Math.PI * 2); ctx.stroke();
     }
   };
 
