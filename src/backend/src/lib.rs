@@ -13410,32 +13410,40 @@ fn luckproof_rand(seed: &[u8; 32], i: u64, salt: u8) -> u64 {
     u64::from_le_bytes(d[..8].try_into().unwrap())
 }
 
-/// Generate `n` gambles from a seed. Presentation follows the reference demo
-/// (risk $20..=100, odds 20..=80%, decline = $0) but the EV mix is BALANCED:
-/// the reference multiplier made ~99% of hands +EV, which reduces the game to
-/// mashing TAKE. Instead each hand draws an edge class — clear-take,
-/// clear-fold, or close-call in equal measure — and derives the reward from
-/// the target EV, so folding discipline matters as much as odds arithmetic.
+/// Generate `n` gambles from a seed. Every hand is shaped like a RIVER
+/// CALL-OR-FOLD in hold'em: you risk the call amount to win the pot, and the
+/// pot always pays at least your call — reward/risk stays in [1.6, 5.0]
+/// (a pot-sized bet offers ~2:1 → 1.6× after rake-ish rounding; a
+/// quarter-pot bet offers ~5×). A $1 reward on a $25 risk can't happen.
+///
+/// Difficulty comes from equity vs pot odds: the ratio fixes the break-even
+/// win probability p* = risk/(risk+reward) (≈17%..38%), and each hand's
+/// stated odds land above, below, or beside it — clear-call, clear-fold, and
+/// close-call in equal measure — so folding discipline matters as much as
+/// odds arithmetic (the reference demo's generator made ~99% of hands +EV).
 fn luckproof_generate(seed: [u8; 32], n: usize) -> Vec<LuckProofGamble> {
     (0..n as u64)
         .map(|i| {
             let risk = 20 + (luckproof_rand(&seed, i, 0) % 81) as u32; // 20..=100
-            let odds_pct = 20 + (luckproof_rand(&seed, i, 1) % 61) as u8; // 20..=80
-            let p_bp = odds_pct as i64 * 100;
-            // Edge class: 0 clear +, 1 clear −, 2 close (either sign).
+            // Pot-odds ratio in milli: reward = risk · m/1000, m ∈ 1600..=5000.
+            let m = 1_600 + luckproof_rand(&seed, i, 1) % 3_401;
+            let reward = ((risk as u64 * m + 999) / 1_000).max(risk as u64) as u32;
+            // Break-even equity in bp, then place the hand's true equity
+            // around it by class: 0 clear-call, 1 clear-fold, 2 close.
+            let p_star_bp = (10_000u64 * risk as u64 / (risk as u64 + reward as u64)) as i64;
             let class = luckproof_rand(&seed, i, 2) % 3;
-            let frac_bp = match class {
-                2 => (luckproof_rand(&seed, i, 3) % 501) as i64,          // 0..=5% of risk
-                _ => 1_500 + (luckproof_rand(&seed, i, 3) % 4_501) as i64, // 15..=60% of risk
+            let delta_bp = match class {
+                2 => (luckproof_rand(&seed, i, 3) % 301) as i64,           // 0..=3 pts
+                _ => 800 + (luckproof_rand(&seed, i, 3) % 2_201) as i64,   // 8..=30 pts
             };
             let sign: i64 = match class {
                 0 => 1,
                 1 => -1,
                 _ => if luckproof_rand(&seed, i, 4) % 2 == 0 { 1 } else { -1 },
             };
-            // Target EV (bp) → reward: EV = p·reward − (1−p)·risk.
-            let ev_bp = sign * frac_bp * risk as i64;
-            let reward = ((ev_bp + (10_000 - p_bp) * risk as i64) / p_bp).max(1) as u32;
+            let p_bp = (p_star_bp + sign * delta_bp).clamp(300, 9_500);
+            // Whole-percent display (the stats row states it exactly).
+            let odds_pct = ((p_bp + 50) / 100).clamp(3, 95) as u8;
             LuckProofGamble { odds_pct, risk, reward }
         })
         .collect()
@@ -30683,9 +30691,18 @@ mod tests {
         let mut plus = 0;
         let mut minus = 0;
         for g in &gambles {
-            assert!((20..=80).contains(&g.odds_pct));
+            assert!((3..=95).contains(&g.odds_pct));
             assert!((20..=100).contains(&g.risk));
-            assert!(g.reward >= 1);
+            // River-call realism: the pot always pays at least the call —
+            // reward/risk stays within [1.6, 5.0] (integer rounding slack).
+            assert!(
+                g.reward as u64 * 10 >= g.risk as u64 * 16,
+                "reward ${} on ${} risk is worse than any real pot offers", g.reward, g.risk
+            );
+            assert!(
+                g.reward as u64 <= g.risk as u64 * 5 + 1,
+                "reward ${} on ${} risk is beyond a quarter-pot bet's offer", g.reward, g.risk
+            );
             if luckproof_edge_bp(g) > 0 { plus += 1 } else { minus += 1 }
         }
         // The reference generator swings both ways — a fair day has both.

@@ -82,16 +82,20 @@ export function buildSeries(
   return { ev, cash };
 }
 
-/** Practice-mode generator — client mirror of the backend's balanced mix. */
+/** Practice-mode generator — client mirror of the backend. Every hand is a
+ *  river call/fold: the pot always pays 1.6×–5× the call (real pot odds; a
+ *  $1 reward on a $25 risk can't happen), and the stated equity lands above,
+ *  below, or beside the break-even p* = risk/(risk+reward) in equal measure. */
 export function practiceGamble(rand: () => number = Math.random): LPGamble {
   const risk = 20 + Math.floor(rand() * 81);
-  const odds_pct = 20 + Math.floor(rand() * 61);
-  const p_bp = odds_pct * 100;
+  const m = 1_600 + Math.floor(rand() * 3_401); // pot-odds ratio, milli
+  const reward = Math.max(risk, Math.ceil((risk * m) / 1_000));
+  const pStarBp = Math.floor((10_000 * risk) / (risk + reward));
   const cls = Math.floor(rand() * 3);
-  const fracBp = cls === 2 ? Math.floor(rand() * 501) : 1_500 + Math.floor(rand() * 4_501);
+  const deltaBp = cls === 2 ? Math.floor(rand() * 301) : 800 + Math.floor(rand() * 2_201);
   const sign = cls === 0 ? 1 : cls === 1 ? -1 : rand() < 0.5 ? 1 : -1;
-  const evBp = sign * fracBp * risk;
-  const reward = Math.max(1, Math.floor((evBp + (10_000 - p_bp) * risk) / p_bp));
+  const pBp = Math.min(9_500, Math.max(300, pStarBp + sign * deltaBp));
+  const odds_pct = Math.min(95, Math.max(3, Math.round(pBp / 100)));
   return { odds_pct, risk, reward };
 }
 
@@ -713,9 +717,10 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
             </span>
             <div className="col" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.55 }}>
               <span>
-                Each hand offers a wager: <b style={{ color: 'var(--fg)' }}>risk</b> some dollars for a chance
-                at a <b style={{ color: 'var(--sprout-ink)' }}>reward</b> at the stated odds.
-                Taking it is worth <span className="mono">P·reward − (1−P)·risk</span>; declining
+                Every hand is a river call in hold'em: <b style={{ color: 'var(--fg)' }}>risk</b> the
+                call amount for a chance at the <b style={{ color: 'var(--sprout-ink)' }}>pot</b> at the
+                stated odds — the pot always pays at least your call, like real pot odds.
+                Calling is worth <span className="mono">P·reward − (1−P)·risk</span>; folding
                 is always exactly $0.
               </span>
               <span>

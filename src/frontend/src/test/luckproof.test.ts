@@ -30,8 +30,8 @@ describe('Sklansky EV math (mirrors the backend exactly)', () => {
   });
 });
 
-describe('practiceGamble (client mirror of the balanced generator)', () => {
-  it('respects the demo ranges and mixes both edge signs', () => {
+describe('practiceGamble (client mirror of the river-call generator)', () => {
+  it('always offers real pot odds (reward 1.6×–5× risk) and mixes both edge signs', () => {
     // Deterministic LCG so the test never flakes.
     let seed = 42;
     const rand = () => { seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31; return seed / 2 ** 31; };
@@ -40,9 +40,11 @@ describe('practiceGamble (client mirror of the balanced generator)', () => {
       const gam = practiceGamble(rand);
       expect(gam.risk).toBeGreaterThanOrEqual(20);
       expect(gam.risk).toBeLessThanOrEqual(100);
-      expect(gam.odds_pct).toBeGreaterThanOrEqual(20);
-      expect(gam.odds_pct).toBeLessThanOrEqual(80);
-      expect(gam.reward).toBeGreaterThanOrEqual(1);
+      expect(gam.odds_pct).toBeGreaterThanOrEqual(3);
+      expect(gam.odds_pct).toBeLessThanOrEqual(95);
+      // The pot always pays at least the call: no $1 rewards on $25 risks.
+      expect(gam.reward * 10).toBeGreaterThanOrEqual(gam.risk * 16);
+      expect(gam.reward).toBeLessThanOrEqual(gam.risk * 5 + 1);
       if (edgeBp(gam) > 0) plus++; else minus++;
     }
     expect(plus).toBeGreaterThan(60);
