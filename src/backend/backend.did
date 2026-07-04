@@ -2002,6 +2002,8 @@ service : (InitPayload) -> {
   // Today's (or a given day's) board + the caller's eligibility/attempt state.
   get_luckproof_daily_board : (opt nat32) -> (vec LuckProofDailyRow) query;
   get_luckproof_daily_status : () -> (LuckProofDailyStatus) query;
+  // Replays unlock by competing: null unless the CALLER has their own entry
+  // for that day (or is asking for their own run).
   get_luckproof_daily_replay : (nat32, principal) -> (opt LuckProofReplay) query;
   submit_arcade_score : (text, nat64, blob) -> (Result_5);
   // Submit a community listing. Requires a fresh quote for the same token +

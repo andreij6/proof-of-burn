@@ -331,6 +331,10 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
 
   const openReplay = async (row: DailyRow) => {
     if (!status) return;
+    if (!status.played) {
+      setErr('Replays unlock after you compete: play today\'s challenge to study other players\' decisions.');
+      return;
+    }
     setBusy(true); setErr(null);
     try {
       const r = await actor.get_luckproof_daily_replay(status.day, row.player);
@@ -389,7 +393,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
                 recorded. The clock expiring folds for you — hesitation is a
                 decision too.
               </p>
-              <Btn variant="secondary" onClick={startPractice}><Icon name="target" size={13} /> Practice</Btn>
+              <Btn variant="secondary" onClick={startPractice}><Icon name="clover" size={13} /> Practice</Btn>
             </div>
             <div className="card col" style={{ gap: 10, borderColor: 'var(--burn)' }}>
               <Chip tone="burn" style={{ alignSelf: 'flex-start', height: 19, fontSize: 10 }}>
@@ -428,14 +432,20 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
           <div className="card col" style={{ gap: 8 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
               <b style={{ fontSize: 13.5 }}>Today's board</b>
-              <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>tap a row to verify their run</span>
+              <span className="row mono" style={{ gap: 5, fontSize: 10.5, color: 'var(--fg-3)' }}>
+                {status && !status.played && <Icon name="lock" size={11} stroke="var(--fg-3)" />}
+                {status && !status.played ? 'compete to unlock replays' : 'tap a row to verify their run'}
+              </span>
             </span>
             {board.length === 0 ? (
               <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Nobody has played today's deal yet. First mover takes rank #1.</span>
             ) : (
               <div className="col" style={{ gap: 2, maxHeight: 240, overflowY: 'auto' }}>
                 {board.map((r) => (
-                  <button key={r.rank} onClick={() => openReplay(r)} title="View this run's every decision against the shared daily deal" style={{
+                  <button key={r.rank} onClick={() => openReplay(r)}
+                    title={status?.played ? "View this run's every decision against the shared daily deal" : "Play today's challenge to unlock replays"}
+                    style={{
+                    opacity: status?.played ? 1 : 0.65,
                     display: 'flex', justifyContent: 'space-between', gap: 8, padding: '6px 8px',
                     background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
                     color: 'var(--fg)', cursor: 'pointer', fontFamily: 'var(--font-mono, monospace)', fontSize: 12, textAlign: 'left',

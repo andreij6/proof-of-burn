@@ -13568,6 +13568,15 @@ pub struct LuckProofReplay {
 
 #[ic_cdk::query]
 fn get_luckproof_daily_replay(day: u32, player: Principal) -> Option<LuckProofReplay> {
+    // Replays unlock by competing: you may study other players' decisions for
+    // a given day only once YOUR OWN entry for that day exists (your own
+    // replay is trivially covered by the same rule).
+    let caller = get_caller();
+    if player != caller
+        && !LUCKPROOF_DAILY.with(|m| m.borrow().contains_key(&LuckProofDayKey { day, player: caller }))
+    {
+        return None;
+    }
     let entry = LUCKPROOF_DAILY.with(|m| m.borrow().get(&LuckProofDayKey { day, player }))?;
     let gambles = luckproof_generate(luckproof_day_seed(day), LUCKPROOF_DAILY_DECISIONS);
     // Recompute the player's rolls exactly as start_luckproof_daily did.
@@ -30770,8 +30779,20 @@ mod tests {
         let decisions: Vec<bool> = run.gambles.iter().map(|g| luckproof_edge_bp(g) > 0).collect();
         let res = complete_luckproof_daily(run.run_id, decisions.clone(), 200_000).unwrap();
 
-        // Anyone can replay: decisions + the day's canonical deal + outcomes.
+        // Replays are gated on competing: bob (no entry today) sees nothing…
         set_mock_caller(bob());
+        assert!(
+            get_luckproof_daily_replay(run.day, alice()).is_none(),
+            "must compete before studying others' decisions"
+        );
+        // …but alice can always study her own run…
+        set_mock_caller(alice());
+        assert!(get_luckproof_daily_replay(run.day, alice()).is_some());
+        // …and once bob competes, alice's replay opens up to him.
+        seed_stake(StakeTier::SixMonths, bob(), 100_000_000);
+        set_mock_caller(bob());
+        let rb = start_luckproof_daily().unwrap();
+        complete_luckproof_daily(rb.run_id, vec![false; LUCKPROOF_DAILY_DECISIONS], 200_000).unwrap();
         let replay = get_luckproof_daily_replay(run.day, alice()).unwrap();
         assert_eq!(replay.decisions, decisions);
         assert_eq!(replay.ev_bp, res.ev_bp);
@@ -30782,9 +30803,11 @@ mod tests {
         for ((g, &roll), (&take, &won)) in run.gambles.iter().zip(&run.rolls).zip(decisions.iter().zip(&replay.outcomes)) {
             assert_eq!(won, take && roll < g.odds_pct as u16 * 100);
         }
-        // No entry → None.
-        assert!(get_luckproof_daily_replay(run.day, bob()).is_none());
-        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice())); });
+        // Asking about a player with no entry → None (carol never played).
+        assert!(get_luckproof_daily_replay(run.day, carol()).is_none());
+        for u in [alice(), bob()] {
+            STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, u)); });
+        }
         clear_luckproof();
     }
 
