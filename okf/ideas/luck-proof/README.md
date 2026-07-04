@@ -15,23 +15,24 @@ uncertainty plus psychology. Luck-Proof isolates the deepest lesson —
 *outcome-vs-decision separation* (Sklansky bucks) — as an arcade game with no
 cards and no wagers.
 
-## The game
+## The game (v2 — Sklansky Trainer, 2026-07-04)
 
-A run is 10 server-generated gambles ("risk `cost` chips for a `p` chance at
-`payout`") under an 8-second shot clock, presented in three framings the
-player must convert in their head: **percent**, **bookmaker odds against**,
-and **outs of unseen cards**. Take or pass.
+Rebuilt same-day on the Gemini reference demo the owner preferred: a LIVE
+dual-track scoreboard (SKILL = Sklansky dollars, EV credited the instant a
+decision is made; LUCK = actual cash), an arena showing Odds/Risk/Reward
+(reward = profit; declining = exactly $0 EV), and a flowing hand log.
 
-- **Ranked metric: EV leaked** vs perfect play (chip-basis-points; 0 =
-  perfect, LOWER ranks higher — golf-style ordering on the shared arcade
-  leaderboard, game key `luckproof`). Close calls cost almost nothing by
-  construction; blunders cost their full edge.
-- **The luck track**: chip outcomes resolve from rolls pre-committed at run
-  issue, revealed only at completion — and deliberately never ranked. The end
-  screen contrasts the two ("you lost chips playing perfectly — that's
-  variance, not error").
-- Instant decision feedback during play (the client can compute the edge);
-  outcomes stay hidden so the lesson lands at the end.
+- **Practice mode**: endless, client-side, instant outcomes, unranked — any
+  signed-in user.
+- **Daily competition**: ONE attempt per UTC day, 250 decisions,
+  no-loss-lottery STAKERS only. Every player faces the SAME daily deal
+  (gambles derive from the day, not the player), so total EV earned ranks
+  fairly: EV desc → accuracy → time. Outcomes (per-player rolls) hide until
+  the end — the reveal is the lesson. Starting consumes the attempt; 1h TTL.
+- Generator note: the reference demo's multiplier made ~99% of hands +EV
+  (mash-TAKE wins); ours keeps its presentation but balances the mix
+  (⅓ clear-take / ⅓ clear-fold / ⅓ close call) so folding discipline counts.
+- Keyboard: T/→ take, D/← decline. Mobile-first fluid layout.
 
 ## Trust model
 
@@ -44,10 +45,12 @@ game grants none).
 
 ## Implementation map
 
-- Backend: `src/backend/src/lib.rs` "Luck-Proof (arcade game 3)" section —
-  generation (`luckproof_generate`, seed = hash(time‖caller‖id)), scoring
-  (`luckproof_edge_bp` / `luckproof_ev_leaked_bp`), endpoints, MemoryIds
-  105 (runs) + 106 (next id), flag `arcade_luckproof`.
+- Backend: `src/backend/src/lib.rs` "Sklansky Trainer / Luck-Proof" section —
+  daily deal `luckproof_generate(luckproof_day_seed(day))`, Sklansky edge
+  `luckproof_edge_bp`, endpoints start/complete_luckproof_daily + board/status
+  queries, MemoryIds 108 (runs) + 109 (next id) + 107 (daily board); 105/106
+  abandoned (held the v1 10-round format on local nets only). Flag
+  `arcade_luckproof`.
 - Frontend: `src/frontend/src/arcade/LuckProof.tsx` (pure helpers exported +
   tested in `test/luckproof.test.ts`); Arcade hub tab "Luck-Proof".
 

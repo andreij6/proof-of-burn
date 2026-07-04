@@ -41,7 +41,6 @@ const CALDERA_COURSE_NAME = 'Caldera Ridge';
 // Mini-golf scores are retired (PB-309); only Field Goal still writes to the
 // shared arcade leaderboard.
 const GAME_FIELDGOAL = 'fieldgoal';
-const GAME_LUCKPROOF = 'luckproof';
 
 // The outfit palette doubles as helmet/jersey colors — team-ish names.
 const HELMET_NAMES = OUTFIT_NAMES;
@@ -187,7 +186,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   const [info, setInfo] = useState<ArcadeInfo | null>(null);
   const [expInfo, setExpInfo] = useState<ExplorerInfo | null>(null);
   const [boardFG, setBoardFG] = useState<ArcadeLeaderboardRow[]>([]);
-  const [boardLP, setBoardLP] = useState<ArcadeLeaderboardRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   // Mini Golf is now the Course Marketplace (PB-309): the tab shows the
   // marketplace; "play" opens a course in the engine. Courses are AI-built —
@@ -264,16 +262,14 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     try {
       // Mini-golf leaderboard + built-in course are retired (PB-309); only the
       // Field Goal board + arcade/explorer info are fetched here now.
-      const [arcadeInfo, rowsFG, rowsLP, explorerInfo] = await Promise.all([
+      const [arcadeInfo, rowsFG, explorerInfo] = await Promise.all([
         currentActor.get_arcade_info(),
         currentActor.get_arcade_leaderboard(GAME_FIELDGOAL),
-        currentActor.get_arcade_leaderboard(GAME_LUCKPROOF),
         currentActor.get_explorer_info(),
       ]);
       setInfo(arcadeInfo);
       setExpInfo(explorerInfo);
       setBoardFG(rowsFG);
-      setBoardLP(rowsLP);
     } catch (err) {
       console.error("Failed to fetch Arcade:", err);
     } finally {
@@ -295,7 +291,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     : DEFAULT_KICKER;
   const fullAccess = info?.full_access ?? false;
   const myRowFG = signedIn ? boardFG.find(r => r.player.toString() === principal!.toString()) : undefined;
-  const myRowLP = signedIn ? boardLP.find(r => r.player.toString() === principal!.toString()) : undefined;
 
   // Per-game kill switches: hide a disabled game's tab entirely; if the
   // active tab's game got pulled, fall back to the first enabled one.
@@ -479,6 +474,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
       <div className="idea-board-container">
         <LuckProof
           actor={actor}
+          onGoParticipate={onGoParticipate}
           onExit={() => { setTab('luckproof'); setView('lobby'); refreshAll(); }}
         />
       </div>
@@ -667,32 +663,29 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
         </>
       ) : (
         <>
-          {/* ── Luck-Proof: the EV-decision trainer ── */}
-          <div className="card col" style={{ gap: 10, maxWidth: 620 }}>
+          {/* ── Sklansky Trainer: the EV-decision trainer ── */}
+          <div className="card col" style={{ gap: 10, maxWidth: 680 }}>
             <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
               <Chip tone="burn" style={{ height: 19, fontSize: 10 }}>
                 <LiveDot color="var(--burn-ink)" size={5} /> Game 3
               </Chip>
               <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-                10 decisions · 8-second clock
+                practice · daily competition
               </span>
             </div>
-            <h6 style={{ margin: 0, fontSize: 16 }}>Luck-Proof</h6>
+            <h6 style={{ margin: 0, fontSize: 16 }}>Sklansky Trainer</h6>
             <p style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0 }}>
-              Your results are luck. Your decisions are skill. Ten quick wagers —
-              percentages, bookmaker odds, outs — <b>take</b> the +EV ones, <b>pass</b> the
-              rest, before the clock. You're ranked ONLY on <b>EV leaked</b> vs perfect
-              play (lower is better); your chip results are revealed at the end and
-              don't count. Sharpen the exact math-and-discipline muscle poker runs on.
+              Your results are luck. Your decisions are skill. Each hand offers a pot
+              at stated odds — <b>take</b> the +EV ones, <b>decline</b> the rest, and watch
+              two tracks diverge: the <b>skill track</b> (EV earned, the only thing that
+              ranks) and the <b>luck track</b> (actual cash, pure variance). Practice is
+              endless and free; the <b>daily competition</b> deals everyone the same 250
+              decisions — highest EV wins the day (no-loss-lottery stakers only).
+              Keyboard: <span className="mono">T/→</span> take, <span className="mono">D/←</span> decline.
             </p>
-            {myRowLP && (
-              <Chip tone="ok" style={{ alignSelf: 'flex-start' }}>
-                <Icon name="target" size={11} /> Your best: {(myRowLP.strokes / 100).toFixed(1)} chips leaked · rank #{myRowLP.rank}
-              </Chip>
-            )}
             <div className="row" style={{ justifyContent: 'space-between', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
               <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-                {signedIn ? 'Full game — free to play' : 'Sign in to play'}
+                {signedIn ? 'Practice free · compete if staked' : 'Sign in to play'}
               </span>
               <Btn variant="primary" sm onClick={() => {
                 if (!signedIn) { onSignIn(); return; }
@@ -702,15 +695,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
               </Btn>
             </div>
           </div>
-
-          <LeaderboardSection
-            title="Luck-Proof — leaderboard"
-            sub="· best run per player · lower is better · top 100"
-            scoreHeader="EV leaked"
-            rows={boardLP}
-            empty="No runs on the board yet. Zero leaks takes the top spot."
-            principal={signedIn ? principal : null}
-          />
         </>
       )}
 

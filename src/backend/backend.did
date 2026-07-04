@@ -967,33 +967,54 @@ type RecordHoleOk = record {
   last_hole : nat8;
   owner_credited : bool;
 };
-// Luck-Proof (arcade game 3) — the EV-decision trainer. A run is 10 server-
-// generated gambles; the RANKED score is EV leaked vs perfect play (lower is
-// better); chip outcomes are a separate, never-ranked luck track. Scoring is
-// recomputed server-side, so scores can't be forged.
+// Sklansky Trainer / Luck-Proof (arcade game 3) — the EV-decision trainer.
+// PRACTICE is fully client-side. COMPETITION is one attempt per UTC day of
+// 250 decisions; every player faces the SAME daily deal, ranked by total EV
+// earned (skill track) desc → correct desc → time asc. Stakers-only entry;
+// scoring is recomputed server-side, so results can't be forged.
 type LuckProofGamble = record {
-  // Win probability in basis points (1..9999).
-  p_bp : nat16;
-  // Chips risked / chips won. framing: 0 percent, 1 odds (outs:cards reused
-  // as a:b against), 2 outs-of-unseen-cards.
-  cost : nat32;
-  payout : nat32;
-  framing : nat8;
-  outs : nat8;
-  cards : nat8;
+  // Win chance in whole percent (20..80); risk/reward in whole dollars —
+  // reward is the PROFIT on a win; declining is worth exactly $0.
+  odds_pct : nat8;
+  risk : nat32;
+  reward : nat32;
 };
 type LuckProofRunStart = record {
   run_id : nat64;
+  day : nat32;
   gambles : vec LuckProofGamble;
   issued_at : nat64;
 };
 type LuckProofResult = record {
-  // Ranked metric (lower = better): EV leaked, chip-basis-points.
-  ev_leaked_bp : nat64;
-  optimal_ev_bp : nat64;
-  outcomes : vec bool;
+  // Skill track (ranked): sum of taken EV, basis points ($1 = 10_000).
+  ev_bp : int64;
+  correct : nat16;
+  // Luck track (never ranked): actual dollar delta.
   bankroll_delta : int64;
+  outcomes : vec bool;
   rank : nat32;
+};
+type LuckProofDailyEntry = record {
+  day : nat32;
+  player : principal;
+  ev_bp : int64;
+  correct : nat16;
+  millis : nat64;
+  submitted_at : nat64;
+};
+type LuckProofDailyRow = record {
+  rank : nat32;
+  player : principal;
+  ev_bp : int64;
+  correct : nat16;
+  millis : nat64;
+};
+type LuckProofDailyStatus = record {
+  day : nat32;
+  eligible : bool;
+  played : bool;
+  my_entry : opt LuckProofDailyEntry;
+  decisions : nat16;
 };
 type Result_16 = variant { Ok : LuckProofRunStart; Err : text };
 type Result_17 = variant { Ok : LuckProofResult; Err : text };
@@ -1953,11 +1974,14 @@ service : (InitPayload) -> {
   // Submit a finished round. Requires full access (the hole-1 preview can't
   // produce a 9-hole score). Insert-if-better per (game, player); returns the
   // caller's resulting 1-based rank on that game's board.
-  // Luck-Proof: start a run (server generates + stores the gambles)…
-  start_luckproof_run : () -> (Result_16);
-  // …then complete it with the take/pass decisions; the score (EV leaked) is
-  // recomputed server-side and insert-if-better'd into the "luckproof" board.
-  complete_luckproof_run : (nat64, vec bool, nat64) -> (Result_17);
+  // Luck-Proof competition: enter today's 250-decision challenge (stakers
+  // only; one attempt per UTC day — starting consumes it)…
+  start_luckproof_daily : () -> (Result_16);
+  // …then submit the decisions; EV is scored server-side onto the daily board.
+  complete_luckproof_daily : (nat64, vec bool, nat64) -> (Result_17);
+  // Today's (or a given day's) board + the caller's eligibility/attempt state.
+  get_luckproof_daily_board : (opt nat32) -> (vec LuckProofDailyRow) query;
+  get_luckproof_daily_status : () -> (LuckProofDailyStatus) query;
   submit_arcade_score : (text, nat64, blob) -> (Result_5);
   // Submit a community listing. Requires a fresh quote for the same token +
   // days (get_explorer_quote) and the quoted amount (+ one ledger fee)
