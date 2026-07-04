@@ -334,8 +334,10 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
         // Screen-relative steering rotated onto world axes (camera yaw = heading).
         const fwd = (k['arrowup'] || k['w'] ? 1 : 0) - (k['arrowdown'] || k['s'] ? 1 : 0);
         const side = (k['arrowright'] || k['d'] ? 1 : 0) - (k['arrowleft'] || k['a'] ? 1 : 0);
-        const ax = path.hx * fwd + -path.hz * side + game.touch.ax;
-        const az = path.hz * fwd + path.hx * side + game.touch.az;
+        // Camera-relative basis: screen-forward = (hx, hz); screen-RIGHT is
+        // (hz, −hx) under this projection (rx = dx·hz − dz·hx).
+        const ax = path.hx * fwd + path.hz * side + game.touch.ax;
+        const az = path.hz * fwd - path.hx * side + game.touch.az;
         const n = Math.hypot(ax, az) || 1;
         stepFall(game.fall, { ax: ax / Math.max(1, n), az: az / Math.max(1, n), dive: !!(k['shift']) }, dt);
         if (game.fall.y <= 0) {
@@ -808,8 +810,8 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
     const path = planePath(game.scenario.planeDir);
     const side = Math.max(-1, Math.min(1, (t.clientX - touchRef.current.sx) / 70));
     const fwd = Math.max(-1, Math.min(1, (touchRef.current.sy - t.clientY) / 70));
-    game.touch.ax = path.hx * fwd + -path.hz * side;
-    game.touch.az = path.hz * fwd + path.hx * side;
+    game.touch.ax = path.hx * fwd + path.hz * side;
+    game.touch.az = path.hz * fwd - path.hx * side;
   };
   const onTouchEnd = () => { touchRef.current = null; if (g.current) g.current.touch = { ax: 0, az: 0 }; };
 
