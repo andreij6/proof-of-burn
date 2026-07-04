@@ -1006,6 +1006,8 @@ type LuckProofDailyEntry = record {
   submitted_at : nat64;
   // Full take/decline vector — public for verifiable replays.
   decisions : vec bool;
+  // Luck-track dollars; the day's top cash is the second winner slot.
+  cash : int64;
 };
 type LuckProofDailyRow = record {
   rank : nat32;
@@ -1013,6 +1015,7 @@ type LuckProofDailyRow = record {
   ev_bp : int64;
   correct : nat16;
   millis : nat64;
+  cash : int64;
 };
 type LuckProofDailyStatus = record {
   day : nat32;

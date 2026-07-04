@@ -181,7 +181,7 @@ interface DailyStatus {
   players_today: number;
 }
 
-interface DailyRow { rank: number; player: any; ev_bp: bigint; correct: number; millis: bigint }
+interface DailyRow { rank: number; player: any; ev_bp: bigint; correct: number; millis: bigint; cash: bigint }
 
 export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofProps) {
   const showMenuExit = !!onExit;
@@ -401,10 +401,11 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
               </Chip>
               <b style={{ fontSize: 15 }}>{status?.decisions ?? 250} decisions · one attempt</b>
               <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0, lineHeight: 1.5, flex: 1 }}>
-                Everyone gets the SAME deal today. Highest EV wins the day and
-                takes <b>lottery tickets equal to the player count</b>
-                {status ? ` (${Math.max(status.players_today, 1)} so far)` : ''}. Ties break on
-                accuracy, then speed. Resets 00:00 UTC.
+                Everyone gets the SAME deal today. TWO winners each day —
+                <b> highest EV</b> (skill) and <b>highest actual cash</b> (luck) — and
+                each takes <b>lottery tickets equal to the player count</b>
+                {status ? ` (${Math.max(status.players_today, 1)} so far)` : ''}. EV ties
+                break on accuracy, then speed. Resets 00:00 UTC.
               </p>
               {status && !status.eligible ? (
                 <div className="col" style={{ gap: 8 }}>
@@ -439,23 +440,32 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
             </span>
             {board.length === 0 ? (
               <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Nobody has played today's deal yet. First mover takes rank #1.</span>
-            ) : (
-              <div className="col" style={{ gap: 2, maxHeight: 240, overflowY: 'auto' }}>
-                {board.map((r) => (
-                  <button key={r.rank} onClick={() => openReplay(r)}
-                    title={status?.played ? "View this run's every decision against the shared daily deal" : "Play today's challenge to unlock replays"}
-                    style={{
-                    opacity: status?.played ? 1 : 0.65,
-                    display: 'flex', justifyContent: 'space-between', gap: 8, padding: '6px 8px',
-                    background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
-                    color: 'var(--fg)', cursor: 'pointer', fontFamily: 'var(--font-mono, monospace)', fontSize: 12, textAlign: 'left',
-                  }}>
-                    <span>#{r.rank} {formatPrincipal(r.player)}</span>
-                    <span>{fmtEvBp(r.ev_bp)} · {r.correct}/{status?.decisions ?? 250} · {(Number(r.millis) / 60000).toFixed(1)}m</span>
-                  </button>
-                ))}
-              </div>
-            )}
+            ) : (() => {
+              // The second winner slot: highest cash (ties: EV, then speed).
+              const cashChamp = board.reduce((a, b) =>
+                b.cash > a.cash || (b.cash === a.cash && (b.ev_bp > a.ev_bp || (b.ev_bp === a.ev_bp && b.millis < a.millis))) ? b : a);
+              return (
+                <div className="col" style={{ gap: 2, maxHeight: 240, overflowY: 'auto' }}>
+                  {board.map((r) => (
+                    <button key={r.rank} onClick={() => openReplay(r)}
+                      title={status?.played ? "View this run's every decision against the shared daily deal" : "Play today's challenge to unlock replays"}
+                      style={{
+                      opacity: status?.played ? 1 : 0.65,
+                      display: 'flex', justifyContent: 'space-between', gap: 8, padding: '6px 8px', flexWrap: 'wrap',
+                      background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)',
+                      color: 'var(--fg)', cursor: 'pointer', fontFamily: 'var(--font-mono, monospace)', fontSize: 12, textAlign: 'left',
+                    }}>
+                      <span className="row" style={{ gap: 6 }}>
+                        #{r.rank} {formatPrincipal(r.player)}
+                        {r.rank === 1 && <span style={{ fontSize: 9.5, color: SKILL_COLOR, border: `1px solid ${SKILL_COLOR}`, borderRadius: 4, padding: '0 4px' }}>EV champ</span>}
+                        {r.player.toString() === cashChamp.player.toString() && <span style={{ fontSize: 9.5, color: LUCK_COLOR, border: `1px solid ${LUCK_COLOR}`, borderRadius: 4, padding: '0 4px' }}>cash champ</span>}
+                      </span>
+                      <span>{fmtEvBp(r.ev_bp)} · cash {Number(r.cash) >= 0 ? '+' : '−'}${Math.abs(Number(r.cash))} · {(Number(r.millis) / 60000).toFixed(1)}m</span>
+                    </button>
+                  ))}
+                </div>
+              );
+            })()}
           </div>
         </>
       )}

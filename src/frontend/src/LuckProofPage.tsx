@@ -51,8 +51,9 @@ export default function LuckProofPage({ actor, principal, onSignIn, onGoParticip
               nothing. The <b>daily competition</b> is one attempt per UTC day, 250
               decisions, for no-loss-lottery stakers: every player faces the SAME
               deal (derived from the day itself), ranked by EV earned, then accuracy,
-              then speed. The day's winner is paid <b>lottery tickets equal to that
-              day's player count</b>. Any run on the board can be replayed
+              then speed. Each day pays <b>two winners</b> — the highest EV (skill)
+              and the highest actual cash (luck) — <b>lottery tickets equal to that
+              day's player count</b>, each. Any run on the board can be replayed
               decision-by-decision — the deal is recomputed on-chain, so anyone can
               verify everyone played identical scenarios.
             </p>

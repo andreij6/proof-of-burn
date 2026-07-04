@@ -13360,6 +13360,10 @@ pub struct LuckProofDailyEntry {
     /// verify it against the day's (shared, seed-derived) deal.
     #[serde(default)]
     pub decisions: Vec<bool>,
+    /// Luck track: actual dollar delta from the rolls. Never ranks the EV
+    /// board, but the day's TOP CASH is the second winner slot.
+    #[serde(default)]
+    pub cash: i64,
 }
 impl_storable!(LuckProofDailyEntry);
 
@@ -13490,6 +13494,8 @@ pub struct LuckProofDailyRow {
     pub ev_bp: i64,
     pub correct: u16,
     pub millis: u64,
+    /// Luck track (dollars) — the top cash of the day is the second winner.
+    pub cash: i64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -13528,6 +13534,7 @@ fn get_luckproof_daily_board(day: Option<u32>) -> Vec<LuckProofDailyRow> {
             ev_bp: e.ev_bp,
             correct: e.correct,
             millis: e.millis,
+            cash: e.cash,
         })
         .collect()
 }
@@ -13610,10 +13617,12 @@ fn get_luckproof_daily_replay(day: u32, player: Principal) -> Option<LuckProofRe
     })
 }
 
-/// Sweep leg: award each finished (past) day's winner lottery tickets equal
-/// to that day's PLAYER COUNT — a bigger field pays the champion more. Runs
-/// through grant_lottery_tickets, so the stakers-only and admin-exclusion
-/// gates apply (competition entry already requires a stake).
+/// Sweep leg: each finished (past) day pays TWO winners, each lottery
+/// tickets equal to that day's PLAYER COUNT — the skill champion (highest
+/// EV, i.e. board rank #1) and the luck champion (highest actual cash; ties
+/// break EV → time → earlier submission). One player sweeping both slots
+/// collects both prizes. Runs through grant_lottery_tickets, so the
+/// stakers-only and admin-exclusion gates apply.
 fn luckproof_daily_award() {
     let today = epoch_day(current_time());
     let mut settled = LUCKPROOF_SETTLED_DAY.with(|c| *c.borrow().get());
@@ -13624,13 +13633,23 @@ fn luckproof_daily_award() {
     while settled + 1 < today {
         let day = settled + 1;
         let board = get_luckproof_daily_board(Some(day));
-        if let Some(winner) = board.first() {
+        if let Some(ev_winner) = board.first() {
             let tickets = board.len() as u64;
-            grant_lottery_tickets(winner.player, tickets);
-            staking_audit("luckproof_daily_winner", winner.player, tickets, day as u64);
+            grant_lottery_tickets(ev_winner.player, tickets);
+            staking_audit("luckproof_daily_winner_ev", ev_winner.player, tickets, day as u64);
+            let cash_winner = board
+                .iter()
+                .max_by(|a, b| {
+                    a.cash.cmp(&b.cash)
+                        .then(a.ev_bp.cmp(&b.ev_bp))
+                        .then(b.millis.cmp(&a.millis))
+                })
+                .unwrap();
+            grant_lottery_tickets(cash_winner.player, tickets);
+            staking_audit("luckproof_daily_winner_cash", cash_winner.player, tickets, day as u64);
             canister_print(&format!(
-                "luckproof: day {} winner {} awarded {} lottery tickets ({} players)",
-                day, winner.player, tickets, board.len()
+                "luckproof: day {} EV winner {} + cash winner {} awarded {} tickets each ({} players)",
+                day, ev_winner.player, cash_winner.player, tickets, board.len()
             ));
         }
         settled = day;
@@ -13752,6 +13771,7 @@ fn complete_luckproof_daily(run_id: u64, decisions: Vec<bool>, millis: u64) -> R
         millis,
         submitted_at: now,
         decisions: decisions.clone(),
+        cash: bankroll_delta,
     };
     LUCKPROOF_DAILY.with(|m| {
         m.borrow_mut().insert(LuckProofDayKey { day: run.day, player: caller }, entry.clone());
@@ -30841,22 +30861,39 @@ mod tests {
             "no award until the day rolls over"
         );
 
-        // Day rolls over → the sweep pays the winner tickets = player count (2).
+        // Day rolls over → TWO winner slots, each paying tickets = player
+        // count (2): the EV champion (alice, rank #1) and the cash champion.
+        // Bob folded everything → cash exactly 0; alice's cash is whatever
+        // her rolls dealt, so derive the expected cash champion.
+        let alice_cash = LUCKPROOF_DAILY
+            .with(|m| m.borrow().get(&LuckProofDayKey { day: epoch_day(t0), player: alice() }))
+            .unwrap()
+            .cash;
+        let cash_champ = if alice_cash >= 0 { alice() } else { bob() };
         set_mock_time(Some(t0 + 86_400 * 1_000_000_000));
         luckproof_daily_award();
+        let alice_expect = 2 + if cash_champ == alice() { 2 } else { 0 };
+        let bob_expect = if cash_champ == bob() { 2 } else { 0 };
         assert_eq!(
             LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0)),
-            before + 2,
-            "winner takes tickets equal to that day's player count"
+            before + alice_expect,
+            "EV champion takes player-count tickets (+cash slot if she swept both)"
         );
-        // Idempotent: a second sweep pass never double-pays.
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0)),
+            bob_expect,
+            "cash champion takes player-count tickets"
+        );
+        // Idempotent: a second sweep pass never double-pays either slot.
         luckproof_daily_award();
         assert_eq!(
             LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0)),
-            before + 2
+            before + alice_expect
         );
-        // Runner-up got nothing.
-        assert_eq!(LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0)), 0);
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0)),
+            bob_expect
+        );
 
         for u in [alice(), bob()] {
             STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, u)); });
