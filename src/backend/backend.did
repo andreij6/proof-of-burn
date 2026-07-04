@@ -36,6 +36,7 @@ type ArcadeInfo = record {
   skin_options : nat8;
   // Per-game kill switches (only meaningful when `enabled` is true).
   minigolf_enabled : bool;
+  luckproof_enabled : bool;
   hair_options : nat8;
   // $1.00 in USD e8s — convert with get_arcade_customize_quote.
   customize_fee_usd_e8s : nat64;
@@ -966,6 +967,36 @@ type RecordHoleOk = record {
   last_hole : nat8;
   owner_credited : bool;
 };
+// Luck-Proof (arcade game 3) — the EV-decision trainer. A run is 10 server-
+// generated gambles; the RANKED score is EV leaked vs perfect play (lower is
+// better); chip outcomes are a separate, never-ranked luck track. Scoring is
+// recomputed server-side, so scores can't be forged.
+type LuckProofGamble = record {
+  // Win probability in basis points (1..9999).
+  p_bp : nat16;
+  // Chips risked / chips won. framing: 0 percent, 1 odds (outs:cards reused
+  // as a:b against), 2 outs-of-unseen-cards.
+  cost : nat32;
+  payout : nat32;
+  framing : nat8;
+  outs : nat8;
+  cards : nat8;
+};
+type LuckProofRunStart = record {
+  run_id : nat64;
+  gambles : vec LuckProofGamble;
+  issued_at : nat64;
+};
+type LuckProofResult = record {
+  // Ranked metric (lower = better): EV leaked, chip-basis-points.
+  ev_leaked_bp : nat64;
+  optimal_ev_bp : nat64;
+  outcomes : vec bool;
+  bankroll_delta : int64;
+  rank : nat32;
+};
+type Result_16 = variant { Ok : LuckProofRunStart; Err : text };
+type Result_17 = variant { Ok : LuckProofResult; Err : text };
 type Result = variant { Ok; Err : text };
 type Result_1 = variant { Ok : nat64; Err : text };
 type Result_10 = variant { Ok : nat64; Err : MintError };
@@ -1922,6 +1953,11 @@ service : (InitPayload) -> {
   // Submit a finished round. Requires full access (the hole-1 preview can't
   // produce a 9-hole score). Insert-if-better per (game, player); returns the
   // caller's resulting 1-based rank on that game's board.
+  // Luck-Proof: start a run (server generates + stores the gambles)…
+  start_luckproof_run : () -> (Result_16);
+  // …then complete it with the take/pass decisions; the score (EV leaked) is
+  // recomputed server-side and insert-if-better'd into the "luckproof" board.
+  complete_luckproof_run : (nat64, vec bool, nat64) -> (Result_17);
   submit_arcade_score : (text, nat64, blob) -> (Result_5);
   // Submit a community listing. Requires a fresh quote for the same token +
   // days (get_explorer_quote) and the quoted amount (+ one ledger fee)

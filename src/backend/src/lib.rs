@@ -5257,6 +5257,7 @@ pub const FLAG_EARLY_ADOPTERS: &str = "early_adopters";
 // `arcade` flag and its own flag are on.
 pub const FLAG_ARCADE_MINIGOLF: &str = "arcade_minigolf";
 pub const FLAG_ARCADE_FIELDGOAL: &str = "arcade_fieldgoal";
+pub const FLAG_ARCADE_LUCKPROOF: &str = "arcade_luckproof";
 /// The Casino: Crash (bustabit-style multiplier game) + the shared casino VP
 /// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
 /// until the owner enables it after a playtest.
@@ -5279,10 +5280,10 @@ pub const FLAG_DASHBOARD: &str = "dashboard";
 /// Mission Statement page (`about` route). Ships dark (default OFF) until an
 /// admin enables it.
 pub const FLAG_MISSION_STATEMENT: &str = "mission_statement";
-const KNOWN_FEATURE_FLAGS: [&str; 14] = [
+const KNOWN_FEATURE_FLAGS: [&str; 15] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
-    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL,
+    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF,
     FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS, FLAG_X_FARM,
     FLAG_DASHBOARD, FLAG_MISSION_STATEMENT,
 ];
@@ -5552,6 +5553,7 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE => false,
         FLAG_ARCADE_MINIGOLF => false,
         FLAG_ARCADE_FIELDGOAL => false,
+        FLAG_ARCADE_LUCKPROOF => false,
         FLAG_X_FARM => false,
         // Dashboard + Mission Statement ship dark (default OFF) — these pages
         // were always-on before; gating them lets an admin hide either page
@@ -12637,6 +12639,19 @@ const FIELDGOAL_ROUNDS: usize = 5;
 const FIELDGOAL_MAX_POINTS_PER_KICK: u8 = 70;
 const FIELDGOAL_MIN_MILLIS: u64 = 5_000; // 5 snaps can't finish in <5 s
 const FIELDGOAL_MAX_MILLIS: u64 = 30 * 60 * 1000; // 30 min
+// Game 3: "Luck-Proof" — the EV-decision trainer. A run is LUCKPROOF_ROUNDS
+// server-generated gambles; the player takes or passes each under a shot
+// clock. The RANKED score is EV LEAKED (chip-basis-points of expected value
+// given up vs perfect play — LOWER is better, so the default minigolf-style
+// rank ordering applies); the chip results are a separate, luck-noisy track
+// that is displayed but never ranked. Scoring is recomputed SERVER-SIDE from
+// the stored run, so a submitted score can't be forged — only the decisions
+// are client input.
+const ARCADE_GAME_LUCKPROOF: &str = "luckproof";
+const LUCKPROOF_ROUNDS: usize = 10;
+const LUCKPROOF_RUN_TTL_NS: u64 = 15 * 60 * 1_000_000_000; // finish within 15 min
+const LUCKPROOF_MIN_MILLIS: u64 = 3_000; // 10 reads can't finish in <3 s
+const LUCKPROOF_MAX_MILLIS: u64 = 15 * 60 * 1000;
 const ARCADE_LEADERBOARD_LIMIT: usize = 100;
 // Palette sizes — the frontend mirrors these (index = palette entry).
 const CHARACTER_HAIR_OPTIONS: u8 = 6;
@@ -12689,6 +12704,7 @@ pub struct ArcadeInfo {
     /// Per-game kill switches (only meaningful when `enabled` is true).
     pub minigolf_enabled: bool,
     pub fieldgoal_enabled: bool,
+    pub luckproof_enabled: bool,
     /// Caller may finish full rounds + submit scores (stake or recent vote).
     pub full_access: bool,
     pub has_stake: bool,
@@ -12743,6 +12759,7 @@ fn require_arcade_enabled() -> Result<(), String> {
 fn arcade_game_flag(game: &str) -> &'static str {
     match game {
         ARCADE_GAME_FIELDGOAL => FLAG_ARCADE_FIELDGOAL,
+        ARCADE_GAME_LUCKPROOF => FLAG_ARCADE_LUCKPROOF,
         _ => FLAG_ARCADE_MINIGOLF,
     }
 }
@@ -12826,6 +12843,7 @@ fn get_arcade_info() -> ArcadeInfo {
         enabled: feature_visible(FLAG_ARCADE, get_caller()),
         minigolf_enabled: feature_visible(FLAG_ARCADE_MINIGOLF, get_caller()),
         fieldgoal_enabled: feature_visible(FLAG_ARCADE_FIELDGOAL, get_caller()),
+        luckproof_enabled: feature_visible(FLAG_ARCADE_LUCKPROOF, get_caller()),
         // Owner decision 2026-07-04: every SIGNED-IN user plays every game in
         // full — no stake/vote gate. Staking now only gates lottery tickets
         // (has_stake stays exposed so the UI can message that).
@@ -13285,6 +13303,278 @@ fn get_arcade_leaderboard(game: String) -> Vec<ArcadeLeaderboardRow> {
             submitted_at: s.submitted_at,
         })
         .collect()
+}
+
+// ── Luck-Proof (arcade game 3): the EV-decision trainer ─────────────────────
+// "Your results are luck. Your decisions are skill." Each run serves
+// LUCKPROOF_ROUNDS gambles (pay `cost` chips for a `p_bp` chance at `payout`
+// chips) in three hold'em-flavored framings the player must convert in their
+// head: percent, bookmaker odds, and outs-from-unseen-cards. Take or pass.
+//
+// The ranked metric is EV LEAKED (Σ of expected value given up vs perfect
+// play, in chip-basis-points; 0 = perfect, lower is better). Chip outcomes
+// are resolved from pre-committed rolls and shown as the separate "luck
+// track" — deliberately NEVER ranked, because separating decision quality
+// from results is the skill this game trains.
+
+/// Scenario framing the frontend renders (numbers always come from the
+/// struct; the framing only changes the prose).
+///   0 = percent ("62% to win"), 1 = odds ("3:2 against"),
+///   2 = outs ("13 of 46 unseen cards win it").
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LuckProofGamble {
+    /// Win probability in basis points (1..=9_999).
+    pub p_bp: u16,
+    /// Chips risked to take the gamble.
+    pub cost: u32,
+    /// Chips received (in addition to keeping nothing else) on a win.
+    pub payout: u32,
+    /// Framing code (see above).
+    pub framing: u8,
+    /// Outs framing support: `outs` of `cards` unseen cards win (0 otherwise).
+    pub outs: u8,
+    pub cards: u8,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LuckProofRun {
+    pub id: u64,
+    pub player: Principal,
+    pub gambles: Vec<LuckProofGamble>,
+    /// Pre-committed outcome rolls (basis points; win iff roll < p_bp).
+    /// Kept server-side until completion so the luck track can't be peeked.
+    pub rolls: Vec<u16>,
+    pub issued_at: u64,
+    pub completed: bool,
+}
+impl_storable!(LuckProofRun);
+
+thread_local! {
+    /// MemoryId 105: in-flight + completed Luck-Proof runs.
+    static LUCKPROOF_RUNS: RefCell<StableBTreeMap<u64, LuckProofRun, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(105)))));
+    /// MemoryId 106: next run id.
+    static NEXT_LUCKPROOF_ID: RefCell<StableCell<u64, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(106)), 1u64)));
+}
+
+/// Signed EV edge of a gamble in chip-basis-points: p·payout − cost.
+/// Positive = taking it is correct; negative = passing is correct.
+fn luckproof_edge_bp(g: &LuckProofGamble) -> i64 {
+    (g.p_bp as i64) * (g.payout as i64) - 10_000i64 * (g.cost as i64)
+}
+
+/// EV leaked by `decisions` against `gambles` (chip-basis-points, ≥ 0;
+/// 0 = perfect play). Taking a −EV gamble leaks |edge|; passing a +EV gamble
+/// leaks edge; near-zero-edge "close calls" cost almost nothing either way —
+/// exactly the weighting a poker player's intuition should have.
+fn luckproof_ev_leaked_bp(gambles: &[LuckProofGamble], decisions: &[bool]) -> u64 {
+    gambles
+        .iter()
+        .zip(decisions)
+        .map(|(g, &take)| {
+            let edge = luckproof_edge_bp(g);
+            if take && edge < 0 {
+                (-edge) as u64
+            } else if !take && edge > 0 {
+                edge as u64
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
+/// Deterministic per-run randomness: SHA-256 stream over (seed material, i).
+fn luckproof_rand(seed: &[u8; 32], i: u64, salt: u8) -> u64 {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(seed);
+    h.update(i.to_le_bytes());
+    h.update([salt]);
+    let d = h.finalize();
+    u64::from_le_bytes(d[..8].try_into().unwrap())
+}
+
+/// Generate one run's gambles + outcome rolls. Round classes rotate so every
+/// run mixes clear takes, clear passes, and close calls; framings force the
+/// player to convert odds/outs into probability under the clock.
+fn luckproof_generate(seed: [u8; 32]) -> (Vec<LuckProofGamble>, Vec<u16>) {
+    let mut gambles = Vec::with_capacity(LUCKPROOF_ROUNDS);
+    let mut rolls = Vec::with_capacity(LUCKPROOF_ROUNDS);
+    for i in 0..LUCKPROOF_ROUNDS as u64 {
+        let framing = (luckproof_rand(&seed, i, 0) % 3) as u8;
+        // Probability, shaped by the framing so the prose is EXACT.
+        let (p_bp, outs, cards) = match framing {
+            2 => {
+                let cards = 40 + (luckproof_rand(&seed, i, 1) % 11) as u8; // 40..=50
+                let outs = 2 + (luckproof_rand(&seed, i, 2) % 19) as u8;   // 2..=20
+                ((outs as u32 * 10_000 / cards as u32) as u16, outs, cards)
+            }
+            1 => {
+                // "a:b against" — a,b in 1..=6, p = b/(a+b).
+                let a = 1 + (luckproof_rand(&seed, i, 1) % 6) as u32;
+                let b = 1 + (luckproof_rand(&seed, i, 2) % 6) as u32;
+                ((b * 10_000 / (a + b)) as u16, a as u8, b as u8) // outs/cards reused as a:b
+            }
+            _ => {
+                (500 + (luckproof_rand(&seed, i, 1) % 9_000) as u16, 0, 0) // 5%..95%
+            }
+        };
+        let cost = 10 + (luckproof_rand(&seed, i, 3) % 10) as u32 * 10; // 10..=100 chips
+        // Round class: 0/1 clear edges (±8%..±30% of cost), 2 close (±0..4%).
+        let class = luckproof_rand(&seed, i, 4) % 3;
+        let mag = match class {
+            2 => (luckproof_rand(&seed, i, 5) % 5) as i64,       // 0..=4 % of cost
+            _ => 8 + (luckproof_rand(&seed, i, 5) % 23) as i64,  // 8..=30 % of cost
+        };
+        let sign: i64 = if luckproof_rand(&seed, i, 6) % 2 == 0 { 1 } else { -1 };
+        let target_edge_bp = sign * mag * (cost as i64) * 100; // % of cost → bp
+        // payout ≈ (cost·10_000 + target_edge) / p, floored at 1 chip.
+        let payout = (((cost as i64) * 10_000 + target_edge_bp) / (p_bp as i64)).max(1) as u32;
+        gambles.push(LuckProofGamble { p_bp, cost, payout, framing, outs, cards });
+        rolls.push((luckproof_rand(&seed, i, 7) % 10_000) as u16);
+    }
+    (gambles, rolls)
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LuckProofRunStart {
+    pub run_id: u64,
+    pub gambles: Vec<LuckProofGamble>,
+    pub issued_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LuckProofResult {
+    /// Ranked metric (lower = better): EV leaked in chip-basis-points.
+    pub ev_leaked_bp: u64,
+    /// Perfect play's total available edge (for the "you captured X%" line).
+    pub optimal_ev_bp: u64,
+    /// Per-round outcomes for the luck track (win iff the player took it AND won).
+    pub outcomes: Vec<bool>,
+    /// Luck-track chip delta across the run (never ranked).
+    pub bankroll_delta: i64,
+    /// Leaderboard rank after insert-if-better (1-based).
+    pub rank: u32,
+}
+
+/// Start a Luck-Proof run: the server generates and stores the gambles (and
+/// hidden outcome rolls) so completion can be scored trustlessly.
+#[ic_cdk::update]
+fn start_luckproof_run() -> Result<LuckProofRunStart, String> {
+    require_authenticated()?;
+    require_arcade_game_enabled(ARCADE_GAME_LUCKPROOF)?;
+    let caller = get_caller();
+    let now = current_time();
+    let id = NEXT_LUCKPROOF_ID.with(|c| {
+        let v = *c.borrow().get();
+        let _ = c.borrow_mut().set(v + 1);
+        v
+    });
+    // Seed: hash(time ‖ caller ‖ id) — no wagers ride on this randomness, so
+    // committee-grade randomness (raw_rand) isn't required; determinism per
+    // run is what matters for server-side rescoring.
+    let seed = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(now.to_le_bytes());
+        h.update(caller.as_slice());
+        h.update(id.to_le_bytes());
+        let d = h.finalize();
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&d);
+        s
+    };
+    let (gambles, rolls) = luckproof_generate(seed);
+    LUCKPROOF_RUNS.with(|m| {
+        m.borrow_mut().insert(id, LuckProofRun {
+            id,
+            player: caller,
+            gambles: gambles.clone(),
+            rolls,
+            issued_at: now,
+            completed: false,
+        });
+    });
+    Ok(LuckProofRunStart { run_id: id, gambles, issued_at: now })
+}
+
+/// Complete a run: score the decisions SERVER-SIDE, reveal the luck track,
+/// and insert-if-better into the shared arcade leaderboard (game
+/// "luckproof"; strokes slot = EV leaked scaled to fit u32, lower = better,
+/// so the default rank ordering applies).
+#[ic_cdk::update]
+fn complete_luckproof_run(run_id: u64, decisions: Vec<bool>, millis: u64) -> Result<LuckProofResult, String> {
+    require_authenticated()?;
+    require_arcade_game_enabled(ARCADE_GAME_LUCKPROOF)?;
+    let caller = get_caller();
+    let now = current_time();
+    let mut run = LUCKPROOF_RUNS.with(|m| m.borrow().get(&run_id)).ok_or("RUN_NOT_FOUND")?;
+    if run.player != caller {
+        return Err("NOT_YOUR_RUN".to_string());
+    }
+    if run.completed {
+        return Err("ALREADY_COMPLETED".to_string());
+    }
+    if now.saturating_sub(run.issued_at) > LUCKPROOF_RUN_TTL_NS {
+        return Err("RUN_EXPIRED".to_string());
+    }
+    if decisions.len() != LUCKPROOF_ROUNDS {
+        return Err("INVALID_DECISION_COUNT".to_string());
+    }
+    if !(LUCKPROOF_MIN_MILLIS..=LUCKPROOF_MAX_MILLIS).contains(&millis) {
+        return Err("INVALID_TIME".to_string());
+    }
+    run.completed = true;
+    LUCKPROOF_RUNS.with(|m| { m.borrow_mut().insert(run_id, run.clone()); });
+
+    let ev_leaked_bp = luckproof_ev_leaked_bp(&run.gambles, &decisions);
+    let optimal_ev_bp: u64 = run.gambles.iter().map(|g| luckproof_edge_bp(g).max(0) as u64).sum();
+    let mut outcomes = Vec::with_capacity(LUCKPROOF_ROUNDS);
+    let mut bankroll_delta: i64 = 0;
+    for ((g, &take), &roll) in run.gambles.iter().zip(&decisions).zip(&run.rolls) {
+        let won = take && (roll < g.p_bp);
+        outcomes.push(won);
+        if take {
+            bankroll_delta += if won { g.payout as i64 - g.cost as i64 } else { -(g.cost as i64) };
+        }
+    }
+
+    // Leaderboard: strokes = EV leaked in centi-chips (bp/100), clamped.
+    let strokes = u32::try_from(ev_leaked_bp / 100).unwrap_or(u32::MAX);
+    let per_hole: Vec<u8> = decisions.iter().map(|&d| d as u8).collect();
+    let key = ArcadeScoreKey { game: ARCADE_GAME_LUCKPROOF.to_string(), player: caller };
+    let (_, best) = ARCADE_SCORES.with(|m| {
+        let mut m = m.borrow_mut();
+        let prev = m.get(&key).map(|p| (p.strokes, p.millis, p.submitted_at));
+        let keep_new = match prev {
+            Some(p) => arcade_score_beats(ARCADE_GAME_LUCKPROOF, (strokes, millis, now), p),
+            None => true,
+        };
+        if keep_new {
+            m.insert(key.clone(), ArcadeScore {
+                game: ARCADE_GAME_LUCKPROOF.to_string(),
+                player: caller,
+                strokes,
+                millis,
+                per_hole,
+                submitted_at: now,
+            });
+        }
+        (keep_new, if keep_new { (strokes, millis, now) } else { prev.unwrap() })
+    });
+    let rank = ARCADE_SCORES.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|s| s.game == ARCADE_GAME_LUCKPROOF && s.player != caller)
+            .filter(|s| arcade_score_beats(ARCADE_GAME_LUCKPROOF, (s.strokes, s.millis, s.submitted_at), best))
+            .count() as u32
+            + 1
+    });
+
+    Ok(LuckProofResult { ev_leaked_bp, optimal_ev_bp, outcomes, bankroll_delta, rank })
 }
 
 // ==========================================
@@ -30153,6 +30443,118 @@ mod tests {
         // Escrow fully drained.
         assert_eq!(acct_get(get_canister_id(), Some(sub)), 0);
         acct_disable();
+    }
+
+
+    // ── Luck-Proof (arcade game 3) ────────────────────────────────────────
+
+    fn enable_luckproof() {
+        install_staking_test_config();
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE_LUCKPROOF.to_string(), 1u8); });
+    }
+
+    #[test]
+    fn test_luckproof_generation_invariants() {
+        let (gambles, rolls) = luckproof_generate([7u8; 32]);
+        assert_eq!(gambles.len(), LUCKPROOF_ROUNDS);
+        assert_eq!(rolls.len(), LUCKPROOF_ROUNDS);
+        for g in &gambles {
+            assert!((1..10_000).contains(&g.p_bp), "p in (0,1): {}", g.p_bp);
+            assert!((10..=100).contains(&g.cost));
+            assert!(g.payout >= 1);
+            assert!(g.framing <= 2);
+            if g.framing == 2 {
+                assert!((40..=50).contains(&g.cards) && (2..=20).contains(&g.outs));
+                assert_eq!(g.p_bp as u32, g.outs as u32 * 10_000 / g.cards as u32, "outs prose is exact");
+            }
+        }
+        // Deterministic per seed; different seeds differ.
+        assert_eq!(format!("{:?}", luckproof_generate([7u8; 32]).0), format!("{:?}", gambles));
+        assert_ne!(format!("{:?}", luckproof_generate([8u8; 32]).0), format!("{:?}", gambles));
+    }
+
+    #[test]
+    fn test_luckproof_scoring_math() {
+        let g = |p_bp: u16, cost: u32, payout: u32| LuckProofGamble {
+            p_bp, cost, payout, framing: 0, outs: 0, cards: 0,
+        };
+        // +EV: p=60%, cost 50, payout 100 -> edge = 0.6*100 - 50 = +10 chips.
+        let plus = g(6_000, 50, 100);
+        assert_eq!(luckproof_edge_bp(&plus), 100_000);
+        let minus = g(4_000, 50, 100);
+        assert_eq!(luckproof_edge_bp(&minus), -100_000);
+
+        let gambles = vec![plus.clone(), minus.clone()];
+        assert_eq!(luckproof_ev_leaked_bp(&gambles, &[true, false]), 0, "perfect play");
+        assert_eq!(luckproof_ev_leaked_bp(&gambles, &[false, true]), 200_000, "both wrong");
+        // Close call leaks almost nothing either way.
+        let close = g(5_001, 50, 100); // edge = +0.01 chips
+        assert_eq!(luckproof_ev_leaked_bp(&[close], &[false]), 100);
+    }
+
+    #[test]
+    fn test_luckproof_run_flow_and_ranked_by_lowest_leak() {
+        enable_luckproof();
+        set_mock_caller(alice());
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_ARCADE_LUCKPROOF.to_string()); });
+        assert_eq!(start_luckproof_run().unwrap_err(), "FEATURE_DISABLED");
+        enable_luckproof();
+
+        // Alice plays PERFECTLY (deciding by the true edge).
+        set_mock_caller(alice());
+        let run = start_luckproof_run().unwrap();
+        assert_eq!(run.gambles.len(), LUCKPROOF_ROUNDS);
+        let perfect: Vec<bool> = run.gambles.iter().map(|g| luckproof_edge_bp(g) > 0).collect();
+
+        // Guards: foreign caller, wrong count, bad time.
+        set_mock_caller(bob());
+        assert_eq!(complete_luckproof_run(run.run_id, perfect.clone(), 30_000).unwrap_err(), "NOT_YOUR_RUN");
+        set_mock_caller(alice());
+        assert_eq!(complete_luckproof_run(run.run_id, vec![true], 30_000).unwrap_err(), "INVALID_DECISION_COUNT");
+        assert_eq!(complete_luckproof_run(run.run_id, perfect.clone(), 1).unwrap_err(), "INVALID_TIME");
+
+        let res = complete_luckproof_run(run.run_id, perfect.clone(), 30_000).unwrap();
+        assert_eq!(res.ev_leaked_bp, 0, "perfect play leaks nothing");
+        assert!(res.optimal_ev_bp > 0);
+        assert_eq!(res.rank, 1);
+        assert_eq!(res.outcomes.len(), LUCKPROOF_ROUNDS);
+        assert_eq!(complete_luckproof_run(run.run_id, perfect, 30_000).unwrap_err(), "ALREADY_COMPLETED");
+
+        // Bob plays maximally wrong -> ranks BELOW alice (lower leak = better).
+        set_mock_caller(bob());
+        let run2 = start_luckproof_run().unwrap();
+        let worst: Vec<bool> = run2.gambles.iter().map(|g| luckproof_edge_bp(g) <= 0).collect();
+        let res2 = complete_luckproof_run(run2.run_id, worst, 30_000).unwrap();
+        assert!(res2.ev_leaked_bp > 0);
+        assert_eq!(res2.rank, 2);
+        let board = get_arcade_leaderboard(ARCADE_GAME_LUCKPROOF.into());
+        assert_eq!(board[0].player, alice());
+        assert_eq!(board[0].strokes, 0);
+        assert_eq!(board[1].player, bob());
+
+        for u in [alice(), bob()] {
+            ARCADE_SCORES.with(|m| { m.borrow_mut().remove(&ArcadeScoreKey { game: ARCADE_GAME_LUCKPROOF.into(), player: u }); });
+        }
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_ARCADE_LUCKPROOF.to_string()); });
+    }
+
+    #[test]
+    fn test_luckproof_bankroll_reflects_precommitted_rolls() {
+        enable_luckproof();
+        set_mock_caller(alice());
+        let run = start_luckproof_run().unwrap();
+        let take_all = vec![true; LUCKPROOF_ROUNDS];
+        // Expected luck track from the STORED run (rolls hidden at start,
+        // fixed at issue time).
+        let stored = LUCKPROOF_RUNS.with(|m| m.borrow().get(&run.run_id)).unwrap();
+        let mut expected: i64 = 0;
+        for (g, &roll) in stored.gambles.iter().zip(&stored.rolls) {
+            expected += if roll < g.p_bp { g.payout as i64 - g.cost as i64 } else { -(g.cost as i64) };
+        }
+        let res = complete_luckproof_run(run.run_id, take_all, 30_000).unwrap();
+        assert_eq!(res.bankroll_delta, expected);
+        ARCADE_SCORES.with(|m| { m.borrow_mut().remove(&ArcadeScoreKey { game: ARCADE_GAME_LUCKPROOF.into(), player: alice() }); });
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_ARCADE_LUCKPROOF.to_string()); });
     }
 
     #[test]

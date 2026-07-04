@@ -102,6 +102,8 @@ icp canister call backend admin_set_feature_flag '("arcade", false)' -e "$ENV" -
 icp canister call backend admin_set_feature_flag '("early_adopters", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # The Course Marketplace keys off the arcade_minigolf sub-flag (PB-305 A7).
 icp canister call backend admin_set_feature_flag '("arcade_minigolf", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+# Luck-Proof (arcade game 3) — enabled locally for testing; ships dark on mainnet.
+icp canister call backend admin_set_feature_flag '("arcade_luckproof", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 ok "Early Adopters + arcade_minigolf flags enabled (local); arcade forced OFF (default)"
 
 # ── 5b. Wire CourseNFT both directions, then seed a sample course ─────────────

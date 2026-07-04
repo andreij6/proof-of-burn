@@ -20,6 +20,7 @@ shipped.
 - [Idea Pitch Coach — Gemini feedback before you post to the R&D board](/ideas/idea-pitch-coach/README.md) — `idea-pitch-coach`
 - [II Purchase — crowdfund discounted idgeek II-anchor+neuron bundles, fold neurons in](/ideas/ii-purchase/README.md) — `ii-purchase`
 - [Lottery FCM reminder — \"draws in 1 hour\" push](/ideas/lottery-fcm-reminder/README.md) — `lottery-fcm-reminder`
+- [Luck-Proof — the EV-decision trainer (arcade game 3)](/ideas/luck-proof/README.md) — `luck-proof`
 - [Neuron Sale — Feature Exploration](/ideas/nueron-sale/README.md) — `nueron-sale`
 - [Oisy Wallet Integration Specification Review & Scorecard (PB-500)](/ideas/oisy/oisy-wallet-integration-specs-review.md) — `oisy`
 - [Epic I — Agent Poker (No-Limit Hold'em, agents-only)](/ideas/poker/README.md) — `poker`
