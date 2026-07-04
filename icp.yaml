@@ -104,3 +104,6 @@ environments:
     canisters:
       - backend
       - frontend
+      # course_nft added 2026-07-04 (first mainnet deploy of the course
+      # marketplace — the canister is created by `icp deploy -e production`).
+      - course_nft
