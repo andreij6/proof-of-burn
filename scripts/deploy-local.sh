@@ -11,7 +11,7 @@
 #   3. Deploys/upgrades backend + frontend (asset sync included).
 #   4. Sanity-checks that the backend's configured ICP ledger id matches the
 #      actual ledger canister (ids permute after a network wipe — see
-#      docs/OPS.md / memory note; a mismatch breaks every balance/burn op).
+#      okf/operations/OPS.md / memory note; a mismatch breaks every balance/burn op).
 #   5. Wires the backend at the local ckBTC/ckETH ledgers (admin call).
 #   6. Prepopulates mock data when missing:
 #        - mock proposals + 3 sample ideas  (auto-seeded by init/post_upgrade)

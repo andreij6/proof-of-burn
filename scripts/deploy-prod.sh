@@ -23,7 +23,7 @@
 #   5. Core-launch feature-flag policy: set the 10 flags + verify on-chain.
 #   6. Post-deploy smoke checks + operator reminders.
 #
-# Prerequisites (see docs/DEPLOY.md):
+# Prerequisites (see okf/operations/DEPLOY.md):
 #   - Funded deploy identity selected: `icp identity use <name>`
 #   - For a FIRST deploy: icp.yaml init_args `owner` updated to your
 #     mainnet principal (it becomes admins[0]).
@@ -199,7 +199,7 @@ ok "Mainnet deploy finished."
 echo "   Backend:  $BACKEND_ID"
 echo "   Frontend: $FRONTEND_ID  →  https://$FRONTEND_ID.icp0.io/"
 echo
-echo "   Post-deploy checklist (docs/DEPLOY.md §4–5):"
+echo "   Post-deploy checklist (okf/operations/DEPLOY.md §4–5):"
 echo "   [ ] Backup controller present:  icp canister status backend -e production"
 echo "   [ ] Anonymous eligibility is tier 0 (smoke per runbook)"
 echo "   [ ] Cycle balances healthy on both canisters"

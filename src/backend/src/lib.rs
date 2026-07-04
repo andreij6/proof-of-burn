@@ -9339,7 +9339,7 @@ fn dev_add_mock_maturity(amount_e8s: u64, tier: StakeTier) -> Result<(), String>
 const LOTTERY_DRAWS_PER_WIN: u64 = 13;
 
 /// A drawing only actually runs when the pot holds at least this much (25
-/// ICP — see docs/GROWTH_TARGETS.md). The countdown always ticks; the pot
+/// ICP — see okf/operations/GROWTH_TARGETS.md). The countdown always ticks; the pot
 /// check happens at the scheduled moment — too small, and the drawing rolls
 /// over to the next slot (no randomness consumed, no draw record). Forced
 /// dev draws bypass the gate.
@@ -13310,7 +13310,7 @@ fn get_arcade_leaderboard(game: String) -> Vec<ArcadeLeaderboardRow> {
 /// 150 ICP — the treasury's monthly cut comes first, CAPPED here so member
 /// yield scales with the neuron. Recalibrated from 1,000 (June 2026): at the
 /// 70k-ICP target the old cut absorbed every realistic month entirely,
-/// paying members 0% forever — see docs/GROWTH_TARGETS.md §3.
+/// paying members 0% forever — see okf/operations/GROWTH_TARGETS.md §3.
 const EARLY_ADOPTER_TREASURY_CUT_E8S: u64 = 15_000_000_000;
 /// 600 ICP — once a settled month's yield reaches this, membership closes
 /// PERMANENTLY: no new early adopters, ever. Existing early adopters can still top
@@ -16143,7 +16143,7 @@ fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
 // `course_nft` canister only by inter-canister `ic_cdk::call` to the principal
 // configured in `Config::course_nft_canister` — the crate is never imported.
 //
-// Specs: ideas/course-nft/tasks/04-minting-flow.md (PB-304),
+// Specs: okf/ideas/course-nft/tasks/04-minting-flow.md (PB-304),
 // 05-marketplace.md (PB-305), 06-play-to-earn-and-anticheat.md (PB-306),
 // 09-leaderboard-removal-and-arcade-migration.md (PB-309).
 //
@@ -19371,10 +19371,10 @@ fn admin_set_faucet_treasury_floor(floor_e8s: u64) -> Result<(), String> {
 // ====================================================================
 // X-Farm — autonomous per-user Farmer canisters that burn ICP→cycles to run
 // Gemini (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X.
-// Spec: ideas/x-farm/{README,01,02,03,05}.md. Ship dark behind FLAG_X_FARM
+// Spec: okf/ideas/x-farm/{README,01,02,03,05}.md. Ship dark behind FLAG_X_FARM
 // (default OFF). LOCAL deploys only — mainnet gated per-deploy by the owner.
 //
-// Reuse (do NOT re-clone — docs/duplication-review-2026-06-19.md): the money path
+// Reuse (do NOT re-clone — okf/notes/duplication-review-2026-06-19.md): the money path
 // is settle_burn_split's CMC leg (call_cmc_topup_transfer + notify_cmc_topup,
 // journaled burn_block_index, CMC_REFUNDED→drop block, PB-148 class); the 10%
 // treasury leg is call_ledger_transfer to TREASURY_SUBACCOUNT; the escrow
@@ -20000,7 +20000,7 @@ async fn admin_refund_xfarm_escrow(user: Principal) -> Result<u64, String> {
 /// transfers (overwriting the historical create blocks). This matches the pre-fix
 /// behavior; the only change is the journaling that lets the sweep recover a notify
 /// failure. The retry-after-extend-failure double-charge this implies is a known
-/// limitation documented in docs/escrow-fix-review-2026-06-20.md (the proper fix is
+/// limitation documented in okf/notes/escrow-fix-review-2026-06-20.md (the proper fix is
 /// a per-renew epoch field; deferred — extend failures are rare, the Farmer canister
 /// is controller-owned and the call is local).
 #[ic_cdk::update]

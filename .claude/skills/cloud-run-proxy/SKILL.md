@@ -10,8 +10,8 @@ The repo's only off-chain component: a tiny **FastAPI + `google-genai`** service
 grounded, structured Gemini output. One service, multiple endpoints:
 `POST /v1/tweets` (x-farm, live) and `POST /v1/review` (ai-proposal-review, stubbed).
 
-Lives in `proxy/`. Design rationale + research: `ideas/x-farm/06-cloud-run-proxy-build.md`.
-Frozen request/response contract + parallel-work status: `ideas/x-farm/PARALLEL-WORK.md`.
+Lives in `proxy/`. Design rationale + research: `okf/ideas/x-farm/06-cloud-run-proxy-build.md`.
+Frozen request/response contract + parallel-work status: `okf/ideas/x-farm/PARALLEL-WORK.md`.
 
 ## HARD RULE: deploys are billable
 
@@ -74,7 +74,7 @@ The service URL is stable across redeploys. Each deploy = a new revision
 ## Common operations
 
 - **Add an endpoint** (e.g. implement `/v1/review`, or an images endpoint per
-  `ideas/x-farm/07-premium-images-nano-banana.md`): add the route to `proxy/main.py`
+  `okf/ideas/x-farm/07-premium-images-nano-banana.md`): add the route to `proxy/main.py`
   behind `_check_auth`, test locally, then redeploy. Keep the same bearer scheme.
 - **Rotate the bearer:** `printf '%s' "$NEW" | gcloud secrets versions add xfarm-bearer --data-file=-`
   then redeploy (picks up `:latest`), then owner re-calls the canister's
@@ -127,5 +127,5 @@ The service URL is stable across redeploys. Each deploy = a new revision
 - `MAX_DRAFTS_PER_CALL` (10), `TWEETS_MODEL` (gemini-3.5-flash).
 - Logs are structured JSON (severity/message/fields) → Cloud Logging jsonPayload.
 
-Do not change this shape without updating `ideas/x-farm/PARALLEL-WORK.md` and the
+Do not change this shape without updating `okf/ideas/x-farm/PARALLEL-WORK.md` and the
 canister side. Wiring: owner sets URL + bearer via `admin_set_xfarm_proxy`.

@@ -100,4 +100,4 @@ cargo test -p backend --lib               # backend unit tests
 - `docs/` — deployment, mainnet, operations, economics and security runbooks.
 - `ideas/`, `plans/` — design specs and implementation plans for upcoming work.
 
-> Deploying to mainnet is a separate, gated process — see `docs/DEPLOY.md`.
+> Deploying to mainnet is a separate, gated process — see `okf/operations/DEPLOY.md`.
