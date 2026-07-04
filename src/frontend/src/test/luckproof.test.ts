@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   edgeBp, fmtEvBp, fmtTrack, practiceGamble, friendlyDailyErr,
-  buildSeries, oddsTone, TRACK_START, SHOT_CLOCK_MS, type LPGamble,
+  buildSeries, oddsTone, TRACK_START, SHOT_CLOCK_MS, PRACTICE_ROUNDS, type LPGamble,
 } from '../arcade/LuckProof';
 
 const g = (odds_pct: number, risk: number, reward: number): LPGamble => ({ odds_pct, risk, reward });
@@ -77,9 +77,10 @@ describe('oddsTone (red / yellow / green bands)', () => {
   });
 });
 
-describe('shot clock', () => {
-  it('is 3 seconds per the competition spec', () => {
+describe('session constants', () => {
+  it('shot clock is 3 seconds, practice sessions are 50 hands', () => {
     expect(SHOT_CLOCK_MS).toBe(3_000);
+    expect(PRACTICE_ROUNDS).toBe(50);
   });
 });
 

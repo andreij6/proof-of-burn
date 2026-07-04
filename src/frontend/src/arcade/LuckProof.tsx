@@ -51,6 +51,7 @@ export function fmtTrack(startCents: number, deltaBp: number): string {
 export const TRACK_START = 100_000; // $1,000.00 in cents
 export const SHOT_CLOCK_MS = 3_000; // the burndown — expiry auto-declines
 export const GET_READY_SECS = 5;   // countdown before the first hand
+export const PRACTICE_ROUNDS = 50; // one practice session
 
 // Chart series colors — validated (dataviz six checks, dark surface):
 // CVD ΔE 101.8 protan, contrast ≥3:1, in-band lightness.
@@ -171,7 +172,7 @@ interface LuckProofProps {
   onExit?: () => void;
 }
 
-type Mode = 'menu' | 'practice' | 'daily' | 'dailyDone' | 'replay';
+type Mode = 'menu' | 'practice' | 'practiceDone' | 'daily' | 'dailyDone' | 'replay';
 
 interface DailyStatus {
   day: number;
@@ -199,6 +200,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
   const [evBp, setEvBp] = useState(0);
   const [cashBp, setCashBp] = useState(0);
   const [log, setLog] = useState<LogEntry[]>([]);
+  const [correctCount, setCorrectCount] = useState(0);
   const [series, setSeries] = useState<{ ev: number[]; cash: number[] }>({ ev: [TRACK_START / 100], cash: [TRACK_START / 100] });
   const [clockPct, setClockPct] = useState(100);
 
@@ -220,7 +222,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
   useEffect(() => { refreshMenu(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor]);
 
   const resetTracks = () => {
-    setHand(0); setEvBp(0); setCashBp(0); setLog([]);
+    setHand(0); setEvBp(0); setCashBp(0); setLog([]); setCorrectCount(0);
     setSeries({ ev: [TRACK_START / 100], cash: [TRACK_START / 100] });
   };
   const armClock = () => { decidedRef.current = false; roundStartRef.current = performance.now(); setClockPct(100); };
@@ -327,9 +329,15 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
       outcome: take ? ((won ? 'won' : 'lost') as LogEntry['outcome']) : undefined,
     }, ...l].slice(0, 60));
 
+    if ((take && e >= 0) || (!take && e <= 0)) setCorrectCount((c) => c + 1);
     if (mode === 'practice') {
-      setGamble(practiceGamble());
-      armClock();
+      if (n >= PRACTICE_ROUNDS) {
+        setGamble(null);
+        setMode('practiceDone');
+      } else {
+        setGamble(practiceGamble());
+        armClock();
+      }
       return;
     }
     const run = runRef.current!;
@@ -389,18 +397,26 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
   }, [mode, gamble, hand]);
 
   const inDaily = mode === 'daily';
-  const total = inDaily ? (runRef.current?.gambles.length ?? 0) : null;
+  const total = inDaily ? (runRef.current?.gambles.length ?? 0) : mode === 'practice' ? PRACTICE_ROUNDS : null;
 
   return (
     <div className="col" style={{ gap: 12, maxWidth: 680, margin: '0 auto', width: '100%' }}>
       {/* Header */}
       <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', borderBottom: '2px solid var(--border)', paddingBottom: 10 }}>
         <b style={{ fontSize: 14, letterSpacing: '0.04em' }}>
-          SKLANSKY TRAINER <span style={{ color: 'var(--fg-3)' }}>// {mode === 'practice' ? 'PRACTICE' : mode === 'replay' ? 'REPLAY' : inDaily || mode === 'dailyDone' ? 'DAILY COMPETITION' : 'ARCADE'}</span>
+          SKLANSKY TRAINER <span style={{ color: 'var(--fg-3)' }}>// {mode === 'practice' || mode === 'practiceDone' ? 'PRACTICE' : mode === 'replay' ? 'REPLAY' : inDaily || mode === 'dailyDone' ? 'DAILY COMPETITION' : 'ARCADE'}</span>
         </b>
         <span className="row" style={{ gap: 10 }}>
           {(mode === 'practice' || inDaily) && (
             <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>Hand: {hand}{total !== null ? `/${total}` : ''}</span>
+          )}
+          {mode === 'practice' && (
+            <Btn variant="ghost" sm onClick={launchPractice} title="Start a fresh 50-hand session">
+              <Icon name="refresh" size={12} /> Restart
+            </Btn>
+          )}
+          {inDaily && (
+            <span className="mono" style={{ fontSize: 10.5, color: 'var(--haze-ink)' }}>one attempt · no restarts</span>
           )}
           {(mode !== 'menu' || showMenuExit) && (
             <Btn variant="ghost" sm onClick={() => (mode === 'menu' ? onExit?.() : (setMode('menu'), setGamble(null), setReplay(null), refreshMenu()))}>
@@ -418,9 +434,9 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
               <Chip tone="muted" style={{ alignSelf: 'flex-start', height: 19, fontSize: 10 }}>Practice</Chip>
               <b style={{ fontSize: 15 }}>Endless drills</b>
               <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0, lineHeight: 1.5, flex: 1 }}>
-                Unlimited hands, 3-second clock, instant outcomes, nothing
-                recorded. The clock expiring folds for you — hesitation is a
-                decision too.
+                {PRACTICE_ROUNDS}-hand sessions, 3-second clock, instant
+                outcomes, nothing recorded — restart anytime. The clock expiring
+                folds for you: hesitation is a decision too.
               </p>
               <Btn variant="secondary" onClick={startPractice}><Icon name="clover" size={13} /> Practice</Btn>
             </div>
@@ -434,7 +450,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
                 <b> highest EV</b> (skill) and <b>highest actual cash</b> (luck) — and
                 each takes <b>lottery tickets equal to the player count</b>
                 {status ? ` (${Math.max(status.players_today, 1)} so far)` : ''}. EV ties
-                break on accuracy, then speed. Resets 00:00 UTC.
+                break on accuracy, then speed. <b>One attempt — no restarts.</b> Resets 00:00 UTC.
               </p>
               {status && !status.eligible ? (
                 <div className="col" style={{ gap: 8 }}>
@@ -581,6 +597,38 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
         </>
       )}
 
+      {/* Practice results: the 50-hand scorecard */}
+      {mode === 'practiceDone' && (
+        <div className="card col" style={{ gap: 14 }}>
+          <h3 style={{ margin: 0 }}>Session complete — {PRACTICE_ROUNDS} hands</h3>
+          <TrackChart ev={series.ev} cash={series.cash} />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+            <div className="card col" style={{ gap: 4, borderLeft: `4px solid ${SKILL_COLOR}` }}>
+              <span style={{ fontSize: 10.5, textTransform: 'uppercase', color: 'var(--fg-3)' }}>Skill track (EV earned)</span>
+              <span className="mono" style={{ fontSize: 22, fontWeight: 700 }}>{fmtEvBp(evBp)}</span>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>{correctCount}/{PRACTICE_ROUNDS} decisions correct</span>
+            </div>
+            <div className="card col" style={{ gap: 4, borderLeft: `4px solid ${LUCK_COLOR}` }}>
+              <span style={{ fontSize: 10.5, textTransform: 'uppercase', color: 'var(--fg-3)' }}>Luck track (actual cash)</span>
+              <span className="mono" style={{ fontSize: 22, fontWeight: 700 }}>
+                {cashBp >= 0 ? '+' : '−'}${Math.abs(Math.round(cashBp / 10_000)).toLocaleString()}
+              </span>
+            </div>
+          </div>
+          <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+            {cashBp < 0 && evBp > 0
+              ? 'Positive EV, negative cash — variance, not error. In the daily competition that skill line is all that ranks.'
+              : cashBp >= 0 && evBp < 0
+              ? 'You made money on bad decisions. Luck bailed you out this session — it won\'t, forever.'
+              : 'Skill and luck agreed this session. Practice until the skill line climbs on its own.'}
+          </span>
+          <div className="row" style={{ gap: 8 }}>
+            <Btn variant="primary" onClick={launchPractice}><Icon name="refresh" size={13} stroke="var(--char-950)" /> Play again</Btn>
+            <Btn variant="secondary" onClick={() => { setMode('menu'); refreshMenu(); }}>Back to menu</Btn>
+          </div>
+        </div>
+      )}
+
       {/* Daily results */}
       {mode === 'dailyDone' && result && (
         <div className="card col" style={{ gap: 14 }}>
@@ -671,8 +719,10 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
                 is always exactly $0.
               </span>
               <span>
-                <b style={{ color: 'var(--fg)' }}>You have 3 seconds per hand.</b> If the clock runs out,
-                you decline — hesitation is a decision too.
+                <b style={{ color: 'var(--fg)' }}>You have 3 seconds per hand</b>, {PRACTICE_ROUNDS} hands
+                per practice session (restart anytime). If the clock runs out, you decline —
+                hesitation is a decision too. The daily competition is different: 250 hands,
+                <b style={{ color: 'var(--fg)' }}> one attempt, no restarts</b>.
               </span>
               <span>
                 Your <b style={{ color: SKILL_COLOR }}>skill track</b> earns each decision's EV the moment
