@@ -14050,17 +14050,22 @@ fn start_skydive_daily() -> Result<SkydiveRunStart, String> {
     }
     let now = current_time();
     let day = epoch_day(now);
-    if SKYDIVE_DAILY.with(|m| m.borrow().contains_key(&SkydiveDayKey { day, player: caller })) {
-        return Err("ALREADY_PLAYED_TODAY".to_string());
-    }
-    let in_flight = SKYDIVE_RUNS.with(|m| {
-        m.borrow().iter().any(|e| {
-            let r = e.value();
-            r.player == caller && r.day == day
-        })
-    });
-    if in_flight {
-        return Err("ALREADY_PLAYED_TODAY".to_string());
+    // Local nets skip the once-per-day gate so the drop can be replayed
+    // freely during development; a retry simply overwrites the day's entry.
+    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+    if !is_local {
+        if SKYDIVE_DAILY.with(|m| m.borrow().contains_key(&SkydiveDayKey { day, player: caller })) {
+            return Err("ALREADY_PLAYED_TODAY".to_string());
+        }
+        let in_flight = SKYDIVE_RUNS.with(|m| {
+            m.borrow().iter().any(|e| {
+                let r = e.value();
+                r.player == caller && r.day == day
+            })
+        });
+        if in_flight {
+            return Err("ALREADY_PLAYED_TODAY".to_string());
+        }
     }
     let id = NEXT_SKYDIVE_ID.with(|c| {
         let v = *c.borrow().get();
@@ -31034,6 +31039,10 @@ mod tests {
 
     fn enable_skydive() {
         install_staking_test_config();
+        // The once-per-day gate only bites off-local — tests exercise prod rules.
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.is_local = false;
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
         FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE_SKYDIVE.to_string(), 1u8); });
     }
 
@@ -31120,6 +31129,13 @@ mod tests {
         assert_eq!(st.players_today, 3);
         set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
         assert!(start_skydive_daily().is_ok(), "fresh attempt after UTC rollover");
+
+        // Local nets replay freely: same day, repeated starts allowed.
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.is_local = true;
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+        assert!(start_skydive_daily().is_ok(), "local retry 1");
+        assert!(start_skydive_daily().is_ok(), "local retry 2");
 
         for u in [alice(), bob(), carol()] {
             STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, u)); });

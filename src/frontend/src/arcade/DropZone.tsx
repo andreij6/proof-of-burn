@@ -193,9 +193,11 @@ interface DailyRow { rank: number; player: any; distance_dm: number; millis: big
 interface DropZoneProps {
   actor: any;
   onGoParticipate: () => void;
+  /** Local replica: the daily drop is replayable without limit. */
+  isLocal?: boolean;
 }
 
-export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
+export default function DropZone({ actor, onGoParticipate, isLocal = false }: DropZoneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [mode, setMode] = useState<Mode>('menu');
   const [busy, setBusy] = useState(false);
@@ -789,7 +791,7 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
     }
 
     // ── Minimap ──
-    const ms = Math.min(130, W * 0.24), mx = W - ms - 12, my = 12;
+    const ms = Math.min(130, W * 0.24), mx = 12, my = H - ms - 12;
     ctx.fillStyle = 'rgba(250,250,248,0.9)';
     ctx.fillRect(mx, my, ms, ms);
     ctx.strokeStyle = INK; ctx.lineWidth = 1.6; ctx.strokeRect(mx, my, ms, ms);
@@ -878,14 +880,19 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
                   </span>
                   <Btn variant="primary" onClick={onGoParticipate}><Icon name="zap" size={13} stroke="var(--char-950)" /> Stake ICP to enter</Btn>
                 </div>
-              ) : status?.played ? (
+              ) : status?.played && !isLocal ? (
                 <Chip tone="ok" style={{ alignSelf: 'flex-start' }}>
                   <Icon name="checkCircle" size={11} /> Jumped today{status.my_entry ? ` — ${(status.my_entry.distance_dm / 10).toFixed(1)} m ${status.my_entry.safe ? '' : '· crashed'}` : ''}
                 </Chip>
               ) : (
-                <Btn variant="primary" disabled={busy || !status} onClick={startDaily}>
-                  {busy ? <LiveDot size={8} /> : <Icon name="parachute" size={13} stroke="var(--char-950)" />} Board the plane
-                </Btn>
+                <div className="col" style={{ gap: 6 }}>
+                  <Btn variant="primary" disabled={busy || !status} onClick={startDaily}>
+                    {busy ? <LiveDot size={8} /> : <Icon name="parachute" size={13} stroke="var(--char-950)" />} Board the plane
+                  </Btn>
+                  {isLocal && status?.played && (
+                    <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>local net — daily retries unlimited</span>
+                  )}
+                </div>
               )}
             </div>
           </div>

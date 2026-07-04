@@ -2506,6 +2506,7 @@ export default function App() {
               principal={principal}
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              isLocal={config?.is_local ?? false}
             />
           ) : page === 'minigolf' && minigolfEnabled ? (
             <Arcade

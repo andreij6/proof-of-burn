@@ -13,9 +13,10 @@ interface DropZonePageProps {
   onSignIn: () => void;
   /** Navigate to staking — the daily competition's gate CTA. */
   onGoParticipate: () => void;
+  isLocal?: boolean;
 }
 
-export default function DropZonePage({ actor, principal, onSignIn, onGoParticipate }: DropZonePageProps) {
+export default function DropZonePage({ actor, principal, onSignIn, onGoParticipate, isLocal = false }: DropZonePageProps) {
   const signedIn = !!principal && !principal.isAnonymous();
 
   return (
@@ -60,7 +61,7 @@ export default function DropZonePage({ actor, principal, onSignIn, onGoParticipa
 
       {/* ── The game ── */}
       {signedIn ? (
-        <DropZone actor={actor} onGoParticipate={onGoParticipate} />
+        <DropZone actor={actor} onGoParticipate={onGoParticipate} isLocal={isLocal} />
       ) : (
         <div className="card col" style={{ gap: 10, alignItems: 'flex-start' }}>
           <b style={{ fontSize: 14 }}>Sign in to play</b>
