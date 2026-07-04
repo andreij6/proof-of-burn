@@ -286,8 +286,11 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
   };
 
   // ── The burndown clock: 3 seconds, expiry declines for you. ──
+  // inCountdown is a dep: these closures capture decide(), whose countdown
+  // guard would otherwise stay stale after GO — keys/clock dead on hand 1.
   useEffect(() => {
     if (mode !== 'practice' && mode !== 'daily') return;
+    if (inCountdown) return;
     let raf = 0;
     const tick = () => {
       raf = requestAnimationFrame(tick);
@@ -299,7 +302,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, gamble]);
+  }, [mode, gamble, inCountdown]);
 
   const decide = (take: boolean, timedOut = false) => {
     if (!gamble || decidedRef.current || inCountdown || (mode !== 'practice' && mode !== 'daily')) return;
@@ -389,6 +392,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
   // ── Keyboard: T/→ take · D/← decline ──
   useEffect(() => {
     if (mode !== 'practice' && mode !== 'daily') return;
+    if (inCountdown) return;
     const onKey = (ev: KeyboardEvent) => {
       if (ev.repeat) return;
       const k = ev.key.toLowerCase();
@@ -398,7 +402,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, gamble, hand]);
+  }, [mode, gamble, hand, inCountdown]);
 
   const inDaily = mode === 'daily';
   const total = inDaily ? (runRef.current?.gambles.length ?? 0) : mode === 'practice' ? PRACTICE_ROUNDS : null;
