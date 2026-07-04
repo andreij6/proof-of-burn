@@ -1891,7 +1891,7 @@ export default function App() {
           </Btn>
         )}
 
-        {(arcadeEnabled || lotteryEnabled || casinoEnabled || minigolfEnabled || luckproofEnabled || dropzoneEnabled) && (
+        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Featured</Eyebrow>
         )}
         {arcadeEnabled && (
@@ -1929,6 +1929,11 @@ export default function App() {
               }}>{drawCountdown}</Chip>
             )}
           </Btn>
+        )}
+
+        {/* ── Play to Earn: skill games with staker competitions ── */}
+        {(luckproofEnabled || dropzoneEnabled || minigolfEnabled) && (
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Play to Earn</Eyebrow>
         )}
         {luckproofEnabled && (
           <Btn variant={page === 'luckproof' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('luckproof')}>
