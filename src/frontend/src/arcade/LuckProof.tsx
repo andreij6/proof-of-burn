@@ -538,8 +538,10 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
             </div>
           </div>
 
-          {/* Realtime two-track chart */}
-          {series.ev.length > 1 && <TrackChart ev={series.ev} cash={series.cash} />}
+          {/* Realtime two-track chart — ALWAYS mounted during play so the
+              arena never jumps when the first data point lands; before any
+              decision it shows the empty frame + $1,000 baseline. */}
+          <TrackChart ev={series.ev} cash={series.cash} />
 
           {/* Get ready: 5-second countdown before the first hand. */}
           {inCountdown && (
