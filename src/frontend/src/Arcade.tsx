@@ -8,7 +8,6 @@ import { Icon, Eyebrow, Chip, Btn, LiveDot, formatPrincipal } from "./ui";
 import { fmtTokenAmount } from "./IdeaBoard";
 import { useErrorImpression } from "./analytics";
 import FieldGoal from "./arcade/FieldGoal";
-import LuckProof from "./arcade/LuckProof";
 import CourseMarketplace from "./CourseMarketplace";
 import CourseCreate from "./CourseCreate";
 import CoursePlay from "./CoursePlay";
@@ -193,7 +192,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   // #/arcade/course/<id>, …) so Back returns to the lobby, not off the page —
   // and `course/<id>` doubles as each course's shareable deep link. The
   // dedicated Mini Golf page reuses this component with base `/mini-golf`.
-  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'luckproof' | 'classic-play' | 'create-course' | `course/${string}` | `spectate/${string}` | `play/${string}`>(minigolfMode ? '/mini-golf' : '/arcade', 'lobby');
+  const [view, setView] = useHashScreen<'lobby' | 'fieldgoal' | 'classic-play' | 'create-course' | `course/${string}` | `spectate/${string}` | `play/${string}`>(minigolfMode ? '/mini-golf' : '/arcade', 'lobby');
   const [playCard, setPlayCard] = useState<CourseCard | null>(null);
   // Deep-link resolution: when the hash names a course we don't have a card
   // for (a shared link, the "View NFT" grid, or a reload), fetch it. The hash
@@ -223,7 +222,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, actor]);
   // Lobby sub-page — one per game (its card, persona and leaderboard).
-  const [tab, setTab] = useState<'minigolf' | 'fieldgoal' | 'luckproof'>('minigolf');
+  const [tab, setTab] = useState<'minigolf' | 'fieldgoal'>('minigolf');
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
 
   // Persona editor — one modal, two targets (golfer / kicker).
@@ -296,12 +295,10 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
   // active tab's game got pulled, fall back to the first enabled one.
   const golfOn = info?.minigolf_enabled ?? true;
   const fgOn = info?.fieldgoal_enabled ?? true;
-  const lpOn = info?.luckproof_enabled ?? false;
   const enabledTabs = ([
     golfOn ? 'minigolf' : null,
     fgOn ? 'fieldgoal' : null,
-    lpOn ? 'luckproof' : null,
-  ].filter(Boolean)) as ('minigolf' | 'fieldgoal' | 'luckproof')[];
+  ].filter(Boolean)) as ('minigolf' | 'fieldgoal')[];
   // The dedicated Mini Golf page only ever shows mini golf — lock the tab.
   const activeTab = minigolfMode
     ? 'minigolf'
@@ -469,18 +466,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
     );
   }
 
-  if (view === 'luckproof' && !minigolfMode) {
-    return (
-      <div className="idea-board-container">
-        <LuckProof
-          actor={actor}
-          onGoParticipate={onGoParticipate}
-          onExit={() => { setTab('luckproof'); setView('lobby'); refreshAll(); }}
-        />
-      </div>
-    );
-  }
-
   if (view === 'fieldgoal' && !minigolfMode) {
     return (
       <div className="idea-board-container">
@@ -526,12 +511,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             <Btn variant={activeTab === 'fieldgoal' ? 'primary' : 'ghost'} sm onClick={() => setTab('fieldgoal')}>
               <Icon name="zap" size={13} stroke={activeTab === 'fieldgoal' ? 'var(--char-950)' : 'currentColor'} />
               Field Goal
-            </Btn>
-          )}
-          {lpOn && (
-            <Btn variant={activeTab === 'luckproof' ? 'primary' : 'ghost'} sm onClick={() => setTab('luckproof')}>
-              <Icon name="target" size={13} stroke={activeTab === 'luckproof' ? 'var(--char-950)' : 'currentColor'} />
-              Luck-Proof
             </Btn>
           )}
         </div>
@@ -599,7 +578,7 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             onSignIn={onSignIn}
           />
         </>
-      ) : activeTab === 'fieldgoal' ? (
+      ) : (
         <>
           {/* ── Field Goal: game + kicker cards ── */}
           <div className="idea-grid">
@@ -660,43 +639,6 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             empty="No games on the board yet. Drill the first kick."
             principal={signedIn ? principal : null}
           />
-        </>
-      ) : (
-        <>
-          {/* ── Sklansky Trainer: the EV-decision trainer ── */}
-          <div className="card col" style={{ gap: 10, maxWidth: 680 }}>
-            <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-              <Chip tone="burn" style={{ height: 19, fontSize: 10 }}>
-                <LiveDot color="var(--burn-ink)" size={5} /> Game 3
-              </Chip>
-              <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-                practice · daily competition
-              </span>
-            </div>
-            <h6 style={{ margin: 0, fontSize: 16 }}>Sklansky Trainer</h6>
-            <p style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0 }}>
-              Your results are luck. Your decisions are skill. Each hand offers a pot
-              at stated odds — <b>take</b> the +EV ones, <b>decline</b> the rest, on a
-              <b> 3-second clock</b> (expiry folds for you), and watch two tracks chart
-              apart in realtime: <b>skill</b> (EV earned, the only thing that ranks) and
-              <b>luck</b> (actual cash). Practice is endless and free; the <b>daily
-              competition</b> deals everyone the same 250 decisions — highest EV wins the
-              day and takes <b>lottery tickets equal to the player count</b>
-              (no-loss-lottery stakers only). Every run is replayable from the board.
-              Keyboard: <span className="mono">T/→</span> take, <span className="mono">D/←</span> decline.
-            </p>
-            <div className="row" style={{ justifyContent: 'space-between', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>
-              <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-                {signedIn ? 'Practice free · compete if staked' : 'Sign in to play'}
-              </span>
-              <Btn variant="primary" sm onClick={() => {
-                if (!signedIn) { onSignIn(); return; }
-                setView('luckproof');
-              }}>
-                <Icon name="target" size={11} stroke="var(--char-950)" /> {signedIn ? 'Play' : 'Sign in to play'}
-              </Btn>
-            </div>
-          </div>
         </>
       )}
 

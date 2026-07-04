@@ -165,7 +165,9 @@ interface LogEntry { n: number; text: string; evBp: number; outcome?: 'won' | 'l
 interface LuckProofProps {
   actor: any;
   onGoParticipate: () => void;
-  onExit: () => void;
+  /** Back-out target for the menu screen; omit on a dedicated page (the
+   *  in-game Quit button always returns to the menu regardless). */
+  onExit?: () => void;
 }
 
 type Mode = 'menu' | 'practice' | 'daily' | 'dailyDone' | 'replay';
@@ -182,6 +184,7 @@ interface DailyStatus {
 interface DailyRow { rank: number; player: any; ev_bp: bigint; correct: number; millis: bigint }
 
 export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofProps) {
+  const showMenuExit = !!onExit;
   const [mode, setMode] = useState<Mode>('menu');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -366,9 +369,11 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
           {(mode === 'practice' || inDaily) && (
             <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>Hand: {hand}{total !== null ? `/${total}` : ''}</span>
           )}
-          <Btn variant="ghost" sm onClick={() => (mode === 'menu' ? onExit() : (setMode('menu'), setGamble(null), setReplay(null), refreshMenu()))}>
-            <Icon name="x" size={12} /> {mode === 'menu' ? 'Exit' : 'Quit'}
-          </Btn>
+          {(mode !== 'menu' || showMenuExit) && (
+            <Btn variant="ghost" sm onClick={() => (mode === 'menu' ? onExit?.() : (setMode('menu'), setGamble(null), setReplay(null), refreshMenu()))}>
+              <Icon name="x" size={12} /> {mode === 'menu' ? 'Exit' : 'Quit'}
+            </Btn>
+          )}
         </span>
       </div>
 
