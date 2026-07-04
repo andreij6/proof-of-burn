@@ -36,10 +36,12 @@ export default function DropZonePage({ actor, principal, onSignIn, onGoParticipa
               <span className="mono">J</span> to jump — timing is everything. In
               freefall the arrows steer; holding <span className="mono">SHIFT</span>{' '}
               tucks into a dive (much faster fall, much weaker steering — the classic
-              battle-royale trade). <span className="mono">SPACE</span> deploys the
-              chute: a slow sink with a long glide, so popping it early covers
-              distance while riding it late saves time. Deploy under <b>80 m</b> and
-              the canopy never opens — that's a crash, and crashes don't rank.
+              battle-royale trade). <span className="mono">SPACE</span> toggles the
+              chute: pop it for a slow sink with a long glide, cut it to freefall
+              again, redeploy whenever — unlimited canopies, exactly like cutting a
+              chute in Warzone. All that matters is landing under a canopy whose last
+              deploy was above <b>80 m</b>; anything else is a crash, and crashes
+              don't rank.
             </p>
             <p>
               <b>Practice</b> deals a fresh random target every jump and records

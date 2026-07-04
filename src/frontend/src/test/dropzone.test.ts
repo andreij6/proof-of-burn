@@ -6,7 +6,7 @@ import {
   type FallState,
 } from '../arcade/DropZone';
 
-const freshFall = (): FallState => ({ x: 1000, y: PLANE_ALT, z: 1000, vx: 0, vy: 0, vz: 0, chuteAt: null });
+const freshFall = (): FallState => ({ x: 1000, y: PLANE_ALT, z: 1000, vx: 0, vy: 0, vz: 0, chute: false, deployAlt: null });
 
 describe('scenario & scenery', () => {
   it('practice targets stay in the central 60% of the map', () => {
@@ -64,7 +64,7 @@ describe('freefall physics', () => {
   it('the chute arrests the sink and steering caps by regime', () => {
     const s = freshFall();
     s.vy = FALL_VY;
-    s.chuteAt = 300;
+    s.chute = true; s.deployAlt = 300;
     for (let i = 0; i < 240; i++) stepFall(s, { ax: 1, az: 0, dive: false }, 1 / 60);
     expect(s.vy).toBeLessThan(CHUTE_VY * 1.1);
     expect(Math.hypot(s.vx, s.vz)).toBeLessThanOrEqual(18.5); // CHUTE_STEER + slack
@@ -83,12 +83,26 @@ describe('freefall physics', () => {
   });
 });
 
-describe('landing rules', () => {
-  it('safe requires a canopy opened at or above the 80 m floor', () => {
-    expect(landingVerdict(null)).toBe(false);
-    expect(landingVerdict(SAFE_DEPLOY_ALT - 1)).toBe(false);
-    expect(landingVerdict(SAFE_DEPLOY_ALT)).toBe(true);
-    expect(landingVerdict(500)).toBe(true);
+describe('landing rules (cut & redeploy)', () => {
+  it('safe requires an OPEN canopy whose latest deploy was at/above 80 m', () => {
+    expect(landingVerdict(false, null)).toBe(false);
+    expect(landingVerdict(false, 500)).toBe(false); // cut away, hit the dirt
+    expect(landingVerdict(true, SAFE_DEPLOY_ALT - 1)).toBe(false); // panic redeploy
+    expect(landingVerdict(true, SAFE_DEPLOY_ALT)).toBe(true);
+    expect(landingVerdict(true, 500)).toBe(true);
+  });
+
+  it('cutting returns to freefall speeds; redeploying arrests the sink again', () => {
+    const s = freshFall();
+    s.chute = true; s.deployAlt = 600; s.vy = CHUTE_VY;
+    // Cut: sink builds back toward terminal.
+    s.chute = false;
+    for (let i = 0; i < 180; i++) stepFall(s, { ax: 0, az: 0, dive: false }, 1 / 60);
+    expect(s.vy).toBeGreaterThan(FALL_VY * 0.9);
+    // Redeploy: sink collapses to canopy speed.
+    s.chute = true; s.deployAlt = s.y;
+    for (let i = 0; i < 180; i++) stepFall(s, { ax: 0, az: 0, dive: false }, 1 / 60);
+    expect(s.vy).toBeLessThan(CHUTE_VY * 1.15);
   });
 
   it('distance is the horizontal error to the target center', () => {

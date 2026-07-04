@@ -107,7 +107,10 @@ export function buildDecor(seed: number, targetX: number, targetZ: number): Deco
 export interface FallState {
   x: number; y: number; z: number;
   vx: number; vy: number; vz: number;
-  chuteAt: number | null; // altitude at deploy, null = not deployed
+  /** Canopy currently open (Space toggles — cut and redeploy freely). */
+  chute: boolean;
+  /** Altitude of the MOST RECENT deploy; the safety check uses this. */
+  deployAlt: number | null;
 }
 
 export interface FallInput { ax: number; az: number; dive: boolean } // ax/az ∈ [-1,1], world axes
@@ -115,7 +118,7 @@ export interface FallInput { ax: number; az: number; dive: boolean } // ax/az �
 /** One integration step. Returns the state mutated in place (for the loop)
  *  — pure enough to unit-test: no globals, no time source. */
 export function stepFall(s: FallState, inp: FallInput, dt: number): FallState {
-  const chute = s.chuteAt !== null;
+  const chute = s.chute;
   const sinkTarget = chute ? CHUTE_VY : inp.dive ? DIVE_VY : FALL_VY;
   s.vy += (sinkTarget - s.vy) * Math.min(1, dt * (chute ? 2.2 : 1.6));
   const steerMax = chute ? CHUTE_STEER : inp.dive ? DIVE_STEER : FALL_STEER;
@@ -138,9 +141,11 @@ export function stepFall(s: FallState, inp: FallInput, dt: number): FallState {
   return s;
 }
 
-/** Landing verdict: safe needs a canopy opened at/above the floor. */
-export function landingVerdict(chuteAt: number | null): boolean {
-  return chuteAt !== null && chuteAt >= SAFE_DEPLOY_ALT;
+/** Landing verdict: safe needs a canopy OPEN at touchdown whose (latest)
+ *  deploy happened at/above the floor — cutting away and hitting the ground
+ *  in freefall is a crash, and so is a last-second redeploy below 80 m. */
+export function landingVerdict(chuteOpen: boolean, deployAlt: number | null): boolean {
+  return chuteOpen && deployAlt !== null && deployAlt >= SAFE_DEPLOY_ALT;
 }
 
 export function distanceToTarget(x: number, z: number, sc: Scenario): number {
@@ -224,7 +229,7 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
       scenario,
       decor: buildDecor(scenario.decorSeed, scenario.targetX, scenario.targetZ),
       phase: 'plane', planeT: 0,
-      fall: { x: 0, y: PLANE_ALT, z: 0, vx: 0, vy: 0, vz: 0, chuteAt: null },
+      fall: { x: 0, y: PLANE_ALT, z: 0, vx: 0, vy: 0, vz: 0, chute: false, deployAlt: null },
       jumpAt: 0, endAt: 0, daily, runId,
       keys: {}, touch: { ax: 0, az: 0 }, t: 0,
     };
@@ -272,7 +277,7 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
       if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(e.key.toLowerCase()) || e.key === ' ') e.preventDefault();
       game.keys[k] = true;
       if (k === 'j' && game.phase === 'plane') jump();
-      if (k === ' ' && game.phase === 'fall' && game.fall.chuteAt === null) deploy();
+      if (k === ' ' && game.phase === 'fall') toggleChute();
     };
     const up = (e: KeyboardEvent) => { if (g.current) g.current.keys[e.key.toLowerCase()] = false; };
     window.addEventListener('keydown', down);
@@ -289,16 +294,23 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
     game.fall = {
       x: path.sx + path.hx * d, y: PLANE_ALT, z: path.sz + path.hz * d,
       vx: path.hx * PLANE_SPEED * 0.35, vy: 0, vz: path.hz * PLANE_SPEED * 0.35,
-      chuteAt: null,
+      chute: false, deployAlt: null,
     };
     game.jumpAt = game.t;
     game.phase = 'fall';
   };
 
-  const deploy = () => {
+  /** Space toggles the canopy: deploy ↔ cut, unlimited chutes. Only the
+   *  state at touchdown matters (open + last deploy ≥ 80 m). */
+  const toggleChute = () => {
     const game = g.current;
-    if (!game || game.phase !== 'fall' || game.fall.chuteAt !== null) return;
-    game.fall.chuteAt = game.fall.y;
+    if (!game || game.phase !== 'fall') return;
+    if (game.fall.chute) {
+      game.fall.chute = false; // cut away — back to freefall
+    } else {
+      game.fall.chute = true;
+      game.fall.deployAlt = game.fall.y;
+    }
   };
 
   // ── The loop ──
@@ -349,7 +361,7 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
         landedHandled = true;
         const dist = distanceToTarget(game.fall.x, game.fall.z, game.scenario);
         const ms = (game.endAt - game.jumpAt) * 1000;
-        const safe = landingVerdict(game.fall.chuteAt);
+        const safe = landingVerdict(game.fall.chute, game.fall.deployAlt);
         (async () => {
           const rank = game.daily ? await submitDaily(dist, ms, safe) : null;
           setResult({ dist, ms, safe, daily: game.daily, rank });
@@ -676,7 +688,7 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
         ctx.restore();
       }
       if (c) {
-        const chute = p.chuteAt !== null;
+        const chute = p.chute;
         const dive = game.keys['shift'] && !chute;
         ctx.save();
         ctx.translate(c.sx, c.sy);
@@ -761,9 +773,9 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
       ctx.strokeStyle = '#555';
       ctx.beginPath(); ctx.moveTo(ax - 5, floorY); ctx.lineTo(ax + 15, floorY); ctx.stroke();
       ctx.strokeStyle = INK;
-      ctx.fillStyle = p.chuteAt !== null ? '#777' : INK;
+      ctx.fillStyle = p.chute ? '#777' : INK;
       ctx.fillRect(ax, ay + ah * (1 - Math.max(0, p.y) / PLANE_ALT) - 2.5, 10, 5);
-      if (p.chuteAt === null && p.y < SAFE_DEPLOY_ALT * 2.2 && game.phase === 'fall') {
+      if (!p.chute && p.y < SAFE_DEPLOY_ALT * 2.2 && game.phase === 'fall') {
         ctx.textAlign = 'center';
         ctx.globalAlpha = 0.65 + 0.35 * Math.sin(game.t * 9);
         ctx.font = '700 22px ui-monospace, monospace';
@@ -839,8 +851,10 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
               <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0, lineHeight: 1.5, flex: 1 }}>
                 A fresh target every drop, nothing recorded. <span className="mono">J</span> jumps
                 when the plane's close, arrows steer, <span className="mono">SHIFT</span> dives
-                (fast fall, weak steering), <span className="mono">SPACE</span> pops the chute —
-                above <b>80 m</b> or you crater. Early chute = long glide; late chute = fast time.
+                (fast fall, weak steering), <span className="mono">SPACE</span> toggles the chute —
+                pop it, cut it, pop it again, as often as you like. Just land with a canopy
+                that opened above <b>80 m</b> or you crater. Early chute = long glide; cutting
+                trades safety margin for speed.
               </p>
               <Btn variant="secondary" onClick={startPractice}><Icon name="parachute" size={13} /> Jump</Btn>
             </div>
@@ -917,7 +931,7 @@ export default function DropZone({ actor, onGoParticipate }: DropZoneProps) {
             >
               <Btn variant="secondary" sm style={{ minWidth: 110, minHeight: 44 }}>SHIFT · DIVE</Btn>
             </span>
-            <Btn variant="primary" sm onClick={deploy} style={{ minWidth: 110, minHeight: 44 }}>SPACE · CHUTE</Btn>
+            <Btn variant="primary" sm onClick={toggleChute} style={{ minWidth: 110, minHeight: 44 }}>SPACE · CHUTE/CUT</Btn>
           </div>
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'center' }}>
             arrows steer (touch: drag) · deploy above 80 m to land safely
