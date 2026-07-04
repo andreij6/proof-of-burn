@@ -1039,6 +1039,10 @@ type LuckProofReplay = record {
   correct : nat16;
   millis : nat64;
 };
+// One source's share of the caller's current-round lottery tickets
+// ("daily_stake", "course_play", "course_owner", "luckproof_ev",
+// "luckproof_cash", "discussions"). Pre-tracking tickets won't appear.
+type TicketSourceRow = record { source : text; count : nat64 };
 type Result_16 = variant { Ok : LuckProofRunStart; Err : text };
 type Result_17 = variant { Ok : LuckProofResult; Err : text };
 type Result = variant { Ok; Err : text };
@@ -2005,6 +2009,8 @@ service : (InitPayload) -> {
   // Today's (or a given day's) board + the caller's eligibility/attempt state.
   get_luckproof_daily_board : (opt nat32) -> (vec LuckProofDailyRow) query;
   get_luckproof_daily_status : () -> (LuckProofDailyStatus) query;
+  // Where the caller's current-round lottery tickets came from (largest first).
+  get_my_ticket_breakdown : () -> (vec TicketSourceRow) query;
   // Replays unlock by competing: null unless the CALLER has their own entry
   // for that day (or is asking for their own run).
   get_luckproof_daily_replay : (nat32, principal) -> (opt LuckProofReplay) query;

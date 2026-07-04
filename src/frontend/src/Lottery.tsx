@@ -43,10 +43,23 @@ function drawDate(atNs: bigint): string {
   });
 }
 
+/** Human labels for ticket-source codes (fallback: the raw code). */
+const TICKET_SOURCE_LABELS: Record<string, string> = {
+  daily_stake: 'Daily staking claims',
+  course_play: 'Mini Golf — playing courses',
+  course_owner: 'Mini Golf — your courses played',
+  luckproof_ev: 'Luck-Proof daily win — skill (EV)',
+  luckproof_cash: 'Luck-Proof daily win — luck (cash)',
+  discussions: 'Discussion rewards',
+  dev: 'Dev grants (local)',
+  test: 'Test grants',
+};
+
 export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaking }: LotteryProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [info, setInfo] = useState<LotteryInfo | null>(null);
+  const [breakdown, setBreakdown] = useState<{ source: string; count: bigint }[]>([]);
   const [loading, setLoading] = useState(true);
   const [icpRateE8s, setIcpRateE8s] = useState<bigint>(0n); // USD-e8s per 1 ICP
   const [draws, setDraws] = useState<LotteryDraw[]>([]);
@@ -64,13 +77,15 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
   const refresh = async () => {
     if (!actor) return;
     try {
-      const [i, d, w, rates] = await Promise.all([
+      const [i, d, w, rates, srcRows] = await Promise.all([
         actor.get_lottery_info(),
         actor.list_lottery_draws(),
         actor.list_recent_winners(),
         actor.get_usd_rates().catch(() => [] as { token: string; rate_usd_e8s: bigint }[]),
+        actor.get_my_ticket_breakdown().catch(() => []),
       ]);
       setInfo(i);
+      setBreakdown(srcRows);
       setDraws(d);
       setWinners(w);
       const icp = (rates ?? []).find((r: { token: string; rate_usd_e8s: bigint }) => r.token === ExplorerToken.ICP);
@@ -437,6 +452,29 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
                   <> Your grant: <span className="mono">{Number(info.my_daily_tickets)}</span>/day.</>
                 )}
               </span>
+              {(info?.my_tickets ?? 0n) > 0n && (() => {
+                // Where this round's tickets came from. Tickets credited
+                // before source-tracking shipped show as "Earlier grants".
+                const tracked = breakdown.reduce((a, r) => a + Number(r.count), 0);
+                const earlier = Number(info?.my_tickets ?? 0n) - tracked;
+                const rows = [
+                  ...breakdown.map((r) => ({ label: TICKET_SOURCE_LABELS[r.source] ?? r.source, count: Number(r.count) })),
+                  ...(earlier > 0 ? [{ label: 'Earlier grants (untracked)', count: earlier }] : []),
+                ];
+                return rows.length === 0 ? null : (
+                  <div className="col" style={{ gap: 4, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+                    <span style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--fg-3)' }}>
+                      Where they came from
+                    </span>
+                    {rows.map((r) => (
+                      <span key={r.label} className="row" style={{ justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
+                        <span style={{ color: 'var(--fg-2)' }}>{r.label}</span>
+                        <span className="mono">{r.count.toLocaleString()}</span>
+                      </span>
+                    ))}
+                  </div>
+                );
+              })()}
             </>
           )}
         </div>

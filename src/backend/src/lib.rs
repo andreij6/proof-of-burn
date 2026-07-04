@@ -6401,9 +6401,50 @@ fn caller_vote(kind: u8, item_id: u64, caller: Principal) -> Option<VoteDir> {
     DISCUSSION_VOTES.with(|m| m.borrow().get(&DiscussionVoteKey { kind, item_id, voter: caller }))
 }
 
+/// Record where `count` freshly credited tickets came from (round-scoped;
+/// a stale round's tally dies on the first write of the new round, mirroring
+/// TicketEntry). Call ONLY after tickets were actually credited.
+fn note_ticket_source(user: Principal, source: &str, count: u64, round: u64) {
+    let key = TicketSourceKey { user, source: source.to_string() };
+    TICKET_SOURCES.with(|m| {
+        let mut m = m.borrow_mut();
+        let mut tally = m.get(&key).unwrap_or(TicketSourceTally { round, count: 0 });
+        if tally.round != round {
+            tally = TicketSourceTally { round, count: 0 };
+        }
+        tally.count = tally.count.saturating_add(count);
+        m.insert(key, tally);
+    });
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TicketSourceRow {
+    pub source: String,
+    pub count: u64,
+}
+
+/// The caller's current-round tickets, broken down by where they came from.
+/// (Tickets credited before source tracking shipped won't appear; the UI
+/// shows the remainder as "earlier grants".)
+#[ic_cdk::query]
+fn get_my_ticket_breakdown() -> Vec<TicketSourceRow> {
+    let caller = get_caller();
+    let round = lottery_state().round;
+    let mut rows: Vec<TicketSourceRow> = TICKET_SOURCES.with(|m| {
+        m.borrow()
+            .range(TicketSourceKey { user: caller, source: String::new() }..)
+            .take_while(|e| e.key().user == caller)
+            .filter(|e| e.value().round == round && e.value().count > 0)
+            .map(|e| TicketSourceRow { source: e.key().source.clone(), count: e.value().count })
+            .collect()
+    });
+    rows.sort_by(|a, b| b.count.cmp(&a.count));
+    rows
+}
+
 /// Grant `count` lottery tickets to `user` in the current round (caller-agnostic
 /// internal helper). Returns the user's new ticket count. No-op if count is 0.
-fn grant_lottery_tickets(user: Principal, count: u64) -> u64 {
+fn grant_lottery_tickets(user: Principal, count: u64, source: &str) -> u64 {
     // Admins are excluded from the lottery entirely (see user_daily_tickets /
     // claim_daily_tickets / add_admin, which all void or zero their tickets).
     // Treat every award path — discussion upvotes, course tickets, anything
@@ -6437,6 +6478,7 @@ fn grant_lottery_tickets(user: Principal, count: u64) -> u64 {
     }
     let new_count = entry.count;
     LOTTERY_TICKETS.with(|m| { m.borrow_mut().insert(user, entry); });
+    note_ticket_source(user, source, count, state.round);
     set_lottery_state(state);
     new_count
 }
@@ -6471,7 +6513,7 @@ fn maybe_award_thread_upvote(thread: &mut Thread, voter: Principal) {
     if !has_history { return; }
     let rkey = DiscussionVoteKey { kind: 2, item_id: thread.id, voter };
     if DISCUSSION_REWARDED.with(|m| m.borrow().get(&rkey)).is_some() { return; }
-    grant_lottery_tickets(thread.author, 1);
+    grant_lottery_tickets(thread.author, 1, "discussions");
     thread.tickets_awarded = thread.tickets_awarded.saturating_add(1);
     DISCUSSION_REWARDED.with(|m| { m.borrow_mut().insert(rkey, ()); });
 }
@@ -9397,6 +9439,21 @@ impl Default for LotteryState {
     }
 }
 
+/// Where a user's current-round tickets came from ("daily_stake",
+/// "course_play", "course_owner", "luckproof_ev", "luckproof_cash",
+/// "discussions", …). One row per (user, source), scoped to a round.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TicketSourceKey {
+    pub user: Principal,
+    pub source: String,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct TicketSourceTally {
+    pub round: u64,
+    pub count: u64,
+}
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct TicketEntry {
     pub round: u64,
@@ -9504,12 +9561,18 @@ pub struct LotteryInfo {
 
 impl_storable!(LotteryState);
 impl_storable!(TicketEntry);
+impl_storable!(TicketSourceKey);
+impl_storable!(TicketSourceTally);
 impl_storable!(LotteryDraw);
 impl_storable!(Payout);
 
 thread_local! {
     // Memory IDs 26–31 (mini golf) and 32–33 (AI reviewer) are reserved by
     // their plan docs — the lottery starts at 34.
+    /// MemoryId 111: per-(user, source) ticket tallies for the breakdown UI.
+    static TICKET_SOURCES: RefCell<StableBTreeMap<TicketSourceKey, TicketSourceTally, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(111))))
+    });
     static LOTTERY_TICKETS: RefCell<StableBTreeMap<Principal, TicketEntry, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(34))))
     });
@@ -10011,6 +10074,7 @@ fn claim_daily_tickets() -> Result<u64, String> {
     LOTTERY_TICKETS.with(|m| {
         m.borrow_mut().insert(caller, entry.clone());
     });
+    note_ticket_source(caller, "daily_stake", per_day, state.round);
     set_lottery_state(state);
     Ok(entry.count)
 }
@@ -10303,6 +10367,7 @@ fn dev_grant_lottery_tickets(count: u64) -> Result<u64, String> {
         state.next_draw_at = next_draw_after(now);
     }
     LOTTERY_TICKETS.with(|m| { m.borrow_mut().insert(caller, entry.clone()); });
+    note_ticket_source(caller, "dev", count, state.round);
     set_lottery_state(state);
     Ok(entry.count)
 }
@@ -13643,7 +13708,7 @@ fn luckproof_daily_award() {
         let board = get_luckproof_daily_board(Some(day));
         if let Some(ev_winner) = board.first() {
             let tickets = board.len() as u64;
-            grant_lottery_tickets(ev_winner.player, tickets);
+            grant_lottery_tickets(ev_winner.player, tickets, "luckproof_ev");
             staking_audit("luckproof_daily_winner_ev", ev_winner.player, tickets, day as u64);
             let cash_winner = board
                 .iter()
@@ -13653,7 +13718,7 @@ fn luckproof_daily_award() {
                         .then(b.millis.cmp(&a.millis))
                 })
                 .unwrap();
-            grant_lottery_tickets(cash_winner.player, tickets);
+            grant_lottery_tickets(cash_winner.player, tickets, "luckproof_cash");
             staking_audit("luckproof_daily_winner_cash", cash_winner.player, tickets, day as u64);
             canister_print(&format!(
                 "luckproof: day {} EV winner {} + cash winner {} awarded {} tickets each ({} players)",
@@ -18517,7 +18582,7 @@ fn complete_round(session_id: u64) -> Result<CompleteRoundOk, String> {
     } else if !try_increment_player_cap(caller, now) {
         (false, Some("DAILY_CAP".to_string()))
     } else {
-        credit_course_ticket(caller);
+        credit_course_ticket(caller, "course_play");
         (true, None)
     };
 
@@ -18562,7 +18627,7 @@ fn try_credit_owner_ticket(owner: Principal, player: Principal, token_id: u64, n
         return false;
     }
     // Both caps pass — credit and bump counters.
-    credit_course_ticket(owner);
+    credit_course_ticket(owner, "course_owner");
     owner_entry.owner_tickets = owner_entry.owner_tickets.saturating_add(1);
     COURSE_TICKET_CAPS.with(|m| {
         m.borrow_mut().insert(owner_key, owner_entry);
@@ -18593,7 +18658,7 @@ fn try_increment_player_cap(player: Principal, now: u64) -> bool {
 /// `dev_grant_lottery_tickets`). Admin-excluded and NON-STAKED recipients are
 /// silently skipped (only stakers earn lottery tickets — owner decision
 /// 2026-07-04; mirrors the grant_lottery_tickets gate).
-fn credit_course_ticket(recipient: Principal) {
+fn credit_course_ticket(recipient: Principal, source: &str) {
     if is_admin_principal(recipient) {
         return;
     }
@@ -18624,6 +18689,7 @@ fn credit_course_ticket(recipient: Principal) {
     LOTTERY_TICKETS.with(|m| {
         m.borrow_mut().insert(recipient, entry);
     });
+    note_ticket_source(recipient, source, 1, state.round);
     set_lottery_state(state);
 }
 
@@ -23282,7 +23348,7 @@ mod tests {
         let admin = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
         add_admin(admin).unwrap();
         let before = lottery_state().total_tickets;
-        assert_eq!(grant_lottery_tickets(admin, 5), 0, "admin is awarded zero tickets");
+        assert_eq!(grant_lottery_tickets(admin, 5, "test"), 0, "admin is awarded zero tickets");
         assert_eq!(lottery_state().total_tickets, before, "round total unchanged");
         assert_eq!(
             LOTTERY_TICKETS.with(|m| m.borrow().get(&admin).map(|e| e.count).unwrap_or(0)),
@@ -23291,12 +23357,12 @@ mod tests {
         // An UNSTAKED user is also skipped (stakers-only, 2026-07-04)…
         let user = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
         let before2 = lottery_state().total_tickets;
-        assert_eq!(grant_lottery_tickets(user, 5), 0, "unstaked user gets nothing");
+        assert_eq!(grant_lottery_tickets(user, 5, "test"), 0, "unstaked user gets nothing");
         assert_eq!(lottery_state().total_tickets, before2);
         // …while a STAKED user in the same round still gets tickets — proves
         // the guards are targeted, not a global short-circuit.
         seed_stake(StakeTier::SixMonths, user, 100_000_000);
-        assert_eq!(grant_lottery_tickets(user, 5), 5);
+        assert_eq!(grant_lottery_tickets(user, 5, "test"), 5);
         assert_eq!(lottery_state().total_tickets, before2 + 5);
         STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, user)); });
     }
@@ -28184,7 +28250,7 @@ mod tests {
         let user = make_player();
         // Arm round state (mirrors dev_grant_lottery_tickets).
         let before = lottery_state().total_tickets;
-        credit_course_ticket(user);
+        credit_course_ticket(user, "course_play");
         let entry = LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).unwrap();
         assert_eq!(entry.round, lottery_state().round);
         assert_eq!(entry.count, 1);
@@ -28195,13 +28261,13 @@ mod tests {
         let admin = bob();
         add_admin(admin).unwrap();
         let total = lottery_state().total_tickets;
-        credit_course_ticket(admin);
+        credit_course_ticket(admin, "course_play");
         assert_eq!(lottery_state().total_tickets, total, "admin credit skipped");
         assert!(LOTTERY_TICKETS.with(|m| m.borrow().get(&admin)).is_none());
 
         // Unstaked recipient is silently skipped (stakers-only, 2026-07-04).
         let unstaked = Principal::self_authenticating(alice().as_slice());
-        credit_course_ticket(unstaked);
+        credit_course_ticket(unstaked, "course_play");
         assert_eq!(lottery_state().total_tickets, total, "unstaked credit skipped");
         assert!(LOTTERY_TICKETS.with(|m| m.borrow().get(&unstaked)).is_none());
     }
@@ -30661,6 +30727,51 @@ mod tests {
         acct_disable();
     }
 
+
+    #[test]
+    fn test_ticket_breakdown_tracks_sources_per_round() {
+        install_staking_test_config();
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8); });
+        seed_stake(StakeTier::SixMonths, alice(), 100_000_000);
+        set_mock_caller(alice());
+
+        grant_lottery_tickets(alice(), 3, "luckproof_ev");
+        grant_lottery_tickets(alice(), 2, "luckproof_ev");
+        grant_lottery_tickets(alice(), 4, "discussions");
+        credit_course_ticket(alice(), "course_play");
+
+        let rows = get_my_ticket_breakdown();
+        let get = |src: &str| rows.iter().find(|r| r.source == src).map(|r| r.count).unwrap_or(0);
+        assert_eq!(get("luckproof_ev"), 5, "same source accumulates");
+        assert_eq!(get("discussions"), 4);
+        assert_eq!(get("course_play"), 1);
+        assert_eq!(rows[0].source, "luckproof_ev", "sorted largest first");
+        // Breakdown sums to the ticket entry (all grants tracked).
+        let total: u64 = rows.iter().map(|r| r.count).sum();
+        assert_eq!(total, LOTTERY_TICKETS.with(|m| m.borrow().get(&alice())).unwrap().count);
+
+        // Unstaked/admin no-op grants never leave phantom rows.
+        set_mock_caller(bob());
+        grant_lottery_tickets(bob(), 7, "discussions");
+        assert!(get_my_ticket_breakdown().is_empty(), "no tickets → no breakdown");
+
+        // A new round starts the breakdown fresh.
+        let mut st = lottery_state();
+        st.round += 1;
+        set_lottery_state(st);
+        set_mock_caller(alice());
+        assert!(get_my_ticket_breakdown().is_empty(), "stale round rows filtered");
+        grant_lottery_tickets(alice(), 2, "course_owner");
+        let rows = get_my_ticket_breakdown();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].count, 2);
+
+        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice())); });
+        let keys: Vec<TicketSourceKey> = TICKET_SOURCES.with(|m| m.borrow().iter().map(|e| e.key().clone()).collect());
+        TICKET_SOURCES.with(|m| { let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
+        LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_LOSSLESS_LOTTERY.to_string()); });
+    }
 
     // ── Sklansky Trainer / Luck-Proof (arcade game 3) ────────────────────
 
