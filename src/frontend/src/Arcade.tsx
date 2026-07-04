@@ -676,11 +676,13 @@ export default function Arcade({ actor, identity, principal, host, rootKey, ledg
             <h6 style={{ margin: 0, fontSize: 16 }}>Sklansky Trainer</h6>
             <p style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5, margin: 0 }}>
               Your results are luck. Your decisions are skill. Each hand offers a pot
-              at stated odds — <b>take</b> the +EV ones, <b>decline</b> the rest, and watch
-              two tracks diverge: the <b>skill track</b> (EV earned, the only thing that
-              ranks) and the <b>luck track</b> (actual cash, pure variance). Practice is
-              endless and free; the <b>daily competition</b> deals everyone the same 250
-              decisions — highest EV wins the day (no-loss-lottery stakers only).
+              at stated odds — <b>take</b> the +EV ones, <b>decline</b> the rest, on a
+              <b> 3-second clock</b> (expiry folds for you), and watch two tracks chart
+              apart in realtime: <b>skill</b> (EV earned, the only thing that ranks) and
+              <b>luck</b> (actual cash). Practice is endless and free; the <b>daily
+              competition</b> deals everyone the same 250 decisions — highest EV wins the
+              day and takes <b>lottery tickets equal to the player count</b>
+              (no-loss-lottery stakers only). Every run is replayable from the board.
               Keyboard: <span className="mono">T/→</span> take, <span className="mono">D/←</span> decline.
             </p>
             <div className="row" style={{ justifyContent: 'space-between', gap: 8, paddingTop: 6, borderTop: '1px solid var(--border)' }}>

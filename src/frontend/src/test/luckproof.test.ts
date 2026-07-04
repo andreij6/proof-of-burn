@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   edgeBp, fmtEvBp, fmtTrack, practiceGamble, friendlyDailyErr,
-  TRACK_START, type LPGamble,
+  buildSeries, oddsTone, TRACK_START, SHOT_CLOCK_MS, type LPGamble,
 } from '../arcade/LuckProof';
 
 const g = (odds_pct: number, risk: number, reward: number): LPGamble => ({ odds_pct, risk, reward });
@@ -47,6 +47,39 @@ describe('practiceGamble (client mirror of the balanced generator)', () => {
     }
     expect(plus).toBeGreaterThan(60);
     expect(minus).toBeGreaterThan(60);
+  });
+});
+
+describe('buildSeries (chart data: cumulative per-hand tracks)', () => {
+  it('EV moves on takes only; cash moves on resolved takes', () => {
+    const gambles = [g(60, 50, 100), g(20, 80, 100), g(60, 50, 100)];
+    // take(+$40, won), take(−$44, lost), decline.
+    const s = buildSeries(gambles, [true, true, false], [true, false, undefined]);
+    expect(s.ev).toEqual([1000, 1040, 996, 996]);
+    expect(s.cash).toEqual([1000, 1100, 1020, 1020]);
+  });
+
+  it('declines never touch either track', () => {
+    const s = buildSeries([g(60, 50, 100)], [false], [undefined]);
+    expect(s.ev).toEqual([1000, 1000]);
+    expect(s.cash).toEqual([1000, 1000]);
+  });
+});
+
+describe('oddsTone (red / yellow / green bands)', () => {
+  it('maps <40 red, 40–60 yellow, >60 green', () => {
+    expect(oddsTone(20)).toBe('var(--ember)');
+    expect(oddsTone(39)).toBe('var(--ember)');
+    expect(oddsTone(40)).toBe('var(--haze-ink)');
+    expect(oddsTone(60)).toBe('var(--haze-ink)');
+    expect(oddsTone(61)).toBe('var(--sprout-ink)');
+    expect(oddsTone(80)).toBe('var(--sprout-ink)');
+  });
+});
+
+describe('shot clock', () => {
+  it('is 3 seconds per the competition spec', () => {
+    expect(SHOT_CLOCK_MS).toBe(3_000);
   });
 });
 

@@ -5060,6 +5060,7 @@ fn setup_timers() {
         expire_featured().await;
         cycle_topup_check().await;
         course_nft_cycle_guard().await; // forward surplus cycles when the NFT canister runs low
+        luckproof_daily_award(); // pay yesterday's Sklansky Trainer winner (tickets = player count)
         staking_sweep().await;
         lottery_draw_check().await;
         early_adopter_settlement_check().await;
@@ -13355,6 +13356,10 @@ pub struct LuckProofDailyEntry {
     pub correct: u16,
     pub millis: u64,
     pub submitted_at: u64,
+    /// The full take/decline vector — public, so anyone can replay a run and
+    /// verify it against the day's (shared, seed-derived) deal.
+    #[serde(default)]
+    pub decisions: Vec<bool>,
 }
 impl_storable!(LuckProofDailyEntry);
 
@@ -13378,6 +13383,9 @@ thread_local! {
     /// MemoryId 107: (day, player) → daily-challenge result.
     static LUCKPROOF_DAILY: RefCell<StableBTreeMap<LuckProofDayKey, LuckProofDailyEntry, Memory>> =
         MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(107)))));
+    /// MemoryId 110: last UTC day whose winner award has been settled.
+    static LUCKPROOF_SETTLED_DAY: RefCell<StableCell<u32, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(110)), 0u32)));
 }
 
 /// Signed EV of TAKING a gamble, in basis points: P·reward − (1−P)·risk.
@@ -13454,6 +13462,10 @@ pub struct LuckProofRunStart {
     pub run_id: u64,
     pub day: u32,
     pub gambles: Vec<LuckProofGamble>,
+    /// Per-player outcome rolls (win iff roll < odds·100). Returned up front
+    /// so the client charts the luck track LIVE; knowing an outcome early
+    /// cannot move the ranked metric (EV is a pure function of the decision).
+    pub rolls: Vec<u16>,
     pub issued_at: u64,
 }
 
@@ -13489,6 +13501,8 @@ pub struct LuckProofDailyStatus {
     pub played: bool,
     pub my_entry: Option<LuckProofDailyEntry>,
     pub decisions: u16,
+    /// Entries so far today — the winner's ticket prize equals this count.
+    pub players_today: u32,
 }
 
 /// Board rows for `day` (default: today), ranked EV desc → correct desc →
@@ -13523,13 +13537,96 @@ fn get_luckproof_daily_status() -> LuckProofDailyStatus {
     let caller = get_caller();
     let day = epoch_day(current_time());
     let my_entry = LUCKPROOF_DAILY.with(|m| m.borrow().get(&LuckProofDayKey { day, player: caller }));
+    let players_today = LUCKPROOF_DAILY.with(|m| {
+        m.borrow().iter().filter(|e| e.value().day == day).count() as u32
+    });
     LuckProofDailyStatus {
         day,
         eligible: caller != Principal::anonymous() && author_is_staked(caller),
         played: my_entry.is_some(),
         my_entry,
         decisions: LUCKPROOF_DAILY_DECISIONS as u16,
+        players_today,
     }
+}
+
+/// Public replay of one player's daily run: the day's canonical deal
+/// (recomputed from the day seed — identical for every player, which is the
+/// fairness proof), their decisions, and their outcomes. None if they didn't
+/// play that day.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LuckProofReplay {
+    pub day: u32,
+    pub player: Principal,
+    pub gambles: Vec<LuckProofGamble>,
+    pub decisions: Vec<bool>,
+    pub outcomes: Vec<bool>,
+    pub ev_bp: i64,
+    pub correct: u16,
+    pub millis: u64,
+}
+
+#[ic_cdk::query]
+fn get_luckproof_daily_replay(day: u32, player: Principal) -> Option<LuckProofReplay> {
+    let entry = LUCKPROOF_DAILY.with(|m| m.borrow().get(&LuckProofDayKey { day, player }))?;
+    let gambles = luckproof_generate(luckproof_day_seed(day), LUCKPROOF_DAILY_DECISIONS);
+    // Recompute the player's rolls exactly as start_luckproof_daily did.
+    let user_seed = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(luckproof_day_seed(day));
+        h.update(player.as_slice());
+        let d = h.finalize();
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&d);
+        s
+    };
+    let outcomes: Vec<bool> = gambles
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            let roll = (luckproof_rand(&user_seed, i as u64, 9) % 10_000) as u16;
+            entry.decisions.get(i).copied().unwrap_or(false) && roll < g.odds_pct as u16 * 100
+        })
+        .collect();
+    Some(LuckProofReplay {
+        day,
+        player,
+        gambles,
+        decisions: entry.decisions.clone(),
+        outcomes,
+        ev_bp: entry.ev_bp,
+        correct: entry.correct,
+        millis: entry.millis,
+    })
+}
+
+/// Sweep leg: award each finished (past) day's winner lottery tickets equal
+/// to that day's PLAYER COUNT — a bigger field pays the champion more. Runs
+/// through grant_lottery_tickets, so the stakers-only and admin-exclusion
+/// gates apply (competition entry already requires a stake).
+fn luckproof_daily_award() {
+    let today = epoch_day(current_time());
+    let mut settled = LUCKPROOF_SETTLED_DAY.with(|c| *c.borrow().get());
+    if settled == 0 {
+        // First activation: nothing before today competes retroactively.
+        settled = today.saturating_sub(1);
+    }
+    while settled + 1 < today {
+        let day = settled + 1;
+        let board = get_luckproof_daily_board(Some(day));
+        if let Some(winner) = board.first() {
+            let tickets = board.len() as u64;
+            grant_lottery_tickets(winner.player, tickets);
+            staking_audit("luckproof_daily_winner", winner.player, tickets, day as u64);
+            canister_print(&format!(
+                "luckproof: day {} winner {} awarded {} lottery tickets ({} players)",
+                day, winner.player, tickets, board.len()
+            ));
+        }
+        settled = day;
+    }
+    LUCKPROOF_SETTLED_DAY.with(|c| { let _ = c.borrow_mut().set(settled); });
 }
 
 /// Enter today's competition. One attempt per UTC day; starting CONSUMES the
@@ -13583,13 +13680,13 @@ fn start_luckproof_daily() -> Result<LuckProofRunStart, String> {
             id,
             player: caller,
             gambles: gambles.clone(),
-            rolls,
+            rolls: rolls.clone(),
             issued_at: now,
             day,
             completed: false,
         });
     });
-    Ok(LuckProofRunStart { run_id: id, day, gambles, issued_at: now })
+    Ok(LuckProofRunStart { run_id: id, day, gambles, rolls, issued_at: now })
 }
 
 /// Submit the day's decisions. Scored SERVER-SIDE from the stored run; the
@@ -13645,6 +13742,7 @@ fn complete_luckproof_daily(run_id: u64, decisions: Vec<bool>, millis: u64) -> R
         correct,
         millis,
         submitted_at: now,
+        decisions: decisions.clone(),
     };
     LUCKPROOF_DAILY.with(|m| {
         m.borrow_mut().insert(LuckProofDayKey { day: run.day, player: caller }, entry.clone());
@@ -30659,6 +30757,88 @@ mod tests {
         for u in [alice(), bob()] {
             STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, u)); });
         }
+        clear_luckproof();
+    }
+
+    #[test]
+    fn test_luckproof_replay_is_verifiable_and_same_deal() {
+        enable_luckproof();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        seed_stake(StakeTier::SixMonths, alice(), 100_000_000);
+        set_mock_caller(alice());
+        let run = start_luckproof_daily().unwrap();
+        let decisions: Vec<bool> = run.gambles.iter().map(|g| luckproof_edge_bp(g) > 0).collect();
+        let res = complete_luckproof_daily(run.run_id, decisions.clone(), 200_000).unwrap();
+
+        // Anyone can replay: decisions + the day's canonical deal + outcomes.
+        set_mock_caller(bob());
+        let replay = get_luckproof_daily_replay(run.day, alice()).unwrap();
+        assert_eq!(replay.decisions, decisions);
+        assert_eq!(replay.ev_bp, res.ev_bp);
+        assert_eq!(replay.outcomes, res.outcomes, "outcomes recompute from the seed");
+        // Fairness proof: the replay's deal is EXACTLY the deal the player got.
+        assert_eq!(format!("{:?}", replay.gambles), format!("{:?}", run.gambles));
+        // The start response's rolls match the recomputed outcomes for takes.
+        for ((g, &roll), (&take, &won)) in run.gambles.iter().zip(&run.rolls).zip(decisions.iter().zip(&replay.outcomes)) {
+            assert_eq!(won, take && roll < g.odds_pct as u16 * 100);
+        }
+        // No entry → None.
+        assert!(get_luckproof_daily_replay(run.day, bob()).is_none());
+        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice())); });
+        clear_luckproof();
+    }
+
+    #[test]
+    fn test_luckproof_daily_winner_gets_tickets_equal_to_player_count() {
+        enable_luckproof();
+        enable_lottery();
+        let t0 = 1_700_000_000_000_000_000u64;
+        set_mock_time(Some(t0));
+        for u in [alice(), bob()] {
+            seed_stake(StakeTier::SixMonths, u, 100_000_000);
+        }
+        // Arm the settlement pointer at "yesterday" (first-activation path).
+        luckproof_daily_award();
+
+        // Two players play today; alice takes every +EV hand, bob folds all.
+        set_mock_caller(alice());
+        let ra = start_luckproof_daily().unwrap();
+        let opt: Vec<bool> = ra.gambles.iter().map(|g| luckproof_edge_bp(g) > 0).collect();
+        complete_luckproof_daily(ra.run_id, opt, 200_000).unwrap();
+        set_mock_caller(bob());
+        let rb = start_luckproof_daily().unwrap();
+        complete_luckproof_daily(rb.run_id, vec![false; LUCKPROOF_DAILY_DECISIONS], 200_000).unwrap();
+
+        // Same day: no award yet.
+        let before = LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0));
+        luckproof_daily_award();
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0)),
+            before,
+            "no award until the day rolls over"
+        );
+
+        // Day rolls over → the sweep pays the winner tickets = player count (2).
+        set_mock_time(Some(t0 + 86_400 * 1_000_000_000));
+        luckproof_daily_award();
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0)),
+            before + 2,
+            "winner takes tickets equal to that day's player count"
+        );
+        // Idempotent: a second sweep pass never double-pays.
+        luckproof_daily_award();
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0)),
+            before + 2
+        );
+        // Runner-up got nothing.
+        assert_eq!(LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0)), 0);
+
+        for u in [alice(), bob()] {
+            STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, u)); });
+        }
+        LUCKPROOF_SETTLED_DAY.with(|c| { let _ = c.borrow_mut().set(0); });
         clear_luckproof();
     }
 

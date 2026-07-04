@@ -983,6 +983,9 @@ type LuckProofRunStart = record {
   run_id : nat64;
   day : nat32;
   gambles : vec LuckProofGamble;
+  // Per-player outcome rolls (win iff roll < odds·100) — returned up front so
+  // the client charts the luck track live; can't influence the ranked metric.
+  rolls : vec nat16;
   issued_at : nat64;
 };
 type LuckProofResult = record {
@@ -1001,6 +1004,8 @@ type LuckProofDailyEntry = record {
   correct : nat16;
   millis : nat64;
   submitted_at : nat64;
+  // Full take/decline vector — public for verifiable replays.
+  decisions : vec bool;
 };
 type LuckProofDailyRow = record {
   rank : nat32;
@@ -1015,6 +1020,21 @@ type LuckProofDailyStatus = record {
   played : bool;
   my_entry : opt LuckProofDailyEntry;
   decisions : nat16;
+  // Entries so far today — the daily winner's lottery-ticket prize equals
+  // this count (settled by the sweep after the day rolls over).
+  players_today : nat32;
+};
+// Verifiable replay: the day's canonical deal (recomputed from the day seed —
+// identical for every player), one player's decisions and outcomes.
+type LuckProofReplay = record {
+  day : nat32;
+  player : principal;
+  gambles : vec LuckProofGamble;
+  decisions : vec bool;
+  outcomes : vec bool;
+  ev_bp : int64;
+  correct : nat16;
+  millis : nat64;
 };
 type Result_16 = variant { Ok : LuckProofRunStart; Err : text };
 type Result_17 = variant { Ok : LuckProofResult; Err : text };
@@ -1982,6 +2002,7 @@ service : (InitPayload) -> {
   // Today's (or a given day's) board + the caller's eligibility/attempt state.
   get_luckproof_daily_board : (opt nat32) -> (vec LuckProofDailyRow) query;
   get_luckproof_daily_status : () -> (LuckProofDailyStatus) query;
+  get_luckproof_daily_replay : (nat32, principal) -> (opt LuckProofReplay) query;
   submit_arcade_score : (text, nat64, blob) -> (Result_5);
   // Submit a community listing. Requires a fresh quote for the same token +
   // days (get_explorer_quote) and the quoted amount (+ one ledger fee)

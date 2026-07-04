@@ -34,6 +34,25 @@ decision is made; LUCK = actual cash), an arena showing Odds/Risk/Reward
   (⅓ clear-take / ⅓ clear-fold / ⅓ close call) so folding discipline counts.
 - Keyboard: T/→ take, D/← decline. Mobile-first fluid layout.
 
+### v2.1 additions (owner-requested, same day)
+
+- **3-second burndown clock** per hand; expiry auto-DECLINES ("hesitation is
+  a decision too"). Both modes.
+- **Realtime two-line chart** of skill (EV) vs luck (cash) per hand — series
+  colors #E85A10/#2F86D9 validated via the dataviz six-checks on the dark
+  surface; hover crosshair; $1,000 baseline. Rolls now return in the START
+  response so the luck track charts live (can't move the ranked metric — EV
+  is a pure function of the decision).
+- **Verifiable replays**: entries store the full decision vector; a public
+  query (`get_luckproof_daily_replay`) recomputes the day's deal + the
+  player's outcomes so ANYONE can audit any run against the shared deal.
+  Board rows are tappable → replay view with chart + per-hand list.
+- **Winner prize**: the sweep pays each finished day's #1 lottery tickets
+  equal to that day's PLAYER COUNT (via grant_lottery_tickets — admin
+  exclusion applies; settlement pointer MemoryId 110, idempotent).
+- Arena shows ONLY the stats row (headline prose removed); reward green,
+  risk neutral, odds tone-banded red <40% / yellow 40–60% / green >60%.
+
 ## Trust model
 
 `start_luckproof_run` generates and stores the gambles + rolls server-side;
