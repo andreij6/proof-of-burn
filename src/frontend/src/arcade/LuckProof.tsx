@@ -54,9 +54,10 @@ export const GET_READY_SECS = 5;   // countdown before the first hand
 export const PRACTICE_ROUNDS = 50; // one practice session
 
 // Chart series colors — validated (dataviz six checks, dark surface):
-// CVD ΔE 101.8 protan, contrast ≥3:1, in-band lightness.
+// protan ΔE 31.2, contrast ≥3:1, in-band lightness; both series are also
+// direct-labeled + legended, so identity never rides on color alone.
 export const SKILL_COLOR = '#E85A10';
-export const LUCK_COLOR = '#2F86D9';
+export const LUCK_COLOR = '#3E9E68';
 
 /** Odds readability tone: red < 40%, yellow 40–60%, green > 60%. */
 export function oddsTone(odds_pct: number): string {
@@ -446,7 +447,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
                 outcomes, nothing recorded — restart anytime. The clock expiring
                 folds for you: hesitation is a decision too.
               </p>
-              <Btn variant="secondary" onClick={startPractice}><Icon name="clover" size={13} /> Practice</Btn>
+              <Btn variant="secondary" onClick={startPractice}><Icon name="pokerchip" size={13} /> Practice</Btn>
             </div>
             <div className="card col" style={{ gap: 10, borderColor: 'var(--burn)' }}>
               <Chip tone="burn" style={{ alignSelf: 'flex-start', height: 19, fontSize: 10 }}>
@@ -716,7 +717,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
             border: '1px solid var(--border-hi)', boxShadow: 'var(--elev-3)',
           }}>
             <span className="row" style={{ gap: 8 }}>
-              <Icon name="clover" size={16} stroke="var(--burn-ink)" />
+              <Icon name="pokerchip" size={16} stroke="var(--burn-ink)" />
               <b>How to play</b>
             </span>
             <div className="col" style={{ gap: 8, fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.55 }}>

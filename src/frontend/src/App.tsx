@@ -1924,7 +1924,7 @@ export default function App() {
         )}
         {luckproofEnabled && (
           <Btn variant={page === 'luckproof' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('luckproof')}>
-            <Icon name="clover" size={14} stroke={page === 'luckproof' ? 'var(--char-950)' : 'currentColor'} />
+            <Icon name="pokerchip" size={14} stroke={page === 'luckproof' ? 'var(--char-950)' : 'currentColor'} />
             Luck-Proof
           </Btn>
         )}

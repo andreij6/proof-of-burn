@@ -24,7 +24,7 @@ export default function LuckProofPage({ actor, principal, onSignIn, onGoParticip
       {/* ── Header ── */}
       <div className="col" style={{ gap: 6 }}>
         <span className="row" style={{ gap: 8 }}>
-          <Icon name="clover" size={16} stroke="var(--burn-ink)" />
+          <Icon name="pokerchip" size={16} stroke="var(--burn-ink)" />
           <Eyebrow accent>Play &amp; compete</Eyebrow>
         </span>
         <b style={{ fontSize: 17 }}>Your results are luck. Your decisions are skill.</b>

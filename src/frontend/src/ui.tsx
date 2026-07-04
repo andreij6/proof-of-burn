@@ -65,8 +65,8 @@ export const iconPaths: Record<string, React.ReactNode> = {
   // Stroke-only to match the set; the elliptical cup reads as the hole at an
   // angle and the pennant waves off the top of the pole.
   golf: <><path d="M10 18V4" /><path d="M10 4l8 2.5L10 9z" /><ellipse cx="10" cy="19.5" rx="3.2" ry="1.5" /></>,
-  // Four-leaf clover (Luck-Proof): four lobes + a stem.
-  clover: <><circle cx="12" cy="7.2" r="3.4" /><circle cx="16.8" cy="12" r="3.4" /><circle cx="12" cy="16.8" r="3.4" /><circle cx="7.2" cy="12" r="3.4" /><path d="M12 16.8c.2 2.2 1.2 3.7 3 4.7" /></>,
+  // Poker chip (Luck-Proof): rim, inlay, and four edge spots.
+  pokerchip: <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="4.5" /><path d="M12 3v3.5" /><path d="M12 17.5V21" /><path d="M3 12h3.5" /><path d="M17.5 12H21" /></>,
   sound: <><path d="M11 5L6 9H2v6h4l5 4z" /><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13" /></>,
   soundOff: <><path d="M11 5L6 9H2v6h4l5 4z" /><path d="M22 9l-6 6M16 9l6 6" /></>,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></>,
