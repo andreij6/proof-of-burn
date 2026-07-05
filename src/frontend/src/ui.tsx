@@ -65,6 +65,8 @@ export const iconPaths: Record<string, React.ReactNode> = {
   // Stroke-only to match the set; the elliptical cup reads as the hole at an
   // angle and the pennant waves off the top of the pole.
   golf: <><path d="M10 18V4" /><path d="M10 4l8 2.5L10 9z" /><ellipse cx="10" cy="19.5" rx="3.2" ry="1.5" /></>,
+  // Stacked coins (ICP LP staking).
+  stack: <><ellipse cx="12" cy="6.5" rx="8" ry="3.2" /><path d="M4 6.5v5c0 1.8 3.6 3.2 8 3.2s8-1.4 8-3.2v-5" /><path d="M4 11.5v5c0 1.8 3.6 3.2 8 3.2s8-1.4 8-3.2v-5" /></>,
   // Droplet (ANSEM LP: liquidity).
   droplet: <><path d="M12 2.5S6 9 6 13.5a6 6 0 0012 0C18 9 12 2.5 12 2.5z" /><path d="M9.5 14a2.5 2.5 0 002.5 2.5" /></>,
   // Bull (Bull Run): head-on skull with sweeping horns.

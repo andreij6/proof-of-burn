@@ -5061,6 +5061,8 @@ fn setup_timers() {
         cycle_topup_check().await;
         course_nft_cycle_guard().await; // forward surplus cycles when the NFT canister runs low
         luckproof_daily_award(); // pay yesterday's Sklansky Trainer winner (tickets = player count)
+        icpswap_lp_grant_round_tickets(); // ICP LP stakers: 10 tickets per lottery round
+        harvest_icpswap_lp().await; // claim + route ICPSwap LP yield (throttled)
         staking_sweep().await;
         lottery_draw_check().await;
         early_adopter_settlement_check().await;
@@ -5262,6 +5264,7 @@ pub const FLAG_ARCADE_LUCKPROOF: &str = "arcade_luckproof";
 pub const FLAG_ARCADE_SKYDIVE: &str = "arcade_skydive";
 pub const FLAG_ARCADE_BULLRUN: &str = "arcade_bullrun";
 pub const FLAG_SOLANA_LP: &str = "solana_lp_rewards";
+pub const FLAG_ICPSWAP_LP: &str = "icpswap_lp_stake";
 /// The Casino: Crash (bustabit-style multiplier game) + the shared casino VP
 /// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
 /// until the owner enables it after a playtest.
@@ -5284,10 +5287,10 @@ pub const FLAG_DASHBOARD: &str = "dashboard";
 /// Mission Statement page (`about` route). Ships dark (default OFF) until an
 /// admin enables it.
 pub const FLAG_MISSION_STATEMENT: &str = "mission_statement";
-const KNOWN_FEATURE_FLAGS: [&str; 18] = [
+const KNOWN_FEATURE_FLAGS: [&str; 19] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
-    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN, FLAG_SOLANA_LP,
+    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN, FLAG_SOLANA_LP, FLAG_ICPSWAP_LP,
     FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS, FLAG_X_FARM,
     FLAG_DASHBOARD, FLAG_MISSION_STATEMENT,
 ];
@@ -5561,6 +5564,7 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE_SKYDIVE => false,
         FLAG_ARCADE_BULLRUN => false,
         FLAG_SOLANA_LP => false,
+        FLAG_ICPSWAP_LP => false,
         FLAG_X_FARM => false,
         // Dashboard + Mission Statement ship dark (default OFF) — these pages
         // were always-on before; gating them lets an admin hide either page
@@ -14787,6 +14791,516 @@ fn admin_set_lp_pools(pools: Vec<LpPoolView>) -> Result<u64, String> {
 fn dev_set_lp_mock_balance(ata_b58: String, amount: u128) -> Result<(), String> {
     require_admin()?;
     MOCK_LP_BALANCES.with(|m| { m.borrow_mut().insert(ata_b58, amount); });
+    Ok(())
+}
+
+// ── ICP LP staking (ICPSwap custody, Model B) ────────────────────────────────
+// Users STAKE their ICPSwap position NFTs with this canister: they transfer
+// the position to us on ICPSwap (transferPosition — the transfer itself is
+// the ownership proof), then register it here. While staked they earn 10
+// lottery tickets every lottery round, and the sweep periodically claims the
+// positions' accrued trading fees. Yield routing (owner decision 2026-07-05):
+//   • ICP → 50% lottery pot, 25% backend cycles burn, 25% frontend cycles
+//     burn (the CMC legs reuse the settle_burn_split machinery);
+//   • every other token (ckUSDC/ckUSDT/ckBTC/ckETH…) → treasury subaccount
+//     on that token's ledger, held for the owner to allocate later.
+// Unstake transfers the position back to a principal the staker names, and
+// is deliberately NOT feature-flag-gated: the custody exit always works.
+//
+// SAFETY: fee claims use ICPSwap's `claimToSubaccount`, which pays the
+// claimed tokens to a DEDICATED subaccount (ICPSWAP_LP_YIELD_SUBACCOUNT) on
+// each token's ledger. The routing pass reads and routes ONLY that
+// subaccount's balances — it can never touch the canister's general funds.
+// Routing is idempotent by construction: whatever sits in the yield
+// subaccount gets routed on the next pass; a failed leg simply waits.
+//
+// ICPSwap wire types are mirrored from ICPSwap-Labs/icpswap-v3-service
+// (src/SwapPool.mo + src/Types.mo, fetched 2026-07-05): Motoko
+// Result.Result<T, Error> encodes as `variant { ok : T; err : Error }`.
+
+const ICPSWAP_LP_YIELD_SUBACCOUNT: [u8; 32] = [9u8; 32];
+const ICP_LP_TICKETS_PER_ROUND: u64 = 10;
+/// Claiming fees for every position on every 5-min sweep would spam the
+/// ICPSwap pools; harvest at most this often.
+const ICP_LP_HARVEST_INTERVAL_NS: u64 = 60 * 60 * 1_000_000_000; // 1 h
+/// ICP below this stays in the yield subaccount (fees would eat the split).
+const ICP_LP_MIN_ROUTE_E8S: u64 = 1_000_000; // 0.01 ICP
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum IcpSwapError {
+    CommonError,
+    InternalError(String),
+    UnsupportedToken(String),
+    InsufficientFunds,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum IcpSwapNatVecResult {
+    #[serde(rename = "ok")]
+    Ok(Vec<candid::Nat>),
+    #[serde(rename = "err")]
+    Err(IcpSwapError),
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum IcpSwapBoolResult {
+    #[serde(rename = "ok")]
+    Ok(bool),
+    #[serde(rename = "err")]
+    Err(IcpSwapError),
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct IcpSwapClaimAmounts {
+    amount0: candid::Nat,
+    amount1: candid::Nat,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum IcpSwapClaimResult {
+    #[serde(rename = "ok")]
+    Ok(IcpSwapClaimAmounts),
+    #[serde(rename = "err")]
+    Err(IcpSwapError),
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct IcpSwapClaimToSubaccountArgs {
+    #[serde(rename = "positionId")]
+    position_id: candid::Nat,
+    subaccount: Vec<u8>, // candid blob ≡ vec nat8
+}
+
+/// One qualifying ICPSwap pool (admin-configured; the owner allows
+/// ICP/ckUSDC, ICP/ckUSDT, ICP/ckBTC, ICP/ckETH and ckBTC/ckETH pairs).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct IcpLpPoolCfg {
+    pub name: String,
+    pub pool: Principal,
+    pub token0_symbol: String,
+    pub token0_ledger: Principal,
+    pub token1_symbol: String,
+    pub token1_ledger: Principal,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct IcpLpPoolsCfg {
+    pub pools: Vec<IcpLpPoolCfg>,
+}
+impl_storable!(IcpLpPoolsCfg);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IcpLpKey {
+    pub pool: Principal,
+    pub position_id: u128,
+}
+impl_storable!(IcpLpKey);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct StakedLpPosition {
+    pub user: Principal,
+    pub pool_name: String,
+    pub staked_at: u64,
+}
+impl_storable!(StakedLpPosition);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IcpLpRoundKey {
+    pub round: u64,
+    pub user: Principal,
+}
+impl_storable!(IcpLpRoundKey);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct IcpLpStats {
+    pub total_harvested_icp_e8s: u64,
+    pub total_pot_e8s: u64,
+    pub total_burn_e8s: u64,
+    pub total_treasury_legs: u64,
+    /// CMC top-up blocks transferred but not yet successfully notified —
+    /// retried every harvest (a refund lands back in the yield subaccount
+    /// and simply re-routes).
+    #[serde(default)]
+    pub pending_notifies: Vec<(Principal, u64)>,
+    #[serde(default)]
+    pub last_harvest_at: u64,
+}
+impl_storable!(IcpLpStats);
+
+thread_local! {
+    /// MemoryId 122: (pool, position id) → staker record. THE custody registry.
+    static STAKED_LP: RefCell<StableBTreeMap<IcpLpKey, StakedLpPosition, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(122)))));
+    /// MemoryId 123: (lottery round, user) → ticket grant guard.
+    static ICP_LP_ROUND_GRANTS: RefCell<StableBTreeMap<IcpLpRoundKey, u8, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(123)))));
+    /// MemoryId 124: qualifying pools (admin-configured).
+    static ICPSWAP_POOLS: RefCell<StableCell<IcpLpPoolsCfg, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(124)), IcpLpPoolsCfg::default())));
+    /// MemoryId 125: lifetime totals + notify retry queue + harvest throttle.
+    static ICP_LP_STATS: RefCell<StableCell<IcpLpStats, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(125)), IcpLpStats::default())));
+    /// Native/local mocks for the ICPSwap pool calls.
+    static MOCK_ICPSWAP_OUR_POSITIONS: RefCell<std::collections::HashMap<Principal, Vec<u128>>> =
+        RefCell::new(std::collections::HashMap::new());
+    static MOCK_ICPSWAP_CLAIMS: RefCell<std::collections::HashMap<(Principal, u128), (u64, u64)>> =
+        RefCell::new(std::collections::HashMap::new());
+    static MOCK_ICPSWAP_TRANSFERS: RefCell<Vec<(Principal, Principal, u128)>> =
+        RefCell::new(Vec::new());
+}
+
+fn icp_lp_pool_cfg(pool: &Principal) -> Option<IcpLpPoolCfg> {
+    ICPSWAP_POOLS.with(|c| c.borrow().get().clone()).pools.into_iter().find(|p| p.pool == *pool)
+}
+
+fn icp_lp_use_mock() -> bool {
+    cfg!(not(target_arch = "wasm32")) || CONFIG.with(|c| c.borrow().get().is_local)
+}
+
+/// Position ids the BACKEND canister owns on `pool` (the stake proof read).
+async fn icpswap_positions_of_backend(pool: Principal) -> Result<Vec<u128>, String> {
+    if icp_lp_use_mock() {
+        return Ok(MOCK_ICPSWAP_OUR_POSITIONS.with(|m| m.borrow().get(&pool).cloned().unwrap_or_default()));
+    }
+    let (res,): (IcpSwapNatVecResult,) =
+        ic_cdk::call(pool, "getUserPositionIdsByPrincipal", (get_canister_id(),))
+            .await
+            .map_err(|(c, m)| format!("ICPSWAP_CALL_FAILED: {:?} {}", c, m))?;
+    match res {
+        IcpSwapNatVecResult::Ok(ids) => Ok(ids
+            .into_iter()
+            .map(|n| u128::try_from(n.0.clone()).map_err(|_| "POSITION_ID_OVERFLOW".to_string()))
+            .collect::<Result<Vec<_>, _>>()?),
+        IcpSwapNatVecResult::Err(e) => Err(format!("ICPSWAP_ERROR: {:?}", e)),
+    }
+}
+
+/// Transfer a custodied position from the backend to `to` (unstake).
+async fn icpswap_transfer_position_out(pool: Principal, to: Principal, position_id: u128) -> Result<(), String> {
+    if icp_lp_use_mock() {
+        let owned = MOCK_ICPSWAP_OUR_POSITIONS.with(|m| {
+            m.borrow().get(&pool).map(|v| v.contains(&position_id)).unwrap_or(false)
+        });
+        if !owned {
+            return Err("ICPSWAP_ERROR: position not owned".to_string());
+        }
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| {
+            if let Some(v) = m.borrow_mut().get_mut(&pool) {
+                v.retain(|id| *id != position_id);
+            }
+        });
+        MOCK_ICPSWAP_TRANSFERS.with(|m| m.borrow_mut().push((pool, to, position_id)));
+        return Ok(());
+    }
+    let (res,): (IcpSwapBoolResult,) = ic_cdk::call(
+        pool,
+        "transferPosition",
+        (get_canister_id(), to, candid::Nat::from(position_id)),
+    )
+    .await
+    .map_err(|(c, m)| format!("ICPSWAP_CALL_FAILED: {:?} {}", c, m))?;
+    match res {
+        IcpSwapBoolResult::Ok(true) => Ok(()),
+        IcpSwapBoolResult::Ok(false) => Err("ICPSWAP_TRANSFER_REFUSED".to_string()),
+        IcpSwapBoolResult::Err(e) => Err(format!("ICPSWAP_ERROR: {:?}", e)),
+    }
+}
+
+/// Claim a position's accrued fees INTO THE DEDICATED YIELD SUBACCOUNT
+/// (ICPSwap pays the claimed tokens to {backend, sub} on each token's
+/// ledger). The native mock credits the TEST_ACCT sim instead.
+async fn icpswap_claim_yield(pool: &IcpLpPoolCfg, position_id: u128) -> Result<(u64, u64), String> {
+    if icp_lp_use_mock() {
+        let amounts = MOCK_ICPSWAP_CLAIMS.with(|m| m.borrow_mut().remove(&(pool.pool, position_id)));
+        let (a0, a1) = amounts.unwrap_or((0, 0));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Credit the single-ledger test sim at the yield subaccount.
+            let me = get_canister_id();
+            let cur = acct_get(me, Some(ICPSWAP_LP_YIELD_SUBACCOUNT));
+            acct_set(me, Some(ICPSWAP_LP_YIELD_SUBACCOUNT), cur + a0 + a1);
+        }
+        return Ok((a0, a1));
+    }
+    let args = IcpSwapClaimToSubaccountArgs {
+        position_id: candid::Nat::from(position_id),
+        subaccount: ICPSWAP_LP_YIELD_SUBACCOUNT.to_vec(),
+    };
+    let (res,): (IcpSwapClaimResult,) = ic_cdk::call(pool.pool, "claimToSubaccount", (args,))
+        .await
+        .map_err(|(c, m)| format!("ICPSWAP_CALL_FAILED: {:?} {}", c, m))?;
+    match res {
+        IcpSwapClaimResult::Ok(a) => Ok((
+            u64::try_from(a.amount0.0.clone()).unwrap_or(u64::MAX),
+            u64::try_from(a.amount1.0.clone()).unwrap_or(u64::MAX),
+        )),
+        IcpSwapClaimResult::Err(e) => Err(format!("ICPSWAP_ERROR: {:?}", e)),
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct IcpLpPositionView {
+    pub pool: Principal,
+    pub pool_name: String,
+    pub position_id: u128,
+    pub staked_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct IcpLpInfo {
+    pub enabled: bool,
+    pub round: u64,
+    pub tickets_per_round: u64,
+    /// Caller holds an active ICP stake (tickets are stakers-only).
+    pub staked: bool,
+    /// Where to send the position on ICPSwap (the custody principal).
+    pub backend_principal: Principal,
+    pub my_positions: Vec<IcpLpPositionView>,
+    pub pools: Vec<IcpLpPoolCfg>,
+    pub total_harvested_icp_e8s: u64,
+    pub granted_this_round: bool,
+}
+
+#[ic_cdk::query]
+fn get_icp_lp_info() -> IcpLpInfo {
+    let caller = get_caller();
+    let round = lottery_state().round;
+    let stats = ICP_LP_STATS.with(|c| c.borrow().get().clone());
+    IcpLpInfo {
+        enabled: feature_visible(FLAG_ICPSWAP_LP, caller),
+        round,
+        tickets_per_round: ICP_LP_TICKETS_PER_ROUND,
+        staked: caller != Principal::anonymous() && author_is_staked(caller),
+        backend_principal: get_canister_id(),
+        my_positions: STAKED_LP.with(|m| {
+            m.borrow()
+                .iter()
+                .filter(|e| e.value().user == caller)
+                .map(|e| IcpLpPositionView {
+                    pool: e.key().pool,
+                    pool_name: e.value().pool_name.clone(),
+                    position_id: e.key().position_id,
+                    staked_at: e.value().staked_at,
+                })
+                .collect()
+        }),
+        pools: ICPSWAP_POOLS.with(|c| c.borrow().get().clone()).pools,
+        total_harvested_icp_e8s: stats.total_harvested_icp_e8s,
+        granted_this_round: ICP_LP_ROUND_GRANTS
+            .with(|m| m.borrow().contains_key(&IcpLpRoundKey { round, user: caller })),
+    }
+}
+
+/// Register a position the caller has ALREADY transferred to this canister
+/// on ICPSwap (transferPosition via their UI — the transfer is the ownership
+/// proof). First registrant wins; the position must be visible in OUR
+/// holdings on the pool.
+#[ic_cdk::update]
+async fn stake_lp_position(pool: Principal, position_id: u128) -> Result<IcpLpPositionView, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    if !feature_visible(FLAG_ICPSWAP_LP, caller) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    let cfg = icp_lp_pool_cfg(&pool).ok_or("POOL_NOT_SUPPORTED")?;
+    let key = IcpLpKey { pool, position_id };
+    if STAKED_LP.with(|m| m.borrow().contains_key(&key)) {
+        return Err("POSITION_ALREADY_STAKED".to_string());
+    }
+    let ours = icpswap_positions_of_backend(pool).await?;
+    if !ours.contains(&position_id) {
+        return Err("POSITION_NOT_TRANSFERRED".to_string());
+    }
+    // Re-check after the await (two calls racing for the same position).
+    if STAKED_LP.with(|m| m.borrow().contains_key(&key)) {
+        return Err("POSITION_ALREADY_STAKED".to_string());
+    }
+    let now = current_time();
+    let record = StakedLpPosition { user: caller, pool_name: cfg.name.clone(), staked_at: now };
+    STAKED_LP.with(|m| { m.borrow_mut().insert(key, record); });
+    staking_audit("icpswap_lp_stake", caller, position_id as u64, 0);
+    Ok(IcpLpPositionView { pool, pool_name: cfg.name, position_id, staked_at: now })
+}
+
+/// Return a custodied position to `return_to` (the staker's ICPSwap
+/// principal). Only the recorded staker; NOT feature-flag-gated — the
+/// custody exit must always work, dark flag or not.
+#[ic_cdk::update]
+async fn unstake_lp_position(pool: Principal, position_id: u128, return_to: Principal) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    if return_to == Principal::anonymous() {
+        return Err("BAD_RETURN_PRINCIPAL".to_string());
+    }
+    let key = IcpLpKey { pool, position_id };
+    let record = STAKED_LP.with(|m| m.borrow().get(&key)).ok_or("POSITION_NOT_STAKED")?;
+    if record.user != caller {
+        return Err("NOT_YOUR_POSITION".to_string());
+    }
+    icpswap_transfer_position_out(pool, return_to, position_id).await?;
+    STAKED_LP.with(|m| { m.borrow_mut().remove(&key); });
+    staking_audit("icpswap_lp_unstake", caller, position_id as u64, 0);
+    Ok(())
+}
+
+/// Admin: configure the qualifying ICPSwap pools.
+#[ic_cdk::update]
+fn admin_set_icpswap_pools(pools: Vec<IcpLpPoolCfg>) -> Result<u64, String> {
+    require_admin()?;
+    for p in &pools {
+        if p.name.trim().is_empty() {
+            return Err("POOL_NAME_EMPTY".to_string());
+        }
+        if p.pool == Principal::anonymous() {
+            return Err(format!("BAD_POOL_PRINCIPAL: {}", p.name));
+        }
+    }
+    let n = pools.len() as u64;
+    ICPSWAP_POOLS.with(|c| { let _ = c.borrow_mut().set(IcpLpPoolsCfg { pools }); });
+    Ok(n)
+}
+
+/// Sweep leg 1 (sync, cheap): every distinct staker with a custodied
+/// position earns ICP_LP_TICKETS_PER_ROUND tickets once per lottery round.
+/// The guard row is only written when tickets actually land, so an unstaked
+/// user who stakes ICP later in the round still collects.
+fn icpswap_lp_grant_round_tickets() {
+    if !feature_visible(FLAG_ICPSWAP_LP, Principal::anonymous()) {
+        return;
+    }
+    let round = lottery_state().round;
+    let stakers: std::collections::BTreeSet<Principal> =
+        STAKED_LP.with(|m| m.borrow().iter().map(|e| e.value().user).collect());
+    for user in stakers {
+        let key = IcpLpRoundKey { round, user };
+        if ICP_LP_ROUND_GRANTS.with(|m| m.borrow().contains_key(&key)) {
+            continue;
+        }
+        if !author_is_staked(user) {
+            continue; // stakers-only; retry next sweep in case they stake
+        }
+        grant_lottery_tickets(user, ICP_LP_TICKETS_PER_ROUND, "icpswap_lp");
+        ICP_LP_ROUND_GRANTS.with(|m| { m.borrow_mut().insert(key, 1u8); });
+        staking_audit("icpswap_lp_round_tickets", user, ICP_LP_TICKETS_PER_ROUND, round);
+    }
+}
+
+/// Sweep leg 2 (async, throttled): claim every custodied position's fees
+/// into the dedicated yield subaccount, then route whatever sits there.
+async fn harvest_icpswap_lp() {
+    if !feature_visible(FLAG_ICPSWAP_LP, Principal::anonymous()) {
+        return;
+    }
+    let now = current_time();
+    let mut stats = ICP_LP_STATS.with(|c| c.borrow().get().clone());
+    if now.saturating_sub(stats.last_harvest_at) < ICP_LP_HARVEST_INTERVAL_NS {
+        return;
+    }
+    stats.last_harvest_at = now;
+    ICP_LP_STATS.with(|c| { let _ = c.borrow_mut().set(stats.clone()); });
+
+    // 1. Claim fees (per position; one failing never blocks the others).
+    let staked: Vec<IcpLpKey> = STAKED_LP.with(|m| m.borrow().iter().map(|e| e.key().clone()).collect());
+    for key in staked {
+        let Some(cfg) = icp_lp_pool_cfg(&key.pool) else { continue };
+        if let Err(e) = icpswap_claim_yield(&cfg, key.position_id).await {
+            canister_print(&format!("icpswap harvest: claim failed for {}#{}: {}", cfg.name, key.position_id, e));
+        }
+    }
+    // 2. Retry any CMC notifies left over from previous harvests.
+    let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+    let mut still_pending: Vec<(Principal, u64)> = Vec::new();
+    for (target, block) in stats.pending_notifies.clone() {
+        match notify_cmc_topup(cmc, target, block, true).await {
+            Ok(_) => {}
+            Err(e) if e.starts_with("CMC_REFUNDED") => {} // ICP is back in the sub; re-routes below
+            Err(_) => still_pending.push((target, block)),
+        }
+    }
+    stats.pending_notifies = still_pending;
+
+    // 3. Route the yield subaccount, ledger by ledger.
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let icp_ledger = config.ledger_canister_id;
+    let me = get_canister_id();
+    let yield_account = LedgerAccount { owner: me, subaccount: Some(ICPSWAP_LP_YIELD_SUBACCOUNT) };
+    let mut ledgers: std::collections::BTreeSet<Principal> = std::collections::BTreeSet::new();
+    for pool in ICPSWAP_POOLS.with(|c| c.borrow().get().clone()).pools {
+        ledgers.insert(pool.token0_ledger);
+        ledgers.insert(pool.token1_ledger);
+    }
+    for ledger in ledgers {
+        let Ok(balance) = call_ledger_balance(ledger, yield_account.clone()).await else { continue };
+        if ledger == icp_ledger {
+            if balance < ICP_LP_MIN_ROUTE_E8S {
+                continue;
+            }
+            // Three outbound transfers → reserve their fees, split the rest.
+            let usable = balance.saturating_sub(3 * 10_000);
+            let pot_amt = usable / 2;
+            let backend_amt = usable / 4;
+            let frontend_amt = usable - pot_amt - backend_amt;
+            // 50% → the lottery pot.
+            let pot_dest = LedgerAccount { owner: me, subaccount: Some(LOTTERY_SUBACCOUNT) };
+            match call_ledger_transfer(ledger, Some(ICPSWAP_LP_YIELD_SUBACCOUNT), pot_dest, pot_amt, Some(10_000)).await {
+                Ok(_) => {
+                    stats.total_pot_e8s = stats.total_pot_e8s.saturating_add(pot_amt);
+                }
+                Err(e) => {
+                    canister_print(&format!("icpswap harvest: pot leg failed: {}", e));
+                    continue; // balance intact; retry next harvest
+                }
+            }
+            // 25% + 25% → cycles for backend and frontend (burns the ICP).
+            for (target, amt) in [(me, backend_amt), (frontend_canister_id(), frontend_amt)] {
+                if amt == 0 { continue; }
+                match call_cmc_topup_transfer(ledger, Some(ICPSWAP_LP_YIELD_SUBACCOUNT), target, amt, 10_000).await {
+                    Ok(block) => {
+                        stats.total_burn_e8s = stats.total_burn_e8s.saturating_add(amt);
+                        if let Err(e) = notify_cmc_topup(cmc, target, block, true).await {
+                            if !e.starts_with("CMC_REFUNDED") {
+                                stats.pending_notifies.push((target, block));
+                            }
+                            canister_print(&format!("icpswap harvest: notify pending for {}: {}", target, e));
+                        }
+                    }
+                    Err(e) => canister_print(&format!("icpswap harvest: burn leg failed: {}", e)),
+                }
+            }
+            stats.total_harvested_icp_e8s = stats.total_harvested_icp_e8s.saturating_add(balance);
+        } else {
+            // Non-ICP yield → treasury on that token's ledger, in full.
+            // 10_000 covers every ck-token's default fee comfortably.
+            if balance <= 20_000 {
+                continue;
+            }
+            let dest = LedgerAccount { owner: me, subaccount: Some(TREASURY_SUBACCOUNT) };
+            match call_ledger_transfer(ledger, Some(ICPSWAP_LP_YIELD_SUBACCOUNT), dest, balance - 10_000, Some(10_000)).await {
+                Ok(_) => {
+                    stats.total_treasury_legs = stats.total_treasury_legs.saturating_add(1);
+                }
+                Err(e) => canister_print(&format!("icpswap harvest: treasury leg failed: {}", e)),
+            }
+        }
+    }
+    ICP_LP_STATS.with(|c| { let _ = c.borrow_mut().set(stats); });
+}
+
+/// Local/dev: seed the mocked ICPSwap position registry (positions "owned"
+/// by this canister on a pool). Admin-gated; the mock is only consulted on
+/// native tests and local replicas.
+#[ic_cdk::update]
+fn dev_set_icpswap_mock_positions(pool: Principal, position_ids: Vec<u128>) -> Result<(), String> {
+    require_admin()?;
+    MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, position_ids); });
+    Ok(())
+}
+
+/// Local/dev: queue mocked claim amounts for a position (one-shot).
+#[ic_cdk::update]
+fn dev_set_icpswap_mock_claim(pool: Principal, position_id: u128, amount0: u64, amount1: u64) -> Result<(), String> {
+    require_admin()?;
+    MOCK_ICPSWAP_CLAIMS.with(|m| { m.borrow_mut().insert((pool, position_id), (amount0, amount1)); });
     Ok(())
 }
 
@@ -31893,6 +32407,267 @@ mod tests {
         STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice())); });
         LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
         clear_solana_lp();
+    }
+
+    // ── ICP LP staking (ICPSwap custody) ──────────────────────────────────
+
+    fn enable_icp_lp() {
+        install_staking_test_config();
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.admins.push(carol());
+        config.is_local = true; // routes CMC legs through the mockable path
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().insert(FLAG_ICPSWAP_LP.to_string(), 1u8);
+            m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8);
+        });
+    }
+
+    fn clear_icp_lp() {
+        STAKED_LP.with(|m| {
+            let keys: Vec<IcpLpKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        ICP_LP_ROUND_GRANTS.with(|m| {
+            let keys: Vec<IcpLpRoundKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        ICPSWAP_POOLS.with(|c| { let _ = c.borrow_mut().set(IcpLpPoolsCfg::default()); });
+        ICP_LP_STATS.with(|c| { let _ = c.borrow_mut().set(IcpLpStats::default()); });
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| m.borrow_mut().clear());
+        MOCK_ICPSWAP_CLAIMS.with(|m| m.borrow_mut().clear());
+        MOCK_ICPSWAP_TRANSFERS.with(|m| m.borrow_mut().clear());
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().remove(&FLAG_ICPSWAP_LP.to_string());
+            m.borrow_mut().remove(&FLAG_LOSSLESS_LOTTERY.to_string());
+        });
+        acct_disable();
+        set_mock_time(None);
+    }
+
+    fn icp_lp_test_pool(ledger0: Principal, ledger1: Principal) -> IcpLpPoolCfg {
+        IcpLpPoolCfg {
+            name: "ICP/ckUSDC".into(),
+            pool: p("qoctq-giaaa-aaaaa-aaaea-cai"),
+            token0_symbol: "ICP".into(),
+            token0_ledger: ledger0,
+            token1_symbol: "ckUSDC".into(),
+            token1_ledger: ledger1,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_icp_lp_stake_gates_and_ownership_proof() {
+        enable_icp_lp();
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+
+        // Flag gate.
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_ICPSWAP_LP.to_string()); });
+        set_mock_caller(alice());
+        assert_eq!(stake_lp_position(pool, 7).await.unwrap_err(), "FEATURE_DISABLED");
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ICPSWAP_LP.to_string(), 1u8); });
+
+        // Pool must be configured.
+        assert_eq!(stake_lp_position(pool, 7).await.unwrap_err(), "POOL_NOT_SUPPORTED");
+        set_mock_caller(carol());
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        admin_set_icpswap_pools(vec![icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id)]).unwrap();
+
+        // The position must ALREADY be in our holdings (the transfer proof).
+        set_mock_caller(alice());
+        assert_eq!(stake_lp_position(pool, 7).await.unwrap_err(), "POSITION_NOT_TRANSFERRED");
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![7]); });
+        let view = stake_lp_position(pool, 7).await.unwrap();
+        assert_eq!(view.position_id, 7);
+        assert_eq!(view.pool_name, "ICP/ckUSDC");
+
+        // First registrant wins.
+        set_mock_caller(bob());
+        assert_eq!(stake_lp_position(pool, 7).await.unwrap_err(), "POSITION_ALREADY_STAKED");
+
+        // Info reflects the caller's custody.
+        set_mock_caller(alice());
+        let info = get_icp_lp_info();
+        assert_eq!(info.my_positions.len(), 1);
+        assert_eq!(info.backend_principal, get_canister_id());
+        clear_icp_lp();
+    }
+
+    #[tokio::test]
+    async fn test_icp_lp_unstake_is_owner_only_and_never_flag_gated() {
+        enable_icp_lp();
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(carol());
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        admin_set_icpswap_pools(vec![icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id)]).unwrap();
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![9]); });
+        set_mock_caller(alice());
+        stake_lp_position(pool, 9).await.unwrap();
+
+        // Only the recorded staker can exit; sane return principal required.
+        set_mock_caller(bob());
+        assert_eq!(unstake_lp_position(pool, 9, bob()).await.unwrap_err(), "NOT_YOUR_POSITION");
+        set_mock_caller(alice());
+        assert_eq!(unstake_lp_position(pool, 9, Principal::anonymous()).await.unwrap_err(), "BAD_RETURN_PRINCIPAL");
+        assert_eq!(unstake_lp_position(pool, 99, alice()).await.unwrap_err(), "POSITION_NOT_STAKED");
+
+        // The custody exit works even with the feature flag DARK.
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_ICPSWAP_LP.to_string()); });
+        unstake_lp_position(pool, 9, dave()).await.unwrap();
+        assert!(STAKED_LP.with(|m| m.borrow().is_empty()));
+        let transfers = MOCK_ICPSWAP_TRANSFERS.with(|m| m.borrow().clone());
+        assert_eq!(transfers, vec![(pool, dave(), 9u128)]);
+        clear_icp_lp();
+    }
+
+    #[tokio::test]
+    async fn test_icp_lp_round_tickets_once_per_round_stakers_only() {
+        enable_icp_lp();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(carol());
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        admin_set_icpswap_pools(vec![icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id)]).unwrap();
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![1, 2]); });
+
+        // Alice is ICP-staked; bob is not (yet).
+        seed_stake(StakeTier::SixMonths, alice(), 100_000_000);
+        set_mock_caller(alice());
+        stake_lp_position(pool, 1).await.unwrap();
+        set_mock_caller(bob());
+        stake_lp_position(pool, 2).await.unwrap();
+
+        let round = lottery_state().round;
+        icpswap_lp_grant_round_tickets();
+        let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
+        assert_eq!(count(alice()), 10);
+        assert_eq!(count(bob()), 0, "unstaked earns nothing (owner rule)");
+        set_mock_caller(alice());
+        assert!(get_icp_lp_info().granted_this_round);
+        let rows = get_my_ticket_breakdown();
+        assert_eq!(rows.iter().find(|r| r.source == "icpswap_lp").map(|r| r.count), Some(10));
+
+        // Same round: no double grant; bob staking mid-round collects on the
+        // NEXT sweep (no guard row was burned for him).
+        icpswap_lp_grant_round_tickets();
+        assert_eq!(count(alice()), 10);
+        seed_stake(StakeTier::SixMonths, bob(), 100_000_000);
+        icpswap_lp_grant_round_tickets();
+        assert_eq!(count(bob()), 10);
+
+        // Round bump re-arms everyone.
+        let mut st = lottery_state();
+        st.round += 1;
+        set_lottery_state(st);
+        icpswap_lp_grant_round_tickets();
+        assert_eq!(count(alice()), 10, "new round: counts reset per-round in TicketEntry");
+        assert_eq!(
+            ICP_LP_ROUND_GRANTS.with(|m| m.borrow().iter().filter(|e| e.key().round == round + 1).count()),
+            2
+        );
+
+        for u in [alice(), bob()] {
+            STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, u)); });
+            LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&u); });
+        }
+        clear_icp_lp();
+    }
+
+    #[tokio::test]
+    async fn test_icp_lp_harvest_routes_icp_50_25_25() {
+        enable_icp_lp();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        acct_reset();
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let icp_ledger = cfg.ledger_canister_id;
+        set_mock_caller(carol());
+        admin_set_icpswap_pools(vec![icp_lp_test_pool(icp_ledger, icp_ledger)]).unwrap();
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![5]); });
+        set_mock_caller(alice());
+        stake_lp_position(pool, 5).await.unwrap();
+
+        // Queue 0.05 ICP of claimable fees; the mock credits the DEDICATED
+        // yield subaccount (never the general balance).
+        MOCK_ICPSWAP_CLAIMS.with(|m| { m.borrow_mut().insert((pool, 5), (3_000_000, 2_000_000)); });
+        harvest_icpswap_lp().await;
+
+        let me = get_canister_id();
+        let usable = 5_000_000u64 - 3 * 10_000;
+        let pot = usable / 2;
+        let backend_amt = usable / 4;
+        let frontend_amt = usable - pot - backend_amt;
+        assert_eq!(acct_get(me, Some(LOTTERY_SUBACCOUNT)), pot, "50% to the lottery pot");
+        // Both burn legs left the yield subaccount for the CMC.
+        let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+        assert_eq!(acct_get(cmc, Some(principal_to_subaccount(&me))), backend_amt, "25% backend cycles");
+        assert_eq!(
+            acct_get(cmc, Some(principal_to_subaccount(&frontend_canister_id()))),
+            frontend_amt,
+            "25% frontend cycles"
+        );
+        assert_eq!(acct_get(me, Some(ICPSWAP_LP_YIELD_SUBACCOUNT)), 0, "yield subaccount fully routed");
+        let stats = ICP_LP_STATS.with(|c| c.borrow().get().clone());
+        assert_eq!(stats.total_pot_e8s, pot);
+        assert_eq!(stats.total_burn_e8s, backend_amt + frontend_amt);
+        assert_eq!(stats.total_harvested_icp_e8s, 5_000_000);
+        assert!(stats.pending_notifies.is_empty(), "local notifies are best-effort Ok");
+
+        // Throttle: an immediate second harvest is a no-op even with fresh fees.
+        MOCK_ICPSWAP_CLAIMS.with(|m| { m.borrow_mut().insert((pool, 5), (1_000_000, 0)); });
+        harvest_icpswap_lp().await;
+        assert_eq!(acct_get(me, Some(ICPSWAP_LP_YIELD_SUBACCOUNT)), 0, "throttled: no new claim happened");
+        clear_icp_lp();
+    }
+
+    #[tokio::test]
+    async fn test_icp_lp_harvest_routes_other_tokens_to_treasury() {
+        enable_icp_lp();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        acct_reset();
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        // Pool whose BOTH tokens live on a non-ICP ledger (the test sim is
+        // single-ledger, so the ck-token case is exercised in isolation).
+        let ck_ledger = p("mxzaz-hqaaa-aaaar-qaada-cai");
+        set_mock_caller(carol());
+        admin_set_icpswap_pools(vec![icp_lp_test_pool(ck_ledger, ck_ledger)]).unwrap();
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![3]); });
+        set_mock_caller(alice());
+        stake_lp_position(pool, 3).await.unwrap();
+
+        MOCK_ICPSWAP_CLAIMS.with(|m| { m.borrow_mut().insert((pool, 3), (400_000, 0)); });
+        harvest_icpswap_lp().await;
+
+        let me = get_canister_id();
+        assert_eq!(
+            acct_get(me, Some(TREASURY_SUBACCOUNT)),
+            400_000 - 10_000,
+            "non-ICP yield goes to the treasury in full (minus one fee)"
+        );
+        assert_eq!(acct_get(me, Some(ICPSWAP_LP_YIELD_SUBACCOUNT)), 0);
+        let stats = ICP_LP_STATS.with(|c| c.borrow().get().clone());
+        assert_eq!(stats.total_treasury_legs, 1);
+        assert_eq!(stats.total_pot_e8s, 0, "no ICP legs fired");
+        clear_icp_lp();
+    }
+
+    #[test]
+    fn test_icp_lp_admin_pool_validation() {
+        enable_icp_lp();
+        set_mock_caller(alice());
+        assert!(admin_set_icpswap_pools(vec![]).is_err(), "non-admin rejected");
+        set_mock_caller(carol());
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let mut bad = icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id);
+        bad.name = "  ".into();
+        assert_eq!(admin_set_icpswap_pools(vec![bad]).unwrap_err(), "POOL_NAME_EMPTY");
+        let mut bad2 = icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id);
+        bad2.pool = Principal::anonymous();
+        assert!(admin_set_icpswap_pools(vec![bad2]).unwrap_err().starts_with("BAD_POOL_PRINCIPAL"));
+        assert_eq!(admin_set_icpswap_pools(vec![icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id)]).unwrap(), 1);
+        clear_icp_lp();
     }
 
     // ── Bull Run (arcade game 5) ──────────────────────────────────────────

@@ -1147,6 +1147,39 @@ type LpClaimResult = record {
   tickets : nat64;
   round : nat64;
 };
+// ICP LP staking (ICPSwap custody, Model B): stake your ICPSwap position
+// NFT with the backend (transfer it on ICPSwap first — the transfer is the
+// ownership proof, backend_principal in get_icp_lp_info is the destination),
+// earn 10 lottery tickets every round while staked, and the sweep harvests
+// the positions' trading fees: ICP → 50% lottery pot / 25% backend cycles /
+// 25% frontend cycles; every other token → treasury. Unstake returns the
+// position to a principal you name and is NEVER feature-flag-gated.
+type IcpLpPoolCfg = record {
+  name : text;
+  pool : principal;
+  token0_symbol : text;
+  token0_ledger : principal;
+  token1_symbol : text;
+  token1_ledger : principal;
+};
+type IcpLpPositionView = record {
+  pool : principal;
+  pool_name : text;
+  position_id : nat;
+  staked_at : nat64;
+};
+type IcpLpInfo = record {
+  enabled : bool;
+  round : nat64;
+  tickets_per_round : nat64;
+  staked : bool;
+  backend_principal : principal;
+  my_positions : vec IcpLpPositionView;
+  pools : vec IcpLpPoolCfg;
+  total_harvested_icp_e8s : nat64;
+  granted_this_round : bool;
+};
+type Result_24 = variant { Ok : IcpLpPositionView; Err : text };
 type Result_21 = variant { Ok : text; Err : text };
 type Result_22 = variant { Ok : LpClaimResult; Err : text };
 type Result_23 = variant { Ok : nat64; Err : text };
@@ -2139,6 +2172,16 @@ service : (InitPayload) -> {
   unlink_solana_wallet : () -> (Result);
   claim_lp_reward : () -> (Result_22);
   admin_set_lp_pools : (vec LpPoolView) -> (Result_23);
+  // ICP LP staking (ICPSwap custody).
+  get_icp_lp_info : () -> (IcpLpInfo) query;
+  // Register a position ALREADY transferred to the backend on ICPSwap.
+  stake_lp_position : (principal, nat) -> (Result_24);
+  // Return a custodied position to `return_to`; staker-only, never flag-gated.
+  unstake_lp_position : (principal, nat, principal) -> (Result);
+  admin_set_icpswap_pools : (vec IcpLpPoolCfg) -> (Result_23);
+  // Local/dev mocks (only consulted on native tests / local replicas).
+  dev_set_icpswap_mock_positions : (principal, vec nat) -> (Result);
+  dev_set_icpswap_mock_claim : (principal, nat, nat64, nat64) -> (Result);
   // Local/dev only in effect: mocked ATA balances (mock map is only
   // consulted when is_local).
   dev_set_lp_mock_balance : (text, nat) -> (Result);

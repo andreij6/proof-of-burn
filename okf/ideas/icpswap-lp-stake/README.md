@@ -8,7 +8,17 @@ timestamp: 2026-07-05T00:00:00Z
 
 # ICPSwap ICP/ckUSDC LP rewards & LP staking
 
-**Status: RESEARCHED & PLANNED, NOT built.** Owner ask (2026-07-05): do the
+**Status: BUILDING (2026-07-05, Model B chosen).** Owner decisions:
+ICP yield → **50% lottery pot, 50% burn (25% backend-cycles + 25%
+frontend-cycles via the existing CMC machinery)**; **all non-ICP tokens →
+app treasury untouched** (owner decides later — no in-pool swaps needed);
+pools: **ICP/ckUSDC, ICP/ckUSDT, ICP/ckBTC, ICP/ckETH, ckBTC/ckETH**
+(admin-configurable); tickets flat 10/round AUTO-granted while staked (no
+claim button — custody is continuous proof); NO admin-transfer endpoint
+(rug-proof; only the staker's unstake moves a position, never flag-gated);
+nav item "ICP LP" in Featured below ANSEM LP.
+
+Original ask (2026-07-05): do the
 ANSEM-style reward for the ICPSwap ICP/USDC pair, and explore letting users
 STAKE their LP with us so the app uses the yield to support the lottery pot
 and token burn.
