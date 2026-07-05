@@ -1,5 +1,15 @@
 # Log
 
+## 2026-07-05 — Mainnet deploy 8d3ba8e (value-scaled LP tickets + Stake to Earn)
+
+Shipped since 23860b4: ICP LP tickets now 40/day per $1 of staked LP value
+(valued live from pool tick-math × XRC rates, once per UTC day); the
+"Stake to Earn" nav section (Neuron Stake page split out of the Lottery
+hub, ICP LP + ANSEM LP moved in; all Stake-ICP CTAs re-routed;
+#/lottery/staking deep link redirects); rich gist-card "How it works"
+modals on all five reward/game pages. Backend rollback snapshot …23
+(520 MiB). All commits on GitHub.
+
 ## 2026-07-05 — Mainnet deploy 23860b4 (ICP LP custody staking live)
 
 Shipped ICP LP (Model B custody staking of ICPSwap positions) with the
