@@ -75,7 +75,17 @@ export interface Decor {
   houses: { x: number; z: number; w: number; d: number; h: number; rot: number }[];
   rocks: { x: number; z: number; r: number }[];
   clouds: { x: number; z: number; y: number; s: number }[];
+  /** One winding river: world-space polyline. */
+  river: { x: number; z: number }[];
+  mountains: { x: number; z: number; h: number; r: number }[];
+  regions: { x: number; z: number; name: string }[];
 }
+
+/** CoD-style ground-label names; 8 are dealt per map, seed-shuffled. */
+export const REGION_NAMES = [
+  'TRAIN YARD', 'OLD TOWN', 'QUARRY', 'LUMBERYARD', 'BONEYARD', 'DOCKS',
+  'FARMLAND', 'PROMENADE', 'STORAGE TOWN', 'HYDRO', 'SUMMIT', 'SALT FLATS',
+];
 
 /** Scenery from a seed — kept clear of the target's inner 60 m. */
 export function buildDecor(seed: number, targetX: number, targetZ: number): Decor {
@@ -100,7 +110,49 @@ export function buildDecor(seed: number, targetX: number, targetZ: number): Deco
   for (let i = 0; i < 12; i++) {
     clouds.push({ x: rand() * MAP_M, z: rand() * MAP_M, y: 350 + rand() * 400, s: 40 + rand() * 70 });
   }
-  return { trees, houses, rocks, clouds };
+  // River: enters one edge, wanders across to the other side.
+  const river: Decor['river'] = [];
+  {
+    const vertical = rand() < 0.5;
+    let off = MAP_M * (0.25 + rand() * 0.5);
+    for (let i = 0; i <= 16; i++) {
+      const along = (i / 16) * MAP_M;
+      off += (rand() - 0.5) * 170;
+      off = Math.max(MAP_M * 0.08, Math.min(MAP_M * 0.92, off));
+      river.push(vertical ? { x: off, z: along } : { x: along, z: off });
+    }
+  }
+  // Mountain range: a clustered band near one map edge, well clear of the target.
+  const mountains: Decor['mountains'] = [];
+  {
+    const edge = Math.floor(rand() * 4);
+    while (mountains.length < 7) {
+      const along = MAP_M * (0.08 + rand() * 0.84);
+      const depth = MAP_M * (0.04 + rand() * 0.16);
+      const [x, z] = edge === 0 ? [along, depth] : edge === 1 ? [along, MAP_M - depth]
+        : edge === 2 ? [depth, along] : [MAP_M - depth, along];
+      if (Math.hypot(x - targetX, z - targetZ) > 220) {
+        mountains.push({ x, z, h: 70 + rand() * 90, r: 90 + rand() * 110 });
+      }
+    }
+  }
+  // Regions: 8 seed-shuffled names on a jittered ring around the map.
+  const names = [...REGION_NAMES];
+  for (let i = names.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [names[i], names[j]] = [names[j], names[i]];
+  }
+  const regions: Decor['regions'] = [];
+  for (let i = 0; i < 8; i++) {
+    const gx = i % 3, gz = Math.floor(i / 3); // 3×3 grid minus center
+    const [cx, cz] = i < 4 ? [gx, gz] : [(i + 1) % 3, Math.floor((i + 1) / 3)];
+    regions.push({
+      x: MAP_M * (0.18 + cx * 0.32) + (rand() - 0.5) * 160,
+      z: MAP_M * (0.18 + cz * 0.32) + (rand() - 0.5) * 160,
+      name: names[i],
+    });
+  }
+  return { trees, houses, rocks, clouds, river, mountains, regions };
 }
 
 // ── Physics ──
@@ -212,6 +264,8 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
     planeT: number; fall: FallState; jumpAt: number; endAt: number;
     daily: boolean; runId: bigint | null;
     keys: Record<string, boolean>; touch: { ax: number; az: number };
+    /** Smoothed pose feedback: x = bank (−1..1 with ←/→), y = pitch (↑/↓). */
+    lean: { x: number; y: number };
     t: number;
   } | null>(null);
 
@@ -233,7 +287,7 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
       phase: 'plane', planeT: 0,
       fall: { x: 0, y: PLANE_ALT, z: 0, vx: 0, vy: 0, vz: 0, chute: false, deployAlt: null },
       jumpAt: 0, endAt: 0, daily, runId,
-      keys: {}, touch: { ax: 0, az: 0 }, t: 0,
+      keys: {}, touch: { ax: 0, az: 0 }, lean: { x: 0, y: 0 }, t: 0,
     };
     setResult(null); setErr(null);
     setMode('play');
@@ -353,6 +407,8 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
         const ax = path.hx * fwd + path.hz * side + game.touch.ax;
         const az = path.hz * fwd - path.hx * side + game.touch.az;
         const n = Math.hypot(ax, az) || 1;
+        game.lean.x += (side - game.lean.x) * Math.min(1, dt * 8);
+        game.lean.y += (fwd - game.lean.y) * Math.min(1, dt * 8);
         stepFall(game.fall, { ax: ax / Math.max(1, n), az: az / Math.max(1, n), dive: !!(k['shift']) }, dt);
         if (game.fall.y <= 0) {
           game.fall.y = 0;
@@ -433,7 +489,9 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
     const fr = mulberry(game.scenario.decorSeed ^ 0x5eed);
     for (let i = 0; i < 22; i++) {
       const fx = fr() * MAP_M, fz = fr() * MAP_M, fs = 90 + fr() * 200, ang = fr() * Math.PI;
-      const tone = 0.06 + fr() * 0.1;
+      const tone = 0.10 + fr() * 0.14;
+      const hueRoll = fr();
+      const patchColor = hueRoll < 0.45 ? '96,140,66' : hueRoll < 0.8 ? '180,158,72' : '110,110,100';
       const c = project(cam, fx, 0, fz);
       if (!c) continue;
       q.push({ d: c.d + 2, draw: () => {
@@ -445,16 +503,38 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
         ctx.beginPath();
         P.forEach((pt, k) => (k === 0 ? ctx.moveTo(pt.sx, pt.sy) : ctx.lineTo(pt.sx, pt.sy)));
         ctx.closePath();
-        ctx.fillStyle = `rgba(60,60,55,${tone})`;
+        ctx.fillStyle = `rgba(${patchColor},${tone})`;
         ctx.fill();
         ctx.save(); ctx.clip();
-        ctx.strokeStyle = 'rgba(60,60,60,0.4)'; ctx.lineWidth = 0.8;
+        ctx.strokeStyle = `rgba(${patchColor},0.55)`; ctx.lineWidth = 0.8;
         const minx = Math.min(...P.map((t) => t.sx)), maxx = Math.max(...P.map((t) => t.sx));
         const miny = Math.min(...P.map((t) => t.sy)), maxy = Math.max(...P.map((t) => t.sy));
         for (let x = minx - (maxy - miny); x < maxx; x += 6) {
           ctx.beginPath(); ctx.moveTo(x, miny); ctx.lineTo(x + (maxy - miny), maxy); ctx.stroke();
         }
         ctx.restore();
+        ctx.strokeStyle = INK;
+      }});
+    }
+
+    // River: layered blue strokes along the polyline, width by depth.
+    {
+      const rv = game.decor.river;
+      const c0 = project(cam, rv[Math.floor(rv.length / 2)].x, 0, rv[Math.floor(rv.length / 2)].z);
+      if (c0) q.push({ d: c0.d + 1.8, draw: () => {
+        const pass = (widthM: number, color: string) => {
+          ctx.strokeStyle = color; ctx.lineJoin = 'round';
+          for (let i = 0; i < rv.length - 1; i++) {
+            const a = project(cam, rv[i].x, 0, rv[i].z);
+            const b = project(cam, rv[i + 1].x, 0, rv[i + 1].z);
+            if (!a || !b) continue;
+            ctx.lineWidth = Math.max(1.2, (cam.f * widthM) / ((a.d + b.d) / 2));
+            ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.lineTo(b.sx, b.sy); ctx.stroke();
+          }
+        };
+        pass(22, '#3c6f9c');
+        pass(15, '#5f9cc9');
+        pass(4, 'rgba(240,248,255,0.7)'); // glint
         ctx.strokeStyle = INK;
       }});
     }
@@ -480,6 +560,46 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
         ctx.globalAlpha = 1; ctx.strokeStyle = INK;
       }});
     }
+
+    // Mountains: faceted peaks, rock-blue faces, white snow caps.
+    game.decor.mountains.forEach((mt, i) => {
+      const base = project(cam, mt.x, 0, mt.z);
+      if (!base) return;
+      q.push({ d: base.d, draw: () => {
+        const apex = project(cam, mt.x, mt.h, mt.z);
+        if (!apex) return;
+        const ring: { sx: number; sy: number }[] = [];
+        for (let a = 0; a < 6; a++) {
+          const th = (a / 6) * Math.PI * 2 + i;
+          const wob = 1 + 0.25 * Math.sin(a * 2.4 + i * 3);
+          const pt = project(cam, mt.x + Math.cos(th) * mt.r * wob, 0, mt.z + Math.sin(th) * mt.r * wob);
+          if (pt) ring.push(pt);
+        }
+        if (ring.length < 4) return;
+        for (let a = 0; a < ring.length; a++) {
+          const b = (a + 1) % ring.length;
+          ctx.beginPath();
+          ctx.moveTo(ring[a].sx, ring[a].sy); ctx.lineTo(ring[b].sx, ring[b].sy); ctx.lineTo(apex.sx, apex.sy);
+          ctx.closePath();
+          ctx.fillStyle = a % 2 === 0 ? '#8d99a6' : '#75828f';
+          ctx.fill();
+          ctx.strokeStyle = '#3a4148'; ctx.lineWidth = 1.3; ctx.stroke();
+        }
+        // Snow cap: upper third of every face.
+        for (let a = 0; a < ring.length; a++) {
+          const b = (a + 1) % ring.length;
+          const ma = { sx: ring[a].sx + (apex.sx - ring[a].sx) * 0.62, sy: ring[a].sy + (apex.sy - ring[a].sy) * 0.62 };
+          const mb = { sx: ring[b].sx + (apex.sx - ring[b].sx) * 0.62, sy: ring[b].sy + (apex.sy - ring[b].sy) * 0.62 };
+          ctx.beginPath();
+          ctx.moveTo(ma.sx, ma.sy); ctx.lineTo(mb.sx, mb.sy); ctx.lineTo(apex.sx, apex.sy);
+          ctx.closePath();
+          ctx.fillStyle = a % 2 === 0 ? '#fbfbfb' : '#e9edf1';
+          ctx.fill();
+          ctx.strokeStyle = '#9aa4ad'; ctx.lineWidth = 0.9; ctx.stroke();
+        }
+        ctx.strokeStyle = INK;
+      }});
+    });
 
     // Target: filled alternating bullseye + flag.
     {
@@ -600,8 +720,8 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
         };
         poly([0, 1, 5, 4], '#e8e8e2');           // lit wall
         poly([1, 2, 6, 5], '#c4c4bc');           // shaded wall
-        poly([4, 5, 8], '#8f8f88', true);        // gable
-        poly([5, 6, 9, 8], '#7c7c74', true);     // roof plane
+        poly([4, 5, 8], '#a2604a', true);        // gable
+        poly([5, 6, 9, 8], '#8f4f3c', true);     // roof plane
         // Door + window on the lit wall.
         const mid = (a: number, b: number, f2: number) => ({ sx: P[a].sx + (P[b].sx - P[a].sx) * f2, sy: P[a].sy + (P[b].sy - P[a].sy) * f2 });
         const dpos = mid(0, 1, 0.28), dtop = mid(4, 5, 0.28);
@@ -642,37 +762,74 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
 
     q.sort((a, b) => b.d - a.d).forEach((o) => o.draw());
 
+    // Region names — floating ground labels, Warzone-style.
+    ctx.textAlign = 'center';
+    game.decor.regions.forEach((rg) => {
+      const c = project(cam, rg.x, 2, rg.z);
+      if (!c || c.d > 2600) return;
+      const size = Math.max(9, Math.min(20, (cam.f * 26) / c.d));
+      const fade = Math.max(0.25, Math.min(0.85, 1.6 - c.d / 1800));
+      ctx.font = `700 ${size}px ui-monospace, monospace`;
+      ctx.globalAlpha = fade;
+      ctx.lineWidth = Math.max(2, size / 5);
+      ctx.strokeStyle = 'rgba(40,44,48,0.9)';
+      ctx.strokeText(rg.name, c.sx, c.sy);
+      ctx.fillStyle = 'rgba(252,250,244,0.95)';
+      ctx.fillText(rg.name, c.sx, c.sy);
+      ctx.globalAlpha = 1;
+    });
+    ctx.textAlign = 'left';
+    ctx.strokeStyle = INK;
+
     // ── The plane / the jumper (drawn last — always on top) ──
     if (inPlane) {
       const c = project(cam, p.x, PLANE_ALT, p.z);
       if (c) {
         ctx.save();
         ctx.translate(c.sx, c.sy);
-        ctx.strokeStyle = INK; ctx.lineWidth = 2.2;
-        // Fuselage.
-        ctx.fillStyle = '#4a4a4a';
-        ctx.beginPath(); ctx.ellipse(0, 0, 52, 11, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-        // Nose cone highlight.
-        ctx.fillStyle = '#7a7a7a';
-        ctx.beginPath(); ctx.ellipse(40, 0, 12, 8, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-        // Tail fin.
-        ctx.fillStyle = '#3a3a3a';
-        ctx.beginPath(); ctx.moveTo(-40, -4); ctx.lineTo(-58, -26); ctx.lineTo(-44, -4); ctx.closePath(); ctx.fill(); ctx.stroke();
-        // Wing (near side, swept).
-        ctx.fillStyle = '#5c5c5c';
-        ctx.beginPath(); ctx.moveTo(4, 2); ctx.lineTo(-18, 30); ctx.lineTo(-34, 30); ctx.lineTo(-10, 2); ctx.closePath(); ctx.fill(); ctx.stroke();
-        // Windows.
-        ctx.fillStyle = '#f2f2f2';
-        for (let wdx = -22; wdx <= 26; wdx += 12) {
-          ctx.beginPath(); ctx.arc(wdx, -3.5, 2.4, 0, Math.PI * 2); ctx.fill();
+        const bob = Math.sin(game.t * 1.7) * 2; // gentle float
+        ctx.translate(0, bob);
+        ctx.strokeStyle = INK; ctx.lineWidth = 2;
+        // Swept wings (rear view): from the shoulder out and slightly up.
+        ctx.fillStyle = '#3d4046';
+        ctx.beginPath();
+        ctx.moveTo(-8, -6);
+        ctx.lineTo(-96, -22); ctx.lineTo(-96, -15); ctx.lineTo(-10, 2);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(8, -6);
+        ctx.lineTo(96, -22); ctx.lineTo(96, -15); ctx.lineTo(10, 2);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        // Wingtip lights: red port, green starboard.
+        ctx.fillStyle = '#d23b3b'; ctx.beginPath(); ctx.arc(-95, -19, 2.6, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#3fae5a'; ctx.beginPath(); ctx.arc(95, -19, 2.6, 0, Math.PI * 2); ctx.fill();
+        // Engine pods under each wing.
+        ctx.fillStyle = '#2c2f34';
+        for (const ex of [-52, -30, 30, 52]) {
+          ctx.beginPath(); ctx.ellipse(ex, -8, 6, 7.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = '#15171a';
+          ctx.beginPath(); ctx.ellipse(ex, -8, 3, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = '#2c2f34';
         }
-        // Open jump door.
-        ctx.fillStyle = '#111';
-        ctx.fillRect(-8, 3, 10, 7);
-        // Prop-wash speed dashes behind.
-        ctx.strokeStyle = '#8c8c8c'; ctx.lineWidth = 1.6;
-        for (let l = 0; l < 3; l++) {
-          ctx.beginPath(); ctx.moveTo(-62 - l * 12, -4 + l * 5); ctx.lineTo(-78 - l * 12, -4 + l * 5); ctx.stroke();
+        // Fuselage: rear disc + taper.
+        ctx.fillStyle = '#464a51';
+        ctx.beginPath(); ctx.ellipse(0, -2, 13, 15, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#33363b';
+        ctx.beginPath(); ctx.ellipse(0, -2, 8, 10, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        // Open rear ramp glow.
+        ctx.fillStyle = '#0e0f11';
+        ctx.fillRect(-5, 2, 10, 9);
+        // Tail: tall fin + horizontal stabilizers.
+        ctx.fillStyle = '#3d4046';
+        ctx.beginPath(); ctx.moveTo(-2.5, -14); ctx.lineTo(-2.5, -44); ctx.lineTo(4.5, -44); ctx.lineTo(2.5, -14); ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(-34, -38); ctx.lineTo(34, -38); ctx.lineTo(26, -33); ctx.lineTo(-26, -33); ctx.closePath(); ctx.fill(); ctx.stroke();
+        // Tail beacon.
+        ctx.fillStyle = (Math.floor(game.t * 2) % 2 === 0) ? '#d23b3b' : '#6b2020';
+        ctx.beginPath(); ctx.arc(1, -46, 2.4, 0, Math.PI * 2); ctx.fill();
+        // Contrails off the wingtips.
+        ctx.strokeStyle = 'rgba(255,255,255,0.65)'; ctx.lineWidth = 3;
+        for (const wx of [-95, 95]) {
+          ctx.beginPath(); ctx.moveTo(wx, -18); ctx.quadraticCurveTo(wx * 1.06, -10, wx * 1.12, 26); ctx.stroke();
         }
         ctx.restore();
         ctx.strokeStyle = INK;
@@ -693,7 +850,9 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
         const chute = p.chute;
         const dive = game.keys['shift'] && !chute;
         ctx.save();
-        ctx.translate(c.sx, c.sy);
+        // Pose feedback: ↑ lifts up to half a body length, ↓ dips; ←/→ bank.
+        ctx.translate(c.sx, c.sy - game.lean.y * 11);
+        ctx.rotate(game.lean.x * 0.34);
         ctx.strokeStyle = INK;
         if (chute) {
           // Canopy: gray fill, rib lines, shroud lines.
@@ -796,7 +955,19 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
     ctx.fillRect(mx, my, ms, ms);
     ctx.strokeStyle = INK; ctx.lineWidth = 1.6; ctx.strokeRect(mx, my, ms, ms);
     const mm = (wx: number, wz: number) => ({ x: mx + (wx / MAP_M) * ms, y: my + (wz / MAP_M) * ms });
-    // Scenery ghost dots so the minimap reads as the terrain.
+    // Scenery so the minimap reads as the terrain.
+    ctx.strokeStyle = '#5f9cc9'; ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    game.decor.river.forEach((pt, i) => {
+      const q2 = mm(pt.x, pt.z);
+      i === 0 ? ctx.moveTo(q2.x, q2.y) : ctx.lineTo(q2.x, q2.y);
+    });
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(120,130,143,0.8)';
+    game.decor.mountains.forEach((mt) => {
+      const pt = mm(mt.x, mt.z);
+      ctx.beginPath(); ctx.moveTo(pt.x, pt.y - 4); ctx.lineTo(pt.x - 3.5, pt.y + 2.5); ctx.lineTo(pt.x + 3.5, pt.y + 2.5); ctx.closePath(); ctx.fill();
+    });
     ctx.fillStyle = 'rgba(90,90,90,0.4)';
     game.decor.houses.forEach((hs) => { const pt = mm(hs.x, hs.z); ctx.fillRect(pt.x - 1.5, pt.y - 1.5, 3, 3); });
     const tg = mm(game.scenario.targetX, game.scenario.targetZ);

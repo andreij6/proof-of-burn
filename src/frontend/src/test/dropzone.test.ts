@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   mulberry, practiceScenario, planePath, buildDecor, stepFall, landingVerdict,
-  distanceToTarget, friendlyDropErr,
+  distanceToTarget, friendlyDropErr, REGION_NAMES,
   MAP_M, PLANE_ALT, FALL_VY, DIVE_VY, CHUTE_VY, SAFE_DEPLOY_ALT,
   type FallState,
 } from '../arcade/DropZone';
@@ -45,6 +45,29 @@ describe('scenario & scenery', () => {
     for (const h of a.houses) expect(Math.hypot(h.x - 1000, h.z - 1000)).toBeGreaterThan(60);
     for (const r of a.rocks) expect(Math.hypot(r.x - 1000, r.z - 1000)).toBeGreaterThan(60);
     expect(JSON.stringify(buildDecor(43, 1000, 1000))).not.toBe(JSON.stringify(a));
+  });
+
+  it('deals a river across the map, an edge mountain range, and 8 named regions', () => {
+    const d = buildDecor(42, 1000, 1000);
+    // River spans the map (16 segments, all in bounds).
+    expect(d.river.length).toBe(17);
+    for (const pt of d.river) {
+      expect(pt.x).toBeGreaterThanOrEqual(0);
+      expect(pt.x).toBeLessThanOrEqual(MAP_M);
+      expect(pt.z).toBeGreaterThanOrEqual(0);
+      expect(pt.z).toBeLessThanOrEqual(MAP_M);
+    }
+    // Mountains: 7 peaks, all clear of the target.
+    expect(d.mountains.length).toBe(7);
+    for (const mt of d.mountains) {
+      expect(Math.hypot(mt.x - 1000, mt.z - 1000)).toBeGreaterThan(220);
+      expect(mt.h).toBeGreaterThanOrEqual(70);
+    }
+    // Regions: 8 unique CoD-style names from the pool.
+    expect(d.regions.length).toBe(8);
+    const names = d.regions.map((r) => r.name);
+    expect(new Set(names).size).toBe(8);
+    for (const n of names) expect(REGION_NAMES).toContain(n);
   });
 });
 
