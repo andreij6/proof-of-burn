@@ -1,5 +1,17 @@
 # Log
 
+## 2026-07-05 — Mainnet deploy a4772c5 (Drop Zone, Bull Run, ANSEM LP)
+
+Shipped everything since 45ff7af and flipped three flags ON:
+`arcade_skydive` (Drop Zone), `arcade_bullrun` (Bull Run), and
+`solana_lp_rewards` (ANSEM LP — pool configured with the on-chain-verified
+PumpSwap ANSEM/SOL LP mint `CevNeicTXqL1oAjqZ3FNmexftzKD4ozqev5DgX2sAgFq`,
+Token-2022, derived as PDA ["pool_lp_mint", FnzKY6x7…L3CC] and confirmed
+against mainnet Solana). Also includes the Play to Earn nav group,
+Luck-Proof practice sessions + pot-odds realism + two daily winners, and
+the lottery ticket-source breakdown refinements. Backend rollback snapshot
+…210000000001f0a4ce0101 (439 MiB). All commits pushed to GitHub.
+
 ## 2026-07-04 — Mainnet deploy 45ff7af (Sklansky Trainer + economy rework)
 
 Shipped 18 commits (d5bb288 → 45ff7af): Luck-Proof/Sklansky Trainer live
