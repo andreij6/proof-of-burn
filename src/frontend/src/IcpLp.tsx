@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
-import { Btn, Chip, Eyebrow, Icon, LiveDot, MoreInfo, fmtICP } from './ui';
+import { Btn, Chip, Eyebrow, Icon, LiveDot, MoreInfo } from './ui';
 
 // ==========================================
 // ICP LP — stake ICPSwap positions, fund the pot, earn tickets.
@@ -147,11 +147,11 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
           <Icon name="stack" size={16} stroke="var(--burn-ink)" />
           <Eyebrow accent>Earn tickets</Eyebrow>
         </span>
-        <b style={{ fontSize: 17 }}>Stake your ICPSwap LP. Fund the pot. Earn tickets.</b>
+        <b style={{ fontSize: 17 }}>Stake your ICPSwap LP. Earn lottery tickets.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
           Transfer an ICPSwap position to the app and earn{' '}
-          {Number(info?.tickets_per_round ?? 10n)} lottery tickets every drawing —
-          while the position's trading fees feed the lottery pot and the burn.{' '}
+          {Number(info?.tickets_per_round ?? 10n)} lottery tickets automatically,
+          every drawing — and reclaim your LP whenever you like.{' '}
           <MoreInfo title="How ICP LP staking works">
             <p>
               Your liquidity on ICPSwap is a <b>position NFT</b> owned by your
@@ -163,19 +163,20 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
             <p>
               While staked, you automatically earn{' '}
               <b>{Number(info?.tickets_per_round ?? 10n)} lottery tickets every
-              drawing</b> — no buttons to press. The app periodically harvests the
-              position's accrued trading fees: <b>ICP is split 50% to the lottery
-              pot and 50% to the cycles burn</b> (half backend, half frontend
-              canister — real, deflationary ICP burning); every other token
-              (ckUSDC, ckUSDT, ckBTC, ckETH) accrues to the app treasury.
+              drawing</b> — no buttons to press. The position's trading fees
+              support the platform while it's staked.
             </p>
             <p>
               <b>Unstake anytime.</b> The position returns exactly as-is to a
-              principal you name (normally your ICPSwap principal). The position's
-              market exposure — including impermanent loss — stays yours the whole
-              time; fees accrued between harvests are harvested by the app. And as
-              everywhere on the platform, lottery tickets require an active ICP
-              stake.
+              principal you name (normally your ICPSwap principal). As everywhere
+              on the platform, lottery tickets require an active ICP stake.
+            </p>
+            <p>
+              <b>Risk disclosure:</b> providing liquidity carries market risk,
+              including <b>impermanent loss</b>. Your position's market exposure
+              stays yours the entire time it's staked, and the app is <b>not
+              responsible for impermanent loss</b> or any change in your
+              position's value.
             </p>
           </MoreInfo>
         </span>
@@ -201,15 +202,6 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
             </div>
           )}
 
-          {/* ── Status strip ── */}
-          <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-            <Chip tone="muted"><span className="mono">drawing #{Number(info?.round ?? 0n)}</span></Chip>
-            <Chip tone={info?.granted_this_round ? 'ok' : 'muted'}>
-              {info?.granted_this_round ? <Icon name="checkCircle" size={11} /> : <Icon name="ticket" size={11} />}
-              <span className="mono">{Number(info?.tickets_per_round ?? 10n)} tickets/drawing while staked{info?.granted_this_round ? ' — landed' : ''}</span>
-            </Chip>
-            <Chip tone="muted"><span className="mono">harvested {fmtICP(info?.total_harvested_icp_e8s ?? 0n)} ICP lifetime</span></Chip>
-          </div>
           {info && !info.staked && (
             <div className="row" style={{ gap: 8, border: '1px solid var(--haze)', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, color: 'var(--haze-ink)', justifyContent: 'space-between', flexWrap: 'wrap' }}>
               <span className="row" style={{ gap: 6 }}>
@@ -227,7 +219,11 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
               <Eyebrow accent>Stake a position</Eyebrow>
               <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <li>
-                  On <b>ICPSwap</b>: My Positions → your ICP-pair position → <b>Transfer Position</b>.
+                  On{' '}
+                  <a href="https://app.icpswap.com/liquidity" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--burn-ink)', fontWeight: 600 }}>
+                    ICPSwap → My Positions
+                  </a>
+                  : pick your position → <b>Transfer Position</b>.
                 </li>
                 <li>
                   <span className="col" style={{ gap: 6, display: 'flex' }}>
@@ -332,12 +328,18 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
             </div>
           </div>
 
+          <span style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.5 }}>
+            Providing liquidity carries market risk, including impermanent loss.
+            Your staked position's value can change; the app is not responsible for
+            impermanent loss. You can unstake and reclaim your LP at any time.
+          </span>
+
           {/* ── Qualifying pools ── */}
           <div className="card col" style={{ gap: 8 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
               <b style={{ fontSize: 13.5 }}>Qualifying pools</b>
               <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-                ICP fees → 50% pot · 50% burn — other tokens → treasury
+                positions in these pools qualify
               </span>
             </span>
             {(info?.pools?.length ?? 0) === 0 ? (

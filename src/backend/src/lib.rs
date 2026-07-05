@@ -32623,6 +32623,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_icp_lp_harvest_notify_failure_queues_and_retries() {
+        // Mainnet mode (is_local = false): a failed CMC notify must QUEUE in
+        // stable stats (the ICP already moved to the CMC subaccount and can't
+        // be re-derived from balances) and retry on the next harvest.
+        enable_icp_lp();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        acct_reset();
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.is_local = false;
+        let icp_ledger = config.ledger_canister_id;
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(carol());
+        admin_set_icpswap_pools(vec![icp_lp_test_pool(icp_ledger, icp_ledger)]).unwrap();
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![9]); });
+        set_mock_caller(alice());
+        stake_lp_position(pool, 9).await.unwrap();
+        MOCK_ICPSWAP_CLAIMS.with(|m| { m.borrow_mut().insert((pool, 9), (5_000_000, 0)); });
+
+        set_mock_cmc_notify_fail(Some("CMC call rejected (test): transient".to_string()));
+        harvest_icpswap_lp().await;
+        let stats = ICP_LP_STATS.with(|c| c.borrow().get().clone());
+        assert_eq!(stats.pending_notifies.len(), 2, "both burn legs queued for retry");
+        // The ICP itself already left the yield subaccount (transfers landed).
+        assert_eq!(acct_get(get_canister_id(), Some(ICPSWAP_LP_YIELD_SUBACCOUNT)), 0);
+
+        // Next harvest (past the 1h throttle) with notify healthy → drained.
+        set_mock_cmc_notify_fail(None);
+        set_mock_time(Some(1_700_000_000_000_000_000 + 2 * 3_600 * 1_000_000_000));
+        harvest_icpswap_lp().await;
+        let stats = ICP_LP_STATS.with(|c| c.borrow().get().clone());
+        assert!(stats.pending_notifies.is_empty(), "queued notifies retried and cleared");
+        clear_icp_lp();
+    }
+
+    #[tokio::test]
     async fn test_icp_lp_harvest_routes_other_tokens_to_treasury() {
         enable_icp_lp();
         set_mock_time(Some(1_700_000_000_000_000_000));
