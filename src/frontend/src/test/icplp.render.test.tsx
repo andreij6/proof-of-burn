@@ -17,7 +17,7 @@ const BACKEND = Principal.fromText('aaaaa-aa');
 const info = {
   enabled: true,
   round: 3n,
-  tickets_per_round: 10n,
+  tickets_per_usd_day: 40n,
   staked: true,
   backend_principal: BACKEND,
   my_positions: [
@@ -27,7 +27,7 @@ const info = {
     { name: 'ICP/ckUSDC', pool: BACKEND, token0_symbol: 'ICP', token0_ledger: BACKEND, token1_symbol: 'ckUSDC', token1_ledger: BACKEND },
   ],
   total_harvested_icp_e8s: 123_000_000n,
-  granted_this_round: true,
+  granted_today: true,
   my_reservations: [
     { pool: BACKEND, pool_name: 'ICP/ckUSDC', position_id: 7n, expires_at: 1_900_000_000_000_000_000n },
   ],

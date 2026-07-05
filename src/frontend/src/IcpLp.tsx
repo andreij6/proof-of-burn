@@ -50,14 +50,14 @@ interface LpPosition { pool: Principal; pool_name: string; position_id: bigint; 
 interface IcpLpInfo {
   enabled: boolean;
   round: bigint;
-  tickets_per_round: bigint;
+  tickets_per_usd_day: bigint;
   staked: boolean;
   backend_principal: Principal;
   my_positions: LpPosition[];
   my_reservations: { pool: Principal; pool_name: string; position_id: bigint; expires_at: bigint }[];
   pools: LpPoolCfg[];
   total_harvested_icp_e8s: bigint;
-  granted_this_round: boolean;
+  granted_today: boolean;
 }
 
 interface IcpLpProps {
@@ -126,7 +126,7 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
     try {
       const res = await actor.stake_lp_position(pool, pid);
       if (res.__kind__ === 'Err') throw new Error(friendlyIcpLpErr(res.Err));
-      setNotice(`Position #${pid} staked — ${Number(info?.tickets_per_round ?? 10n)} tickets will land every drawing while it's staked.`);
+      setNotice(`Position #${pid} staked — tickets now land daily, scaled to your LP's value.`);
       await refresh();
     } catch (e: any) { setErr(e?.message || String(e)); }
     finally { setBusy(null); }
@@ -168,34 +168,42 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
         <b style={{ fontSize: 17 }}>Stake your ICPSwap LP. Earn lottery tickets.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
           Transfer an ICPSwap position to the app and earn{' '}
-          {Number(info?.tickets_per_round ?? 10n)} lottery tickets automatically,
-          every drawing — and reclaim your LP whenever you like.{' '}
+          <b>{Number(info?.tickets_per_usd_day ?? 40n)} lottery tickets a day for every $1
+          of LP value</b> — automatically, and you can reclaim your LP whenever you
+          like.{' '}
           <MoreInfo title="How ICP LP staking works">
-            <p>
-              Your liquidity on ICPSwap is a <b>position NFT</b> owned by your
-              ICPSwap principal. To stake it here, you transfer that position to the
-              app's canister (ICPSwap → My Positions → Transfer Position). The
-              transfer itself proves ownership — no signatures, no bridges: ICPSwap
-              runs on the Internet Computer, so the app talks to its pools directly.
-            </p>
-            <p>
-              While staked, you automatically earn{' '}
-              <b>{Number(info?.tickets_per_round ?? 10n)} lottery tickets every
-              drawing</b> — no buttons to press. The position's trading fees
-              support the platform while it's staked.
-            </p>
-            <p>
-              <b>Unstake anytime.</b> The position returns exactly as-is to a
-              principal you name (normally your ICPSwap principal). As everywhere
-              on the platform, lottery tickets require an active ICP stake.
-            </p>
-            <p>
-              <b>Risk disclosure:</b> providing liquidity carries market risk,
-              including <b>impermanent loss</b>. Your position's market exposure
-              stays yours the entire time it's staked, and the app is <b>not
-              responsible for impermanent loss</b> or any change in your
-              position's value.
-            </p>
+            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+              <Eyebrow accent>The gist</Eyebrow>
+              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                <b>Your liquidity keeps working — and earns lottery tickets on top.</b>{' '}
+                Stake an ICPSwap position here and collect{' '}
+                {Number(info?.tickets_per_usd_day ?? 40n)} tickets a day for every $1 of
+                LP value, hands-free. Reclaim it any time.
+              </p>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Staking</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Reserve first:</b> lock your position id to your account here (1 hour), so nobody can claim it but you.</li>
+                <li><b>Then transfer:</b> on ICPSwap, send the position to the app principal — the transfer itself proves ownership. No signatures, no bridges.</li>
+                <li><b>Confirm</b> back here and you're staked.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Earning tickets</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Scales with value:</b> {Number(info?.tickets_per_usd_day ?? 40n)} tickets per day per $1 of LP — $25 of LP is {Number(info?.tickets_per_usd_day ?? 40n) * 25} tickets every day.</li>
+                <li><b>Valued live, daily:</b> your position is re-priced each day from the pool itself and live USD rates.</li>
+                <li><b>Stakers-only:</b> like everywhere on the platform, tickets require an active ICP stake (any amount).</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Unstaking &amp; risk</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Unstake anytime</b> — the position returns exactly as-is to a principal you name. Nobody else can ever move it, including us.</li>
+                <li><b>Impermanent loss is yours:</b> providing liquidity carries market risk, and the app is <b>not responsible for impermanent loss</b> or changes in your position's value.</li>
+              </ul>
+            </div>
           </MoreInfo>
         </span>
       </div>

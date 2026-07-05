@@ -5061,7 +5061,7 @@ fn setup_timers() {
         cycle_topup_check().await;
         course_nft_cycle_guard().await; // forward surplus cycles when the NFT canister runs low
         luckproof_daily_award(); // pay yesterday's Sklansky Trainer winner (tickets = player count)
-        icpswap_lp_grant_round_tickets(); // ICP LP stakers: 10 tickets per lottery round
+        icpswap_lp_grant_daily_tickets().await; // ICP LP: 40 tickets/day per $1 of LP value
         harvest_icpswap_lp().await; // claim + route ICPSwap LP yield (throttled)
         staking_sweep().await;
         lottery_draw_check().await;
@@ -14819,7 +14819,10 @@ fn dev_set_lp_mock_balance(ata_b58: String, amount: u128) -> Result<(), String> 
 // Result.Result<T, Error> encodes as `variant { ok : T; err : Error }`.
 
 const ICPSWAP_LP_YIELD_SUBACCOUNT: [u8; 32] = [9u8; 32];
-const ICP_LP_TICKETS_PER_ROUND: u64 = 10;
+/// Owner formula (2026-07-05): 40 tickets per DAY per $1 of staked LP value
+/// (proportional — $2.50 of LP = 100 tickets/day), valued live at grant time
+/// from the position's tick-math token amounts × the cached XRC USD rates.
+const ICP_LP_TICKETS_PER_USD_DAY: u64 = 40;
 /// Reservations live this long — plenty for the ICPSwap transfer round-trip.
 const ICP_LP_RESERVATION_TTL_NS: u64 = 60 * 60 * 1_000_000_000;
 /// Active reservations per user (griefing cap).
@@ -14965,6 +14968,122 @@ thread_local! {
         RefCell::new(std::collections::HashMap::new());
     static MOCK_ICPSWAP_TRANSFERS: RefCell<Vec<(Principal, Principal, u128)>> =
         RefCell::new(Vec::new());
+    /// (pool, position id) → (token0Amount, token1Amount) for valuation mocks.
+    static MOCK_ICPSWAP_AMOUNTS: RefCell<std::collections::HashMap<(Principal, u128), (u128, u128)>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct IcpSwapPositionWithAmount {
+    id: candid::Nat,
+    #[serde(rename = "tickLower")]
+    tick_lower: candid::Int,
+    #[serde(rename = "tickUpper")]
+    tick_upper: candid::Int,
+    liquidity: candid::Nat,
+    #[serde(rename = "feeGrowthInside0LastX128")]
+    fee_growth_0: candid::Nat,
+    #[serde(rename = "feeGrowthInside1LastX128")]
+    fee_growth_1: candid::Nat,
+    #[serde(rename = "tokensOwed0")]
+    tokens_owed0: candid::Nat,
+    #[serde(rename = "tokensOwed1")]
+    tokens_owed1: candid::Nat,
+    #[serde(rename = "token0Amount")]
+    token0_amount: candid::Nat,
+    #[serde(rename = "token1Amount")]
+    token1_amount: candid::Nat,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct IcpSwapPositionPage {
+    #[serde(rename = "totalElements")]
+    total_elements: candid::Nat,
+    content: Vec<IcpSwapPositionWithAmount>,
+    offset: candid::Nat,
+    limit: candid::Nat,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum IcpSwapPageResult {
+    #[serde(rename = "ok")]
+    Ok(IcpSwapPositionPage),
+    #[serde(rename = "err")]
+    Err(IcpSwapError),
+}
+
+/// Live token amounts for the given position ids on `pool` (tick-math done
+/// by the pool). Pages through getUserPositionWithTokenAmount; early-exits
+/// once every wanted id is found.
+async fn icpswap_position_amounts(
+    pool: Principal,
+    want: &[u128],
+) -> Result<std::collections::HashMap<u128, (u128, u128)>, String> {
+    if icp_lp_use_mock() {
+        return Ok(MOCK_ICPSWAP_AMOUNTS.with(|m| {
+            m.borrow()
+                .iter()
+                .filter(|((p2, id), _)| *p2 == pool && want.contains(id))
+                .map(|((_, id), v)| (*id, *v))
+                .collect()
+        }));
+    }
+    let mut found = std::collections::HashMap::new();
+    let mut offset = 0u64;
+    const PAGE: u64 = 200;
+    for _ in 0..50 {
+        let (res,): (IcpSwapPageResult,) = ic_cdk::call(
+            pool,
+            "getUserPositionWithTokenAmount",
+            (candid::Nat::from(offset), candid::Nat::from(PAGE)),
+        )
+        .await
+        .map_err(|(c, m)| format!("ICPSWAP_CALL_FAILED: {:?} {}", c, m))?;
+        let page = match res {
+            IcpSwapPageResult::Ok(p2) => p2,
+            IcpSwapPageResult::Err(e) => return Err(format!("ICPSWAP_ERROR: {:?}", e)),
+        };
+        let n = page.content.len() as u64;
+        for pos in page.content {
+            let id = u128::try_from(pos.id.0.clone()).map_err(|_| "POSITION_ID_OVERFLOW".to_string())?;
+            if want.contains(&id) {
+                let a0 = u128::try_from(pos.token0_amount.0.clone()).unwrap_or(u128::MAX);
+                let a1 = u128::try_from(pos.token1_amount.0.clone()).unwrap_or(u128::MAX);
+                found.insert(id, (a0, a1));
+            }
+        }
+        if found.len() == want.len() || n < PAGE {
+            break;
+        }
+        offset += PAGE;
+    }
+    Ok(found)
+}
+
+/// Ledger principal → the explorer token whose cached USD rate applies.
+fn icp_lp_ledger_token(ledger: Principal) -> Option<ExplorerToken> {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    for t in [IdeaToken::ICP, IdeaToken::CkBTC, IdeaToken::CkETH, IdeaToken::CkUSDC, IdeaToken::CkUSDT] {
+        if token_ledger(t, &config) == ledger {
+            return Some(match t {
+                IdeaToken::ICP => ExplorerToken::ICP,
+                IdeaToken::CkBTC => ExplorerToken::CkBTC,
+                IdeaToken::CkETH => ExplorerToken::CkETH,
+                IdeaToken::CkUSDC => ExplorerToken::CkUSDC,
+                IdeaToken::CkUSDT => ExplorerToken::CkUSDT,
+            });
+        }
+    }
+    None
+}
+
+/// USD e8s value of `amount` base units of the token on `ledger` (u128-safe
+/// for 18-decimal ckETH amounts).
+fn icp_lp_amount_usd_e8s(ledger: Principal, amount: u128) -> u64 {
+    let Some(token) = icp_lp_ledger_token(ledger) else { return 0 };
+    let rate = cached_usd_rate_e8s(token) as u128;
+    let scale = 10u128.pow(explorer_token_decimals(token));
+    u64::try_from(amount.saturating_mul(rate) / scale).unwrap_or(u64::MAX)
 }
 
 fn icp_lp_pool_cfg(pool: &Principal) -> Option<IcpLpPoolCfg> {
@@ -15068,7 +15187,8 @@ pub struct IcpLpPositionView {
 pub struct IcpLpInfo {
     pub enabled: bool,
     pub round: u64,
-    pub tickets_per_round: u64,
+    /// Tickets per day per $1 of staked LP value (proportional).
+    pub tickets_per_usd_day: u64,
     /// Caller holds an active ICP stake (tickets are stakers-only).
     pub staked: bool,
     /// Where to send the position on ICPSwap (the custody principal).
@@ -15078,7 +15198,8 @@ pub struct IcpLpInfo {
     pub my_reservations: Vec<IcpLpReservationView>,
     pub pools: Vec<IcpLpPoolCfg>,
     pub total_harvested_icp_e8s: u64,
-    pub granted_this_round: bool,
+    /// Today's grant already landed for the caller.
+    pub granted_today: bool,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -15097,7 +15218,7 @@ fn get_icp_lp_info() -> IcpLpInfo {
     IcpLpInfo {
         enabled: feature_visible(FLAG_ICPSWAP_LP, caller),
         round,
-        tickets_per_round: ICP_LP_TICKETS_PER_ROUND,
+        tickets_per_usd_day: ICP_LP_TICKETS_PER_USD_DAY,
         staked: caller != Principal::anonymous() && author_is_staked(caller),
         backend_principal: get_canister_id(),
         my_positions: STAKED_LP.with(|m| {
@@ -15129,8 +15250,9 @@ fn get_icp_lp_info() -> IcpLpInfo {
         },
         pools: ICPSWAP_POOLS.with(|c| c.borrow().get().clone()).pools,
         total_harvested_icp_e8s: stats.total_harvested_icp_e8s,
-        granted_this_round: ICP_LP_ROUND_GRANTS
-            .with(|m| m.borrow().contains_key(&IcpLpRoundKey { round, user: caller })),
+        granted_today: ICP_LP_ROUND_GRANTS.with(|m| {
+            m.borrow().contains_key(&IcpLpRoundKey { round: epoch_day(current_time()) as u64, user: caller })
+        }),
     }
 }
 
@@ -15263,24 +15385,68 @@ fn admin_set_icpswap_pools(pools: Vec<IcpLpPoolCfg>) -> Result<u64, String> {
 /// position earns ICP_LP_TICKETS_PER_ROUND tickets once per lottery round.
 /// The guard row is only written when tickets actually land, so an unstaked
 /// user who stakes ICP later in the round still collects.
-fn icpswap_lp_grant_round_tickets() {
+/// Daily ticket grant: 40 tickets per $1 of staked LP value, per user, per
+/// UTC day. The value is read LIVE (the pool's own tick-math amounts × the
+/// cached XRC USD rates), so tickets track the position through price moves.
+/// A failed valuation leaves the day's guard unwritten — retried next sweep.
+/// The guard key reuses the (round, user) map with round = epoch day.
+async fn icpswap_lp_grant_daily_tickets() {
     if !feature_visible(FLAG_ICPSWAP_LP, Principal::anonymous()) {
         return;
     }
-    let round = lottery_state().round;
-    let stakers: std::collections::BTreeSet<Principal> =
-        STAKED_LP.with(|m| m.borrow().iter().map(|e| e.value().user).collect());
-    for user in stakers {
-        let key = IcpLpRoundKey { round, user };
+    let day = epoch_day(current_time()) as u64;
+    // Group staked positions by user.
+    let mut by_user: std::collections::BTreeMap<Principal, Vec<IcpLpKey>> = Default::default();
+    STAKED_LP.with(|m| {
+        for e in m.borrow().iter() {
+            by_user.entry(e.value().user).or_default().push(e.key().clone());
+        }
+    });
+    for (user, positions) in by_user {
+        let key = IcpLpRoundKey { round: day, user };
         if ICP_LP_ROUND_GRANTS.with(|m| m.borrow().contains_key(&key)) {
             continue;
         }
         if !author_is_staked(user) {
             continue; // stakers-only; retry next sweep in case they stake
         }
-        grant_lottery_tickets(user, ICP_LP_TICKETS_PER_ROUND, "icpswap_lp");
-        ICP_LP_ROUND_GRANTS.with(|m| { m.borrow_mut().insert(key, 1u8); });
-        staking_audit("icpswap_lp_round_tickets", user, ICP_LP_TICKETS_PER_ROUND, round);
+        // Value every position; ANY failure skips the user this pass so a
+        // partial valuation never underpays permanently.
+        let mut usd_e8s: u64 = 0;
+        let mut failed = false;
+        let mut by_pool: std::collections::BTreeMap<Principal, Vec<u128>> = Default::default();
+        for k in &positions {
+            by_pool.entry(k.pool).or_default().push(k.position_id);
+        }
+        for (pool, ids) in by_pool {
+            let Some(cfg) = icp_lp_pool_cfg(&pool) else { continue };
+            match icpswap_position_amounts(pool, &ids).await {
+                Ok(amounts) => {
+                    for id in &ids {
+                        let (a0, a1) = amounts.get(id).copied().unwrap_or((0, 0));
+                        usd_e8s = usd_e8s
+                            .saturating_add(icp_lp_amount_usd_e8s(cfg.token0_ledger, a0))
+                            .saturating_add(icp_lp_amount_usd_e8s(cfg.token1_ledger, a1));
+                    }
+                }
+                Err(e) => {
+                    canister_print(&format!("icpswap daily tickets: valuation failed for {}: {}", user, e));
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if failed {
+            continue;
+        }
+        let tickets = ((usd_e8s as u128) * (ICP_LP_TICKETS_PER_USD_DAY as u128) / 100_000_000u128) as u64;
+        if tickets > 0 {
+            grant_lottery_tickets(user, tickets, "icpswap_lp");
+        }
+        // Guard written on successful valuation (even a $0 day) — value is
+        // re-read fresh tomorrow.
+        ICP_LP_ROUND_GRANTS.with(|m| { m.borrow_mut().insert(key, if tickets > 0 { 1u8 } else { 0u8 }); });
+        staking_audit("icpswap_lp_daily_tickets", user, tickets, day);
     }
 }
 
@@ -32686,13 +32852,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_icp_lp_round_tickets_once_per_round_stakers_only() {
+    async fn test_icp_lp_daily_tickets_scale_with_usd_value() {
         enable_icp_lp();
         set_mock_time(Some(1_700_000_000_000_000_000));
+        let day = epoch_day(current_time()) as u64;
         let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
         set_mock_caller(carol());
         let cfg = CONFIG.with(|c| c.borrow().get().clone());
-        admin_set_icpswap_pools(vec![icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id)]).unwrap();
+        // Pool tokens = the explorer ckUSDC ledger on both legs → $1 per
+        // 1_000_000 base units (ckUSDC has 6 decimals, pegged $1) — makes
+        // the USD math exact. The test config leaves explorer ledgers at the
+        // ICP ledger default, so pin a DISTINCT ckUSDC ledger first (else the
+        // ledger→token reverse map resolves to ICP).
+        admin_set_explorer_ledger(ExplorerToken::CkUSDC, p("xevnm-gaaaa-aaaar-qafnq-cai")).unwrap();
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let usdc = token_ledger(IdeaToken::CkUSDC, &cfg);
+        assert_ne!(usdc, cfg.ledger_canister_id, "distinct ledger for exact USD math");
+        admin_set_icpswap_pools(vec![IcpLpPoolCfg {
+            name: "ICP/ckUSDC".into(),
+            pool,
+            token0_symbol: "ckUSDC".into(),
+            token0_ledger: usdc,
+            token1_symbol: "ckUSDC".into(),
+            token1_ledger: usdc,
+        }]).unwrap();
         MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![1, 2]); });
 
         // Alice is ICP-staked; bob is not (yet).
@@ -32704,33 +32887,37 @@ mod tests {
         reserve_lp_position(pool, 2).unwrap();
         stake_lp_position(pool, 2).await.unwrap();
 
-        let round = lottery_state().round;
-        icpswap_lp_grant_round_tickets();
+        // Alice's position: $5.00 of LP (2.5 + 2.5) → 40 × 5 = 200/day.
+        MOCK_ICPSWAP_AMOUNTS.with(|m| {
+            m.borrow_mut().insert((pool, 1), (2_500_000, 2_500_000));
+            m.borrow_mut().insert((pool, 2), (10_000_000, 0)); // bob: $10
+        });
+        icpswap_lp_grant_daily_tickets().await;
         let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
-        assert_eq!(count(alice()), 10);
+        assert_eq!(count(alice()), 200, "40 tickets per $1 per day, proportional");
         assert_eq!(count(bob()), 0, "unstaked earns nothing (owner rule)");
         set_mock_caller(alice());
-        assert!(get_icp_lp_info().granted_this_round);
+        assert!(get_icp_lp_info().granted_today);
         let rows = get_my_ticket_breakdown();
-        assert_eq!(rows.iter().find(|r| r.source == "icpswap_lp").map(|r| r.count), Some(10));
+        assert_eq!(rows.iter().find(|r| r.source == "icpswap_lp").map(|r| r.count), Some(200));
 
-        // Same round: no double grant; bob staking mid-round collects on the
-        // NEXT sweep (no guard row was burned for him).
-        icpswap_lp_grant_round_tickets();
-        assert_eq!(count(alice()), 10);
+        // Same day: no double grant; bob ICP-staking mid-day collects on the
+        // NEXT sweep at HIS value ($10 → 400).
+        icpswap_lp_grant_daily_tickets().await;
+        assert_eq!(count(alice()), 200);
         seed_stake(StakeTier::SixMonths, bob(), 100_000_000);
-        icpswap_lp_grant_round_tickets();
-        assert_eq!(count(bob()), 10);
+        icpswap_lp_grant_daily_tickets().await;
+        assert_eq!(count(bob()), 400);
 
-        // Round bump re-arms everyone.
-        let mut st = lottery_state();
-        st.round += 1;
-        set_lottery_state(st);
-        icpswap_lp_grant_round_tickets();
-        assert_eq!(count(alice()), 10, "new round: counts reset per-round in TicketEntry");
-        assert_eq!(
-            ICP_LP_ROUND_GRANTS.with(|m| m.borrow().iter().filter(|e| e.key().round == round + 1).count()),
-            2
+        // Next UTC day: fresh valuation — alice's LP halved → half the tickets.
+        MOCK_ICPSWAP_AMOUNTS.with(|m| {
+            m.borrow_mut().insert((pool, 1), (1_250_000, 1_250_000));
+        });
+        set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
+        icpswap_lp_grant_daily_tickets().await;
+        assert_eq!(count(alice()), 200 + 100, "revalued daily: $2.50 → 100 tickets");
+        assert!(
+            ICP_LP_ROUND_GRANTS.with(|m| m.borrow().contains_key(&IcpLpRoundKey { round: day + 1, user: alice() }))
         );
 
         for u in [alice(), bob()] {

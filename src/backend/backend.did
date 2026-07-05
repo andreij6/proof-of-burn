@@ -1180,14 +1180,15 @@ type IcpLpReservationView = record {
 type IcpLpInfo = record {
   enabled : bool;
   round : nat64;
-  tickets_per_round : nat64;
+  // Tickets per day per $1 of staked LP value (proportional to value).
+  tickets_per_usd_day : nat64;
   staked : bool;
   backend_principal : principal;
   my_positions : vec IcpLpPositionView;
   my_reservations : vec IcpLpReservationView;
   pools : vec IcpLpPoolCfg;
   total_harvested_icp_e8s : nat64;
-  granted_this_round : bool;
+  granted_today : bool;
 };
 type Result_24 = variant { Ok : IcpLpPositionView; Err : text };
 type Result_21 = variant { Ok : text; Err : text };

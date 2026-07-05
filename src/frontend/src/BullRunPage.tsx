@@ -32,26 +32,35 @@ export default function BullRunPage({ actor, principal, onSignIn, onGoParticipat
           You are the bull, horns-first through an ever-harder Spanish street packed
           with runners in white and red scattering out of your way.{' '}
           <MoreInfo title="How Bull Run works">
-            <p>
-              Three lanes down a whitewashed street that never ends.{' '}
-              <span className="mono">←/→</span> cut across, <span className="mono">↑/SPACE</span>{' '}
-              jumps the barriers and barrel stacks — <b>carts are too tall to jump</b>,
-              you have to go around. Every stumble halves your speed;{' '}
-              <b>the tenth hit ends the run</b>. Coins line the cobbles, some floating
-              in arcs you can only catch mid-jump.
-            </p>
-            <p>
-              It gets harder the deeper you charge: the bull keeps accelerating,
-              obstacles pack tighter, and the crowd thickens until the runners
-              genuinely block your view of what's waiting behind them.
-            </p>
-            <p>
-              <b>Practice</b> deals a fresh random street every run and records
-              nothing. The <b>daily run</b> is one attempt per UTC day for
-              no-loss-lottery stakers: every player charges the SAME street — same
-              obstacles, same crowd, same coin lines — ranked by coins collected,
-              ties broken by run time.
-            </p>
+            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+              <Eyebrow accent>The gist</Eyebrow>
+              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                <b>You are the bull. The street never ends — ten hits do.</b>{' '}Charge through the crowd, hoard coins, and survive an ever-faster, ever-denser street.
+              </p>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Running</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>←/→ cut across three lanes; ↑/SPACE jumps</b> barriers and barrel stacks.</li>
+                <li><b>Carts are too tall to jump</b> — go around.</li>
+                <li><b>Stumbles halve your speed</b> (a brief grace stops chain hits); the tenth hit ends the run.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>It gets harder</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>You accelerate with distance</b> — the street comes at you faster the deeper you charge.</li>
+                <li><b>Obstacles pack tighter</b> and more of them block two lanes at once (never all three).</li>
+                <li><b>The crowd thickens</b> until the runners genuinely block your view of what's behind them.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Coins & the daily</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Coins line the cobbles</b> — some float in arcs only a well-timed jump can catch.</li>
+                <li><b>Daily run:</b> one attempt per UTC day, stakers-only — everyone charges the SAME street, ranked coins → time.</li>
+              </ul>
+            </div>
           </MoreInfo>
         </span>
       </div>

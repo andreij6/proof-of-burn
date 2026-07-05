@@ -32,29 +32,35 @@ export default function DropZonePage({ actor, principal, onSignIn, onGoParticipa
           A battle-royale-style target drop in hand-drawn ink: bail out of the plane
           at the right moment and land as close to the bullseye as you can — alive.{' '}
           <MoreInfo title="How Drop Zone works">
-            <p>
-              A plane crosses the 2 km map diagonally at 1 000 m. Press{' '}
-              <span className="mono">J</span> to jump — timing is everything. In
-              freefall the arrows steer; holding <span className="mono">SHIFT</span>{' '}
-              tucks into a dive (much faster fall, much weaker steering — the classic
-              battle-royale trade). <span className="mono">SPACE</span> toggles the
-              chute: pop it for a slow sink with a long glide, cut it to freefall
-              again, redeploy whenever — unlimited canopies, exactly like cutting a
-              chute in Warzone. All that matters is landing under a canopy whose last
-              deploy was above <b>80 m</b>; anything else is a crash, and crashes
-              don't rank.
-            </p>
-            <p>
-              <b>Practice</b> deals a fresh random target every jump and records
-              nothing. The <b>daily drop</b> is one attempt per UTC day for
-              no-loss-lottery stakers: every player gets the SAME scenario — plane
-              path, target, terrain — so the board is a pure skill race, ranked by
-              distance to the bullseye, ties broken by jump-to-touchdown time.
-            </p>
-            <p>
-              The minimap (top right) tracks the plane, you, and the target ×. Watch
-              the altimeter on the right edge — the tick is the 80 m deploy floor.
-            </p>
+            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+              <Eyebrow accent>The gist</Eyebrow>
+              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                <b>Jump at the right moment, steer hard, land on the bullseye — alive.</b>{' '}A plane crosses the map at 1,000 m; distance to the target ranks you, time breaks ties, and a bad canopy is a crash.
+              </p>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>The jump</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>J to jump</b> — timing is positioning; the plane crosses the 2 km map diagonally.</li>
+                <li><b>Arrows steer, SHIFT dives:</b> a dive falls much faster but steers much worse — the classic battle-royale trade.</li>
+                <li><b>SPACE toggles the chute:</b> pop it for a slow sink and a long glide, cut it to freefall again, redeploy freely — unlimited canopies.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Landing safely</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>The 80 m floor:</b> you land safely only under a canopy whose latest deploy was above 80 m — cut-and-crater or a panic redeploy below the floor is a crash.</li>
+                <li><b>Crashes never rank</b> — and in the daily, the attempt is spent.</li>
+                <li><b>Watch the altimeter</b> on the right edge; the tick marks the floor.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Practice vs the daily</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Practice:</b> a fresh random target every jump, nothing recorded.</li>
+                <li><b>Daily drop:</b> one attempt per UTC day, stakers-only — everyone gets the SAME scenario (plane, target, terrain), ranked distance → time.</li>
+              </ul>
+            </div>
           </MoreInfo>
         </span>
       </div>

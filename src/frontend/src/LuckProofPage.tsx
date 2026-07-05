@@ -32,31 +32,35 @@ export default function LuckProofPage({ actor, principal, onSignIn, onGoParticip
           A poker-brain trainer with no cards: take or decline wagers on a 3-second
           clock, scored purely on the expected value of your decisions.{' '}
           <MoreInfo title="How Luck-Proof works">
-            <p>
-              Every hand offers a wager: risk some dollars for a stated chance at a
-              profit. Taking it is worth <span className="mono">P·reward − (1−P)·risk</span> in
-              expected value (EV); declining is worth exactly $0. You have 3 seconds —
-              if the clock runs out, you decline.
-            </p>
-            <p>
-              Two tracks chart in realtime as you play. The <b>skill track</b> credits
-              each decision's EV the moment you make it — good decisions score even
-              when the cards go against you. The <b>luck track</b> is your actual
-              cash, rolled fairly per hand. Only the skill track ever ranks: that
-              separation — judging decisions, not outcomes — is the core discipline
-              of long-term poker profitability (the "Sklansky dollars" idea).
-            </p>
-            <p>
-              <b>Practice</b> is endless, free for any signed-in user, and records
-              nothing. The <b>daily competition</b> is one attempt per UTC day, 250
-              decisions, for no-loss-lottery stakers: every player faces the SAME
-              deal (derived from the day itself), ranked by EV earned, then accuracy,
-              then speed. Each day pays <b>two winners</b> — the highest EV (skill)
-              and the highest actual cash (luck) — <b>lottery tickets equal to that
-              day's player count</b>, each. Any run on the board can be replayed
-              decision-by-decision — the deal is recomputed on-chain, so anyone can
-              verify everyone played identical scenarios.
-            </p>
+            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+              <Eyebrow accent>The gist</Eyebrow>
+              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                <b>Your results are luck. Your decisions are skill.</b>{' '}Every hand is a river call at stated pot odds; only the expected value of your decisions is scored — the cards can't save you or sink you.
+              </p>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Playing a hand</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Call or fold in 3 seconds:</b> the pot offers a reward at stated odds; calling is worth <span className="mono">P·reward − (1−P)·risk</span>, folding is always exactly $0.</li>
+                <li><b>The clock folds for you</b> — hesitation is a decision too.</li>
+                <li><b>Two live tracks:</b> the skill track credits each decision's EV instantly; the luck track is your actual cash. Only skill ranks.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Practice vs the daily</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Practice:</b> 50-hand sessions, restart anytime, nothing recorded.</li>
+                <li><b>Daily competition:</b> 250 decisions, one attempt per UTC day, stakers-only — everyone faces the SAME deal, ranked EV → accuracy → speed.</li>
+                <li><b>Two daily winners:</b> highest EV and highest actual cash each take lottery tickets equal to the day's player count.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Trust</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Replays are public:</b> tap any board row (after you've competed) to see every decision against the shared deal, recomputed on-chain.</li>
+                <li><b>Scores can't be forged:</b> your decisions are the only client input; the EV is rescored server-side.</li>
+              </ul>
+            </div>
           </MoreInfo>
         </span>
       </div>

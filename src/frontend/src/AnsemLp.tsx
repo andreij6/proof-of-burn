@@ -126,26 +126,35 @@ export default function AnsemLp({ actor, principal, onSignIn, onGoParticipate }:
           {Number(info?.tickets_per_round ?? 10n)} tickets into every drawing — re-confirmed
           each round, read live from the Solana chain.{' '}
           <MoreInfo title="How ANSEM LP rewards work">
-            <p>
-              Link your Solana wallet once: your wallet signs a challenge message
-              (nothing is sent on-chain, no fees) and the canister verifies the
-              Ed25519 signature itself. The challenge embeds your account id and an
-              expiry, so it can't be replayed.
-            </p>
-            <p>
-              Then, once per lottery round, hit <b>Confirm LP</b>. The backend reads
-              your live LP token balance for the configured $ANSEM pools straight
-              from Solana — through the Internet Computer's SOL RPC canister, which
-              queries three independent RPC providers and requires them to agree.
-              Any qualifying balance pays <b>{Number(info?.tickets_per_round ?? 10n)} tickets</b>{' '}
-              into the current drawing.
-            </p>
-            <p>
-              After each drawing the round advances and the claim re-arms: you
-              re-confirm you're STILL providing liquidity to earn again. Selling the
-              LP means the next confirmation finds nothing. Tickets are stakers-only
-              platform-wide, so an active ICP stake (any amount) is required.
-            </p>
+            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+              <Eyebrow accent>The gist</Eyebrow>
+              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                <b>Provide $ANSEM liquidity on Solana, collect lottery tickets here.</b>{' '}Link your wallet once, then confirm each drawing — 10 tickets per round, read live from the Solana chain.
+              </p>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Linking your wallet</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>One signature, once:</b> your Solana wallet (Phantom or Solflare) signs a challenge message — free, nothing goes on-chain.</li>
+                <li><b>Verified on the Internet Computer:</b> the canister checks the signature itself; the challenge embeds your account and an expiry so it can't be replayed.</li>
+                <li><b>One wallet, one account</b> — a wallet can never earn for two people.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>Confirming each drawing</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Hit Confirm LP once per round:</b> the app reads your live LP balance straight from Solana — three independent RPC providers must agree.</li>
+                <li><b>10 tickets land in the current drawing</b> when a qualifying balance is found.</li>
+                <li><b>Re-confirm after each drawing:</b> the round advances and the button re-arms. Sold the LP? The next confirmation finds nothing.</li>
+              </ul>
+            </div>
+            <div className="col" style={{ gap: 6 }}>
+              <Eyebrow accent>The fine print</Eyebrow>
+              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                <li><b>Stakers-only:</b> tickets require an active ICP stake (any amount), like everywhere on the platform.</li>
+                <li><b>Custodial wallets can't sign</b> — you need a wallet with message signing (Phantom, Solflare).</li>
+              </ul>
+            </div>
           </MoreInfo>
         </span>
       </div>
