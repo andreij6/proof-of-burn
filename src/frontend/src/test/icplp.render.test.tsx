@@ -28,6 +28,9 @@ const info = {
   ],
   total_harvested_icp_e8s: 123_000_000n,
   granted_this_round: true,
+  my_reservations: [
+    { pool: BACKEND, pool_name: 'ICP/ckUSDC', position_id: 7n, expires_at: 1_900_000_000_000_000_000n },
+  ],
 };
 
 const actor = { get_icp_lp_info: async () => info };
@@ -82,6 +85,22 @@ describe('IcpLp page copy (owner requirements)', () => {
     const text = document.body.textContent ?? '';
     expect(text).not.toMatch(/harvested .* lifetime/i);
     expect(text).not.toMatch(/drawing #\d/);
+    cleanup();
+  });
+
+  it('walks the RESERVE-FIRST order: reserve here, then transfer on ICPSwap, then confirm', async () => {
+    await renderPage();
+    const text = document.body.textContent ?? '';
+    // Step order: the reserve instruction precedes the transfer instruction.
+    const reserveIdx = text.search(/Reserve it here first/i);
+    const transferIdx = text.search(/Transfer Position/i);
+    const confirmIdx = text.search(/confirm/i);
+    expect(reserveIdx).toBeGreaterThanOrEqual(0);
+    expect(transferIdx).toBeGreaterThan(reserveIdx);
+    expect(confirmIdx).toBeGreaterThanOrEqual(0);
+    // A pending reservation renders with its Confirm affordance.
+    expect(text).toContain('#7');
+    expect(text).toMatch(/Confirm stake/i);
     cleanup();
   });
 

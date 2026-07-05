@@ -21,6 +21,10 @@ export function friendlyIcpLpErr(code: string): string {
     case 'FEATURE_DISABLED': return 'ICP LP staking isn\'t open yet — check back soon.';
     case 'POOL_NOT_CONFIGURED': return 'That pool isn\'t in the qualifying list.';
     case 'POSITION_NOT_TRANSFERRED': return 'We don\'t see that position under the app\'s principal yet — complete the transfer on ICPSwap first (My Positions → Transfer Position), then try again.';
+    case 'NO_RESERVATION': return 'Reserve the position here FIRST, then transfer it on ICPSwap.';
+    case 'RESERVATION_EXPIRED': return 'Your reservation expired — reserve the position again, then confirm.';
+    case 'RESERVED_BY_OTHER': return 'That position id is reserved by another account.';
+    case 'RESERVATION_LIMIT': return 'You have too many open reservations — confirm or let one expire first.';
     case 'POSITION_ALREADY_STAKED': return 'That position is already registered.';
     case 'NOT_YOUR_POSITION': return 'Only the account that staked this position can unstake it.';
     default: return code;
@@ -50,6 +54,7 @@ interface IcpLpInfo {
   staked: boolean;
   backend_principal: Principal;
   my_positions: LpPosition[];
+  my_reservations: { pool: Principal; pool_name: string; position_id: bigint; expires_at: bigint }[];
   pools: LpPoolCfg[];
   total_harvested_icp_e8s: bigint;
   granted_this_round: boolean;
@@ -96,19 +101,32 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
     } catch { /* clipboard denied — the mono text is selectable */ }
   };
 
-  const registerStake = async () => {
+  const reservePosition = async () => {
     if (busy) return;
     setErr(null); setNotice(null);
     const pool = parsePrincipal(poolText);
     const pid = parsePositionId(posIdText);
     if (!pool) { setErr('Pick a pool.'); return; }
     if (pid === null) { setErr('Enter the numeric position id (shown on ICPSwap under My Positions).'); return; }
+    setBusy('reserve');
+    try {
+      const res = await actor.reserve_lp_position(pool, pid);
+      if (res.__kind__ === 'Err') throw new Error(friendlyIcpLpErr(res.Err));
+      setNotice(`Position #${pid} reserved for 1 hour — now transfer it on ICPSwap, then confirm below.`);
+      setPosIdText('');
+      await refresh();
+    } catch (e: any) { setErr(e?.message || String(e)); }
+    finally { setBusy(null); }
+  };
+
+  const confirmStake = async (pool: Principal, pid: bigint) => {
+    if (busy) return;
+    setErr(null); setNotice(null);
     setBusy('stake');
     try {
       const res = await actor.stake_lp_position(pool, pid);
       if (res.__kind__ === 'Err') throw new Error(friendlyIcpLpErr(res.Err));
-      setNotice(`Position #${pid} registered — ${Number(info?.tickets_per_round ?? 10n)} tickets will land every drawing while it's staked.`);
-      setPosIdText('');
+      setNotice(`Position #${pid} staked — ${Number(info?.tickets_per_round ?? 10n)} tickets will land every drawing while it's staked.`);
       await refresh();
     } catch (e: any) { setErr(e?.message || String(e)); }
     finally { setBusy(null); }
@@ -219,54 +237,65 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
               <Eyebrow accent>Stake a position</Eyebrow>
               <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <li>
-                  On{' '}
-                  <a href="https://app.icpswap.com/liquidity" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--burn-ink)', fontWeight: 600 }}>
-                    ICPSwap → My Positions
-                  </a>
-                  : pick your position → <b>Transfer Position</b>.
-                </li>
-                <li>
-                  <span className="col" style={{ gap: 6, display: 'flex' }}>
-                    <span>Send it to the app principal:</span>
-                    <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                      <span className="mono" style={{ fontSize: 10.5, background: 'var(--bg-alt)', padding: '4px 8px', borderRadius: 6, wordBreak: 'break-all', userSelect: 'all' }}>
-                        {info?.backend_principal?.toString() ?? '…'}
-                      </span>
-                      <Btn variant="secondary" sm onClick={copyPrincipal}>
-                        <Icon name={copied ? 'check' : 'copy'} size={11} /> {copied ? 'Copied' : 'Copy'}
-                      </Btn>
-                    </span>
+                  <span className="col" style={{ gap: 8, display: 'flex' }}>
+                    <span><b>Reserve it here first</b> — this locks the position id to your account for 1 hour, so nobody else can claim it:</span>
+                    <select
+                      className="burn-input"
+                      value={poolText}
+                      onChange={(e) => setPoolText(e.target.value)}
+                      aria-label="Pool"
+                      style={{ fontSize: 12.5 }}
+                    >
+                      {(info?.pools ?? []).map((p) => (
+                        <option key={p.pool.toString()} value={p.pool.toString()}>{p.name}</option>
+                      ))}
+                      {(info?.pools?.length ?? 0) === 0 && <option value="">No pools configured yet</option>}
+                    </select>
+                    <input
+                      className="burn-input"
+                      placeholder="Position ID (e.g. 42)"
+                      value={posIdText}
+                      onChange={(e) => setPosIdText(e.target.value)}
+                      inputMode="numeric"
+                      aria-label="Position ID"
+                    />
+                    <Btn variant="primary" onClick={reservePosition} disabled={busy !== null || (info?.pools?.length ?? 0) === 0}>
+                      {busy === 'reserve' ? <LiveDot size={8} /> : <Icon name="stack" size={13} stroke="var(--char-950)" />} Reserve position
+                    </Btn>
                   </span>
                 </li>
                 <li>
-                  Come back and register it:
+                  Then on{' '}
+                  <a href="https://app.icpswap.com/liquidity" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--burn-ink)', fontWeight: 600 }}>
+                    ICPSwap → My Positions
+                  </a>
+                  : pick the position → <b>Transfer Position</b> to the app principal:
+                  <span className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                    <span className="mono" style={{ fontSize: 10.5, background: 'var(--bg-alt)', padding: '4px 8px', borderRadius: 6, wordBreak: 'break-all', userSelect: 'all' }}>
+                      {info?.backend_principal?.toString() ?? '…'}
+                    </span>
+                    <Btn variant="secondary" sm onClick={copyPrincipal}>
+                      <Icon name={copied ? 'check' : 'copy'} size={11} /> {copied ? 'Copied' : 'Copy'}
+                    </Btn>
+                  </span>
+                </li>
+                <li>
+                  Come back and <b>confirm</b> the reservation below.
                 </li>
               </ol>
-              <div className="col" style={{ gap: 8 }}>
-                <select
-                  className="burn-input"
-                  value={poolText}
-                  onChange={(e) => setPoolText(e.target.value)}
-                  aria-label="Pool"
-                  style={{ fontSize: 12.5 }}
-                >
-                  {(info?.pools ?? []).map((p) => (
-                    <option key={p.pool.toString()} value={p.pool.toString()}>{p.name}</option>
+              {(info?.my_reservations?.length ?? 0) > 0 && (
+                <div className="col" style={{ gap: 6, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+                  <span style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--fg-3)' }}>Your reservations</span>
+                  {info!.my_reservations.map((r: any) => (
+                    <span key={`${r.pool.toString()}-${r.position_id}`} className="row" style={{ gap: 8, justifyContent: 'space-between', fontSize: 12.5, flexWrap: 'wrap' }}>
+                      <span className="mono">#{String(r.position_id)} · {r.pool_name || 'pool'} · expires {new Date(Number(r.expires_at / 1_000_000n)).toLocaleTimeString()}</span>
+                      <Btn variant="primary" sm onClick={() => confirmStake(r.pool, r.position_id)} disabled={busy !== null}>
+                        {busy === 'stake' ? <LiveDot size={7} /> : <Icon name="check" size={11} stroke="var(--char-950)" />} Confirm stake
+                      </Btn>
+                    </span>
                   ))}
-                  {(info?.pools?.length ?? 0) === 0 && <option value="">No pools configured yet</option>}
-                </select>
-                <input
-                  className="burn-input"
-                  placeholder="Position ID (e.g. 42)"
-                  value={posIdText}
-                  onChange={(e) => setPosIdText(e.target.value)}
-                  inputMode="numeric"
-                  aria-label="Position ID"
-                />
-                <Btn variant="primary" onClick={registerStake} disabled={busy !== null || (info?.pools?.length ?? 0) === 0}>
-                  {busy === 'stake' ? <LiveDot size={8} /> : <Icon name="stack" size={13} stroke="var(--char-950)" />} Register stake
-                </Btn>
-              </div>
+                </div>
+              )}
             </div>
 
             {/* ── Your staked positions ── */}

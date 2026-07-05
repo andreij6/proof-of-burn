@@ -1168,6 +1168,15 @@ type IcpLpPositionView = record {
   position_id : nat;
   staked_at : nat64;
 };
+// Reserve-first flow: a reservation binds (pool, position id) to the caller
+// BEFORE they transfer the position on ICPSwap, so an arriving position can
+// only ever be registered by the user who announced it — no sniping.
+type IcpLpReservationView = record {
+  pool : principal;
+  pool_name : text;
+  position_id : nat;
+  expires_at : nat64;
+};
 type IcpLpInfo = record {
   enabled : bool;
   round : nat64;
@@ -1175,6 +1184,7 @@ type IcpLpInfo = record {
   staked : bool;
   backend_principal : principal;
   my_positions : vec IcpLpPositionView;
+  my_reservations : vec IcpLpReservationView;
   pools : vec IcpLpPoolCfg;
   total_harvested_icp_e8s : nat64;
   granted_this_round : bool;
@@ -2175,6 +2185,11 @@ service : (InitPayload) -> {
   // ICP LP staking (ICPSwap custody).
   get_icp_lp_info : () -> (IcpLpInfo) query;
   // Register a position ALREADY transferred to the backend on ICPSwap.
+  // Reserve BEFORE transferring on ICPSwap (returns expiry ns; 1h TTL,
+  // max 5 live reservations per user)…
+  reserve_lp_position : (principal, nat) -> (Result_23);
+  // …then register once the transfer has landed. Only the reservation
+  // holder can register.
   stake_lp_position : (principal, nat) -> (Result_24);
   // Return a custodied position to `return_to`; staker-only, never flag-gated.
   unstake_lp_position : (principal, nat, principal) -> (Result);

@@ -14820,6 +14820,10 @@ fn dev_set_lp_mock_balance(ata_b58: String, amount: u128) -> Result<(), String> 
 
 const ICPSWAP_LP_YIELD_SUBACCOUNT: [u8; 32] = [9u8; 32];
 const ICP_LP_TICKETS_PER_ROUND: u64 = 10;
+/// Reservations live this long — plenty for the ICPSwap transfer round-trip.
+const ICP_LP_RESERVATION_TTL_NS: u64 = 60 * 60 * 1_000_000_000;
+/// Active reservations per user (griefing cap).
+const ICP_LP_MAX_RESERVATIONS: usize = 5;
 /// Claiming fees for every position on every 5-min sweep would spam the
 /// ICPSwap pools; harvest at most this often.
 const ICP_LP_HARVEST_INTERVAL_NS: u64 = 60 * 60 * 1_000_000_000; // 1 h
@@ -14911,6 +14915,13 @@ pub struct IcpLpRoundKey {
 }
 impl_storable!(IcpLpRoundKey);
 
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LpReservation {
+    pub user: Principal,
+    pub expires_at: u64,
+}
+impl_storable!(LpReservation);
+
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
 pub struct IcpLpStats {
     pub total_harvested_icp_e8s: u64,
@@ -14940,6 +14951,13 @@ thread_local! {
     /// MemoryId 125: lifetime totals + notify retry queue + harvest throttle.
     static ICP_LP_STATS: RefCell<StableCell<IcpLpStats, Memory>> =
         MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(125)), IcpLpStats::default())));
+    /// MemoryId 126: (pool, position id) → reservation. RESERVE-FIRST is the
+    /// anti-sniping rule: a position id is only registrable by whoever
+    /// reserved it BEFORE transferring — so nobody ever sends a position we
+    /// haven't already bound to them, and an attacker who sees a position
+    /// arrive can't race the register call to steal it.
+    static LP_RESERVATIONS: RefCell<StableBTreeMap<IcpLpKey, LpReservation, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(126)))));
     /// Native/local mocks for the ICPSwap pool calls.
     static MOCK_ICPSWAP_OUR_POSITIONS: RefCell<std::collections::HashMap<Principal, Vec<u128>>> =
         RefCell::new(std::collections::HashMap::new());
@@ -15056,9 +15074,19 @@ pub struct IcpLpInfo {
     /// Where to send the position on ICPSwap (the custody principal).
     pub backend_principal: Principal,
     pub my_positions: Vec<IcpLpPositionView>,
+    /// Reserve-first flow: ids the caller has reserved but not yet registered.
+    pub my_reservations: Vec<IcpLpReservationView>,
     pub pools: Vec<IcpLpPoolCfg>,
     pub total_harvested_icp_e8s: u64,
     pub granted_this_round: bool,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct IcpLpReservationView {
+    pub pool: Principal,
+    pub pool_name: String,
+    pub position_id: u128,
+    pub expires_at: u64,
 }
 
 #[ic_cdk::query]
@@ -15084,6 +15112,21 @@ fn get_icp_lp_info() -> IcpLpInfo {
                 })
                 .collect()
         }),
+        my_reservations: {
+            let now = current_time();
+            LP_RESERVATIONS.with(|m| {
+                m.borrow()
+                    .iter()
+                    .filter(|e| e.value().user == caller && e.value().expires_at > now)
+                    .map(|e| IcpLpReservationView {
+                        pool: e.key().pool,
+                        pool_name: icp_lp_pool_cfg(&e.key().pool).map(|c2| c2.name).unwrap_or_default(),
+                        position_id: e.key().position_id,
+                        expires_at: e.value().expires_at,
+                    })
+                    .collect()
+            })
+        },
         pools: ICPSWAP_POOLS.with(|c| c.borrow().get().clone()).pools,
         total_harvested_icp_e8s: stats.total_harvested_icp_e8s,
         granted_this_round: ICP_LP_ROUND_GRANTS
@@ -15091,10 +15134,54 @@ fn get_icp_lp_info() -> IcpLpInfo {
     }
 }
 
-/// Register a position the caller has ALREADY transferred to this canister
-/// on ICPSwap (transferPosition via their UI — the transfer is the ownership
-/// proof). First registrant wins; the position must be visible in OUR
-/// holdings on the pool.
+/// RESERVE a position id BEFORE transferring it on ICPSwap. The reservation
+/// binds (pool, id) to the caller for ICP_LP_RESERVATION_TTL_NS, and
+/// stake_lp_position only registers the reservation holder — so a position
+/// arriving at our canister can never be claimed by anyone but the user who
+/// announced it first. Nobody should ever transfer without reserving.
+/// Returns the reservation's expiry (ns).
+#[ic_cdk::update]
+fn reserve_lp_position(pool: Principal, position_id: u128) -> Result<u64, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    if !feature_visible(FLAG_ICPSWAP_LP, caller) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    icp_lp_pool_cfg(&pool).ok_or("POOL_NOT_SUPPORTED")?;
+    let key = IcpLpKey { pool, position_id };
+    if STAKED_LP.with(|m| m.borrow().contains_key(&key)) {
+        return Err("POSITION_ALREADY_STAKED".to_string());
+    }
+    let now = current_time();
+    // Lazily prune expired reservations while enforcing the per-user cap.
+    let expired: Vec<IcpLpKey> = LP_RESERVATIONS.with(|m| {
+        m.borrow().iter().filter(|e| e.value().expires_at <= now).map(|e| e.key().clone()).collect()
+    });
+    LP_RESERVATIONS.with(|m| {
+        let mut m = m.borrow_mut();
+        for k in expired { m.remove(&k); }
+    });
+    if let Some(existing) = LP_RESERVATIONS.with(|m| m.borrow().get(&key)) {
+        if existing.user != caller {
+            return Err("RESERVED_BY_OTHER".to_string());
+        }
+        // Re-reserving your own refreshes the TTL (fall through to insert).
+    } else {
+        let mine = LP_RESERVATIONS.with(|m| {
+            m.borrow().iter().filter(|e| e.value().user == caller).count()
+        });
+        if mine >= ICP_LP_MAX_RESERVATIONS {
+            return Err("RESERVATION_LIMIT".to_string());
+        }
+    }
+    let expires_at = now + ICP_LP_RESERVATION_TTL_NS;
+    LP_RESERVATIONS.with(|m| { m.borrow_mut().insert(key, LpReservation { user: caller, expires_at }); });
+    Ok(expires_at)
+}
+
+/// Register a position the caller RESERVED and then transferred to this
+/// canister on ICPSwap. Only the reservation holder can register — the
+/// reserve-first ordering is the anti-sniping guarantee.
 #[ic_cdk::update]
 async fn stake_lp_position(pool: Principal, position_id: u128) -> Result<IcpLpPositionView, String> {
     require_authenticated()?;
@@ -15107,17 +15194,29 @@ async fn stake_lp_position(pool: Principal, position_id: u128) -> Result<IcpLpPo
     if STAKED_LP.with(|m| m.borrow().contains_key(&key)) {
         return Err("POSITION_ALREADY_STAKED".to_string());
     }
+    // Reserve-first: the caller must hold the live reservation for this id.
+    let check_reservation = || -> Result<(), String> {
+        match LP_RESERVATIONS.with(|m| m.borrow().get(&key)) {
+            None => Err("NO_RESERVATION".to_string()),
+            Some(r) if r.user != caller => Err("RESERVED_BY_OTHER".to_string()),
+            Some(r) if r.expires_at <= current_time() => Err("RESERVATION_EXPIRED".to_string()),
+            Some(_) => Ok(()),
+        }
+    };
+    check_reservation()?;
     let ours = icpswap_positions_of_backend(pool).await?;
     if !ours.contains(&position_id) {
         return Err("POSITION_NOT_TRANSFERRED".to_string());
     }
-    // Re-check after the await (two calls racing for the same position).
+    // Re-check after the await (reservation could have expired mid-flight).
+    check_reservation()?;
     if STAKED_LP.with(|m| m.borrow().contains_key(&key)) {
         return Err("POSITION_ALREADY_STAKED".to_string());
     }
     let now = current_time();
     let record = StakedLpPosition { user: caller, pool_name: cfg.name.clone(), staked_at: now };
-    STAKED_LP.with(|m| { m.borrow_mut().insert(key, record); });
+    STAKED_LP.with(|m| { m.borrow_mut().insert(key.clone(), record); });
+    LP_RESERVATIONS.with(|m| { m.borrow_mut().remove(&key); });
     staking_audit("icpswap_lp_stake", caller, position_id as u64, 0);
     Ok(IcpLpPositionView { pool, pool_name: cfg.name, position_id, staked_at: now })
 }
@@ -32424,6 +32523,11 @@ mod tests {
     }
 
     fn clear_icp_lp() {
+        LP_RESERVATIONS.with(|m| {
+            let keys: Vec<IcpLpKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
         STAKED_LP.with(|m| {
             let keys: Vec<IcpLpKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
             let mut m = m.borrow_mut();
@@ -32475,23 +32579,81 @@ mod tests {
         let cfg = CONFIG.with(|c| c.borrow().get().clone());
         admin_set_icpswap_pools(vec![icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id)]).unwrap();
 
-        // The position must ALREADY be in our holdings (the transfer proof).
+        // RESERVE-FIRST: registering without a reservation is refused, even
+        // for a position already in our holdings.
         set_mock_caller(alice());
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![7]); });
+        assert_eq!(stake_lp_position(pool, 7).await.unwrap_err(), "NO_RESERVATION");
+
+        // Reserve, then the transfer proof still applies…
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let expires = reserve_lp_position(pool, 7).unwrap();
+        assert_eq!(expires, current_time() + ICP_LP_RESERVATION_TTL_NS);
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![]); });
         assert_eq!(stake_lp_position(pool, 7).await.unwrap_err(), "POSITION_NOT_TRANSFERRED");
+        // …and with the position transferred, registration succeeds and the
+        // reservation is consumed.
         MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![7]); });
         let view = stake_lp_position(pool, 7).await.unwrap();
         assert_eq!(view.position_id, 7);
         assert_eq!(view.pool_name, "ICP/ckUSDC");
+        assert!(LP_RESERVATIONS.with(|m| m.borrow().is_empty()), "reservation consumed");
 
-        // First registrant wins.
+        // Registered position stays registered.
         set_mock_caller(bob());
         assert_eq!(stake_lp_position(pool, 7).await.unwrap_err(), "POSITION_ALREADY_STAKED");
+        assert_eq!(reserve_lp_position(pool, 7).unwrap_err(), "POSITION_ALREADY_STAKED");
 
         // Info reflects the caller's custody.
         set_mock_caller(alice());
         let info = get_icp_lp_info();
         assert_eq!(info.my_positions.len(), 1);
         assert_eq!(info.backend_principal, get_canister_id());
+        clear_icp_lp();
+    }
+
+    #[tokio::test]
+    async fn test_icp_lp_reservation_blocks_sniping_and_expires() {
+        enable_icp_lp();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(carol());
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        admin_set_icpswap_pools(vec![icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id)]).unwrap();
+
+        // Alice reserves #42 and transfers it in.
+        set_mock_caller(alice());
+        reserve_lp_position(pool, 42).unwrap();
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![42]); });
+
+        // THE SNIPE: bob sees the position arrive and races the register —
+        // no reservation, no theft.
+        set_mock_caller(bob());
+        assert_eq!(stake_lp_position(pool, 42).await.unwrap_err(), "RESERVED_BY_OTHER");
+        // Bob can't take over the reservation either.
+        assert_eq!(reserve_lp_position(pool, 42).unwrap_err(), "RESERVED_BY_OTHER");
+
+        // Alice's own reservation refreshes on re-reserve.
+        set_mock_caller(alice());
+        reserve_lp_position(pool, 42).unwrap();
+
+        // Reservations expire: past the TTL alice can't register…
+        set_mock_time(Some(1_700_000_000_000_000_000 + 2 * ICP_LP_RESERVATION_TTL_NS));
+        assert_eq!(stake_lp_position(pool, 42).await.unwrap_err(), "RESERVATION_EXPIRED");
+        // …and the id is reservable again (alice re-reserves and registers).
+        reserve_lp_position(pool, 42).unwrap();
+        stake_lp_position(pool, 42).await.unwrap();
+
+        // Griefing cap: at most ICP_LP_MAX_RESERVATIONS live reservations.
+        set_mock_caller(bob());
+        for id in 100..(100 + ICP_LP_MAX_RESERVATIONS as u128) {
+            reserve_lp_position(pool, id).unwrap();
+        }
+        assert_eq!(reserve_lp_position(pool, 999).unwrap_err(), "RESERVATION_LIMIT");
+        // Expired ones free the cap.
+        set_mock_time(Some(1_700_000_000_000_000_000 + 4 * ICP_LP_RESERVATION_TTL_NS));
+        reserve_lp_position(pool, 999).unwrap();
+
         clear_icp_lp();
     }
 
@@ -32504,6 +32666,7 @@ mod tests {
         admin_set_icpswap_pools(vec![icp_lp_test_pool(cfg.ledger_canister_id, cfg.ledger_canister_id)]).unwrap();
         MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![9]); });
         set_mock_caller(alice());
+        reserve_lp_position(pool, 9).unwrap();
         stake_lp_position(pool, 9).await.unwrap();
 
         // Only the recorded staker can exit; sane return principal required.
@@ -32535,8 +32698,10 @@ mod tests {
         // Alice is ICP-staked; bob is not (yet).
         seed_stake(StakeTier::SixMonths, alice(), 100_000_000);
         set_mock_caller(alice());
+        reserve_lp_position(pool, 1).unwrap();
         stake_lp_position(pool, 1).await.unwrap();
         set_mock_caller(bob());
+        reserve_lp_position(pool, 2).unwrap();
         stake_lp_position(pool, 2).await.unwrap();
 
         let round = lottery_state().round;
@@ -32587,6 +32752,7 @@ mod tests {
         admin_set_icpswap_pools(vec![icp_lp_test_pool(icp_ledger, icp_ledger)]).unwrap();
         MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![5]); });
         set_mock_caller(alice());
+        reserve_lp_position(pool, 5).unwrap();
         stake_lp_position(pool, 5).await.unwrap();
 
         // Queue 0.05 ICP of claimable fees; the mock credits the DEDICATED
@@ -32640,6 +32806,7 @@ mod tests {
         admin_set_icpswap_pools(vec![icp_lp_test_pool(icp_ledger, icp_ledger)]).unwrap();
         MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![9]); });
         set_mock_caller(alice());
+        reserve_lp_position(pool, 9).unwrap();
         stake_lp_position(pool, 9).await.unwrap();
         MOCK_ICPSWAP_CLAIMS.with(|m| { m.borrow_mut().insert((pool, 9), (5_000_000, 0)); });
 
@@ -32672,6 +32839,7 @@ mod tests {
         admin_set_icpswap_pools(vec![icp_lp_test_pool(ck_ledger, ck_ledger)]).unwrap();
         MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![3]); });
         set_mock_caller(alice());
+        reserve_lp_position(pool, 3).unwrap();
         stake_lp_position(pool, 3).await.unwrap();
 
         MOCK_ICPSWAP_CLAIMS.with(|m| { m.borrow_mut().insert((pool, 3), (400_000, 0)); });
