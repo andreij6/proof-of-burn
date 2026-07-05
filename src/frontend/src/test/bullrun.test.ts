@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   makeStreet, ensureStreet, pruneStreet, stepCrowd, freshBull, stepBull,
   obstacleClearY, difficultyAt, friendlyBullErr,
-  MAX_HITS, LANE_X, BASE_SPEED, BARRIER_CLEAR, JUMP_VY, GRAVITY, STREET_HALF_W,
+  MAX_HITS, LANE_X, BASE_SPEED, BARRIER_CLEAR, JUMP_VY, GRAVITY, STREET_HALF_W, COIN_HIGH_Y,
 } from '../arcade/BullRun';
 
 describe('endless street generation', () => {
@@ -109,6 +109,37 @@ describe('bull physics (endless)', () => {
     expect(obstacleClearY('barrels')).toBe(BARRIER_CLEAR);
     const apex = (JUMP_VY * JUMP_VY) / (2 * GRAVITY);
     expect(apex).toBeLessThan(obstacleClearY('cart'));
+  });
+
+  it('high coins demand a jump: grounded passes leave them, apex catches them', () => {
+    // Grounded run under a high line → nothing collected.
+    const st = makeStreet(1);
+    st.obstacles = [];
+    st.coins = [{ z: 15, lane: 1, y: COIN_HIGH_Y }];
+    const b = freshBull();
+    for (let i = 0; i < 60 * 3; i++) stepBull(b, st, 1 / 60);
+    expect(b.coins).toBe(0);
+    // Jumping through it → collected near the apex.
+    const st2 = makeStreet(1);
+    st2.obstacles = [];
+    st2.coins = [{ z: 15, lane: 1, y: COIN_HIGH_Y }];
+    const b2 = freshBull();
+    for (let i = 0; i < 60 * 3; i++) {
+      if (b2.y === 0 && b2.z > 15 - b2.speed * 0.42 && b2.z < 15) { b2.vy = JUMP_VY; b2.y = 0.01; }
+      stepBull(b2, st2, 1 / 60);
+    }
+    expect(b2.coins).toBe(1);
+    // The generator actually deals high lines.
+    const st3 = makeStreet(9);
+    ensureStreet(st3, 3_000);
+    expect(st3.coins.some((c) => c.y === COIN_HIGH_Y)).toBe(true);
+  });
+
+  it('the crowd comes in clusters — a proper mass of runners', () => {
+    const st = makeStreet(11);
+    ensureStreet(st, 1_000);
+    // Cluster spawning: on average ≥ 2 runners per slot ≈ well over 120/km.
+    expect(st.crowd.length).toBeGreaterThan(150);
   });
 
   it('collects a ground coin in-lane only', () => {

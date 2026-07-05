@@ -27,6 +27,9 @@ export const STUMBLE_FACTOR = 0.5;
 export const JUMP_VY = 7.8;
 export const GRAVITY = 20;
 export const BARRIER_CLEAR = 0.8;
+/** High coin lines float here — beyond the grounded pickup window (which
+ *  tops out at y ≈ 1.55), reachable only near a jump's apex. */
+export const COIN_HIGH_Y = 1.8;
 
 export type ObstacleKind = 'barrier' | 'barrels' | 'cart';
 export interface Obstacle { z: number; lane: number; kind: ObstacleKind; hit?: boolean }
@@ -41,7 +44,7 @@ export function difficultyAt(z: number): { spacing: number; doubleP: number; cro
   return {
     spacing: 26 - 16 * t,          // avg m between obstacle slots: 26 → 10
     doubleP: 0.3 + 0.25 * t,       // chance a slot blocks a second lane
-    crowdGap: 14 - 9.5 * t,        // avg m between runners: 14 → 4.5
+    crowdGap: 11 - 7 * t,          // avg m between runner CLUSTERS: 11 → 4
     maxSpeed: Math.min(34, 16 + z / 300), // the bull just keeps accelerating
   };
 }
@@ -94,12 +97,16 @@ export function ensureStreet(st: Street, upToZ: number): void {
     }
     st.cObs += d.spacing * (0.75 + st.rObs() * 0.5);
   }
-  // Coins: runs of 6, ground or jump-arc.
+  // Coins: runs of 6 — ground lines, jump-arcs, and HIGH lines (y = COIN_HIGH_Y)
+  // that only an airborne bull can reach.
   while (st.cCoin < upToZ) {
     const lane = Math.floor(st.rCoin() * 3);
-    const arc = st.rCoin() < 0.4;
+    const roll = st.rCoin();
     for (let i = 0; i < 6; i++) {
-      st.coins.push({ z: st.cCoin + i * 4, lane, y: arc ? 0.6 + Math.sin((i / 5) * Math.PI) * 1.3 : 0.55 });
+      const y = roll < 0.3 ? COIN_HIGH_Y
+        : roll < 0.6 ? 0.6 + Math.sin((i / 5) * Math.PI) * 1.3
+        : 0.55;
+      st.coins.push({ z: st.cCoin + i * 4, lane, y });
     }
     st.cCoin += 34 + st.rCoin() * 26;
   }
@@ -119,16 +126,21 @@ export function ensureStreet(st: Street, upToZ: number): void {
     st.buntings.push(st.cFlag);
     st.cFlag += 70 + st.rBld() * 50;
   }
-  // The crowd: runners scattered across the street, thicker with distance.
+  // The crowd: CLUSTERS of runners (2-4 per slot) filling the street,
+  // thicker with distance — proper San Fermín masses.
   while (st.cCrowd < upToZ) {
     const d = difficultyAt(st.cCrowd);
-    const x = (st.rCrowd() * 2 - 1) * (STREET_HALF_W - 0.7);
-    st.crowd.push({
-      z: st.cCrowd, x,
-      wallX: (x >= 0 ? 1 : -1) * (STREET_HALF_W - 0.35),
-      dodge: false,
-      phase: st.rCrowd() * Math.PI * 2,
-    });
+    const n = 2 + Math.floor(st.rCrowd() * 3);
+    for (let i = 0; i < n; i++) {
+      const x = (st.rCrowd() * 2 - 1) * (STREET_HALF_W - 0.7);
+      st.crowd.push({
+        z: st.cCrowd + st.rCrowd() * 3,
+        x,
+        wallX: (x >= 0 ? 1 : -1) * (STREET_HALF_W - 0.35),
+        dodge: false,
+        phase: st.rCrowd() * Math.PI * 2,
+      });
+    }
     st.cCrowd += d.crowdGap * (0.6 + st.rCrowd() * 0.8);
   }
   st.genZ = upToZ;
@@ -704,79 +716,91 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
 
     q.sort((a, b2) => b2.d - a.d).forEach((o) => o.draw());
 
-    // ── The bull, seen from behind (the photo perspective) ──
+    // ── The bulls, seen from behind (the photo perspective) ──
+    const drawBullFigure = (
+      sx: number, sy: number, s2: number, gallop: number, tilt: number,
+      alpha: number, body: string, outline: string, horn: string,
+    ) => {
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(tilt);
+      ctx.globalAlpha = alpha;
+      // Hind legs kicking out to the sides (rear view).
+      ctx.strokeStyle = body; ctx.lineWidth = Math.max(3, s2 * 0.18); ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-s2 * 0.42, s2 * 0.2); ctx.lineTo(-s2 * (0.55 + gallop * 0.1), s2 * 0.72);
+      ctx.moveTo(s2 * 0.42, s2 * 0.2); ctx.lineTo(s2 * (0.55 - gallop * 0.1), s2 * 0.72);
+      ctx.stroke();
+      // Front hooves peeking ahead.
+      ctx.lineWidth = Math.max(2.2, s2 * 0.12);
+      ctx.beginPath();
+      ctx.moveTo(-s2 * 0.2, -s2 * 0.32); ctx.lineTo(-s2 * (0.26 - gallop * 0.06), -s2 * 0.05);
+      ctx.moveTo(s2 * 0.2, -s2 * 0.32); ctx.lineTo(s2 * (0.26 + gallop * 0.06), -s2 * 0.05);
+      ctx.stroke();
+      // Rump — the big mass closest to camera.
+      ctx.fillStyle = body;
+      ctx.strokeStyle = outline; ctx.lineWidth = Math.max(1.4, s2 * 0.05);
+      ctx.beginPath();
+      ctx.ellipse(0, s2 * 0.05, s2 * 0.62, s2 * 0.45, 0, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+      // Shoulders/hump.
+      ctx.beginPath();
+      ctx.ellipse(0, -s2 * 0.32, s2 * 0.48, s2 * 0.3, 0, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+      // Spine highlight.
+      ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = Math.max(1.5, s2 * 0.07);
+      ctx.beginPath(); ctx.moveTo(0, s2 * 0.32); ctx.quadraticCurveTo(0, -s2 * 0.05, 0, -s2 * 0.42); ctx.stroke();
+      // Head, low between the shoulders.
+      ctx.fillStyle = body;
+      ctx.strokeStyle = outline;
+      ctx.beginPath();
+      ctx.ellipse(0, -s2 * 0.56, s2 * 0.22, s2 * 0.16, 0, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+      // Ears.
+      ctx.beginPath();
+      ctx.ellipse(-s2 * 0.26, -s2 * 0.58, s2 * 0.08, s2 * 0.045, -0.5, 0, Math.PI * 2);
+      ctx.ellipse(s2 * 0.26, -s2 * 0.58, s2 * 0.08, s2 * 0.045, 0.5, 0, Math.PI * 2);
+      ctx.fill();
+      // Horns sweeping out and up.
+      ctx.strokeStyle = horn; ctx.lineWidth = Math.max(3, s2 * 0.16);
+      ctx.beginPath();
+      ctx.moveTo(-s2 * 0.16, -s2 * 0.6);
+      ctx.quadraticCurveTo(-s2 * 0.52, -s2 * 0.68, -s2 * 0.46, -s2 * 0.95);
+      ctx.moveTo(s2 * 0.16, -s2 * 0.6);
+      ctx.quadraticCurveTo(s2 * 0.52, -s2 * 0.68, s2 * 0.46, -s2 * 0.95);
+      ctx.stroke();
+      // Horn tips.
+      ctx.strokeStyle = '#2c2c2c'; ctx.lineWidth = Math.max(2, s2 * 0.09);
+      ctx.beginPath();
+      ctx.moveTo(-s2 * 0.47, -s2 * 0.88); ctx.lineTo(-s2 * 0.46, -s2 * 0.97);
+      ctx.moveTo(s2 * 0.47, -s2 * 0.88); ctx.lineTo(s2 * 0.46, -s2 * 0.97);
+      ctx.stroke();
+      // Tail.
+      ctx.strokeStyle = body; ctx.lineWidth = Math.max(1.8, s2 * 0.09);
+      ctx.beginPath();
+      ctx.moveTo(0, s2 * 0.4);
+      ctx.quadraticCurveTo(gallop * s2 * 0.3, s2 * 0.75, gallop * s2 * 0.42, s2 * 0.62);
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    const drawShadow = (wx: number, wz: number, mul: number) => {
+      const gp = project(cam, wx, 0, wz);
+      if (!gp) return;
+      ctx.fillStyle = 'rgba(40,35,25,0.3)';
+      const sr = Math.max(7, (cam.f * 1.15 * mul) / gp.d);
+      ctx.beginPath(); ctx.ellipse(gp.sx, gp.sy, sr, sr * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+    };
+
+    // The player's bull (farthest of the trio — drawn first).
     {
+      drawShadow(b.x, b.z, 1);
       const c = project(cam, b.x, b.y + 0.55, b.z);
-      const gp = project(cam, b.x, 0, b.z);
-      if (gp) {
-        ctx.fillStyle = 'rgba(40,35,25,0.3)';
-        const sr = Math.max(7, (cam.f * 1.15) / gp.d);
-        ctx.beginPath(); ctx.ellipse(gp.sx, gp.sy, sr, sr * 0.3, 0, 0, Math.PI * 2); ctx.fill();
-      }
       if (c) {
         const s2 = Math.max(12, (cam.f * 1.15) / c.d);
         const gallop = Math.sin(b.z * 1.7);
         const flash = b.invulnT > 0 && Math.floor(game.t * 10) % 2 === 0;
-        ctx.save();
-        ctx.translate(c.sx, c.sy);
-        ctx.rotate((LANE_X[b.lane] - b.x) * 0.14);
-        ctx.globalAlpha = flash ? 0.45 : 1;
-        // Hind legs kicking out to the sides (rear view).
-        ctx.strokeStyle = '#141414'; ctx.lineWidth = Math.max(3, s2 * 0.18);
-        ctx.beginPath();
-        ctx.moveTo(-s2 * 0.42, s2 * 0.2); ctx.lineTo(-s2 * (0.55 + gallop * 0.1), s2 * 0.72);
-        ctx.moveTo(s2 * 0.42, s2 * 0.2); ctx.lineTo(s2 * (0.55 - gallop * 0.1), s2 * 0.72);
-        ctx.stroke();
-        // Front hooves peeking ahead (smaller, higher).
-        ctx.lineWidth = Math.max(2.2, s2 * 0.12);
-        ctx.beginPath();
-        ctx.moveTo(-s2 * 0.2, -s2 * 0.32); ctx.lineTo(-s2 * (0.26 - gallop * 0.06), -s2 * 0.05);
-        ctx.moveTo(s2 * 0.2, -s2 * 0.32); ctx.lineTo(s2 * (0.26 + gallop * 0.06), -s2 * 0.05);
-        ctx.stroke();
-        // Rump — the big dark mass closest to camera.
-        ctx.fillStyle = '#111111';
-        ctx.beginPath();
-        ctx.ellipse(0, s2 * 0.05, s2 * 0.62, s2 * 0.45, 0, 0, Math.PI * 2);
-        ctx.fill();
-        // Shoulders/hump — narrower, higher on screen (further away).
-        ctx.beginPath();
-        ctx.ellipse(0, -s2 * 0.32, s2 * 0.48, s2 * 0.3, 0, 0, Math.PI * 2);
-        ctx.fill();
-        // Spine highlight down the back.
-        ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = Math.max(1.5, s2 * 0.07);
-        ctx.beginPath(); ctx.moveTo(0, s2 * 0.32); ctx.quadraticCurveTo(0, -s2 * 0.05, 0, -s2 * 0.42); ctx.stroke();
-        // Head, low between the shoulders.
-        ctx.fillStyle = '#0c0c0c';
-        ctx.beginPath();
-        ctx.ellipse(0, -s2 * 0.56, s2 * 0.22, s2 * 0.16, 0, 0, Math.PI * 2);
-        ctx.fill();
-        // Ears flicking out.
-        ctx.beginPath();
-        ctx.ellipse(-s2 * 0.26, -s2 * 0.58, s2 * 0.08, s2 * 0.045, -0.5, 0, Math.PI * 2);
-        ctx.ellipse(s2 * 0.26, -s2 * 0.58, s2 * 0.08, s2 * 0.045, 0.5, 0, Math.PI * 2);
-        ctx.fill();
-        // The horns: thick white crescents sweeping out and UP — the photo's
-        // signature read.
-        ctx.strokeStyle = '#f5f2ea'; ctx.lineWidth = Math.max(3, s2 * 0.16); ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(-s2 * 0.16, -s2 * 0.6);
-        ctx.quadraticCurveTo(-s2 * 0.52, -s2 * 0.68, -s2 * 0.46, -s2 * 0.95);
-        ctx.moveTo(s2 * 0.16, -s2 * 0.6);
-        ctx.quadraticCurveTo(s2 * 0.52, -s2 * 0.68, s2 * 0.46, -s2 * 0.95);
-        ctx.stroke();
-        // Horn tips darken.
-        ctx.strokeStyle = '#2c2c2c'; ctx.lineWidth = Math.max(2, s2 * 0.09);
-        ctx.beginPath();
-        ctx.moveTo(-s2 * 0.47, -s2 * 0.88); ctx.lineTo(-s2 * 0.46, -s2 * 0.97);
-        ctx.moveTo(s2 * 0.47, -s2 * 0.88); ctx.lineTo(s2 * 0.46, -s2 * 0.97);
-        ctx.stroke();
-        // Tail whipping over the rump.
-        ctx.strokeStyle = '#141414'; ctx.lineWidth = Math.max(1.8, s2 * 0.09);
-        ctx.beginPath();
-        ctx.moveTo(0, s2 * 0.4);
-        ctx.quadraticCurveTo(gallop * s2 * 0.3, s2 * 0.75, gallop * s2 * 0.42, s2 * 0.62);
-        ctx.stroke();
-        ctx.restore();
+        drawBullFigure(c.sx, c.sy, s2, gallop, (LANE_X[b.lane] - b.x) * 0.14, flash ? 0.45 : 1, '#111111', '#111111', '#f5f2ea');
         // Dust.
         if (b.y === 0 && b.speed > 15) {
           ctx.fillStyle = 'rgba(160,145,110,0.35)';
@@ -788,7 +812,25 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
       }
     }
 
-    // ── HUD ──
+    // The herd: a brown bull and a white bull run flanking, half a length
+    // back — they surge and drift but never interfere.
+    {
+      const herd = [
+        { dx: -2.3, dz: -2.6 + Math.sin(game.t * 1.3) * 0.7, body: '#5a3a22', outline: '#3a2413', horn: '#efe6d2', ph: 1.9 },
+        { dx: 2.3, dz: -3.3 + Math.sin(game.t * 1.1 + 2) * 0.7, body: '#efece0', outline: '#8a857a', horn: '#d9cfb8', ph: 4.1 },
+      ];
+      for (const hb of herd) {
+        const hx = Math.max(-STREET_HALF_W + 0.8, Math.min(STREET_HALF_W - 0.8, b.x + hb.dx));
+        const hz = b.z + hb.dz;
+        drawShadow(hx, hz, 0.95);
+        const c = project(cam, hx, 0.55, hz);
+        if (!c) continue;
+        const s2 = Math.max(12, (cam.f * 1.1) / c.d);
+        drawBullFigure(c.sx, c.sy, s2, Math.sin(hz * 1.7 + hb.ph), 0, 1, hb.body, hb.outline, hb.horn);
+      }
+    }
+
+    // ── HUD ──    // ── HUD ──
     ctx.fillStyle = 'rgba(255,255,255,0.75)';
     ctx.fillRect(8, 8, 148, 62);
     ctx.strokeStyle = '#8a8a8a'; ctx.lineWidth = 1; ctx.strokeRect(8, 8, 148, 62);
