@@ -3,7 +3,7 @@ import { Icon, Eyebrow, MoreInfo, Chip, LiveDot } from "./ui";
 import Staking from "./Staking";
 
 // ==========================================
-// Neuron Stake — dedicated page (nav: Stake to Earn). Holds what used to be
+// Neuron Stake — dedicated page (nav: Stake 4 Tickets). Holds what used to be
 // the Lottery hub's "Stake to Earn Tickets" tab: the 6-month / 1-year /
 // 2-year pooled-neuron staking that mints daily lottery tickets.
 // ==========================================
@@ -32,7 +32,7 @@ export default function NeuronStakePage({
       <div className="idea-board-container" style={{ paddingBottom: 0 }}>
         {/* ── Page header ── */}
         <div className="col" style={{ gap: 6 }}>
-          <Eyebrow accent>Stake to earn</Eyebrow>
+          <Eyebrow accent>Stake 4 tickets</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
             <Icon name="zap" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Neuron Stake</h4>

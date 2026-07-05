@@ -1961,9 +1961,9 @@ export default function App() {
           </Btn>
         )}
 
-        {/* ── Stake to Earn: staking + LP rewards ── */}
+        {/* ── Stake 4 Tickets: staking + LP rewards ── */}
         {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled || ansemLpEnabled) && (
-          <Eyebrow style={{ margin: '14px 0 4px' }}>Stake to Earn</Eyebrow>
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Stake 4 Tickets</Eyebrow>
         )}
         {(losslessEnabled || earlyAdoptersEnabled) && (
           <Btn variant={page === 'neuronstake' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('neuronstake')}>
@@ -1984,9 +1984,9 @@ export default function App() {
           </Btn>
         )}
 
-        {/* ── Play to Earn: skill games with staker competitions ── */}
+        {/* ── Play 4 Tickets: skill games with staker competitions ── */}
         {(luckproofEnabled || dropzoneEnabled || minigolfEnabled || bullrunEnabled) && (
-          <Eyebrow style={{ margin: '14px 0 4px' }}>Play to Earn</Eyebrow>
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Play 4 Tickets</Eyebrow>
         )}
         {luckproofEnabled && (
           <Btn variant={page === 'luckproof' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('luckproof')}>
