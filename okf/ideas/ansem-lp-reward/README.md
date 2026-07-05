@@ -25,29 +25,27 @@ balance ≥ the configured floor → `grant_lottery_tickets(caller, 10,
 "solana_lp")`. Claims are keyed by lottery round, so when the drawing fires
 and the round increments, the button re-arms — that IS the re-confirmation.
 
-## Load-bearing gates (answer before building)
+## Gates — RESOLVED by owner (2026-07-04)
 
-1. **WHICH $ANSEM?** At least two Solana tokens use the ticker (an "Official
-   Ansem Coin" pool at ~$2.5k TVL and a "SoylanaManletCaptainZ" pool at
-   ~$25k TVL, both ANSEM/SOL on Raydium; NO ANSEM/USDC pool surfaced in
-   research). The owner must supply the canonical token mint + exact pool(s).
-   Design consequence: pools are **admin config** (name, LP mint, min
-   amount), never hardcoded.
-2. **Pool program type.** The ATA-balance check works for pools whose LP is
-   a plain SPL token (Raydium AMM v4 / CPMM). If the canonical pool is a
-   Raydium **CLMM** (concentrated liquidity: positions are NFTs + PDAs), the
-   MVP check doesn't apply — that variant needs `jsonRequest` +
-   position-account decoding, roughly 3× the work. Verify the pool's program
-   before committing to scope.
-3. **Stakers-only collision.** Owner rule (2026-07-04): `grant_lottery_tickets`
-   NO-OPS for principals without an active stake. Either (a) LP rewards
-   require a stake too — zero code change, consistent, recommended (UI copy:
-   "stake any amount to activate LP rewards") — or (b) carve an exemption,
-   weakening the rule everywhere. **Decision needed.**
-4. **Ticket size vs sybil.** 10 tickets is flat per principal+wallet. LP can
-   be split across N wallets for N×10 tickets at near-zero cost → the
-   min-LP floor is the real sybil price. Suggest a floor worth ≥ ~$25 of LP,
-   admin-tunable per pool.
+1. **Token confirmed**: $ANSEM mint =
+   `9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump` — a pump.fun token, so the
+   canonical ANSEM/SOL liquidity lives on **PumpSwap** (pump.fun's AMM).
+   Excellent for the MVP: PumpSwap LP positions are **fungible Token-2022 LP
+   tokens**, and the LP mint is a PDA derivable from the pool address
+   (`["pool_lp_mint", pool]`) — the ATA-balance check works, and admin
+   config can store just pool addresses. Pools stay admin config regardless
+   (an ANSEM/USDC pool can be added if/when one exists).
+2. **Pool mechanisms**: PumpSwap = fungible Token-2022 LP tokens (MVP path
+   ✓). **Meteora is DIFFERENT and NOT MVP**: DLMM positions are
+   non-transferable program accounts (no token at all); DAMM v2 positions
+   are NFTs. Either would need jsonRequest + position-account decoding
+   (~2× scope) — deferred until an ANSEM pool actually lives there.
+3. **Staking required: DECIDED YES.** The existing stakers-only gate in
+   grant_lottery_tickets stands — zero code change; UI copy: "stake any
+   amount of ICP to activate LP rewards".
+4. **Sybil floor: owner accepts the risk** — 10 tickets/round per principal
+   is the cap and that's fine. Keep a dust-level min_amount in pool config
+   (filters zero-balance ATAs), default minimal.
 
 ## What was researched
 

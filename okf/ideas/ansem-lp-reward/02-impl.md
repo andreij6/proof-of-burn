@@ -22,7 +22,9 @@ Endpoints:
   providers, finalized, cycles attached); if any balance ≥ pool.min →
   `grant_lottery_tickets(caller, 10, "solana_lp")` (subject to the
   stakers-only gate — see README gate 3) + record claim.
-- `admin_set_lp_pools(vec { name; lp_mint; min_amount })`.
+- `admin_set_lp_pools(vec { name; pool_address; min_amount })` — the
+  PumpSwap LP mint derives in-canister from the pool address
+  (PDA ["pool_lp_mint", pool]); ATAs derive with the TOKEN_2022 program id.
 
 Storage (next free MemoryIds — check at build time; 118+ as of 2026-07-04):
 - 118 `SOLANA_WALLETS`: principal → { pubkey, linked_at }.
@@ -73,8 +75,15 @@ claim flow; local replica can also deploy the real SOL RPC canister
   "solana_lp", double-claim same round rejected, round bump re-arms,
   unstaked principal gets 0 (if gate (a) chosen), wallet uniqueness.
 
+## Decisions locked (owner, 2026-07-04)
+
+- Token mint `9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump`; MVP =
+  PumpSwap pools only (fungible Token-2022 LP). Meteora (DLMM position
+  accounts / DAMM v2 NFTs) deferred.
+- Staking REQUIRED — the grant_lottery_tickets gate stands unchanged.
+- Sybil floor: accepted risk; min_amount is just a dust filter.
+
 ## Estimate
 
-Backend ~500 lines + deps, frontend ~250, tests ~250. The CLMM variant
-(if the canonical pool turns out concentrated) adds jsonRequest + position
-decoding: roughly double.
+Backend ~500 lines + deps, frontend ~250, tests ~250. Meteora support
+(position-account decoding via jsonRequest) would roughly double it.

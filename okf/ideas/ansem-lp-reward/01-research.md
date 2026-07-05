@@ -43,20 +43,30 @@ timestamp: 2026-07-04T00:00:00Z
    pool gives the LP balance with provider consensus. Fallback for exotic
    token accounts (non-ATA) or CLMM positions: `jsonRequest`.
 
-## $ANSEM on Solana — AMBIGUOUS (owner must resolve)
+## $ANSEM on Solana — RESOLVED (owner, 2026-07-04)
 
-- GeckoTerminal shows at least TWO "ANSEM" tokens with Raydium ANSEM/SOL
-  pools: "Official Ansem Coin" (pool `C5WrNH…vX2b`, ~$2.5k liquidity) and
-  "SoylanaManletCaptainZ" (pool `7xGQkp…w2kw`, ~$25k liquidity).
-- **No ANSEM/USDC pool found** in research — it may not exist yet.
-- Pool addresses ≠ LP mint addresses: the LP mint must be read from the
-  pool account (one-time, at admin-config time, off-chain is fine).
-- Raydium legacy AMM/CPMM → SPL LP tokens (ATA check works). Raydium CLMM →
-  position NFTs (ATA check does NOT work). Program of the canonical pool
-  must be confirmed.
+- **Canonical mint: `9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump`** — the
+  `pump` suffix marks a pump.fun launch, so post-bonding liquidity lives on
+  **PumpSwap** (pump.fun's own AMM), not Raydium. The Raydium "ANSEM" pools
+  found earlier are OTHER tokens sharing the ticker — ignore them.
+- **PumpSwap LP mechanics** (pump.fun public docs): every pool has ONE
+  fungible **Token-2022 LP mint** with the pool as mint authority; the LP
+  mint is a PDA of `["pool_lp_mint", pool]` under the PumpSwap program —
+  derivable in-canister from the pool address alone. LPs hold plain
+  (Token-2022) token balances → ATA + `getTokenAccountBalance` works.
+  ATA derivation nuance: Token-2022 accounts use the TOKEN_2022 program id
+  in the ATA seeds, not the classic token program.
+- **Meteora does NOT use the same mechanism** (owner asked): DLMM positions
+  are unique, non-transferable position program accounts — no LP token, no
+  NFT; DAMM v2 positions are transferable NFTs. Both need
+  jsonRequest + account decoding (~2× scope) — deferred.
+- ANSEM/USDC: no such pool found; admin pool config can add one later.
 
 Sources: [SOL RPC canister README](https://github.com/dfinity/sol-rpc-canister),
 [ICP Solana integration docs](https://docs.internetcomputer.org/building-apps/chain-fusion/solana/overview),
 [ICP Reaches the Shores of Solana](https://medium.com/dfinity/icp-reaches-the-shores-of-solana-0f373a886dce),
 [GeckoTerminal ANSEM/SOL (official)](https://www.geckoterminal.com/solana/pools/C5WrNHiWv9SqZVmeNemc4BzquMfZ2b8PYnFDBUWAvX2b),
-[GeckoTerminal ANSEM/SOL (SoylanaManletCaptainZ)](https://www.geckoterminal.com/solana/pools/7xGQkpvqrqCNKwangJaj6h8KFqMu3RC9PRGYkAXhw2kw).
+[GeckoTerminal ANSEM/SOL (SoylanaManletCaptainZ)](https://www.geckoterminal.com/solana/pools/7xGQkpvqrqCNKwangJaj6h8KFqMu3RC9PRGYkAXhw2kw),
+[PumpSwap liquidity management (pump.fun public docs)](https://deepwiki.com/pump-fun/pump-public-docs/4.4-liquidity-management),
+[Meteora DLMM user guide](https://docs.meteora.ag/user-guide/guides/how-to-use-dlmm),
+[Meteora V2 vs V1](https://medium.com/@webrin/meteora-v2-vs-v1-everything-new-improved-9ead0992777a).
