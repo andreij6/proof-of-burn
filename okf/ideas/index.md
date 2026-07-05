@@ -7,6 +7,7 @@ documents themselves — an idea folder existing does NOT mean the feature
 shipped.
 
 - [Admin — Revenue & Expense Dashboard (PB-320, design doc)](/ideas/admin-revenue/revenue-expense-dashboard.md) — `admin-revenue`
+- [ANSEM LP Reward — Solana LPs earn lottery tickets](/ideas/ansem-lp-reward/README.md) — `ansem-lp-reward`
 - [AI Course Builder — agent-built mini-golf courses](/ideas/ai-course-builder/README.md) — `ai-course-builder`
 - [AI Proposal Review ("AI Review" / Chat with Proposal)](/ideas/ai-proposal-review/README.md) — `ai-proposal-review`
 - [AI Reviewer Agent — Build Spec (PB-510)](/ideas/ai-reviewer/ai-reviewer-spec.md) — `ai-reviewer`
