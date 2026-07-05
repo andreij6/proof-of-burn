@@ -14177,12 +14177,14 @@ thread_local! {
         MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(117)))));
 }
 
-/// The course generator ALWAYS places exactly this many coins — the server's
-/// completion bound. Mirrored by the frontend's buildCourse.
-const BULLRUN_COINS: u32 = 120;
-const BULLRUN_RUN_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
-const BULLRUN_MIN_MILLIS: u64 = 45_000; // 1.5 km can't be run faster
-const BULLRUN_MAX_MILLIS: u64 = 10 * 60 * 1000;
+/// The run ends when the bull has hit this many obstacles (endless street).
+const BULLRUN_MAX_HITS: u32 = 10;
+/// Endless-run coin bound: the generator can't feed coins faster than ~8/s
+/// even at top speed, so `coins ≤ seconds·8 + 20` is the plausibility cap.
+const BULLRUN_COIN_RATE_CAP: u64 = 8;
+const BULLRUN_RUN_TTL_NS: u64 = 30 * 60 * 1_000_000_000;
+const BULLRUN_MIN_MILLIS: u64 = 10_000; // 10 hits take at least this long
+const BULLRUN_MAX_MILLIS: u64 = 30 * 60 * 1000;
 const BULLRUN_BOARD_LIMIT: usize = 100;
 
 fn bullrun_day_seed(day: u32) -> u64 {
@@ -14200,7 +14202,8 @@ pub struct BullRunStart {
     pub day: u32,
     /// Client derives the whole street (obstacles, coins, buildings) from this.
     pub course_seed: u64,
-    pub coins_total: u32,
+    /// The run ends at this many obstacle hits.
+    pub hits_limit: u32,
     pub issued_at: u64,
 }
 
@@ -14219,7 +14222,7 @@ pub struct BullRunDailyStatus {
     pub played: bool,
     pub my_entry: Option<BullRunDailyEntry>,
     pub players_today: u32,
-    pub coins_total: u32,
+    pub hits_limit: u32,
 }
 
 /// Board for `day` (default today): coins desc → time asc → earlier entry.
@@ -14255,7 +14258,7 @@ fn get_bullrun_daily_status() -> BullRunDailyStatus {
         played: my_entry.is_some(),
         my_entry,
         players_today,
-        coins_total: BULLRUN_COINS,
+        hits_limit: BULLRUN_MAX_HITS,
     }
 }
 
@@ -14294,7 +14297,7 @@ fn start_bullrun_daily() -> Result<BullRunStart, String> {
     BULLRUN_RUNS.with(|m| {
         m.borrow_mut().insert(id, BullRunRun { id, player: caller, day, issued_at: now, completed: false });
     });
-    Ok(BullRunStart { run_id: id, day, course_seed: bullrun_day_seed(day), coins_total: BULLRUN_COINS, issued_at: now })
+    Ok(BullRunStart { run_id: id, day, course_seed: bullrun_day_seed(day), hits_limit: BULLRUN_MAX_HITS, issued_at: now })
 }
 
 /// Submit the finish: coins picked up + start→arena time. Bounds-validated
@@ -14315,11 +14318,12 @@ fn complete_bullrun_daily(run_id: u64, coins: u32, millis: u64) -> Result<u32, S
     if now.saturating_sub(run.issued_at) > BULLRUN_RUN_TTL_NS {
         return Err("RUN_EXPIRED".to_string());
     }
-    if coins > BULLRUN_COINS {
-        return Err("INVALID_COINS".to_string());
-    }
     if !(BULLRUN_MIN_MILLIS..=BULLRUN_MAX_MILLIS).contains(&millis) {
         return Err("INVALID_TIME".to_string());
+    }
+    // The coin cap keys off the validated run length.
+    if (coins as u64) > (millis / 1_000) * BULLRUN_COIN_RATE_CAP + 20 {
+        return Err("INVALID_COINS".to_string());
     }
     run.completed = true;
     BULLRUN_RUNS.with(|m| { m.borrow_mut().insert(run_id, run.clone()); });
@@ -31291,14 +31295,14 @@ mod tests {
         // The day seed is deterministic and shared.
         let run = start_bullrun_daily().unwrap();
         assert_eq!(run.course_seed, bullrun_day_seed(run.day));
-        assert_eq!(run.coins_total, BULLRUN_COINS);
+        assert_eq!(run.hits_limit, BULLRUN_MAX_HITS);
         assert_eq!(start_bullrun_daily().unwrap_err(), "ALREADY_PLAYED_TODAY");
 
-        // Guards.
+        // Guards. Coin plausibility is rate-based: 90 s can't yield 10 000.
         set_mock_caller(bob());
         assert_eq!(complete_bullrun_daily(run.run_id, 80, 90_000).unwrap_err(), "NOT_YOUR_RUN");
         set_mock_caller(alice());
-        assert_eq!(complete_bullrun_daily(run.run_id, BULLRUN_COINS + 1, 90_000).unwrap_err(), "INVALID_COINS");
+        assert_eq!(complete_bullrun_daily(run.run_id, 10_000, 90_000).unwrap_err(), "INVALID_COINS");
         assert_eq!(complete_bullrun_daily(run.run_id, 80, 10).unwrap_err(), "INVALID_TIME");
         assert_eq!(complete_bullrun_daily(run.run_id, 95, 92_000).unwrap(), 1);
         assert_eq!(complete_bullrun_daily(run.run_id, 95, 92_000).unwrap_err(), "ALREADY_COMPLETED");

@@ -27,25 +27,30 @@ export default function BullRunPage({ actor, principal, onSignIn, onGoParticipat
           <Icon name="bull" size={16} stroke="var(--burn-ink)" />
           <Eyebrow accent>Play &amp; compete</Eyebrow>
         </span>
-        <b style={{ fontSize: 17 }}>Charge the streets. Reach the plaza.</b>
+        <b style={{ fontSize: 17 }}>Charge the endless street. Ten hits and it's over.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
-          You are the bull: 1.5 km of Spanish streets between you and the bullring,
-          coins on the cobbles and obstacles in the way.{' '}
+          You are the bull, horns-first through an ever-harder Spanish street packed
+          with runners in white and red scattering out of your way.{' '}
           <MoreInfo title="How Bull Run works">
             <p>
-              Three lanes down a whitewashed street. <span className="mono">←/→</span> cut
-              across, <span className="mono">↑/SPACE</span> jumps the barriers and barrel
-              stacks — <b>carts are too tall to jump</b>, you have to go around. Every
-              stumble halves your speed, and speed builds back only with clean running.
-              Exactly 120 coins line the course, some floating in arcs you can only
-              catch mid-jump.
+              Three lanes down a whitewashed street that never ends.{' '}
+              <span className="mono">←/→</span> cut across, <span className="mono">↑/SPACE</span>{' '}
+              jumps the barriers and barrel stacks — <b>carts are too tall to jump</b>,
+              you have to go around. Every stumble halves your speed;{' '}
+              <b>the tenth hit ends the run</b>. Coins line the cobbles, some floating
+              in arcs you can only catch mid-jump.
+            </p>
+            <p>
+              It gets harder the deeper you charge: the bull keeps accelerating,
+              obstacles pack tighter, and the crowd thickens until the runners
+              genuinely block your view of what's waiting behind them.
             </p>
             <p>
               <b>Practice</b> deals a fresh random street every run and records
               nothing. The <b>daily run</b> is one attempt per UTC day for
               no-loss-lottery stakers: every player charges the SAME street — same
-              barriers, same carts, same coin lines — ranked by coins collected,
-              ties broken by time to the plaza.
+              obstacles, same crowd, same coin lines — ranked by coins collected,
+              ties broken by run time.
             </p>
           </MoreInfo>
         </span>

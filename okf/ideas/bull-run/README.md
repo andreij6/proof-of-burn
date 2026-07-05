@@ -11,14 +11,22 @@ timestamp: 2026-07-04T00:00:00Z
 **Status: BUILT, shipped dark behind `arcade_bullrun` (enabled on local).**
 Dedicated page `#/bull-run`, nav in Play to Earn (bull icon).
 
-## The game
+## The game (v2 — ENDLESS, 2026-07-04)
 
-A lone black bull charges 1.5 km through Spanish streets to the plaza de
-toros. Three lanes (←/→), ↑/SPACE jumps barriers and barrel stacks — carts
-are too tall, dodge them. Stumbles halve speed (rebuilds at 1.2 m/s²,
-max 24 m/s); a 1.2 s post-stumble grace stops chain hits. EXACTLY 120 coins
-per course (20 runs of 6; ~40% float in jump arcs). Finish is guaranteed —
-ranking prices mistakes: coins desc → time asc.
+A lone black bull — rendered from BEHIND per the Pamplona press-photo
+reference (rump + shoulders + white horns sweeping up) — charges an endless
+Spanish street. Three lanes (←/→), ↑/SPACE jumps barriers/barrels; carts
+are too tall, dodge. **Ten hits end the run.** Progressive difficulty, all
+pure functions of distance: the bull's speed cap climbs 16 → 34 m/s,
+obstacle spacing shrinks 26 → 10 m, and the CROWD (runners in white with
+red scarves, who bolt for the walls as the bull nears) thickens 14 → 4.5 m
+apart — eventually genuinely occluding obstacles behind them (painter-order
+occlusion is the difficulty mechanic). Ranked coins desc → time asc; coin
+plausibility is rate-capped server-side (≤ 8/s + 20).
+
+The street STREAMS from independent per-subsystem PRNGs (obstacles, coins,
+buildings, crowd), so any chunking builds the identical street — the
+daily-fairness invariant is unit-tested.
 
 - **Practice**: random street each run, client-side.
 - **Daily**: mirrors Luck-Proof/Drop Zone — once per UTC day (local replays

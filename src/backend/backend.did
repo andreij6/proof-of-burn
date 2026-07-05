@@ -1084,16 +1084,17 @@ type SkydiveDailyStatus = record {
   my_entry : opt SkydiveDailyEntry;
   players_today : nat32;
 };
-// Bull Run (arcade game 5) — the encierro lane-runner: a black bull charges
-// through Spanish streets to the bullring collecting coins and dodging
-// obstacles. Course derives client-side from the day seed with EXACTLY
-// coins_total coins; ranked coins desc then time asc. Daily = once/UTC day
-// (local nets replay freely), stakers-only, same street for everyone.
+// Bull Run (arcade game 5) — the ENDLESS encierro lane-runner: a black bull
+// charges an ever-harder Spanish street (faster, denser obstacles, thicker
+// crowds blocking the view) collecting coins until it has hit hits_limit
+// obstacles. Course derives client-side from the day seed; ranked coins desc
+// then time asc; coins are plausibility-capped by run length. Daily = once
+// per UTC day (local nets replay freely), stakers-only, same street for all.
 type BullRunStart = record {
   run_id : nat64;
   day : nat32;
   course_seed : nat64;
-  coins_total : nat32;
+  hits_limit : nat32;
   issued_at : nat64;
 };
 type BullRunDailyEntry = record {
@@ -1115,7 +1116,7 @@ type BullRunDailyStatus = record {
   played : bool;
   my_entry : opt BullRunDailyEntry;
   players_today : nat32;
-  coins_total : nat32;
+  hits_limit : nat32;
 };
 type Result_20 = variant { Ok : BullRunStart; Err : text };
 type Result_18 = variant { Ok : SkydiveRunStart; Err : text };

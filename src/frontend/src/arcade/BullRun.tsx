@@ -3,123 +3,180 @@ import { Btn, Chip, Icon, LiveDot, formatPrincipal } from '../ui';
 import { mulberry } from './DropZone';
 
 // ==========================================
-// Bull Run — arcade game 5: the encierro lane-runner.
+// Bull Run — arcade game 5: the ENDLESS encierro.
 //
-// A lone black bull charges 1.5 km through Spanish streets to the bullring:
-// three lanes, ←/→ to cut across, ↑/SPACE to jump the barriers (carts can't
-// be jumped — dodge them), EXACTLY 120 coins laid along the course. Stumbles
-// halve your speed, so the board's coins-then-time ranking already prices
-// sloppy running. Same ink-outline look as Drop Zone, in Spanish-town color:
-// whitewash and ochre walls, terracotta roofs, red-and-yellow bunting.
+// You are the bull, seen from behind (the Pamplona press-photo view): black
+// shoulders and rump filling the frame, white horns out front, the street
+// ahead packed with runners in white and red scarves scattering as you
+// charge. The run never ends — it just gets harder: the bull accelerates
+// with distance, obstacles pack tighter, and the crowd thickens until it
+// genuinely blocks your view of what's behind it. TEN hits and the run is
+// over. Coins line the street; most coins wins the daily, ties to time.
 //
-// PRACTICE runs a random street. The DAILY mirrors the other Play-to-Earn
-// games: once per UTC day (local replays free), stakers-only, everyone runs
-// the SAME day-seeded street; completion is bounds-validated server-side.
+// The street streams procedurally from independent seeded generators (one
+// per subsystem), so any two clients extending it in different chunk sizes
+// still build the IDENTICAL street — the daily stays fair.
 // ==========================================
 
-// ── Course constants (meters) ──
-export const COURSE_M = 1_500;
+// ── Constants ──
 export const LANE_X = [-2.4, 0, 2.4];
 export const STREET_HALF_W = 4.2;
-export const COINS_TOTAL = 120; // mirrors the backend BULLRUN_COINS bound
+export const MAX_HITS = 10;      // run ends here (mirrors backend hits_limit)
 export const BASE_SPEED = 13;
-export const MAX_SPEED = 24;
-export const ACCEL = 0.12;       // m/s per second of clean running
 export const STUMBLE_FACTOR = 0.5;
 export const JUMP_VY = 7.8;
 export const GRAVITY = 20;
-export const BARRIER_CLEAR = 0.8; // airborne above this clears a barrier
+export const BARRIER_CLEAR = 0.8;
 
 export type ObstacleKind = 'barrier' | 'barrels' | 'cart';
-
 export interface Obstacle { z: number; lane: number; kind: ObstacleKind; hit?: boolean }
 export interface Coin { z: number; lane: number; y: number; taken?: boolean }
-export interface Building { z: number; side: -1 | 1; w: number; h: number; tone: number }
+export interface Building { z: number; side: -1 | 1; w: number; h: number; tone: number; awning: boolean; balcony: boolean }
+export interface CrowdAgent { z: number; x: number; wallX: number; dodge: boolean; phase: number }
 
-export interface Course {
+/** Difficulty is a pure function of distance — layout AND handling both
+ *  scale from it, so the same z means the same challenge for everyone. */
+export function difficultyAt(z: number): { spacing: number; doubleP: number; crowdGap: number; maxSpeed: number } {
+  const t = Math.min(1, z / 4_000);
+  return {
+    spacing: 26 - 16 * t,          // avg m between obstacle slots: 26 → 10
+    doubleP: 0.3 + 0.25 * t,       // chance a slot blocks a second lane
+    crowdGap: 14 - 9.5 * t,        // avg m between runners: 14 → 4.5
+    maxSpeed: Math.min(34, 16 + z / 300), // the bull just keeps accelerating
+  };
+}
+
+export interface Street {
   obstacles: Obstacle[];
   coins: Coin[];
   buildings: Building[];
-  buntings: number[]; // z positions of flag strings across the street
+  buntings: number[];
+  crowd: CrowdAgent[];
+  genZ: number; // generated up to here
+  // Independent deterministic streams — chunk-size can't change the street.
+  rObs: () => number;
+  rCoin: () => number;
+  rBld: () => number;
+  rCrowd: () => number;
+  // Per-subsystem cursors.
+  cObs: number; cCoin: number; cBldL: number; cBldR: number; cFlag: number; cCrowd: number;
 }
 
-/** The clearance height an airborne bull needs over each obstacle kind —
- *  carts are simply too tall to jump. */
+export function makeStreet(seed: number): Street {
+  const st: Street = {
+    obstacles: [], coins: [], buildings: [], buntings: [], crowd: [],
+    genZ: 0,
+    rObs: mulberry((seed ^ 0x0b57) >>> 0),
+    rCoin: mulberry((seed ^ 0xc019) >>> 0),
+    rBld: mulberry((seed ^ 0xb11d) >>> 0),
+    rCrowd: mulberry((seed ^ 0xc80d) >>> 0),
+    cObs: 55, cCoin: 40, cBldL: -20, cBldR: -20, cFlag: 90, cCrowd: 30,
+  };
+  ensureStreet(st, 320);
+  return st;
+}
+
+/** Stream the street out to `upToZ`. Deterministic for any chunking: each
+ *  subsystem consumes only its own PRNG, in strict z order. */
+export function ensureStreet(st: Street, upToZ: number): void {
+  if (upToZ <= st.genZ) return;
+  // Obstacles: spacing and double-blocks scale with difficulty; the third
+  // lane is ALWAYS open.
+  while (st.cObs < upToZ) {
+    const d = difficultyAt(st.cObs);
+    const lane = Math.floor(st.rObs() * 3);
+    const roll = st.rObs();
+    const kind: ObstacleKind = roll < 0.45 ? 'barrier' : roll < 0.75 ? 'barrels' : 'cart';
+    st.obstacles.push({ z: st.cObs, lane, kind });
+    if (st.rObs() < d.doubleP) {
+      const lane2 = (lane + 1 + Math.floor(st.rObs() * 2)) % 3;
+      st.obstacles.push({ z: st.cObs, lane: lane2, kind: st.rObs() < 0.6 ? 'barrier' : 'barrels' });
+    }
+    st.cObs += d.spacing * (0.75 + st.rObs() * 0.5);
+  }
+  // Coins: runs of 6, ground or jump-arc.
+  while (st.cCoin < upToZ) {
+    const lane = Math.floor(st.rCoin() * 3);
+    const arc = st.rCoin() < 0.4;
+    for (let i = 0; i < 6; i++) {
+      st.coins.push({ z: st.cCoin + i * 4, lane, y: arc ? 0.6 + Math.sin((i / 5) * Math.PI) * 1.3 : 0.55 });
+    }
+    st.cCoin += 34 + st.rCoin() * 26;
+  }
+  // Buildings, both walls.
+  while (st.cBldL < upToZ + 60) {
+    const w = 12 + st.rBld() * 10;
+    st.buildings.push({ z: st.cBldL, side: -1, w, h: 7 + st.rBld() * 8, tone: st.rBld(), awning: st.rBld() < 0.35, balcony: st.rBld() < 0.45 });
+    st.cBldL += w + 1.5;
+  }
+  while (st.cBldR < upToZ + 60) {
+    const w = 12 + st.rBld() * 10;
+    st.buildings.push({ z: st.cBldR, side: 1, w, h: 7 + st.rBld() * 8, tone: st.rBld(), awning: st.rBld() < 0.35, balcony: st.rBld() < 0.45 });
+    st.cBldR += w + 1.5;
+  }
+  while (st.cFlag < upToZ) {
+    st.buntings.push(st.cFlag);
+    st.cFlag += 70 + st.rBld() * 50;
+  }
+  // The crowd: runners scattered across the street, thicker with distance.
+  while (st.cCrowd < upToZ) {
+    const d = difficultyAt(st.cCrowd);
+    const x = (st.rCrowd() * 2 - 1) * (STREET_HALF_W - 0.7);
+    st.crowd.push({
+      z: st.cCrowd, x,
+      wallX: (x >= 0 ? 1 : -1) * (STREET_HALF_W - 0.35),
+      dodge: false,
+      phase: st.rCrowd() * Math.PI * 2,
+    });
+    st.cCrowd += d.crowdGap * (0.6 + st.rCrowd() * 0.8);
+  }
+  st.genZ = upToZ;
+}
+
+/** Prune everything the bull has passed (endless arrays stay small). */
+export function pruneStreet(st: Street, behindZ: number): void {
+  st.obstacles = st.obstacles.filter((o) => o.z > behindZ);
+  st.coins = st.coins.filter((c) => c.z > behindZ);
+  st.buildings = st.buildings.filter((b) => b.z + b.w > behindZ);
+  st.buntings = st.buntings.filter((b) => b > behindZ);
+  st.crowd = st.crowd.filter((c) => c.z > behindZ);
+}
+
+/** Runners near the bull's path bolt for the nearest wall. */
+export function stepCrowd(st: Street, bullX: number, bullZ: number, dt: number): void {
+  for (const a of st.crowd) {
+    const ahead = a.z - bullZ;
+    if (!a.dodge && ahead > 0 && ahead < 22 && Math.abs(a.x - bullX) < 2.1) {
+      a.dodge = true;
+    }
+    if (a.dodge && Math.abs(a.x - a.wallX) > 0.05) {
+      a.x += Math.sign(a.wallX - a.x) * 4.2 * dt;
+      a.z += 2.2 * dt; // panicked jog forward while clearing out
+    }
+    a.phase += dt * (a.dodge ? 14 : 3);
+  }
+}
+
 export function obstacleClearY(kind: ObstacleKind): number {
   return kind === 'cart' ? 99 : BARRIER_CLEAR;
 }
 
-/** Build the whole street from a seed. ALWAYS exactly COINS_TOTAL coins and
- *  never a z-slot with all three lanes blocked. */
-export function buildCourse(seed: number): Course {
-  const rand = mulberry(seed >>> 0);
-  const obstacles: Obstacle[] = [];
-  let z = 70;
-  while (z < COURSE_M - 80) {
-    const lane = Math.floor(rand() * 3);
-    const roll = rand();
-    const kind: ObstacleKind = roll < 0.45 ? 'barrier' : roll < 0.75 ? 'barrels' : 'cart';
-    obstacles.push({ z, lane, kind });
-    // Occasionally block a second lane — but never the third.
-    if (rand() < 0.3) {
-      const lane2 = (lane + 1 + Math.floor(rand() * 2)) % 3;
-      const roll2 = rand();
-      obstacles.push({ z, lane: lane2, kind: roll2 < 0.6 ? 'barrier' : 'barrels' });
-    }
-    z += 20 + rand() * 26;
-  }
-  // Coins: 20 runs of 6. Half hug a lane on the ground; the rest arc as if
-  // over a jump (collect them mid-air).
-  const coins: Coin[] = [];
-  for (let run = 0; run < 20; run++) {
-    const rz = 50 + (run / 20) * (COURSE_M - 140) + rand() * 30;
-    const lane = Math.floor(rand() * 3);
-    const arc = rand() < 0.4;
-    for (let i = 0; i < 6; i++) {
-      const cz = rz + i * 4;
-      const y = arc ? 0.6 + Math.sin((i / 5) * Math.PI) * 1.3 : 0.55;
-      coins.push({ z: cz, lane, y });
-    }
-  }
-  // Street walls: buildings marching down both sides.
-  const buildings: Building[] = [];
-  for (let side of [-1, 1] as const) {
-    let bz = -20;
-    while (bz < COURSE_M + 60) {
-      const w = 12 + rand() * 10;
-      buildings.push({ z: bz, side, w, h: 7 + rand() * 7, tone: rand() });
-      bz += w + 1.5;
-    }
-  }
-  const buntings: number[] = [];
-  for (let bz = 100; bz < COURSE_M - 60; bz += 80 + rand() * 60) buntings.push(bz);
-  return { obstacles, coins, buildings, buntings };
-}
-
-// ── Bull state & physics ──
+// ── Bull ──
 export interface BullState {
-  z: number;
-  lane: number;   // target lane index
-  x: number;      // smoothed world x
-  y: number;      // height above ground
-  vy: number;
-  speed: number;
-  coins: number;
-  stumbles: number;
-  invulnT: number; // seconds of post-stumble grace
-  t: number;       // run clock, seconds
+  z: number; lane: number; x: number; y: number; vy: number;
+  speed: number; coins: number; stumbles: number; invulnT: number; t: number;
 }
 
 export function freshBull(): BullState {
   return { z: 0, lane: 1, x: 0, y: 0, vy: 0, speed: BASE_SPEED, coins: 0, stumbles: 0, invulnT: 0, t: 0 };
 }
 
-/** One physics step: advance, lerp into the lane, integrate the jump,
- *  collect coins, stumble on obstacles. Pure — mutates and returns `b`. */
-export function stepBull(b: BullState, course: Course, dt: number): BullState {
+/** One step of the endless run. The speed ceiling comes from difficultyAt —
+ *  the deeper you get, the faster the street comes at you. */
+export function stepBull(b: BullState, st: Street, dt: number): BullState {
   b.t += dt;
-  // Clean running builds speed back up; ACCEL is per second of running.
-  b.speed = Math.min(MAX_SPEED, b.speed + ACCEL * 10 * dt);
+  const cap = difficultyAt(b.z).maxSpeed;
+  b.speed = Math.min(cap, b.speed + 1.2 * dt);
   b.z += b.speed * dt;
   b.x += (LANE_X[b.lane] - b.x) * Math.min(1, dt * 9);
   if (b.y > 0 || b.vy > 0) {
@@ -128,18 +185,16 @@ export function stepBull(b: BullState, course: Course, dt: number): BullState {
     if (b.y === 0) b.vy = 0;
   }
   if (b.invulnT > 0) b.invulnT = Math.max(0, b.invulnT - dt);
-  // Coins: same lane, close in z, and reachable in y.
-  for (const c of course.coins) {
+  for (const c of st.coins) {
     if (c.taken || Math.abs(c.z - b.z) > 1.4) continue;
-    if (LANE_X[c.lane] !== LANE_X[b.lane]) continue;
+    if (c.lane !== b.lane) continue;
     if (Math.abs(c.y - (b.y + 0.5)) < 1.05) {
       c.taken = true;
       b.coins += 1;
     }
   }
-  // Obstacles: stumble unless airborne above the clear height.
   if (b.invulnT === 0) {
-    for (const o of course.obstacles) {
+    for (const o of st.obstacles) {
       if (o.hit || Math.abs(o.z - b.z) > 1.1 || o.lane !== b.lane) continue;
       if (b.y >= obstacleClearY(o.kind)) continue;
       o.hit = true;
@@ -151,17 +206,16 @@ export function stepBull(b: BullState, course: Course, dt: number): BullState {
   return b;
 }
 
-/** Friendly copy for daily error codes (mirrors the other dailies). */
 export function friendlyBullErr(code: string): string {
   switch (code) {
     case 'NOT_STAKED': return 'The daily run is for no-loss-lottery stakers — stake any amount of ICP to enter.';
     case 'ALREADY_PLAYED_TODAY': return 'You\'ve run today\'s street — a fresh course opens at 00:00 UTC.';
-    case 'RUN_EXPIRED': return 'This run timed out (15-minute limit). Today\'s attempt was consumed.';
+    case 'RUN_EXPIRED': return 'This run timed out (30-minute limit). Today\'s attempt was consumed.';
     default: return code;
   }
 }
 
-// ── Projection (chase cam straight down the street) ──
+// ── Projection (chase cam, slightly high — the press-photo angle) ──
 interface Cam { x: number; y: number; z: number; pitch: number; f: number; w: number; h: number }
 function project(cam: Cam, wx: number, wy: number, wz: number): { sx: number; sy: number; d: number } | null {
   const dx = wx - cam.x, dy = wy - cam.y, dz = wz - cam.z;
@@ -172,14 +226,13 @@ function project(cam: Cam, wx: number, wy: number, wz: number): { sx: number; sy
   return { sx: cam.w / 2 + (cam.f * dx) / rd, sy: cam.h / 2 - (cam.f * ry) / rd, d: rd };
 }
 
-/** Anime line boil. */
 function boil(id: number, tick: number): number {
   const n = Math.sin(id * 127.1 + tick * 311.7) * 43758.5453;
   return (n - Math.floor(n) - 0.5) * 2.2;
 }
 
 type Mode = 'menu' | 'play' | 'done';
-interface DailyStatus { day: number; eligible: boolean; played: boolean; my_entry?: any; players_today: number; coins_total: number }
+interface DailyStatus { day: number; eligible: boolean; played: boolean; my_entry?: any; players_today: number; hits_limit: number }
 interface DailyRow { rank: number; player: any; coins: number; millis: bigint }
 
 interface BullRunProps {
@@ -195,11 +248,11 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
   const [err, setErr] = useState<string | null>(null);
   const [status, setStatus] = useState<DailyStatus | null>(null);
   const [board, setBoard] = useState<DailyRow[]>([]);
-  const [result, setResult] = useState<{ coins: number; ms: number; stumbles: number; daily: boolean; rank: number | null } | null>(null);
+  const [result, setResult] = useState<{ coins: number; ms: number; dist: number; daily: boolean; rank: number | null } | null>(null);
 
   const g = useRef<{
-    course: Course; bull: BullState; daily: boolean; runId: bigint | null;
-    finished: boolean; keys: Record<string, boolean>; t: number;
+    street: Street; bull: BullState; daily: boolean; runId: bigint | null;
+    finished: boolean; keys: Record<string, boolean>; t: number; lastPrune: number;
   } | null>(null);
 
   const refreshMenu = async () => {
@@ -214,7 +267,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
   useEffect(() => { refreshMenu(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor]);
 
   const launch = (seed: number, daily: boolean, runId: bigint | null) => {
-    g.current = { course: buildCourse(seed), bull: freshBull(), daily, runId, finished: false, keys: {}, t: 0 };
+    g.current = { street: makeStreet(seed), bull: freshBull(), daily, runId, finished: false, keys: {}, t: 0, lastPrune: 0 };
     setResult(null); setErr(null);
     setMode('play');
   };
@@ -236,7 +289,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     const game = g.current;
     if (!game?.runId) return null;
     try {
-      const res = await actor.complete_bullrun_daily(game.runId, coins, BigInt(Math.max(45_001, Math.round(ms))));
+      const res = await actor.complete_bullrun_daily(game.runId, coins, BigInt(Math.max(10_001, Math.round(ms))));
       if (res.__kind__ === 'Err') throw new Error(friendlyBullErr(res.Err));
       return res.Ok as number;
     } catch (e: any) { setErr(e?.message || String(e)); return null; }
@@ -254,12 +307,11 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     game.bull.y = 0.01;
   };
 
-  // ── Input ──
   useEffect(() => {
     if (mode !== 'play') return;
     const down = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
-      if (['arrowleft', 'arrowright', 'arrowup', ' '].includes(e.key.toLowerCase()) || e.key === ' ') e.preventDefault();
+      if (['arrowleft', 'arrowright', 'arrowup'].includes(k) || e.key === ' ') e.preventDefault();
       if (k === 'arrowleft' || k === 'a') steer(-1);
       if (k === 'arrowright' || k === 'd') steer(1);
       if (k === 'arrowup' || k === 'w' || k === ' ') jump();
@@ -269,7 +321,6 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  // ── Loop ──
   useEffect(() => {
     if (mode !== 'play') return;
     const canvas = canvasRef.current;
@@ -287,15 +338,21 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
       last = now;
       game.t += dt;
       if (!game.finished) {
-        stepBull(game.bull, game.course, dt);
-        if (game.bull.z >= COURSE_M) {
+        ensureStreet(game.street, game.bull.z + 280);
+        stepBull(game.bull, game.street, dt);
+        stepCrowd(game.street, game.bull.x, game.bull.z, dt);
+        if (game.bull.z - game.lastPrune > 120) {
+          pruneStreet(game.street, game.bull.z - 30);
+          game.lastPrune = game.bull.z;
+        }
+        if (game.bull.stumbles >= MAX_HITS) {
           game.finished = true;
           if (!doneHandled) {
             doneHandled = true;
             const b = game.bull;
             (async () => {
               const rank = game.daily ? await submitDaily(b.coins, b.t * 1000) : null;
-              setResult({ coins: b.coins, ms: b.t * 1000, stumbles: b.stumbles, daily: game.daily, rank });
+              setResult({ coins: b.coins, ms: b.t * 1000, dist: b.z, daily: game.daily, rank });
               setMode('done');
               refreshMenu();
             })();
@@ -309,25 +366,24 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  // ── Renderer: warm Spanish street in ink ──
+  // ── Renderer ──
   const INK = '#1a1a1a';
   const draw = (ctx: CanvasRenderingContext2D, W: number, H: number, game: NonNullable<typeof g.current>) => {
     const tick = Math.floor(game.t * 5);
     const b = game.bull;
-    const cam: Cam = { x: b.x * 0.55, y: 3.6 + b.y * 0.3, z: b.z - 8.5, pitch: 0.16, f: H * 0.95, w: W, h: H };
+    // Higher, steeper chase cam — the press-photo look down onto the bull.
+    const cam: Cam = { x: b.x * 0.55, y: 4.6 + b.y * 0.3, z: b.z - 7.5, pitch: 0.24, f: H * 0.98, w: W, h: H };
 
-    // Warm sky + sun.
     const horizon = project(cam, cam.x, 0, cam.z + 900);
-    const hy = Math.max(0, Math.min(H, horizon ? horizon.sy : H * 0.4));
+    const hy = Math.max(0, Math.min(H, horizon ? horizon.sy : H * 0.35));
     const sky = ctx.createLinearGradient(0, 0, 0, Math.max(1, hy));
     sky.addColorStop(0, '#8ec3e6');
     sky.addColorStop(1, '#f6e2b8');
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, hy);
     ctx.fillStyle = '#f9d976';
-    ctx.beginPath(); ctx.arc(W * 0.78, hy * 0.42, 26, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(W * 0.78, hy * 0.4, 24, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#c9a24a'; ctx.lineWidth = 1.5; ctx.stroke();
-    // Street surface.
     const road = ctx.createLinearGradient(0, hy, 0, H);
     road.addColorStop(0, '#cfc3ae');
     road.addColorStop(1, '#e5dbc8');
@@ -336,28 +392,10 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     ctx.strokeStyle = INK;
     ctx.lineCap = 'round';
 
-    // The arena at the end of the street (grows as you approach).
-    {
-      const az = Math.max(b.z + 60, COURSE_M + 25);
-      const c = project(cam, 0, 0, az);
-      if (c) {
-        const r = Math.max(24, (cam.f * 60) / c.d);
-        ctx.fillStyle = '#d8a86a';
-        ctx.beginPath(); ctx.ellipse(c.sx, c.sy - r * 0.28, r, r * 0.34, 0, Math.PI, 0); ctx.closePath(); ctx.fill();
-        ctx.strokeStyle = '#8a6a3a'; ctx.lineWidth = 2; ctx.stroke();
-        ctx.fillStyle = '#b4824a';
-        for (let a2 = 0; a2 < 7; a2++) {
-          const gx = c.sx - r + (a2 + 0.5) * (r / 3.5);
-          ctx.beginPath(); ctx.arc(gx, c.sy - r * 0.06, r * 0.055, Math.PI, 0); ctx.closePath(); ctx.fill();
-        }
-        ctx.strokeStyle = INK;
-      }
-    }
-
     const q: { d: number; draw: () => void }[] = [];
 
-    // Cobblestone bands + curbs.
-    for (let cz = Math.floor(b.z / 6) * 6; cz < b.z + 140; cz += 6) {
+    // Cobble bands.
+    for (let cz = Math.floor(b.z / 6) * 6; cz < b.z + 130; cz += 6) {
       const a = project(cam, -STREET_HALF_W, 0, cz);
       const b2 = project(cam, STREET_HALF_W, 0, cz);
       if (!a || !b2) continue;
@@ -369,27 +407,10 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
         ctx.strokeStyle = INK;
       }});
     }
-    for (const side of [-1, 1]) {
-      const a = project(cam, side * STREET_HALF_W, 0, b.z);
-      if (!a) continue;
-      q.push({ d: 500, draw: () => {
-        ctx.strokeStyle = '#8f8474'; ctx.lineWidth = 2.4;
-        ctx.beginPath();
-        let started = false;
-        for (let cz = b.z - 2; cz < b.z + 160; cz += 8) {
-          const pt = project(cam, side * STREET_HALF_W, 0.12, cz);
-          if (!pt) continue;
-          started ? ctx.lineTo(pt.sx, pt.sy) : ctx.moveTo(pt.sx, pt.sy);
-          started = true;
-        }
-        ctx.stroke();
-        ctx.strokeStyle = INK;
-      }});
-    }
 
-    // Buildings lining the street.
-    game.course.buildings.forEach((bd) => {
-      if (bd.z + bd.w < b.z - 4 || bd.z > b.z + 180) return;
+    // Buildings with awnings, balconies, shutters.
+    game.street.buildings.forEach((bd) => {
+      if (bd.z + bd.w < b.z - 4 || bd.z > b.z + 170) return;
       const x0 = bd.side * STREET_HALF_W;
       const base = project(cam, x0, 0, Math.max(bd.z, b.z + 0.5));
       if (!base) return;
@@ -397,40 +418,75 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
         const cnr = (zz: number, y: number) => project(cam, x0, y, zz);
         const p1 = cnr(bd.z, 0), p2 = cnr(bd.z + bd.w, 0), p3 = cnr(bd.z + bd.w, bd.h), p4 = cnr(bd.z, bd.h);
         if (!p1 || !p2 || !p3 || !p4) return;
-        const wall = bd.tone < 0.4 ? '#f5efe2' : bd.tone < 0.7 ? '#efe0c0' : '#e6c890';
+        const wall = bd.tone < 0.35 ? '#f5efe2' : bd.tone < 0.6 ? '#efe0c0' : bd.tone < 0.85 ? '#e6c890' : '#dba9a0';
         ctx.beginPath();
         ctx.moveTo(p1.sx, p1.sy); ctx.lineTo(p2.sx, p2.sy); ctx.lineTo(p3.sx, p3.sy); ctx.lineTo(p4.sx, p4.sy);
         ctx.closePath();
         ctx.fillStyle = wall; ctx.fill();
         ctx.strokeStyle = '#4a4438'; ctx.lineWidth = 1.4; ctx.stroke();
-        // Terracotta roof strip.
         const r4 = cnr(bd.z, bd.h + 1.2), r3 = cnr(bd.z + bd.w, bd.h + 1.2);
         if (r3 && r4) {
           ctx.beginPath();
           ctx.moveTo(p4.sx, p4.sy); ctx.lineTo(p3.sx, p3.sy); ctx.lineTo(r3.sx, r3.sy); ctx.lineTo(r4.sx, r4.sy);
           ctx.closePath();
           ctx.fillStyle = '#b05a3c'; ctx.fill(); ctx.stroke();
+          // Roof tile ticks.
+          ctx.strokeStyle = 'rgba(90,40,25,0.5)'; ctx.lineWidth = 0.9;
+          for (let tt = 0.15; tt < 1; tt += 0.18) {
+            const tx1 = p4.sx + (p3.sx - p4.sx) * tt, ty1 = p4.sy + (p3.sy - p4.sy) * tt;
+            const tx2 = r4.sx + (r3.sx - r4.sx) * tt, ty2 = r4.sy + (r3.sy - r4.sy) * tt;
+            ctx.beginPath(); ctx.moveTo(tx1, ty1); ctx.lineTo(tx2, ty2); ctx.stroke();
+          }
+          ctx.strokeStyle = '#4a4438';
         }
-        // Windows: dark punches with tiny balconies.
+        // Windows with shutters; balconies on some rows.
         const rows = Math.max(1, Math.floor(bd.h / 3.4));
         const cols = Math.max(1, Math.floor(bd.w / 4.5));
         for (let rr2 = 0; rr2 < rows; rr2++) {
           for (let cc = 0; cc < cols; cc++) {
             const wz = bd.z + (cc + 0.5) * (bd.w / cols);
-            const wy = 1.6 + rr2 * 3.1;
+            const wy = 1.8 + rr2 * 3.1;
             const wp = project(cam, x0, wy, wz);
             const wp2 = project(cam, x0, wy + 1.4, wz + 0.9);
             if (!wp || !wp2) continue;
+            const ww = Math.max(2, wp2.sx - wp.sx), wh = Math.max(2.5, wp.sy - wp2.sy);
             ctx.fillStyle = '#3a332a';
-            ctx.fillRect(wp.sx, wp2.sy, Math.max(2, wp2.sx - wp.sx), Math.max(2.5, wp.sy - wp2.sy));
+            ctx.fillRect(wp.sx, wp2.sy, ww, wh);
+            // Shutters.
+            ctx.fillStyle = '#6d8a56';
+            ctx.fillRect(wp.sx - ww * 0.35, wp2.sy, ww * 0.28, wh);
+            ctx.fillRect(wp.sx + ww * 1.07, wp2.sy, ww * 0.28, wh);
+            // Balcony rail under upper-floor windows.
+            if (bd.balcony && rr2 > 0) {
+              ctx.strokeStyle = '#2c2c2c'; ctx.lineWidth = 0.9;
+              ctx.strokeRect(wp.sx - ww * 0.3, wp2.sy + wh, ww * 1.6, Math.max(1.5, wh * 0.3));
+              for (let bx = 0; bx <= 4; bx++) {
+                const rx = wp.sx - ww * 0.3 + (ww * 1.6 * bx) / 4;
+                ctx.beginPath(); ctx.moveTo(rx, wp2.sy + wh); ctx.lineTo(rx, wp2.sy + wh + Math.max(1.5, wh * 0.3)); ctx.stroke();
+              }
+              ctx.strokeStyle = '#4a4438';
+            }
+          }
+        }
+        // Street-level awning.
+        if (bd.awning) {
+          const az1 = cnr(bd.z + bd.w * 0.2, 2.6), az2 = cnr(bd.z + bd.w * 0.8, 2.6);
+          const ax1 = project(cam, x0 * 0.82, 2.1, bd.z + bd.w * 0.2);
+          const ax2 = project(cam, x0 * 0.82, 2.1, bd.z + bd.w * 0.8);
+          if (az1 && az2 && ax1 && ax2) {
+            ctx.beginPath();
+            ctx.moveTo(az1.sx, az1.sy); ctx.lineTo(az2.sx, az2.sy); ctx.lineTo(ax2.sx, ax2.sy); ctx.lineTo(ax1.sx, ax1.sy);
+            ctx.closePath();
+            ctx.fillStyle = bd.tone < 0.5 ? '#d23b3b' : '#e8b93c';
+            ctx.fill(); ctx.lineWidth = 1.2; ctx.stroke();
           }
         }
       }});
     });
 
-    // Bunting: catenary of red/yellow flags across the street.
-    game.course.buntings.forEach((bz, i) => {
-      if (bz < b.z + 2 || bz > b.z + 150) return;
+    // Bunting.
+    game.street.buntings.forEach((bz, i) => {
+      if (bz < b.z + 2 || bz > b.z + 140) return;
       const a = project(cam, -STREET_HALF_W, 5.4, bz);
       const c2 = project(cam, STREET_HALF_W, 5.4, bz);
       if (!a || !c2) return;
@@ -452,8 +508,8 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     });
 
     // Obstacles.
-    game.course.obstacles.forEach((o) => {
-      if (o.z < b.z - 3 || o.z > b.z + 150) return;
+    game.street.obstacles.forEach((o) => {
+      if (o.z < b.z - 3 || o.z > b.z + 140) return;
       const base = project(cam, LANE_X[o.lane], 0, o.z);
       if (!base) return;
       q.push({ d: base.d, draw: () => {
@@ -467,46 +523,34 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
           ctx.fillStyle = '#f2ede2';
           ctx.fillRect(-w2, -h2, w2 * 2, h2 * 0.8);
           ctx.fillStyle = '#d23b3b';
-          for (let sgm = 0; sgm < 4; sgm += 2) {
-            ctx.fillRect(-w2 + (sgm * w2) / 2, -h2, w2 / 2, h2 * 0.8);
-          }
+          for (let sgm = 0; sgm < 4; sgm += 2) ctx.fillRect(-w2 + (sgm * w2) / 2, -h2, w2 / 2, h2 * 0.8);
           ctx.lineWidth = 1.4;
           ctx.strokeRect(-w2, -h2, w2 * 2, h2 * 0.8);
-          ctx.beginPath(); ctx.moveTo(-w2 * 0.8, 0); ctx.lineTo(-w2 * 0.6, -h2 * 0.25);
-          ctx.moveTo(w2 * 0.8, 0); ctx.lineTo(w2 * 0.6, -h2 * 0.25); ctx.stroke();
         } else if (o.kind === 'barrels') {
           const r2 = scale * 0.55;
           for (const ox of [-0.55, 0.55]) {
             ctx.fillStyle = '#9c6b3f';
             ctx.beginPath(); ctx.ellipse(ox * scale, -r2, r2 * 0.8, r2, 0, 0, Math.PI * 2); ctx.fill();
             ctx.lineWidth = 1.3; ctx.stroke();
-            ctx.strokeStyle = '#5a3d24';
-            ctx.beginPath(); ctx.moveTo(ox * scale - r2 * 0.75, -r2); ctx.lineTo(ox * scale + r2 * 0.75, -r2); ctx.stroke();
-            ctx.strokeStyle = INK;
           }
         } else {
-          // Cart: tall wooden box + wheels — unjumpable.
           const w2 = scale * 1.3, h2 = scale * 2.3;
           ctx.fillStyle = '#8a5a34';
           ctx.fillRect(-w2, -h2, w2 * 2, h2 * 0.9);
           ctx.lineWidth = 1.6;
           ctx.strokeRect(-w2, -h2, w2 * 2, h2 * 0.9);
-          ctx.strokeStyle = '#5a3d24';
-          ctx.beginPath(); ctx.moveTo(-w2, -h2 * 0.55); ctx.lineTo(w2, -h2 * 0.55); ctx.stroke();
-          ctx.strokeStyle = INK;
           ctx.fillStyle = '#3a332a';
           for (const wx of [-0.75, 0.75]) {
-            ctx.beginPath(); ctx.arc(wx * scale, -scale * 0.32, scale * 0.34, 0, Math.PI * 2); ctx.fill();
-            ctx.stroke();
+            ctx.beginPath(); ctx.arc(wx * scale, -scale * 0.32, scale * 0.34, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
           }
         }
         ctx.restore();
       }});
     });
 
-    // Coins: spinning gold with ground shadow.
-    game.course.coins.forEach((c2, ci) => {
-      if (c2.taken || c2.z < b.z - 2 || c2.z > b.z + 120) return;
+    // Coins.
+    game.street.coins.forEach((c2, ci) => {
+      if (c2.taken || c2.z < b.z - 2 || c2.z > b.z + 110) return;
       const pt = project(cam, LANE_X[c2.lane], c2.y, c2.z);
       const gp = project(cam, LANE_X[c2.lane], 0, c2.z);
       if (!pt) return;
@@ -524,65 +568,131 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
       }});
     });
 
+    // ── The crowd: white shirts, red scarves, scattering as you come ──
+    game.street.crowd.forEach((a) => {
+      if (a.z < b.z - 2 || a.z > b.z + 130) return;
+      const pt = project(cam, a.x, 0, a.z);
+      if (!pt) return;
+      q.push({ d: pt.d, draw: () => {
+        const s2 = Math.max(4, (cam.f * 0.62) / pt.d);
+        const legSwing = Math.sin(a.phase) * (a.dodge ? 0.5 : 0.12);
+        ctx.save();
+        ctx.translate(pt.sx, pt.sy);
+        // Shadow.
+        ctx.fillStyle = 'rgba(40,35,25,0.22)';
+        ctx.beginPath(); ctx.ellipse(0, 0, s2 * 0.4, s2 * 0.13, 0, 0, Math.PI * 2); ctx.fill();
+        // Legs (white trousers).
+        ctx.strokeStyle = '#f2efe6'; ctx.lineWidth = Math.max(1.6, s2 * 0.16);
+        ctx.beginPath();
+        ctx.moveTo(-legSwing * s2 * 0.5, 0); ctx.lineTo(0, -s2 * 0.75);
+        ctx.moveTo(legSwing * s2 * 0.5, 0); ctx.lineTo(0, -s2 * 0.75);
+        ctx.stroke();
+        // Torso (white shirt) + ink outline.
+        ctx.fillStyle = '#faf8f2';
+        ctx.beginPath();
+        ctx.ellipse(0, -s2 * 1.05, s2 * 0.3, s2 * 0.42, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(30,30,30,0.6)'; ctx.lineWidth = 1; ctx.stroke();
+        // Arms — flailing when dodging.
+        ctx.strokeStyle = '#faf8f2'; ctx.lineWidth = Math.max(1.4, s2 * 0.13);
+        const armUp = a.dodge ? -0.5 : 0.15;
+        ctx.beginPath();
+        ctx.moveTo(-s2 * 0.28, -s2 * 1.2); ctx.lineTo(-s2 * 0.55, -s2 * (1.2 - armUp));
+        ctx.moveTo(s2 * 0.28, -s2 * 1.2); ctx.lineTo(s2 * 0.55, -s2 * (1.2 - armUp));
+        ctx.stroke();
+        // Red scarf at the neck.
+        ctx.fillStyle = '#d23b3b';
+        ctx.fillRect(-s2 * 0.16, -s2 * 1.44, s2 * 0.32, Math.max(1.4, s2 * 0.12));
+        // Head.
+        ctx.fillStyle = '#e8c9a8';
+        ctx.beginPath(); ctx.arc(0, -s2 * 1.62, s2 * 0.19, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = 'rgba(30,30,30,0.6)'; ctx.lineWidth = 0.9; ctx.stroke();
+        ctx.restore();
+        ctx.strokeStyle = INK;
+      }});
+    });
+
     q.sort((a, b2) => b2.d - a.d).forEach((o) => o.draw());
 
-    // ── The bull (always on top) ──
+    // ── The bull, seen from behind (the photo perspective) ──
     {
       const c = project(cam, b.x, b.y + 0.55, b.z);
       const gp = project(cam, b.x, 0, b.z);
       if (gp) {
         ctx.fillStyle = 'rgba(40,35,25,0.3)';
-        const sr = Math.max(6, (cam.f * 1.1) / gp.d);
+        const sr = Math.max(7, (cam.f * 1.15) / gp.d);
         ctx.beginPath(); ctx.ellipse(gp.sx, gp.sy, sr, sr * 0.3, 0, 0, Math.PI * 2); ctx.fill();
       }
       if (c) {
-        const s2 = Math.max(10, (cam.f * 1.05) / c.d);
+        const s2 = Math.max(12, (cam.f * 1.15) / c.d);
         const gallop = Math.sin(b.z * 1.7);
         const flash = b.invulnT > 0 && Math.floor(game.t * 10) % 2 === 0;
         ctx.save();
         ctx.translate(c.sx, c.sy);
-        ctx.rotate((LANE_X[b.lane] - b.x) * 0.16);
+        ctx.rotate((LANE_X[b.lane] - b.x) * 0.14);
         ctx.globalAlpha = flash ? 0.45 : 1;
-        ctx.strokeStyle = INK;
-        // Legs (gallop phases).
-        ctx.lineWidth = Math.max(2.4, s2 * 0.16);
+        // Hind legs kicking out to the sides (rear view).
+        ctx.strokeStyle = '#141414'; ctx.lineWidth = Math.max(3, s2 * 0.18);
         ctx.beginPath();
-        for (const [lx, ph] of [[-0.55, 0], [-0.25, 2.2], [0.28, 1.1], [0.55, 3.3]] as const) {
-          const swing = Math.sin(b.z * 1.7 + ph) * 0.35;
-          ctx.moveTo(lx * s2, s2 * 0.28);
-          ctx.lineTo(lx * s2 + swing * s2, s2 * 0.75);
-        }
+        ctx.moveTo(-s2 * 0.42, s2 * 0.2); ctx.lineTo(-s2 * (0.55 + gallop * 0.1), s2 * 0.72);
+        ctx.moveTo(s2 * 0.42, s2 * 0.2); ctx.lineTo(s2 * (0.55 - gallop * 0.1), s2 * 0.72);
         ctx.stroke();
-        // Body — a charging black mass, hump forward.
-        ctx.fillStyle = '#141414';
+        // Front hooves peeking ahead (smaller, higher).
+        ctx.lineWidth = Math.max(2.2, s2 * 0.12);
         ctx.beginPath();
-        ctx.ellipse(0, 0, s2 * 0.85, s2 * 0.42 + gallop * s2 * 0.02, -0.06, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.ellipse(s2 * 0.52, -s2 * 0.18, s2 * 0.38, s2 * 0.3, 0, 0, Math.PI * 2);
-        ctx.fill();
-        // Head (facing away, slightly down) + white horns.
-        ctx.beginPath();
-        ctx.ellipse(s2 * 0.78, -s2 * 0.06, s2 * 0.22, s2 * 0.2, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#f5f2ea'; ctx.lineWidth = Math.max(2, s2 * 0.12);
-        ctx.beginPath();
-        ctx.moveTo(s2 * 0.68, -s2 * 0.22); ctx.quadraticCurveTo(s2 * 0.58, -s2 * 0.5, s2 * 0.78, -s2 * 0.56);
-        ctx.moveTo(s2 * 0.9, -s2 * 0.22); ctx.quadraticCurveTo(s2 * 1.0, -s2 * 0.5, s2 * 0.82, -s2 * 0.56);
+        ctx.moveTo(-s2 * 0.2, -s2 * 0.32); ctx.lineTo(-s2 * (0.26 - gallop * 0.06), -s2 * 0.05);
+        ctx.moveTo(s2 * 0.2, -s2 * 0.32); ctx.lineTo(s2 * (0.26 + gallop * 0.06), -s2 * 0.05);
         ctx.stroke();
-        // Tail whip.
-        ctx.strokeStyle = INK; ctx.lineWidth = Math.max(1.6, s2 * 0.08);
+        // Rump — the big dark mass closest to camera.
+        ctx.fillStyle = '#111111';
         ctx.beginPath();
-        ctx.moveTo(-s2 * 0.8, -s2 * 0.1);
-        ctx.quadraticCurveTo(-s2 * 1.1, -s2 * 0.3 + gallop * s2 * 0.15, -s2 * 1.2, -s2 * 0.05);
+        ctx.ellipse(0, s2 * 0.05, s2 * 0.62, s2 * 0.45, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Shoulders/hump — narrower, higher on screen (further away).
+        ctx.beginPath();
+        ctx.ellipse(0, -s2 * 0.32, s2 * 0.48, s2 * 0.3, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Spine highlight down the back.
+        ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = Math.max(1.5, s2 * 0.07);
+        ctx.beginPath(); ctx.moveTo(0, s2 * 0.32); ctx.quadraticCurveTo(0, -s2 * 0.05, 0, -s2 * 0.42); ctx.stroke();
+        // Head, low between the shoulders.
+        ctx.fillStyle = '#0c0c0c';
+        ctx.beginPath();
+        ctx.ellipse(0, -s2 * 0.56, s2 * 0.22, s2 * 0.16, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Ears flicking out.
+        ctx.beginPath();
+        ctx.ellipse(-s2 * 0.26, -s2 * 0.58, s2 * 0.08, s2 * 0.045, -0.5, 0, Math.PI * 2);
+        ctx.ellipse(s2 * 0.26, -s2 * 0.58, s2 * 0.08, s2 * 0.045, 0.5, 0, Math.PI * 2);
+        ctx.fill();
+        // The horns: thick white crescents sweeping out and UP — the photo's
+        // signature read.
+        ctx.strokeStyle = '#f5f2ea'; ctx.lineWidth = Math.max(3, s2 * 0.16); ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(-s2 * 0.16, -s2 * 0.6);
+        ctx.quadraticCurveTo(-s2 * 0.52, -s2 * 0.68, -s2 * 0.46, -s2 * 0.95);
+        ctx.moveTo(s2 * 0.16, -s2 * 0.6);
+        ctx.quadraticCurveTo(s2 * 0.52, -s2 * 0.68, s2 * 0.46, -s2 * 0.95);
+        ctx.stroke();
+        // Horn tips darken.
+        ctx.strokeStyle = '#2c2c2c'; ctx.lineWidth = Math.max(2, s2 * 0.09);
+        ctx.beginPath();
+        ctx.moveTo(-s2 * 0.47, -s2 * 0.88); ctx.lineTo(-s2 * 0.46, -s2 * 0.97);
+        ctx.moveTo(s2 * 0.47, -s2 * 0.88); ctx.lineTo(s2 * 0.46, -s2 * 0.97);
+        ctx.stroke();
+        // Tail whipping over the rump.
+        ctx.strokeStyle = '#141414'; ctx.lineWidth = Math.max(1.8, s2 * 0.09);
+        ctx.beginPath();
+        ctx.moveTo(0, s2 * 0.4);
+        ctx.quadraticCurveTo(gallop * s2 * 0.3, s2 * 0.75, gallop * s2 * 0.42, s2 * 0.62);
         ctx.stroke();
         ctx.restore();
-        // Dust puffs at speed.
+        // Dust.
         if (b.y === 0 && b.speed > 15) {
           ctx.fillStyle = 'rgba(160,145,110,0.35)';
           for (let d2 = 0; d2 < 3; d2++) {
-            const px = c.sx - s2 * (0.9 + d2 * 0.35) + boil(d2, tick) * 2;
-            ctx.beginPath(); ctx.arc(px, c.sy + s2 * 0.45, s2 * (0.12 + d2 * 0.05), 0, Math.PI * 2); ctx.fill();
+            const px = c.sx + (d2 - 1) * s2 * 0.4 + boil(d2, tick) * 2;
+            ctx.beginPath(); ctx.arc(px, c.sy + s2 * 0.6, s2 * (0.1 + d2 * 0.04), 0, Math.PI * 2); ctx.fill();
           }
         }
       }
@@ -590,35 +700,33 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
 
     // ── HUD ──
     ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    ctx.fillRect(8, 8, 140, 60);
-    ctx.strokeStyle = '#8a8a8a'; ctx.lineWidth = 1; ctx.strokeRect(8, 8, 140, 60);
+    ctx.fillRect(8, 8, 148, 62);
+    ctx.strokeStyle = '#8a8a8a'; ctx.lineWidth = 1; ctx.strokeRect(8, 8, 148, 62);
     ctx.fillStyle = '#c9931a';
     ctx.beginPath(); ctx.arc(22, 24, 6, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#8a6a1a'; ctx.stroke();
     ctx.fillStyle = INK;
     ctx.font = '700 14px ui-monospace, monospace';
-    ctx.fillText(`${b.coins}/${COINS_TOTAL}`, 34, 29);
+    ctx.fillText(`${b.coins}`, 34, 29);
     ctx.font = '600 12px ui-monospace, monospace';
-    ctx.fillText(`${Math.round(b.speed * 3.6)} km/h`, 14, 47);
-    ctx.fillText(`${b.t.toFixed(1)} s`, 14, 62);
-    // Progress to the arena.
-    const pw = Math.min(320, W * 0.5), px0 = (W - pw) / 2;
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.fillRect(px0, 12, pw, 9);
-    ctx.strokeStyle = INK; ctx.lineWidth = 1.2; ctx.strokeRect(px0, 12, pw, 9);
-    ctx.fillStyle = '#d23b3b';
-    ctx.fillRect(px0, 12, pw * Math.min(1, b.z / COURSE_M), 9);
-    ctx.font = '600 10px ui-monospace, monospace';
-    ctx.fillStyle = INK;
-    ctx.textAlign = 'center';
-    ctx.fillText('PLAZA DE TOROS', px0 + pw / 2, 31);
-    if (b.z < 40) {
+    ctx.fillText(`${Math.round(b.speed * 3.6)} km/h · ${Math.round(b.z)} m`, 14, 47);
+    ctx.fillText(`${b.t.toFixed(1)} s`, 14, 63);
+    // Hits: the run's life bar.
+    const hitsLeft = MAX_HITS - b.stumbles;
+    ctx.font = `700 ${hitsLeft <= 3 ? 17 : 14}px ui-monospace, monospace`;
+    ctx.fillStyle = hitsLeft <= 3 ? '#b02a2a' : INK;
+    ctx.textAlign = 'right';
+    ctx.fillText(`HITS ${b.stumbles}/${MAX_HITS}`, W - 12, 26);
+    ctx.textAlign = 'left';
+    if (b.z < 30) {
+      ctx.textAlign = 'center';
       ctx.globalAlpha = 0.75 + 0.25 * Math.sin(game.t * 6);
       ctx.font = '700 22px ui-monospace, monospace';
-      ctx.fillText('¡A LA PLAZA!', W / 2, H * 0.3);
+      ctx.fillStyle = INK;
+      ctx.fillText('¡QUE VIENE EL TORO!', W / 2, H * 0.28);
       ctx.globalAlpha = 1;
+      ctx.textAlign = 'left';
     }
-    ctx.textAlign = 'left';
   };
 
   const fmtS = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
@@ -643,10 +751,11 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
               <Chip tone="muted" style={{ alignSelf: 'flex-start', height: 19, fontSize: 10 }}>Practice</Chip>
               <b style={{ fontSize: 15 }}>Free runs</b>
               <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0, lineHeight: 1.5, flex: 1 }}>
-                A fresh street every run, nothing recorded. <span className="mono">←/→</span> cut
-                across the lanes, <span className="mono">↑/SPACE</span> jumps the barriers and
-                barrels — <b>carts can't be jumped</b>, go around. Every stumble halves your
-                speed; the coins don't collect themselves.
+                An endless street, fresh every run. <span className="mono">←/→</span> cut across
+                the lanes, <span className="mono">↑/SPACE</span> jumps barriers and barrels —
+                <b> carts can't be jumped</b>. Ten hits ends the run. The deeper you go, the
+                faster you charge, the tighter the obstacles, and the thicker the crowd
+                blocking your view.
               </p>
               <Btn variant="secondary" onClick={startPractice}><Icon name="bull" size={13} /> Run</Btn>
             </div>
@@ -656,9 +765,10 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
               </Chip>
               <b style={{ fontSize: 15 }}>One run · same street for everyone</b>
               <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0, lineHeight: 1.5, flex: 1 }}>
-                Everyone charges today's exact street — same barriers, same carts, same{' '}
-                {status?.coins_total ?? 120} coins. Most coins wins; ties go to the faster
-                bull. <b>One attempt — no restarts.</b> Resets 00:00 UTC.
+                Everyone charges today's exact street — same obstacles, same crowd, same
+                coin lines, until {status?.hits_limit ?? 10} hits end the run. Most coins
+                wins; ties go to the faster bull. <b>One attempt — no restarts.</b> Resets
+                00:00 UTC.
               </p>
               {status && !status.eligible ? (
                 <div className="col" style={{ gap: 8 }}>
@@ -720,7 +830,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
             <Btn variant="secondary" sm onClick={() => steer(1)} style={{ minWidth: 96, minHeight: 46 }}>LANE ▶</Btn>
           </div>
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'center' }}>
-            ←/→ lanes · ↑/space jump · carts can't be jumped — dodge them
+            ←/→ lanes · ↑/space jump · carts can't be jumped · 10 hits ends the run
           </span>
         </div>
       )}
@@ -728,11 +838,11 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
       {mode === 'done' && result && (
         <div className="card col" style={{ gap: 12 }}>
           <h3 style={{ margin: 0 }}>
-            {result.coins === COINS_TOTAL ? '¡PERFECTO! Every coin in the street.' : `Reached the plaza with ${result.coins} coins.`}
+            The street won — {MAX_HITS} hits after {Math.round(result.dist)} m.
           </h3>
           <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-            <Chip tone="ok"><span className="mono">{result.coins}/{COINS_TOTAL} coins · {fmtS(result.ms)}</span></Chip>
-            <Chip tone="muted"><span className="mono">{result.stumbles} stumble{result.stumbles === 1 ? '' : 's'}</span></Chip>
+            <Chip tone="ok"><span className="mono">{result.coins} coins · {fmtS(result.ms)}</span></Chip>
+            <Chip tone="muted"><span className="mono">{Math.round(result.dist)} m survived</span></Chip>
             {result.daily && result.rank !== null && (
               <Chip tone="burn"><span className="mono">rank #{result.rank} today</span></Chip>
             )}
