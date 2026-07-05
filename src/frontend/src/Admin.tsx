@@ -170,6 +170,17 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   const [lottery, setLottery] = useState<LotteryInfo | null>(null);
   const [ea, setEa] = useState<EarlyAdopterInfo | null>(null);
   const [staking, setStaking] = useState<StakingPoolInfo | null>(null);
+  const [lpPoolStats, setLpPoolStats] = useState<{ pool: any; name: string; positions: bigint; token0_symbol: string; token0_amount: bigint; token1_symbol: string; token1_amount: bigint; usd_e8s: bigint; error?: string | null }[] | null>(null);
+  const [lpStatsBusy, setLpStatsBusy] = useState(false);
+  const loadLpPoolStats = async () => {
+    if (!actor || lpStatsBusy) return;
+    setLpStatsBusy(true);
+    try {
+      const res = await actor.admin_get_icp_lp_pool_stats();
+      if (res.__kind__ === 'Ok') setLpPoolStats(res.Ok);
+    } catch { /* surfaced by the empty state */ }
+    finally { setLpStatsBusy(false); }
+  };
   const [pool, setPool] = useState<PoolInfo | null>(null);
 
   // ── course moderation ──
@@ -962,6 +973,49 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       {/* ════ STAKING & LOTTERY ════ */}
       {section === 'staking' && (
         <>
+          {/* ── ICP LP custody: staked value per approved pool ── */}
+          <div className="col" style={{ ...card, gap: 10 }}>
+            <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+              <Eyebrow>ICP LP staked per pool</Eyebrow>
+              <Btn variant="secondary" sm onClick={loadLpPoolStats} disabled={lpStatsBusy}>
+                {lpStatsBusy ? <LiveDot size={7} /> : <Icon name="refresh" size={12} />} {lpPoolStats ? 'Refresh' : 'Load'}
+              </Btn>
+            </span>
+            {!lpPoolStats ? (
+              <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
+                Reads each approved pool live (positions in custody, token totals, USD value).
+              </span>
+            ) : lpPoolStats.length === 0 ? (
+              <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>No pools configured.</span>
+            ) : (
+              <div className="col" style={{ gap: 4 }}>
+                <div className="row mono" style={{ gap: 8, fontSize: 10.5, color: 'var(--fg-3)', justifyContent: 'space-between' }}>
+                  <span style={{ flex: 2 }}>pool</span>
+                  <span style={{ flex: 1, textAlign: 'right' }}>positions</span>
+                  <span style={{ flex: 3, textAlign: 'right' }}>custodied amounts</span>
+                  <span style={{ flex: 1, textAlign: 'right' }}>value</span>
+                </div>
+                {lpPoolStats.map((row) => (
+                  <div key={row.pool.toString()} className="row mono" style={{ gap: 8, fontSize: 12, justifyContent: 'space-between', padding: '5px 0', borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
+                    <span style={{ flex: 2 }}>{row.name}</span>
+                    <span style={{ flex: 1, textAlign: 'right' }}>{Number(row.positions)}</span>
+                    <span style={{ flex: 3, textAlign: 'right', color: 'var(--fg-2)' }}>
+                      {row.error
+                        ? <span style={{ color: 'var(--ember)' }}>valuation failed</span>
+                        : `${row.token0_amount} ${row.token0_symbol} · ${row.token1_amount} ${row.token1_symbol}`}
+                    </span>
+                    <span style={{ flex: 1, textAlign: 'right', fontWeight: 600 }}>
+                      ${(Number(row.usd_e8s) / 1e8).toFixed(2)}
+                    </span>
+                  </div>
+                ))}
+                <span className="row" style={{ justifyContent: 'flex-end', fontSize: 12.5, fontWeight: 700, paddingTop: 4, borderTop: '1px solid var(--border-hi)' }}>
+                  total ${(lpPoolStats.reduce((a, r) => a + Number(r.usd_e8s), 0) / 1e8).toFixed(2)}
+                </span>
+              </div>
+            )}
+          </div>
+
           <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
             <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
               <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>

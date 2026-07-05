@@ -14767,6 +14767,64 @@ async fn claim_lp_reward() -> Result<LpClaimResult, String> {
     Err("NO_QUALIFYING_LP".to_string())
 }
 
+/// One approved pool's custody snapshot for the Admin page: how many
+/// positions we hold and what they're worth right now.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct IcpLpPoolStats {
+    pub pool: Principal,
+    pub name: String,
+    pub positions: u64,
+    pub token0_symbol: String,
+    pub token0_amount: u128,
+    pub token1_symbol: String,
+    pub token1_amount: u128,
+    pub usd_e8s: u64,
+    /// Valuation error for THIS pool, if any (others still report).
+    pub error: Option<String>,
+}
+
+/// Admin: live staked-LP totals per approved pool (positions counted from
+/// the custody registry; amounts read from each pool's tick math; USD via
+/// the cached XRC rates). Update call — it reads the pools live.
+#[ic_cdk::update]
+async fn admin_get_icp_lp_pool_stats() -> Result<Vec<IcpLpPoolStats>, String> {
+    require_admin()?;
+    let pools = ICPSWAP_POOLS.with(|c| c.borrow().get().clone()).pools;
+    let mut out = Vec::with_capacity(pools.len());
+    for cfg in pools {
+        let ids: Vec<u128> = STAKED_LP.with(|m| {
+            m.borrow().iter().filter(|e| e.key().pool == cfg.pool).map(|e| e.key().position_id).collect()
+        });
+        let mut row = IcpLpPoolStats {
+            pool: cfg.pool,
+            name: cfg.name.clone(),
+            positions: ids.len() as u64,
+            token0_symbol: cfg.token0_symbol.clone(),
+            token0_amount: 0,
+            token1_symbol: cfg.token1_symbol.clone(),
+            token1_amount: 0,
+            usd_e8s: 0,
+            error: None,
+        };
+        if !ids.is_empty() {
+            match icpswap_position_amounts(cfg.pool, &ids).await {
+                Ok(amounts) => {
+                    for id in &ids {
+                        let (a0, a1) = amounts.get(id).copied().unwrap_or((0, 0));
+                        row.token0_amount = row.token0_amount.saturating_add(a0);
+                        row.token1_amount = row.token1_amount.saturating_add(a1);
+                    }
+                    row.usd_e8s = icp_lp_amount_usd_e8s(cfg.token0_ledger, row.token0_amount)
+                        .saturating_add(icp_lp_amount_usd_e8s(cfg.token1_ledger, row.token1_amount));
+                }
+                Err(e) => row.error = Some(e),
+            }
+        }
+        out.push(row);
+    }
+    Ok(out)
+}
+
 /// Admin: configure the qualifying pools. Mints as base58 strings.
 #[ic_cdk::update]
 fn admin_set_lp_pools(pools: Vec<LpPoolView>) -> Result<u64, String> {
@@ -32972,6 +33030,51 @@ mod tests {
         MOCK_ICPSWAP_CLAIMS.with(|m| { m.borrow_mut().insert((pool, 5), (1_000_000, 0)); });
         harvest_icpswap_lp().await;
         assert_eq!(acct_get(me, Some(ICPSWAP_LP_YIELD_SUBACCOUNT)), 0, "throttled: no new claim happened");
+        clear_icp_lp();
+    }
+
+    #[tokio::test]
+    async fn test_icp_lp_admin_pool_stats() {
+        enable_icp_lp();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(carol());
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.admins.push(carol());
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+        admin_set_explorer_ledger(ExplorerToken::CkUSDC, p("xevnm-gaaaa-aaaar-qafnq-cai")).unwrap();
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let usdc = token_ledger(IdeaToken::CkUSDC, &cfg);
+        admin_set_icpswap_pools(vec![IcpLpPoolCfg {
+            name: "ICP/ckUSDC".into(), pool,
+            token0_symbol: "ckUSDC".into(), token0_ledger: usdc,
+            token1_symbol: "ckUSDC".into(), token1_ledger: usdc,
+        }]).unwrap();
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![1, 2]); });
+        set_mock_caller(alice());
+        reserve_lp_position(pool, 1).unwrap();
+        stake_lp_position(pool, 1).await.unwrap();
+        set_mock_caller(bob());
+        reserve_lp_position(pool, 2).unwrap();
+        stake_lp_position(pool, 2).await.unwrap();
+        MOCK_ICPSWAP_AMOUNTS.with(|m| {
+            m.borrow_mut().insert((pool, 1), (2_500_000, 0)); // $2.50
+            m.borrow_mut().insert((pool, 2), (7_500_000, 0)); // $7.50
+        });
+
+        // Non-admin rejected.
+        assert!(admin_get_icp_lp_pool_stats().await.is_err());
+        set_mock_caller(carol());
+        let stats = admin_get_icp_lp_pool_stats().await.unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].positions, 2);
+        assert_eq!(stats[0].token0_amount, 10_000_000);
+        assert_eq!(stats[0].usd_e8s, 10 * 100_000_000, "$10 of LP custodied");
+        assert!(stats[0].error.is_none());
+
+        for u in [alice(), bob()] {
+            STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, u)); });
+        }
         clear_icp_lp();
     }
 

@@ -1191,6 +1191,19 @@ type IcpLpInfo = record {
   granted_today : bool;
 };
 type Result_24 = variant { Ok : IcpLpPositionView; Err : text };
+// Admin custody snapshot per approved ICPSwap pool.
+type IcpLpPoolStats = record {
+  pool : principal;
+  name : text;
+  positions : nat64;
+  token0_symbol : text;
+  token0_amount : nat;
+  token1_symbol : text;
+  token1_amount : nat;
+  usd_e8s : nat64;
+  error : opt text;
+};
+type Result_25 = variant { Ok : vec IcpLpPoolStats; Err : text };
 type Result_21 = variant { Ok : text; Err : text };
 type Result_22 = variant { Ok : LpClaimResult; Err : text };
 type Result_23 = variant { Ok : nat64; Err : text };
@@ -2195,6 +2208,8 @@ service : (InitPayload) -> {
   // Return a custodied position to `return_to`; staker-only, never flag-gated.
   unstake_lp_position : (principal, nat, principal) -> (Result);
   admin_set_icpswap_pools : (vec IcpLpPoolCfg) -> (Result_23);
+  // Live staked-LP totals per approved pool (admin; reads the pools).
+  admin_get_icp_lp_pool_stats : () -> (Result_25);
   // Local/dev mocks (only consulted on native tests / local replicas).
   dev_set_icpswap_mock_positions : (principal, vec nat) -> (Result);
   dev_set_icpswap_mock_claim : (principal, nat, nat64, nat64) -> (Result);
