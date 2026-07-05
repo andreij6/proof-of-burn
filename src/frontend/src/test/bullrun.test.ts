@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   makeStreet, ensureStreet, pruneStreet, stepCrowd, freshBull, stepBull,
-  obstacleClearY, difficultyAt, friendlyBullErr,
+  obstacleClearY, difficultyAt, friendlyBullErr, tapZone,
   MAX_HITS, LANE_X, BASE_SPEED, BARRIER_CLEAR, JUMP_VY, GRAVITY, STREET_HALF_W, COIN_HIGH_Y,
 } from '../arcade/BullRun';
 
@@ -163,6 +163,18 @@ describe('bull physics (endless)', () => {
     b.lane = 2;
     for (let i = 0; i < 120; i++) stepBull(b, st, 1 / 60);
     expect(Math.abs(b.x - LANE_X[2])).toBeLessThan(0.05);
+  });
+});
+
+describe('mobile tap zones', () => {
+  it('maps thirds of the canvas to lane-left / jump / lane-right', () => {
+    expect(tapZone(0)).toBe('left');
+    expect(tapZone(0.32)).toBe('left');
+    expect(tapZone(0.34)).toBe('jump');
+    expect(tapZone(0.5)).toBe('jump');
+    expect(tapZone(0.66)).toBe('jump');
+    expect(tapZone(0.68)).toBe('right');
+    expect(tapZone(1)).toBe('right');
   });
 });
 

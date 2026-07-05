@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Btn, Chip, Icon, LiveDot, formatPrincipal } from '../ui';
-import { mulberry } from './DropZone';
+import { mulberry, isTouchDevice } from './DropZone';
 
 // ==========================================
 // Bull Run — arcade game 5: the ENDLESS encierro.
@@ -277,6 +277,14 @@ export function playHitSound(): void {
   noise.start(t);
 }
 
+/** Map a tap's horizontal position (0..1 of canvas width) to an action —
+ *  left third = lane left, right third = lane right, middle = jump. */
+export function tapZone(xFrac: number): 'left' | 'jump' | 'right' {
+  if (xFrac < 1 / 3) return 'left';
+  if (xFrac > 2 / 3) return 'right';
+  return 'jump';
+}
+
 export function friendlyBullErr(code: string): string {
   switch (code) {
     case 'NOT_STAKED': return 'The daily run is for no-loss-lottery stakers — stake any amount of ICP to enter.';
@@ -391,6 +399,41 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     return () => window.removeEventListener('keydown', down);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
+
+  // Mobile fullscreen: lock scroll + match the backbuffer to the viewport
+  // (the fixed 720×440 buffer CSS-shrunk to phone width was unreadable).
+  const fullscreen = mode === 'play' && isTouchDevice();
+  useEffect(() => {
+    if (!fullscreen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const resize = () => {
+      const c = canvasRef.current;
+      if (!c) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      c.width = Math.round(window.innerWidth * dpr);
+      c.height = Math.round(window.innerHeight * dpr);
+    };
+    resize();
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', resize);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener('resize', resize);
+      window.removeEventListener('orientationchange', resize);
+    };
+  }, [fullscreen]);
+
+  /** Whole-canvas tap zones: fastest thumbs never leave the action. */
+  const onCanvasTouch = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    if (!t) return;
+    const rect = (e.target as HTMLElement).getBoundingClientRect();
+    const action = tapZone((t.clientX - rect.left) / rect.width);
+    if (action === 'left') steer(-1);
+    else if (action === 'right') steer(1);
+    else jump();
+  };
 
   useEffect(() => {
     if (mode !== 'play') return;
@@ -949,21 +992,47 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
       )}
 
       {mode === 'play' && (
-        <div className="col" style={{ gap: 8 }}>
+        <div
+          className={fullscreen ? undefined : 'col'}
+          style={fullscreen
+            ? { position: 'fixed', inset: 0, zIndex: 80, background: '#e9dfc8', touchAction: 'none' }
+            : { gap: 8 }}
+        >
           <canvas
             ref={canvasRef}
             width={720}
             height={440}
-            style={{ width: '100%', height: 'auto', borderRadius: 10, border: '1px solid var(--border-hi)', touchAction: 'none', background: '#e9dfc8' }}
+            onTouchStart={fullscreen ? onCanvasTouch : undefined}
+            style={fullscreen
+              ? { width: '100%', height: '100%', display: 'block', touchAction: 'none', background: '#e9dfc8' }
+              : { width: '100%', height: 'auto', borderRadius: 10, border: '1px solid var(--border-hi)', touchAction: 'none', background: '#e9dfc8' }}
           />
-          <div className="row" style={{ gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
-            <Btn variant="secondary" sm onClick={() => steer(-1)} style={{ minWidth: 96, minHeight: 46 }}>◀ LANE</Btn>
-            <Btn variant="primary" sm onClick={jump} style={{ minWidth: 120, minHeight: 46 }}>▲ JUMP</Btn>
-            <Btn variant="secondary" sm onClick={() => steer(1)} style={{ minWidth: 96, minHeight: 46 }}>LANE ▶</Btn>
-          </div>
-          <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'center' }}>
-            ←/→ lanes · ↑/space jump · carts can't be jumped · 10 hits ends the run
-          </span>
+          {fullscreen ? (
+            <>
+              <button
+                onClick={() => { setMode('menu'); g.current = null; refreshMenu(); }}
+                style={{ position: 'absolute', top: 'calc(env(safe-area-inset-top, 0px) + 10px)', left: 10, width: 40, height: 40, borderRadius: 20, border: '1px solid var(--border-hi)', background: 'rgba(255,255,255,0.85)', fontSize: 16, color: '#1a1a1a' }}
+                aria-label="Quit"
+              >✕</button>
+              <button onClick={() => steer(-1)} style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 22px)', left: 14, width: 88, height: 88, borderRadius: 44, border: '2px solid #1a1a1a', background: 'rgba(255,255,255,0.82)', fontSize: 24, color: '#1a1a1a' }} aria-label="Lane left">◀</button>
+              <button onClick={jump} style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 22px)', left: '50%', transform: 'translateX(-50%)', width: 112, height: 88, borderRadius: 44, border: 'none', background: 'var(--burn)', color: 'var(--char-950)', fontSize: 17, fontWeight: 800, boxShadow: '0 4px 14px rgba(0,0,0,0.25)' }}>JUMP</button>
+              <button onClick={() => steer(1)} style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 22px)', right: 14, width: 88, height: 88, borderRadius: 44, border: '2px solid #1a1a1a', background: 'rgba(255,255,255,0.82)', fontSize: 24, color: '#1a1a1a' }} aria-label="Lane right">▶</button>
+              <span className="mono" style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 4px)', left: '50%', transform: 'translateX(-50%)', fontSize: 10, color: 'rgba(26,26,26,0.55)', whiteSpace: 'nowrap' }}>
+                tap sides for lanes · tap middle to jump
+              </span>
+            </>
+          ) : (
+            <>
+              <div className="row" style={{ gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+                <Btn variant="secondary" sm onClick={() => steer(-1)} style={{ minWidth: 96, minHeight: 46 }}>◀ LANE</Btn>
+                <Btn variant="primary" sm onClick={jump} style={{ minWidth: 120, minHeight: 46 }}>▲ JUMP</Btn>
+                <Btn variant="secondary" sm onClick={() => steer(1)} style={{ minWidth: 96, minHeight: 46 }}>LANE ▶</Btn>
+              </div>
+              <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'center' }}>
+                ←/→ lanes · ↑/space jump · carts can't be jumped · 10 hits ends the run
+              </span>
+            </>
+          )}
         </div>
       )}
 

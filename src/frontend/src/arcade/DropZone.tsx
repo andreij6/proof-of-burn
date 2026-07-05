@@ -204,6 +204,11 @@ export function distanceToTarget(x: number, z: number, sc: Scenario): number {
   return Math.hypot(x - sc.targetX, z - sc.targetZ);
 }
 
+/** Coarse-pointer (touch) device — drives the mobile fullscreen shell. */
+export function isTouchDevice(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches === true;
+}
+
 /** Friendly copy for daily error codes (mirrors Luck-Proof's). */
 export function friendlyDropErr(code: string): string {
   switch (code) {
@@ -266,6 +271,8 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
     keys: Record<string, boolean>; touch: { ax: number; az: number };
     /** Smoothed pose feedback: x = bank (−1..1 with ←/→), y = pitch (↑/↓). */
     lean: { x: number; y: number };
+    /** Mobile fullscreen: controls overlay the canvas; minimap moves top-right. */
+    mobileUi: boolean;
     t: number;
   } | null>(null);
 
@@ -287,7 +294,8 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
       phase: 'plane', planeT: 0,
       fall: { x: 0, y: PLANE_ALT, z: 0, vx: 0, vy: 0, vz: 0, chute: false, deployAlt: null },
       jumpAt: 0, endAt: 0, daily, runId,
-      keys: {}, touch: { ax: 0, az: 0 }, lean: { x: 0, y: 0 }, t: 0,
+      keys: {}, touch: { ax: 0, az: 0 }, lean: { x: 0, y: 0 },
+      mobileUi: isTouchDevice(), t: 0,
     };
     setResult(null); setErr(null);
     setMode('play');
@@ -322,6 +330,31 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
       return null;
     }
   };
+
+  // Mobile fullscreen: lock page scroll and match the canvas backbuffer to
+  // the viewport (dpr-aware, capped ×2) so the HUD is crisp and readable —
+  // the fixed 720×460 backbuffer CSS-shrunk to phone width was unreadable.
+  const fullscreen = mode === 'play' && isTouchDevice();
+  useEffect(() => {
+    if (!fullscreen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const resize = () => {
+      const c = canvasRef.current;
+      if (!c) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      c.width = Math.round(window.innerWidth * dpr);
+      c.height = Math.round(window.innerHeight * dpr);
+    };
+    resize();
+    window.addEventListener('resize', resize);
+    window.addEventListener('orientationchange', resize);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener('resize', resize);
+      window.removeEventListener('orientationchange', resize);
+    };
+  }, [fullscreen]);
 
   // ── Input ──
   useEffect(() => {
@@ -950,7 +983,11 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
     }
 
     // ── Minimap ──
-    const ms = Math.min(130, W * 0.24), mx = 12, my = H - ms - 12;
+    const ms = Math.min(130, W * 0.24);
+    // Desktop: bottom-left (owner preference). Mobile fullscreen: top-right —
+    // bottom-left is the DIVE thumb's home.
+    const mx = game.mobileUi ? W - ms - 12 : 12;
+    const my = game.mobileUi ? 12 : H - ms - 12;
     ctx.fillStyle = 'rgba(250,250,248,0.9)';
     ctx.fillRect(mx, my, ms, ms);
     ctx.strokeStyle = INK; ctx.lineWidth = 1.6; ctx.strokeRect(mx, my, ms, ms);
@@ -1091,7 +1128,12 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
       )}
 
       {mode === 'play' && (
-        <div className="col" style={{ gap: 8 }}>
+        <div
+          className={fullscreen ? undefined : 'col'}
+          style={fullscreen
+            ? { position: 'fixed', inset: 0, zIndex: 80, background: '#f6f4ef', touchAction: 'none' }
+            : { gap: 8 }}
+        >
           <canvas
             ref={canvasRef}
             width={720}
@@ -1099,23 +1141,60 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
             onTouchStart={onTouchMove}
             onTouchMove={onTouchMove}
             onTouchEnd={onTouchEnd}
-            style={{ width: '100%', height: 'auto', borderRadius: 10, border: '1px solid var(--border-hi)', touchAction: 'none', background: '#f6f4ef' }}
+            style={fullscreen
+              ? { width: '100%', height: '100%', display: 'block', touchAction: 'none', background: '#f6f4ef' }
+              : { width: '100%', height: 'auto', borderRadius: 10, border: '1px solid var(--border-hi)', touchAction: 'none', background: '#f6f4ef' }}
           />
-          <div className="row" style={{ gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
-            <Btn variant="primary" sm onClick={jump} style={{ minWidth: 110, minHeight: 44 }}>J · JUMP</Btn>
-            <span
-              onPointerDown={() => { if (g.current) g.current.keys['shift'] = true; }}
-              onPointerUp={() => { if (g.current) g.current.keys['shift'] = false; }}
-              onPointerLeave={() => { if (g.current) g.current.keys['shift'] = false; }}
-              style={{ display: 'inline-flex' }}
-            >
-              <Btn variant="secondary" sm style={{ minWidth: 110, minHeight: 44 }}>SHIFT · DIVE</Btn>
-            </span>
-            <Btn variant="primary" sm onClick={toggleChute} style={{ minWidth: 110, minHeight: 44 }}>SPACE · CHUTE/CUT</Btn>
-          </div>
-          <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'center' }}>
-            arrows steer (touch: drag) · deploy above 80 m to land safely
-          </span>
+          {fullscreen ? (
+            <>
+              {/* ── Thumb controls, overlaid ── */}
+              <button
+                onClick={() => { setMode('menu'); g.current = null; refreshMenu(); }}
+                style={{ position: 'absolute', top: 'calc(env(safe-area-inset-top, 0px) + 10px)', left: 10, width: 40, height: 40, borderRadius: 20, border: '1px solid var(--border-hi)', background: 'rgba(255,255,255,0.85)', fontSize: 16, color: '#1a1a1a' }}
+                aria-label="Quit"
+              >✕</button>
+              {g.current?.phase === 'plane' ? (
+                <button
+                  onClick={jump}
+                  style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 22px)', left: '50%', transform: 'translateX(-50%)', minWidth: 170, height: 62, borderRadius: 31, border: 'none', background: 'var(--burn)', color: 'var(--char-950)', fontSize: 19, fontWeight: 800, letterSpacing: '0.04em', boxShadow: '0 4px 14px rgba(0,0,0,0.25)' }}
+                >JUMP</button>
+              ) : (
+                <>
+                  <button
+                    onPointerDown={() => { if (g.current) g.current.keys['shift'] = true; }}
+                    onPointerUp={() => { if (g.current) g.current.keys['shift'] = false; }}
+                    onPointerLeave={() => { if (g.current) g.current.keys['shift'] = false; }}
+                    style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 22px)', left: 14, width: 96, height: 96, borderRadius: 48, border: '2px solid #1a1a1a', background: 'rgba(255,255,255,0.82)', fontSize: 15, fontWeight: 700, color: '#1a1a1a', touchAction: 'none' }}
+                  >DIVE<br /><span style={{ fontSize: 10, fontWeight: 500 }}>hold</span></button>
+                  <button
+                    onClick={toggleChute}
+                    style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 22px)', right: 14, width: 96, height: 96, borderRadius: 48, border: 'none', background: 'var(--burn)', color: 'var(--char-950)', fontSize: 15, fontWeight: 800, boxShadow: '0 4px 14px rgba(0,0,0,0.25)' }}
+                  >{g.current?.fall.chute ? 'CUT' : 'CHUTE'}</button>
+                </>
+              )}
+              <span className="mono" style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 4px)', left: '50%', transform: 'translateX(-50%)', fontSize: 10, color: 'rgba(26,26,26,0.55)', whiteSpace: 'nowrap' }}>
+                drag anywhere to steer
+              </span>
+            </>
+          ) : (
+            <>
+              <div className="row" style={{ gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+                <Btn variant="primary" sm onClick={jump} style={{ minWidth: 110, minHeight: 44 }}>J · JUMP</Btn>
+                <span
+                  onPointerDown={() => { if (g.current) g.current.keys['shift'] = true; }}
+                  onPointerUp={() => { if (g.current) g.current.keys['shift'] = false; }}
+                  onPointerLeave={() => { if (g.current) g.current.keys['shift'] = false; }}
+                  style={{ display: 'inline-flex' }}
+                >
+                  <Btn variant="secondary" sm style={{ minWidth: 110, minHeight: 44 }}>SHIFT · DIVE</Btn>
+                </span>
+                <Btn variant="primary" sm onClick={toggleChute} style={{ minWidth: 110, minHeight: 44 }}>SPACE · CHUTE/CUT</Btn>
+              </div>
+              <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'center' }}>
+                arrows steer (touch: drag) · deploy above 80 m to land safely
+              </span>
+            </>
+          )}
         </div>
       )}
 
