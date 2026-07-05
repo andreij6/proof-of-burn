@@ -1,56 +1,25 @@
 import { Principal } from "@icp-sdk/core/principal";
 import { Icon, Eyebrow, MoreInfo, Chip, LiveDot } from "./ui";
-import { useHashScreen } from "./nav";
 import Lottery from "./Lottery";
-import Staking from "./Staking";
 
 // ==========================================
-// Lottery hub — a Community-R&D-style tabbed page: "Drawings" (the lossless
-// draws) and "Stake to Earn Tickets" (staking). Staking lives here because its
-// only reward is daily lottery tickets; voting is burn-only and grants no
-// voting power. The active tab lives in the hash (#/lottery, #/lottery/staking)
-// so the Back button moves between tabs.
+// Lottery — the drawings page. Staking moved to its own "Neuron Stake" page
+// (Stake to Earn nav section); the old #/lottery/staking deep link redirects
+// there via pageFromHash.
 // ==========================================
 
 interface LotteryHubProps {
   actor: any;
-  identity: any;
   principal: Principal | null;
-  host: string;
-  rootKey?: Uint8Array;
-  ledgerCanisterId: string;
   isLocal: boolean;
-  /** Whether lossless staking is enabled (gates the staking tab). */
-  stakingEnabled: boolean;
-  /** Whether Boosters (permanent stake) is enabled (shown within staking). */
-  boostersEnabled: boolean;
-  /** The permanent Booster neuron is admin-only — non-admins never see it. */
-  isAdmin: boolean;
-  /** Treasury can front the unstake fee; false hides/blocks unstaking. */
-  treasuryCanFront: boolean;
   onSignIn: () => void;
-  /** Called after stake/unstake so the app shell can refresh balances. */
-  onActivity: () => void;
+  /** Stake CTAs navigate to the Neuron Stake page. */
+  onGoNeuronStake: () => void;
 }
 
-type Tab = 'lottery' | 'staking';
-
 export default function LotteryHub({
-  actor, identity, principal, host, rootKey, ledgerCanisterId,
-  isLocal, stakingEnabled, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity,
+  actor, principal, isLocal, onSignIn, onGoNeuronStake,
 }: LotteryHubProps) {
-  // Active tab lives in the hash (#/lottery, #/lottery/staking) so Back moves
-  // between tabs instead of leaving the page.
-  const [screen, setScreen] = useHashScreen<Tab>('/lottery', 'lottery');
-  const stakeEnabled = stakingEnabled || boostersEnabled;
-  // Fall back to the Drawings tab if staking is disabled.
-  const tab: Tab = screen === 'staking' && stakeEnabled ? 'staking' : 'lottery';
-
-  const tabs: [Tab, string][] = [
-    ['lottery', 'Drawings'],
-    ...(stakeEnabled ? ([['staking', 'Stake to Earn Tickets']] as [Tab, string][]) : []),
-  ];
-
   return (
     <>
       <div className="idea-board-container" style={{ paddingBottom: 0 }}>
@@ -98,54 +67,15 @@ export default function LotteryHub({
           </p>
         </div>
 
-        {/* ── Tab bar ── */}
-        <div className="row" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 2, gap: 16, width: '100%', overflowX: 'auto', scrollbarWidth: 'none', marginTop: 10 }}>
-          {tabs.map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setScreen(key)}
-              style={{
-                background: 'transparent', border: 'none',
-                color: tab === key ? 'var(--burn-ink)' : 'var(--fg-3)',
-                fontSize: 14, fontWeight: tab === key ? 600 : 500,
-                cursor: 'pointer', padding: '6px 4px', position: 'relative', whiteSpace: 'nowrap',
-                transition: 'color var(--dur-fast) var(--ease-out)',
-              }}
-            >
-              {label}
-              {tab === key && (
-                <div style={{ position: 'absolute', bottom: -3, left: 0, right: 0, height: 2, background: 'var(--burn)', borderRadius: 999 }} />
-              )}
-            </button>
-          ))}
-        </div>
       </div>
 
-      {/* ── Active tab ── */}
-      {tab === 'lottery' ? (
-        <Lottery
-          actor={actor}
-          principal={principal}
-          isLocal={isLocal}
-          onSignIn={onSignIn}
-          onGoStaking={() => setScreen('staking')}
-        />
-      ) : (
-        <Staking
-          actor={actor}
-          identity={identity}
-          principal={principal}
-          host={host}
-          rootKey={rootKey}
-          ledgerCanisterId={ledgerCanisterId}
-          isLocal={isLocal}
-          boostersEnabled={boostersEnabled}
-          isAdmin={isAdmin}
-          treasuryCanFront={treasuryCanFront}
-          onSignIn={onSignIn}
-          onActivity={onActivity}
-        />
-      )}
+      <Lottery
+        actor={actor}
+        principal={principal}
+        isLocal={isLocal}
+        onSignIn={onSignIn}
+        onGoStaking={onGoNeuronStake}
+      />
     </>
   );
 }

@@ -30,6 +30,7 @@ import type {
 } from "./bindings/backend";
 import IdeaBoard, { parseTokenAmount, fmtTokenAmount } from "./IdeaBoard";
 import LotteryHub from "./LotteryHub";
+import NeuronStakePage from "./NeuronStakePage";
 import Explorer from "./Explorer";
 import Discussions from "./Discussions";
 import DiscussionsPage from "./DiscussionsPage";
@@ -57,7 +58,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -68,7 +69,10 @@ export const PAGE_PATH: Record<AppPage, string> = {
   earn: '/earn',
   staking: '/staking',
   lottery: '/lottery',
-  // ANSEM LP rewards (Solana chain fusion) — Featured nav, below Lottery.
+  // Neuron Stake — the pooled-neuron staking page (was the Lottery hub's
+  // "Stake to Earn Tickets" tab); Stake to Earn nav section.
+  neuronstake: '/neuron-stake',
+  // ANSEM LP rewards (Solana chain fusion) — Stake to Earn nav section.
   ansemlp: '/ansem-lp',
   // ICPSwap LP staking — Featured nav, below ANSEM LP.
   icplp: '/icp-lp',
@@ -116,6 +120,8 @@ export function pageFromHash(hash: string): AppPage | null {
   const h = hash.replace(/^#/, '');
   if (/^proposal-\d+$/.test(h)) return 'voting'; // shared proposal deep link
   const path = '/' + h.replace(/^\//, '');
+  // The staking tab moved out of the Lottery hub — honor old deep links.
+  if (path === '/lottery/staking') return 'neuronstake';
   const hub = HUB_PATHS.find((p) => path === p || path.startsWith(p + '/'));
   if (hub) return PATH_PAGE[hub];
   return PATH_PAGE[path] ?? null;
@@ -1288,6 +1294,9 @@ export default function App() {
     if (page === 'ansemlp' && featureFlags.length > 0 && !ansemLpEnabled) {
       redirect('dashboard');
     }
+    if (page === 'neuronstake' && featureFlags.length > 0 && !(losslessEnabled || earlyAdoptersEnabled)) {
+      redirect('dashboard');
+    }
     if (page === 'icplp' && featureFlags.length > 0 && !icpLpEnabled) {
       redirect('dashboard');
     }
@@ -1951,16 +1960,27 @@ export default function App() {
             )}
           </Btn>
         )}
-        {ansemLpEnabled && (
-          <Btn variant={page === 'ansemlp' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ansemlp')}>
-            <Icon name="droplet" size={14} stroke={page === 'ansemlp' ? 'var(--char-950)' : 'currentColor'} />
-            ANSEM LP
+
+        {/* ── Stake to Earn: staking + LP rewards ── */}
+        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled || ansemLpEnabled) && (
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Stake to Earn</Eyebrow>
+        )}
+        {(losslessEnabled || earlyAdoptersEnabled) && (
+          <Btn variant={page === 'neuronstake' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('neuronstake')}>
+            <Icon name="zap" size={14} stroke={page === 'neuronstake' ? 'var(--char-950)' : 'currentColor'} />
+            Neuron Stake
           </Btn>
         )}
         {icpLpEnabled && (
           <Btn variant={page === 'icplp' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('icplp')}>
             <Icon name="stack" size={14} stroke={page === 'icplp' ? 'var(--char-950)' : 'currentColor'} />
             ICP LP
+          </Btn>
+        )}
+        {ansemLpEnabled && (
+          <Btn variant={page === 'ansemlp' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ansemlp')}>
+            <Icon name="droplet" size={14} stroke={page === 'ansemlp' ? 'var(--char-950)' : 'currentColor'} />
+            ANSEM LP
           </Btn>
         )}
 
@@ -2475,13 +2495,20 @@ export default function App() {
           ) : page === 'lottery' ? (
             <LotteryHub
               actor={actor}
+              principal={principal}
+              isLocal={config?.is_local ?? false}
+              onSignIn={handleLogin}
+              onGoNeuronStake={() => setPage('neuronstake')}
+            />
+          ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
+            <NeuronStakePage
+              actor={actor}
               identity={identity}
               principal={principal}
               host={host}
               rootKey={env?.IC_ROOT_KEY}
               ledgerCanisterId={ledgerCanisterId}
               isLocal={config?.is_local ?? false}
-              stakingEnabled={losslessEnabled}
               boostersEnabled={earlyAdoptersEnabled}
               isAdmin={isAdmin}
               treasuryCanFront={globalStats?.treasury_can_front_fees ?? true}
@@ -2535,35 +2562,35 @@ export default function App() {
               backendCanisterId={backendCanisterId}
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'ansemlp' && ansemLpEnabled ? (
             <AnsemLp
               actor={actor}
               principal={principal}
               onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'icplp' && icpLpEnabled ? (
             <IcpLp
               actor={actor}
               principal={principal}
               onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'luckproof' && luckproofEnabled ? (
             <LuckProofPage
               actor={actor}
               principal={principal}
               onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'dropzone' && dropzoneEnabled ? (
             <DropZonePage
               actor={actor}
               principal={principal}
               onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
               isLocal={config?.is_local ?? false}
             />
           ) : page === 'bullrun' && bullrunEnabled ? (
@@ -2571,7 +2598,7 @@ export default function App() {
               actor={actor}
               principal={principal}
               onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
               isLocal={config?.is_local ?? false}
             />
           ) : page === 'minigolf' && minigolfEnabled ? (
@@ -2586,7 +2613,7 @@ export default function App() {
               backendCanisterId={backendCanisterId}
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'casino' && casinoEnabled ? (
             <Casino
@@ -2594,7 +2621,7 @@ export default function App() {
               principal={principal}
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
-              onGoStaking={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              onGoStaking={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
               crashEnabled={crashEnabled}
             />
           ) : page === 'faucet' && faucetEnabled ? (

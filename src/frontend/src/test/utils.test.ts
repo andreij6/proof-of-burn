@@ -369,7 +369,9 @@ describe('pageFromHash (shareable URL routing)', () => {
     // top-level router must still land on the hub page.
     expect(pageFromHash('#/casino/crash')).toBe('casino');
     expect(pageFromHash('#/arcade/course-play')).toBe('arcade');
-    expect(pageFromHash('#/lottery/staking')).toBe('lottery');
+    // The staking tab moved to its own page — old deep links follow it.
+    expect(pageFromHash('#/lottery/staking')).toBe('neuronstake');
+    expect(pageFromHash('#/lottery/anything-else')).toBe('lottery');
     expect(pageFromHash('#/lottery/lottery')).toBe('lottery');
     // the bare hub path still resolves to the hub
     expect(pageFromHash('#/arcade')).toBe('arcade');
