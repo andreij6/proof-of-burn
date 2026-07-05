@@ -1,5 +1,17 @@
 # Log
 
+## 2026-07-05 — Mainnet deploy 23860b4 (ICP LP custody staking live)
+
+Shipped ICP LP (Model B custody staking of ICPSwap positions) with the
+reserve-first anti-sniping flow; flag `icpswap_lp_stake` ON. All five pools
+configured after resolving them from the SwapFactory and verifying each
+pool's token pair against its own on-chain metadata: ICP/ckUSDC
+`mohjv-bqaaa-aaaag-qjyia-cai`, ckUSDT/ICP `hkstf-6iaaa-aaaag-qkcoq-cai`,
+ckBTC/ICP `xmiu5-jqaaa-aaaag-qbz7q-cai`, ICP/ckETH
+`angxa-baaaa-aaaag-qcvnq-cai`, ckBTC/ckETH `akhru-myaaa-aaaag-qcvna-cai`
+(all fee 3000, token0/token1 order as the pools report). Backend rollback
+snapshot …22 (480 MiB).
+
 ## 2026-07-05 — Mainnet deploy a4772c5 (Drop Zone, Bull Run, ANSEM LP)
 
 Shipped everything since 45ff7af and flipped three flags ON:
