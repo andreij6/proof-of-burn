@@ -104,15 +104,16 @@ export function ensureStreet(st: Street, upToZ: number): void {
     st.cCoin += 34 + st.rCoin() * 26;
   }
   // Buildings, both walls.
+  // Facades run shoulder-to-shoulder — a gap would leak sky into the canyon.
   while (st.cBldL < upToZ + 60) {
     const w = 12 + st.rBld() * 10;
     st.buildings.push({ z: st.cBldL, side: -1, w, h: 7 + st.rBld() * 8, tone: st.rBld(), awning: st.rBld() < 0.35, balcony: st.rBld() < 0.45 });
-    st.cBldL += w + 1.5;
+    st.cBldL += w;
   }
   while (st.cBldR < upToZ + 60) {
     const w = 12 + st.rBld() * 10;
     st.buildings.push({ z: st.cBldR, side: 1, w, h: 7 + st.rBld() * 8, tone: st.rBld(), awning: st.rBld() < 0.35, balcony: st.rBld() < 0.45 });
-    st.cBldR += w + 1.5;
+    st.cBldR += w;
   }
   while (st.cFlag < upToZ) {
     st.buntings.push(st.cFlag);
@@ -204,6 +205,64 @@ export function stepBull(b: BullState, st: Street, dt: number): BullState {
     }
   }
   return b;
+}
+
+// ── Sound: tiny synthesized effects (no assets — the CSP allows no fetches) ──
+let actx: AudioContext | null = null;
+function audio(): AudioContext | null {
+  try {
+    if (!actx) actx = new AudioContext();
+    if (actx.state === 'suspended') void actx.resume();
+    return actx;
+  } catch { return null; }
+}
+
+/** Coin: a bright two-step chime. */
+export function playCoinSound(): void {
+  const ctx = audio();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(988, t);
+  osc.frequency.setValueAtTime(1319, t + 0.06);
+  gain.gain.setValueAtTime(0.12, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + 0.2);
+}
+
+/** Hit: a low thud — dropping square + a burst of filtered noise. */
+export function playHitSound(): void {
+  const ctx = audio();
+  if (!ctx) return;
+  const t = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  const og = ctx.createGain();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(130, t);
+  osc.frequency.exponentialRampToValueAtTime(45, t + 0.22);
+  og.gain.setValueAtTime(0.22, t);
+  og.gain.exponentialRampToValueAtTime(0.001, t + 0.26);
+  osc.connect(og).connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + 0.28);
+  const len = Math.floor(ctx.sampleRate * 0.12);
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const noise = ctx.createBufferSource();
+  noise.buffer = buf;
+  const filt = ctx.createBiquadFilter();
+  filt.type = 'lowpass';
+  filt.frequency.value = 420;
+  const ng = ctx.createGain();
+  ng.gain.setValueAtTime(0.3, t);
+  ng.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  noise.connect(filt).connect(ng).connect(ctx.destination);
+  noise.start(t);
 }
 
 export function friendlyBullErr(code: string): string {
@@ -339,7 +398,11 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
       game.t += dt;
       if (!game.finished) {
         ensureStreet(game.street, game.bull.z + 280);
+        const prevCoins = game.bull.coins;
+        const prevHits = game.bull.stumbles;
         stepBull(game.bull, game.street, dt);
+        if (game.bull.coins > prevCoins) playCoinSound();
+        if (game.bull.stumbles > prevHits) playHitSound();
         stepCrowd(game.street, game.bull.x, game.bull.z, dt);
         if (game.bull.z - game.lastPrune > 120) {
           pruneStreet(game.street, game.bull.z - 30);
@@ -381,8 +444,10 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     sky.addColorStop(1, '#f6e2b8');
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, hy);
+    // Sun sits at the street's vanishing point — anything built after this
+    // (backdrops, walls) occludes it naturally.
     ctx.fillStyle = '#f9d976';
-    ctx.beginPath(); ctx.arc(W * 0.78, hy * 0.4, 24, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(W * 0.5, hy * 0.45, 22, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#c9a24a'; ctx.lineWidth = 1.5; ctx.stroke();
     const road = ctx.createLinearGradient(0, hy, 0, H);
     road.addColorStop(0, '#cfc3ae');
@@ -391,6 +456,22 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     ctx.fillRect(0, hy, W, H - hy);
     ctx.strokeStyle = INK;
     ctx.lineCap = 'round';
+
+    // Backdrop walls: one tall muted plane per side, camera to deep distance —
+    // the sky and sun can never show through or above a gap in the buildings.
+    for (const side of [-1, 1] as const) {
+      const x0 = side * STREET_HALF_W;
+      const zn = cam.z + 1.2, zf = b.z + 400;
+      const b1 = project(cam, x0, 0, zn), b2 = project(cam, x0, 30, zn);
+      const f1 = project(cam, x0, 0, zf), f2 = project(cam, x0, 30, zf);
+      if (b1 && b2 && f1 && f2) {
+        ctx.beginPath();
+        ctx.moveTo(b1.sx, b1.sy); ctx.lineTo(f1.sx, f1.sy); ctx.lineTo(f2.sx, f2.sy); ctx.lineTo(b2.sx, b2.sy);
+        ctx.closePath();
+        ctx.fillStyle = '#d9cdb2';
+        ctx.fill();
+      }
+    }
 
     const q: { d: number; draw: () => void }[] = [];
 
@@ -416,7 +497,11 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
       if (!base) return;
       q.push({ d: base.d, draw: () => {
         const cnr = (zz: number, y: number) => project(cam, x0, y, zz);
-        const p1 = cnr(bd.z, 0), p2 = cnr(bd.z + bd.w, 0), p3 = cnr(bd.z + bd.w, bd.h), p4 = cnr(bd.z, bd.h);
+        // Clamp the near edge to just in front of the camera: a wall the
+        // bull is passing stays on screen instead of vanishing when its
+        // corner crosses the near plane.
+        const zNear = Math.max(bd.z, cam.z + 1.2);
+        const p1 = cnr(zNear, 0), p2 = cnr(bd.z + bd.w, 0), p3 = cnr(bd.z + bd.w, bd.h), p4 = cnr(zNear, bd.h);
         if (!p1 || !p2 || !p3 || !p4) return;
         const wall = bd.tone < 0.35 ? '#f5efe2' : bd.tone < 0.6 ? '#efe0c0' : bd.tone < 0.85 ? '#e6c890' : '#dba9a0';
         ctx.beginPath();
@@ -424,7 +509,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
         ctx.closePath();
         ctx.fillStyle = wall; ctx.fill();
         ctx.strokeStyle = '#4a4438'; ctx.lineWidth = 1.4; ctx.stroke();
-        const r4 = cnr(bd.z, bd.h + 1.2), r3 = cnr(bd.z + bd.w, bd.h + 1.2);
+        const r4 = cnr(zNear, bd.h + 1.2), r3 = cnr(bd.z + bd.w, bd.h + 1.2);
         if (r3 && r4) {
           ctx.beginPath();
           ctx.moveTo(p4.sx, p4.sy); ctx.lineTo(p3.sx, p3.sy); ctx.lineTo(r3.sx, r3.sy); ctx.lineTo(r4.sx, r4.sy);
@@ -468,6 +553,11 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
             }
           }
         }
+        // Corner shading at the join to the next building — depth cue.
+        ctx.strokeStyle = 'rgba(60,50,40,0.55)';
+        ctx.lineWidth = Math.max(1.5, (cam.f * 0.28) / p2.d);
+        ctx.beginPath(); ctx.moveTo(p2.sx, p2.sy); ctx.lineTo(p3.sx, p3.sy); ctx.stroke();
+        ctx.strokeStyle = '#4a4438';
         // Street-level awning.
         if (bd.awning) {
           const az1 = cnr(bd.z + bd.w * 0.2, 2.6), az2 = cnr(bd.z + bd.w * 0.8, 2.6);
