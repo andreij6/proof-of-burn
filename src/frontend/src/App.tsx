@@ -38,6 +38,7 @@ import Arcade from "./Arcade";
 import LuckProofPage from "./LuckProofPage";
 import DropZonePage from "./DropZonePage";
 import BullRunPage from "./BullRunPage";
+import AnsemLp from "./AnsemLp";
 import Casino from "./Casino";
 import Faucet from "./Faucet";
 import Payouts from "./Payouts";
@@ -55,7 +56,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'ansemlp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -66,6 +67,8 @@ export const PAGE_PATH: Record<AppPage, string> = {
   earn: '/earn',
   staking: '/staking',
   lottery: '/lottery',
+  // ANSEM LP rewards (Solana chain fusion) — Featured nav, below Lottery.
+  ansemlp: '/ansem-lp',
   // Luck-Proof (Sklansky Trainer) has its own nav page below Lottery, gated
   // on the arcade_luckproof per-game flag.
   luckproof: '/luck-proof',
@@ -648,6 +651,7 @@ export default function App() {
   const luckproofEnabled = featureFlags.find(f => f.key === 'arcade_luckproof')?.enabled ?? false;
   const dropzoneEnabled = featureFlags.find(f => f.key === 'arcade_skydive')?.enabled ?? false;
   const bullrunEnabled = featureFlags.find(f => f.key === 'arcade_bullrun')?.enabled ?? false;
+  const ansemLpEnabled = featureFlags.find(f => f.key === 'solana_lp_rewards')?.enabled ?? false;
   const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
   const casinoEnabled = crashEnabled;
   const faucetEnabled = featureFlags.find(f => f.key === 'cycles_faucet')?.enabled ?? false;
@@ -1277,6 +1281,9 @@ export default function App() {
     if (page === 'bullrun' && featureFlags.length > 0 && !bullrunEnabled) {
       redirect('dashboard');
     }
+    if (page === 'ansemlp' && featureFlags.length > 0 && !ansemLpEnabled) {
+      redirect('dashboard');
+    }
     if (page === 'casino' && featureFlags.length > 0 && !casinoEnabled) {
       redirect('dashboard');
     }
@@ -1305,7 +1312,7 @@ export default function App() {
     if (page === 'about' && featureFlags.length > 0 && !missionEnabled) {
       redirect('voting');
     }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, xFarmEnabled, dashboardEnabled, missionEnabled, principal, featureFlags.length]);
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, xFarmEnabled, dashboardEnabled, missionEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1898,7 +1905,7 @@ export default function App() {
           </Btn>
         )}
 
-        {(arcadeEnabled || lotteryEnabled || casinoEnabled) && (
+        {(arcadeEnabled || lotteryEnabled || casinoEnabled || ansemLpEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Featured</Eyebrow>
         )}
         {arcadeEnabled && (
@@ -1935,6 +1942,12 @@ export default function App() {
                 } : {}),
               }}>{drawCountdown}</Chip>
             )}
+          </Btn>
+        )}
+        {ansemLpEnabled && (
+          <Btn variant={page === 'ansemlp' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ansemlp')}>
+            <Icon name="droplet" size={14} stroke={page === 'ansemlp' ? 'var(--char-950)' : 'currentColor'} />
+            ANSEM LP
           </Btn>
         )}
 
@@ -2508,6 +2521,13 @@ export default function App() {
               ledgerCanisterId={ledgerCanisterId}
               backendCanisterId={backendCanisterId}
               isLocal={config?.is_local ?? false}
+              onSignIn={handleLogin}
+              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+            />
+          ) : page === 'ansemlp' && ansemLpEnabled ? (
+            <AnsemLp
+              actor={actor}
+              principal={principal}
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
             />

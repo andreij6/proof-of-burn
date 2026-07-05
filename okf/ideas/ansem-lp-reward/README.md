@@ -8,7 +8,7 @@ timestamp: 2026-07-04T00:00:00Z
 
 # ANSEM LP Reward — Solana LPs earn lottery tickets
 
-**Status: RESEARCHED & PLANNED, NOT built.** Owner ask (2026-07-04): reward
+**Status: BUILT (2026-07-04), shipped dark behind `solana_lp_rewards` (enabled on local; pools + mainnet flag pending owner).** Owner ask (2026-07-04): reward
 users providing liquidity for $ANSEM/SOL or $ANSEM/USDC on Solana with **10
 lottery tickets per drawing**, wallet-ownership proven, **re-confirmed every
 round**.

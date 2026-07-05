@@ -65,6 +65,8 @@ export const iconPaths: Record<string, React.ReactNode> = {
   // Stroke-only to match the set; the elliptical cup reads as the hole at an
   // angle and the pennant waves off the top of the pole.
   golf: <><path d="M10 18V4" /><path d="M10 4l8 2.5L10 9z" /><ellipse cx="10" cy="19.5" rx="3.2" ry="1.5" /></>,
+  // Droplet (ANSEM LP: liquidity).
+  droplet: <><path d="M12 2.5S6 9 6 13.5a6 6 0 0012 0C18 9 12 2.5 12 2.5z" /><path d="M9.5 14a2.5 2.5 0 002.5 2.5" /></>,
   // Bull (Bull Run): head-on skull with sweeping horns.
   bull: <><path d="M7 13a5 5 0 0010 0v-2a5 5 0 00-10 0z" /><path d="M7 11C4 11 2.5 9 2.5 6c2.5 0 4.5 1 5.5 3M17 11c3 0 4.5-2 4.5-5-2.5 0-4.5 1-5.5 3" /><circle cx="10" cy="12" r="0.8" /><circle cx="14" cy="12" r="0.8" /><path d="M11 16.5h2" /></>,
   // Parachute (Drop Zone): canopy, shroud lines, jumper.

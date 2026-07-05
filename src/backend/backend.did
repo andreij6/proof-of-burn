@@ -1118,6 +1118,38 @@ type BullRunDailyStatus = record {
   players_today : nat32;
   hits_limit : nat32;
 };
+// ANSEM LP rewards (Solana chain fusion): prove wallet ownership with a
+// signed challenge (Ed25519, verified in-canister), then once per lottery
+// round read the wallet's LIVE LP balance for the configured pools via the
+// NNS SOL RPC canister; a qualifying balance pays 10 tickets. Claims key on
+// the lottery round — each drawing re-arms them (the re-confirmation).
+// Staking is REQUIRED (stakers-only ticket rule).
+type LpPoolView = record {
+  name : text;
+  // Base58 LP mint (PumpSwap LP mints are Token-2022).
+  lp_mint_b58 : text;
+  token_2022 : bool;
+  // Dust floor in raw LP base units.
+  min_amount : nat;
+};
+type LpRewardInfo = record {
+  enabled : bool;
+  round : nat64;
+  tickets_per_round : nat64;
+  my_wallet_b58 : opt text;
+  claimed_this_round : bool;
+  staked : bool;
+  pools : vec LpPoolView;
+};
+type LpClaimResult = record {
+  pool : text;
+  amount : nat;
+  tickets : nat64;
+  round : nat64;
+};
+type Result_21 = variant { Ok : text; Err : text };
+type Result_22 = variant { Ok : LpClaimResult; Err : text };
+type Result_23 = variant { Ok : nat64; Err : text };
 type Result_20 = variant { Ok : BullRunStart; Err : text };
 type Result_18 = variant { Ok : SkydiveRunStart; Err : text };
 type Result_19 = variant { Ok : nat32; Err : text };
@@ -2099,6 +2131,17 @@ service : (InitPayload) -> {
   complete_bullrun_daily : (nat64, nat32, nat64) -> (Result_19);
   get_bullrun_daily_board : (opt nat32) -> (vec BullRunDailyRow) query;
   get_bullrun_daily_status : () -> (BullRunDailyStatus) query;
+  // ANSEM LP rewards.
+  get_lp_reward_info : () -> (LpRewardInfo) query;
+  // (pubkey 32 bytes, signature 64 bytes, nonce, expires_ns) — the wallet
+  // signed the canonical challenge binding the caller + round + nonce.
+  link_solana_wallet : (blob, blob, nat64, nat64) -> (Result_21);
+  unlink_solana_wallet : () -> (Result);
+  claim_lp_reward : () -> (Result_22);
+  admin_set_lp_pools : (vec LpPoolView) -> (Result_23);
+  // Local/dev only in effect: mocked ATA balances (mock map is only
+  // consulted when is_local).
+  dev_set_lp_mock_balance : (text, nat) -> (Result);
   // Replays unlock by competing: null unless the CALLER has their own entry
   // for that day (or is asking for their own run).
   get_luckproof_daily_replay : (nat32, principal) -> (opt LuckProofReplay) query;

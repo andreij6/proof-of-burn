@@ -5261,6 +5261,7 @@ pub const FLAG_ARCADE_FIELDGOAL: &str = "arcade_fieldgoal";
 pub const FLAG_ARCADE_LUCKPROOF: &str = "arcade_luckproof";
 pub const FLAG_ARCADE_SKYDIVE: &str = "arcade_skydive";
 pub const FLAG_ARCADE_BULLRUN: &str = "arcade_bullrun";
+pub const FLAG_SOLANA_LP: &str = "solana_lp_rewards";
 /// The Casino: Crash (bustabit-style multiplier game) + the shared casino VP
 /// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
 /// until the owner enables it after a playtest.
@@ -5283,10 +5284,10 @@ pub const FLAG_DASHBOARD: &str = "dashboard";
 /// Mission Statement page (`about` route). Ships dark (default OFF) until an
 /// admin enables it.
 pub const FLAG_MISSION_STATEMENT: &str = "mission_statement";
-const KNOWN_FEATURE_FLAGS: [&str; 17] = [
+const KNOWN_FEATURE_FLAGS: [&str; 18] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
-    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN,
+    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN, FLAG_SOLANA_LP,
     FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS, FLAG_X_FARM,
     FLAG_DASHBOARD, FLAG_MISSION_STATEMENT,
 ];
@@ -5559,6 +5560,7 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE_LUCKPROOF => false,
         FLAG_ARCADE_SKYDIVE => false,
         FLAG_ARCADE_BULLRUN => false,
+        FLAG_SOLANA_LP => false,
         FLAG_X_FARM => false,
         // Dashboard + Mission Statement ship dark (default OFF) — these pages
         // were always-on before; gating them lets an admin hide either page
@@ -14339,6 +14341,453 @@ fn complete_bullrun_daily(run_id: u64, coins: u32, millis: u64) -> Result<u32, S
         .map(|r| r.rank)
         .unwrap_or(0);
     Ok(rank)
+}
+
+// ── ANSEM LP Rewards (Solana chain fusion) ───────────────────────────────────
+// Rewards $ANSEM liquidity providers on Solana with 10 lottery tickets per
+// drawing. The user proves wallet ownership ONCE by signing a challenge in
+// their Solana wallet (plain Ed25519 over bytes — verified right here, no
+// chain call); then, once per lottery round, `claim_lp_reward` derives the
+// wallet's associated token account for each admin-configured LP mint and
+// reads the LIVE balance through the NNS SOL RPC canister
+// (tghme-zyaaa-aaaar-qarca-cai, 3-provider Equality consensus, paid in
+// attached cycles). Any balance ≥ the pool's floor → tickets. Claims key on
+// the lottery round, so every drawing re-arms the claim — that IS the
+// owner-required re-confirmation. Staking stays REQUIRED (owner decision
+// 2026-07-04): the grant path's stakers-only gate is enforced up front.
+//
+// MVP scope: fungible LP mints only (PumpSwap = Token-2022 LP; classic SPL
+// also supported via config). Meteora DLMM/DAMM-v2 positions are NOT LP
+// tokens and are out of scope (see okf/ideas/ansem-lp-reward).
+
+const SOL_RPC_CANISTER: &str = "tghme-zyaaa-aaaar-qarca-cai";
+/// Cycles attached per SOL RPC read (excess is refunded by the SOL RPC canister).
+const SOL_RPC_CYCLES: u128 = 10_000_000_000;
+const LP_TICKETS_PER_ROUND: u64 = 10;
+/// Challenge freshness window.
+const LP_CHALLENGE_MAX_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
+const ATA_PROGRAM_B58: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+const TOKEN_PROGRAM_B58: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM_B58: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct SolanaWalletLink {
+    /// Raw 32-byte Ed25519 public key (the Solana address).
+    pub pubkey: Vec<u8>,
+    pub linked_at: u64,
+}
+impl_storable!(SolanaWalletLink);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SolanaPubkeyKey {
+    pub pubkey: Vec<u8>,
+}
+impl_storable!(SolanaPubkeyKey);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LpClaimKey {
+    pub round: u64,
+    pub user: Principal,
+}
+impl_storable!(LpClaimKey);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LpClaim {
+    pub round: u64,
+    pub user: Principal,
+    pub wallet: Vec<u8>,
+    pub pool: String,
+    /// Raw LP token amount that qualified (base units, decimal string on wire).
+    pub amount: u128,
+    pub claimed_at: u64,
+}
+impl_storable!(LpClaim);
+
+/// One qualifying pool: any wallet holding ≥ min_amount of `lp_mint` earns
+/// the round's tickets. PumpSwap LP mints are Token-2022.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LpPool {
+    pub name: String,
+    /// Raw 32-byte LP mint.
+    pub lp_mint: Vec<u8>,
+    pub token_2022: bool,
+    /// Dust filter in raw LP base units.
+    pub min_amount: u128,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct LpPoolsCfg {
+    pub pools: Vec<LpPool>,
+}
+impl_storable!(LpPoolsCfg);
+
+thread_local! {
+    /// MemoryId 118: principal → linked Solana wallet.
+    static SOLANA_WALLETS: RefCell<StableBTreeMap<Principal, SolanaWalletLink, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(118)))));
+    /// MemoryId 119: wallet pubkey → owning principal (one wallet, one principal).
+    static SOLANA_WALLET_OWNERS: RefCell<StableBTreeMap<SolanaPubkeyKey, Principal, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(119)))));
+    /// MemoryId 120: (lottery round, principal) → claim.
+    static LP_CLAIMS: RefCell<StableBTreeMap<LpClaimKey, LpClaim, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(120)))));
+    /// MemoryId 121: qualifying pools (admin-configured).
+    static LP_POOLS: RefCell<StableCell<LpPoolsCfg, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(121)), LpPoolsCfg::default())));
+    /// Native tests + local replica: mocked ATA balances (b58 ATA → amount).
+    static MOCK_LP_BALANCES: RefCell<std::collections::HashMap<String, u128>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// The exact challenge string the Solana wallet signs. The frontend builds
+/// the identical string; any drift fails verification.
+fn lp_challenge_message(user: Principal, round: u64, nonce: u64, expires_ns: u64) -> String {
+    format!(
+        "Cycle Burn LP verification\nprincipal: {}\nround: {}\nnonce: {}\nexpires_ns: {}",
+        user, round, nonce, expires_ns
+    )
+}
+
+/// Is a 32-byte string a valid ed25519 curve point? (PDA bump search needs
+/// the OFF-curve check.)
+fn solana_on_curve(bytes: &[u8; 32]) -> bool {
+    curve25519_dalek::edwards::CompressedEdwardsY(*bytes).decompress().is_some()
+}
+
+/// Solana `find_program_address` for the ATA program: the associated token
+/// account of (owner, mint) under the given token program. Pure function —
+/// verified against an independent Python implementation (see tests).
+fn solana_find_ata(owner: &[u8; 32], mint: &[u8; 32], token_program: &[u8; 32]) -> Result<[u8; 32], String> {
+    use sha2::Digest;
+    let ata_program: [u8; 32] = bs58::decode(ATA_PROGRAM_B58)
+        .into_vec()
+        .map_err(|e| e.to_string())?
+        .try_into()
+        .map_err(|_| "bad ATA program id".to_string())?;
+    for bump in (0u8..=255).rev() {
+        let mut h = sha2::Sha256::new();
+        h.update(owner);
+        h.update(token_program);
+        h.update(mint);
+        h.update([bump]);
+        h.update(ata_program);
+        h.update(b"ProgramDerivedAddress");
+        let d: [u8; 32] = h.finalize().into();
+        if !solana_on_curve(&d) {
+            return Ok(d);
+        }
+    }
+    Err("no valid PDA bump".to_string())
+}
+
+/// Verify an Ed25519 signature from a Solana wallet over `message`.
+fn solana_verify_signature(pubkey: &[u8], signature: &[u8], message: &[u8]) -> Result<(), String> {
+    let pk: [u8; 32] = pubkey.try_into().map_err(|_| "pubkey must be 32 bytes".to_string())?;
+    let sig: [u8; 64] = signature.try_into().map_err(|_| "signature must be 64 bytes".to_string())?;
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).map_err(|_| "invalid pubkey".to_string())?;
+    vk.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&sig))
+        .map_err(|_| "SIGNATURE_INVALID".to_string())
+}
+
+// ── SOL RPC canister wire types (mirrored from its candid) ──
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolCluster { Mainnet, Devnet, Testnet }
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolConsensusStrategy {
+    Equality,
+    Threshold { total: Option<u8>, min: u8 },
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct SolRpcConfig {
+    #[serde(rename = "responseSizeEstimate")]
+    response_size_estimate: Option<u64>,
+    #[serde(rename = "responseConsensus")]
+    response_consensus: Option<SolConsensusStrategy>,
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolSupportedProvider {
+    AlchemyMainnet, AlchemyDevnet, AnkrMainnet, AnkrDevnet, ChainstackMainnet,
+    ChainstackDevnet, DrpcMainnet, DrpcDevnet, HeliusMainnet, HeliusDevnet, PublicNodeMainnet,
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct SolHttpHeader { value: String, name: String }
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct SolRpcEndpoint { url: String, headers: Option<Vec<SolHttpHeader>> }
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolRpcSource { Supported(SolSupportedProvider), Custom(SolRpcEndpoint) }
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolRpcSources { Custom(Vec<SolRpcSource>), Default(SolCluster) }
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+#[allow(non_camel_case_types)]
+enum SolCommitment { processed, confirmed, finalized }
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct SolGetTokenAccountBalanceParams {
+    pubkey: String,
+    commitment: Option<SolCommitment>,
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct SolTokenAmount {
+    decimals: u8,
+    #[serde(rename = "uiAmount")]
+    ui_amount: Option<f64>,
+    #[serde(rename = "uiAmountString")]
+    ui_amount_string: String,
+    amount: String,
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct SolJsonRpcError { code: i64, message: String }
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolProviderError {
+    TooFewCycles { expected: candid::Nat, received: candid::Nat },
+    InvalidRpcConfig(String),
+    UnsupportedCluster(String),
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolRejectionCode { NoError, CanisterError, SysTransient, DestinationInvalid, Unknown, SysFatal, CanisterReject }
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolHttpOutcallError {
+    IcError { code: SolRejectionCode, message: String },
+    InvalidHttpJsonRpcResponse { status: u16, body: String, #[serde(rename = "parsingError")] parsing_error: Option<String> },
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolRpcError {
+    JsonRpcError(SolJsonRpcError),
+    ProviderError(SolProviderError),
+    ValidationError(String),
+    HttpOutcallError(SolHttpOutcallError),
+}
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolBalanceResult { Ok(SolTokenAmount), Err(SolRpcError) }
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum SolMultiBalanceResult {
+    Consistent(SolBalanceResult),
+    Inconsistent(Vec<(SolRpcSource, SolBalanceResult)>),
+}
+
+/// Read a token account balance (raw base units) via the SOL RPC canister.
+/// A missing token account (never created / zero-initialized) reads as 0.
+/// Native tests + local replicas use the mock map instead.
+async fn sol_get_token_balance(ata_b58: &str) -> Result<u128, String> {
+    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+    if cfg!(not(target_arch = "wasm32")) || is_local {
+        return Ok(MOCK_LP_BALANCES.with(|m| m.borrow().get(ata_b58).copied().unwrap_or(0)));
+    }
+    let sol_rpc = Principal::from_text(SOL_RPC_CANISTER).map_err(|e| e.to_string())?;
+    let args = (
+        SolRpcSources::Default(SolCluster::Mainnet),
+        Some(SolRpcConfig {
+            response_size_estimate: None,
+            response_consensus: Some(SolConsensusStrategy::Equality),
+        }),
+        SolGetTokenAccountBalanceParams {
+            pubkey: ata_b58.to_string(),
+            commitment: Some(SolCommitment::finalized),
+        },
+    );
+    let (res,): (SolMultiBalanceResult,) =
+        ic_cdk::api::call::call_with_payment128(sol_rpc, "getTokenAccountBalance", args, SOL_RPC_CYCLES)
+            .await
+            .map_err(|(code, msg)| format!("SOL_RPC_CALL_FAILED: {:?} {}", code, msg))?;
+    match res {
+        SolMultiBalanceResult::Consistent(SolBalanceResult::Ok(amount)) => {
+            amount.amount.parse::<u128>().map_err(|_| "SOL_RPC_BAD_AMOUNT".to_string())
+        }
+        SolMultiBalanceResult::Consistent(SolBalanceResult::Err(SolRpcError::JsonRpcError(e)))
+            if e.message.to_lowercase().contains("could not find account") =>
+        {
+            Ok(0) // no token account = no LP
+        }
+        SolMultiBalanceResult::Consistent(SolBalanceResult::Err(e)) => {
+            Err(format!("SOL_RPC_ERROR: {:?}", e))
+        }
+        SolMultiBalanceResult::Inconsistent(_) => Err("SOL_RPC_INCONSISTENT: providers disagreed — retry".to_string()),
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LpPoolView {
+    pub name: String,
+    pub lp_mint_b58: String,
+    pub token_2022: bool,
+    pub min_amount: u128,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LpRewardInfo {
+    pub enabled: bool,
+    pub round: u64,
+    pub tickets_per_round: u64,
+    /// The caller's linked wallet (base58), if any.
+    pub my_wallet_b58: Option<String>,
+    pub claimed_this_round: bool,
+    /// Claiming requires an active stake (owner rule: stakers-only tickets).
+    pub staked: bool,
+    pub pools: Vec<LpPoolView>,
+}
+
+#[ic_cdk::query]
+fn get_lp_reward_info() -> LpRewardInfo {
+    let caller = get_caller();
+    let round = lottery_state().round;
+    LpRewardInfo {
+        enabled: feature_visible(FLAG_SOLANA_LP, caller),
+        round,
+        tickets_per_round: LP_TICKETS_PER_ROUND,
+        my_wallet_b58: SOLANA_WALLETS
+            .with(|m| m.borrow().get(&caller))
+            .map(|l| bs58::encode(l.pubkey).into_string()),
+        claimed_this_round: LP_CLAIMS.with(|m| m.borrow().contains_key(&LpClaimKey { round, user: caller })),
+        staked: caller != Principal::anonymous() && author_is_staked(caller),
+        pools: LP_POOLS.with(|c| c.borrow().get().clone()).pools.iter().map(|p| LpPoolView {
+            name: p.name.clone(),
+            lp_mint_b58: bs58::encode(&p.lp_mint).into_string(),
+            token_2022: p.token_2022,
+            min_amount: p.min_amount,
+        }).collect(),
+    }
+}
+
+/// Link a Solana wallet: the wallet signed the canonical challenge (which
+/// binds the caller's principal + the current round + a nonce + an expiry),
+/// so possession of the key is proven. One wallet ↔ one principal.
+#[ic_cdk::update]
+fn link_solana_wallet(pubkey: Vec<u8>, signature: Vec<u8>, nonce: u64, expires_ns: u64) -> Result<String, String> {
+    require_authenticated()?;
+    if !feature_visible(FLAG_SOLANA_LP, get_caller()) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    let caller = get_caller();
+    let now = current_time();
+    if expires_ns <= now {
+        return Err("CHALLENGE_EXPIRED".to_string());
+    }
+    if expires_ns > now.saturating_add(LP_CHALLENGE_MAX_TTL_NS) {
+        return Err("CHALLENGE_TTL_TOO_LONG".to_string());
+    }
+    let round = lottery_state().round;
+    let message = lp_challenge_message(caller, round, nonce, expires_ns);
+    solana_verify_signature(&pubkey, &signature, message.as_bytes())?;
+    // One wallet, one principal — ever (prevents one LP position farming
+    // tickets across many principals).
+    let key = SolanaPubkeyKey { pubkey: pubkey.clone() };
+    if let Some(owner) = SOLANA_WALLET_OWNERS.with(|m| m.borrow().get(&key)) {
+        if owner != caller {
+            return Err("WALLET_ALREADY_LINKED".to_string());
+        }
+    }
+    // Re-linking replaces the caller's previous wallet.
+    if let Some(prev) = SOLANA_WALLETS.with(|m| m.borrow().get(&caller)) {
+        SOLANA_WALLET_OWNERS.with(|m| { m.borrow_mut().remove(&SolanaPubkeyKey { pubkey: prev.pubkey }); });
+    }
+    SOLANA_WALLET_OWNERS.with(|m| { m.borrow_mut().insert(key, caller); });
+    SOLANA_WALLETS.with(|m| {
+        m.borrow_mut().insert(caller, SolanaWalletLink { pubkey: pubkey.clone(), linked_at: now });
+    });
+    Ok(bs58::encode(pubkey).into_string())
+}
+
+#[ic_cdk::update]
+fn unlink_solana_wallet() -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    if let Some(link) = SOLANA_WALLETS.with(|m| m.borrow_mut().remove(&caller)) {
+        SOLANA_WALLET_OWNERS.with(|m| { m.borrow_mut().remove(&SolanaPubkeyKey { pubkey: link.pubkey }); });
+    }
+    Ok(())
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct LpClaimResult {
+    pub pool: String,
+    pub amount: u128,
+    pub tickets: u64,
+    pub round: u64,
+}
+
+/// Claim the round's LP reward: reads the linked wallet's LIVE LP balances
+/// on Solana and grants LP_TICKETS_PER_ROUND tickets if any configured pool
+/// clears its floor. Once per lottery round; the next drawing re-arms it.
+#[ic_cdk::update]
+async fn claim_lp_reward() -> Result<LpClaimResult, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    if !feature_visible(FLAG_SOLANA_LP, caller) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    require_lottery_enabled()?;
+    // Stakers-only (owner rule 2026-07-04) — fail loudly instead of granting 0.
+    if !author_is_staked(caller) {
+        return Err("NOT_STAKED".to_string());
+    }
+    let link = SOLANA_WALLETS.with(|m| m.borrow().get(&caller)).ok_or("NO_WALLET_LINKED")?;
+    let round = lottery_state().round;
+    let claim_key = LpClaimKey { round, user: caller };
+    if LP_CLAIMS.with(|m| m.borrow().contains_key(&claim_key)) {
+        return Err("ALREADY_CLAIMED_THIS_ROUND".to_string());
+    }
+    let pools = LP_POOLS.with(|c| c.borrow().get().clone()).pools;
+    if pools.is_empty() {
+        return Err("NO_POOLS_CONFIGURED".to_string());
+    }
+    let owner: [u8; 32] = link.pubkey.clone().try_into().map_err(|_| "bad wallet".to_string())?;
+    for pool in pools {
+        let mint: [u8; 32] = pool.lp_mint.clone().try_into().map_err(|_| "bad pool mint".to_string())?;
+        let token_program: [u8; 32] = bs58::decode(if pool.token_2022 { TOKEN_2022_PROGRAM_B58 } else { TOKEN_PROGRAM_B58 })
+            .into_vec()
+            .map_err(|e| e.to_string())?
+            .try_into()
+            .map_err(|_| "bad token program".to_string())?;
+        let ata = solana_find_ata(&owner, &mint, &token_program)?;
+        let ata_b58 = bs58::encode(ata).into_string();
+        let balance = sol_get_token_balance(&ata_b58).await?;
+        if balance >= pool.min_amount && balance > 0 {
+            // Re-check the claim after the await (another call could have won).
+            if LP_CLAIMS.with(|m| m.borrow().contains_key(&claim_key)) {
+                return Err("ALREADY_CLAIMED_THIS_ROUND".to_string());
+            }
+            grant_lottery_tickets(caller, LP_TICKETS_PER_ROUND, "solana_lp");
+            LP_CLAIMS.with(|m| {
+                m.borrow_mut().insert(claim_key.clone(), LpClaim {
+                    round,
+                    user: caller,
+                    wallet: link.pubkey.clone(),
+                    pool: pool.name.clone(),
+                    amount: balance,
+                    claimed_at: current_time(),
+                });
+            });
+            staking_audit("solana_lp_reward", caller, LP_TICKETS_PER_ROUND, round);
+            return Ok(LpClaimResult { pool: pool.name, amount: balance, tickets: LP_TICKETS_PER_ROUND, round });
+        }
+    }
+    Err("NO_QUALIFYING_LP".to_string())
+}
+
+/// Admin: configure the qualifying pools. Mints as base58 strings.
+#[ic_cdk::update]
+fn admin_set_lp_pools(pools: Vec<LpPoolView>) -> Result<u64, String> {
+    require_admin()?;
+    let mut cfg = LpPoolsCfg::default();
+    for p in pools {
+        let mint = bs58::decode(&p.lp_mint_b58).into_vec().map_err(|e| format!("bad mint {}: {}", p.lp_mint_b58, e))?;
+        if mint.len() != 32 {
+            return Err(format!("mint {} is not 32 bytes", p.lp_mint_b58));
+        }
+        cfg.pools.push(LpPool { name: p.name, lp_mint: mint, token_2022: p.token_2022, min_amount: p.min_amount });
+    }
+    let n = cfg.pools.len() as u64;
+    LP_POOLS.with(|c| { let _ = c.borrow_mut().set(cfg); });
+    Ok(n)
+}
+
+/// Local/dev: set a mocked ATA balance (the local replica has no SOL RPC
+/// canister). Admin-gated and inert on mainnet (mock map only consulted
+/// when is_local).
+#[ic_cdk::update]
+fn dev_set_lp_mock_balance(ata_b58: String, amount: u128) -> Result<(), String> {
+    require_admin()?;
+    MOCK_LP_BALANCES.with(|m| { m.borrow_mut().insert(ata_b58, amount); });
+    Ok(())
 }
 
 // ==========================================
@@ -31254,6 +31703,196 @@ mod tests {
         TICKET_SOURCES.with(|m| { let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
         LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
         FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_LOSSLESS_LOTTERY.to_string()); });
+    }
+
+    // ── ANSEM LP rewards (Solana chain fusion) ────────────────────────────
+
+    fn enable_solana_lp() {
+        install_staking_test_config();
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().insert(FLAG_SOLANA_LP.to_string(), 1u8);
+            m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8);
+        });
+    }
+
+    fn clear_solana_lp() {
+        SOLANA_WALLETS.with(|m| {
+            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        SOLANA_WALLET_OWNERS.with(|m| {
+            let keys: Vec<SolanaPubkeyKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        LP_CLAIMS.with(|m| {
+            let keys: Vec<LpClaimKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        LP_POOLS.with(|c| { let _ = c.borrow_mut().set(LpPoolsCfg::default()); });
+        MOCK_LP_BALANCES.with(|m| m.borrow_mut().clear());
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().remove(&FLAG_SOLANA_LP.to_string());
+            m.borrow_mut().remove(&FLAG_LOSSLESS_LOTTERY.to_string());
+        });
+        set_mock_time(None);
+    }
+
+    fn test_signing_key() -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    fn sign_challenge(user: Principal, round: u64, nonce: u64, expires_ns: u64) -> (Vec<u8>, Vec<u8>) {
+        use ed25519_dalek::Signer;
+        let sk = test_signing_key();
+        let msg = lp_challenge_message(user, round, nonce, expires_ns);
+        (sk.verifying_key().to_bytes().to_vec(), sk.sign(msg.as_bytes()).to_bytes().to_vec())
+    }
+
+    #[test]
+    fn test_solana_ata_derivation_matches_independent_impl() {
+        // Vectors generated by a standalone Python implementation of
+        // find_program_address (sha256 + RFC 8032 decompress) — cross-impl
+        // agreement guards against seed-order and curve-check bugs.
+        let ata = |owner_b58: &str, mint_b58: &str, program_b58: &str| {
+            let owner: [u8; 32] = bs58::decode(owner_b58).into_vec().unwrap().try_into().unwrap();
+            let mint: [u8; 32] = bs58::decode(mint_b58).into_vec().unwrap().try_into().unwrap();
+            let prog: [u8; 32] = bs58::decode(program_b58).into_vec().unwrap().try_into().unwrap();
+            bs58::encode(solana_find_ata(&owner, &mint, &prog).unwrap()).into_string()
+        };
+        assert_eq!(
+            ata("4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", TOKEN_PROGRAM_B58),
+            "F8biqkCRK2tHR6EncrcXDGgVTkGRrtojqyW39w41Qspn"
+        );
+        assert_eq!(
+            ata("4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T", "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump", TOKEN_2022_PROGRAM_B58),
+            "FrNKhh6WNXRG3t8h9NMcj2aaZaFTJnhxEUHACrAK6b69"
+        );
+        assert_eq!(
+            ata("7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV", "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump", TOKEN_2022_PROGRAM_B58),
+            "8geSAWxrJdw5dscfRqK6yqhg1gNPTH9EsTwH5nJrihvm"
+        );
+    }
+
+    #[test]
+    fn test_solana_signature_verification() {
+        use ed25519_dalek::Signer;
+        let sk = test_signing_key();
+        let msg = b"Cycle Burn LP verification test";
+        let sig = sk.sign(msg);
+        assert!(solana_verify_signature(&sk.verifying_key().to_bytes(), &sig.to_bytes(), msg).is_ok());
+        // Tampered message rejected.
+        assert!(solana_verify_signature(&sk.verifying_key().to_bytes(), &sig.to_bytes(), b"tampered").is_err());
+        // Wrong sizes rejected.
+        assert!(solana_verify_signature(&[0u8; 31], &sig.to_bytes(), msg).is_err());
+        assert!(solana_verify_signature(&sk.verifying_key().to_bytes(), &[0u8; 63], msg).is_err());
+    }
+
+    #[test]
+    fn test_lp_wallet_link_gates_and_uniqueness() {
+        enable_solana_lp();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let now = current_time();
+        let round = lottery_state().round;
+        set_mock_caller(alice());
+
+        // Fresh valid challenge links.
+        let (pk, sig) = sign_challenge(alice(), round, 42, now + 60_000_000_000);
+        let b58 = link_solana_wallet(pk.clone(), sig.clone(), 42, now + 60_000_000_000).unwrap();
+        assert_eq!(b58, bs58::encode(&pk).into_string());
+
+        // Expired / over-TTL / tampered challenges rejected.
+        assert_eq!(link_solana_wallet(pk.clone(), sig.clone(), 42, now - 1).unwrap_err(), "CHALLENGE_EXPIRED");
+        let (pk2, sig2) = sign_challenge(alice(), round, 43, now + LP_CHALLENGE_MAX_TTL_NS + 10);
+        assert_eq!(link_solana_wallet(pk2, sig2, 43, now + LP_CHALLENGE_MAX_TTL_NS + 10).unwrap_err(), "CHALLENGE_TTL_TOO_LONG");
+        let (pk3, sig3) = sign_challenge(alice(), round, 44, now + 60_000_000_000);
+        assert!(link_solana_wallet(pk3, sig3, 45, now + 60_000_000_000).unwrap_err().contains("SIGNATURE"));
+
+        // Same wallet can't link to a second principal…
+        set_mock_caller(bob());
+        let (pkb, sigb) = sign_challenge(bob(), round, 46, now + 60_000_000_000);
+        assert_eq!(pkb, pk, "same test key");
+        assert_eq!(link_solana_wallet(pkb, sigb, 46, now + 60_000_000_000).unwrap_err(), "WALLET_ALREADY_LINKED");
+        // …until the first principal unlinks.
+        set_mock_caller(alice());
+        unlink_solana_wallet().unwrap();
+        set_mock_caller(bob());
+        let (pkb, sigb) = sign_challenge(bob(), round, 47, now + 60_000_000_000);
+        assert!(link_solana_wallet(pkb, sigb, 47, now + 60_000_000_000).is_ok());
+
+        clear_solana_lp();
+    }
+
+    #[tokio::test]
+    async fn test_lp_claim_flow_and_round_rearm() {
+        enable_solana_lp();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let now = current_time();
+        let round = lottery_state().round;
+
+        // Pool config via the admin endpoint (carol seeded as admin).
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.admins.push(carol());
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+        set_mock_caller(carol());
+        admin_set_lp_pools(vec![LpPoolView {
+            name: "ANSEM/SOL".into(),
+            lp_mint_b58: "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump".into(),
+            token_2022: true,
+            min_amount: 100,
+        }]).unwrap();
+        // Bad mints rejected.
+        assert!(admin_set_lp_pools(vec![LpPoolView {
+            name: "bad".into(), lp_mint_b58: "notbase58!!!".into(), token_2022: false, min_amount: 0,
+        }]).is_err());
+
+        // Alice links + stakes.
+        set_mock_caller(alice());
+        let (pk, sig) = sign_challenge(alice(), round, 1, now + 60_000_000_000);
+        link_solana_wallet(pk.clone(), sig, 1, now + 60_000_000_000).unwrap();
+
+        // Unstaked → loud NOT_STAKED (owner rule).
+        assert_eq!(claim_lp_reward().await.unwrap_err(), "NOT_STAKED");
+        seed_stake(StakeTier::SixMonths, alice(), 100_000_000);
+
+        // Below the floor → NO_QUALIFYING_LP.
+        let owner: [u8; 32] = pk.clone().try_into().unwrap();
+        let mint: [u8; 32] = bs58::decode("9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump").into_vec().unwrap().try_into().unwrap();
+        let prog: [u8; 32] = bs58::decode(TOKEN_2022_PROGRAM_B58).into_vec().unwrap().try_into().unwrap();
+        let ata_b58 = bs58::encode(solana_find_ata(&owner, &mint, &prog).unwrap()).into_string();
+        MOCK_LP_BALANCES.with(|m| { m.borrow_mut().insert(ata_b58.clone(), 99); });
+        assert_eq!(claim_lp_reward().await.unwrap_err(), "NO_QUALIFYING_LP");
+
+        // At the floor → 10 tickets, source-tagged, once per round.
+        MOCK_LP_BALANCES.with(|m| { m.borrow_mut().insert(ata_b58.clone(), 100); });
+        let res = claim_lp_reward().await.unwrap();
+        assert_eq!(res.tickets, LP_TICKETS_PER_ROUND);
+        assert_eq!(res.pool, "ANSEM/SOL");
+        assert_eq!(res.amount, 100);
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0)),
+            10
+        );
+        let rows = get_my_ticket_breakdown();
+        assert_eq!(rows.iter().find(|r| r.source == "solana_lp").map(|r| r.count), Some(10));
+        assert_eq!(claim_lp_reward().await.unwrap_err(), "ALREADY_CLAIMED_THIS_ROUND");
+
+        // Next drawing (round bump) re-arms the claim — the re-confirmation.
+        let mut st = lottery_state();
+        st.round += 1;
+        set_lottery_state(st);
+        let res2 = claim_lp_reward().await.unwrap();
+        assert_eq!(res2.round, round + 1);
+
+        // No wallet linked → clear error.
+        unlink_solana_wallet().unwrap();
+        assert_eq!(claim_lp_reward().await.unwrap_err(), "NO_WALLET_LINKED");
+
+        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice())); });
+        LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
+        clear_solana_lp();
     }
 
     // ── Bull Run (arcade game 5) ──────────────────────────────────────────

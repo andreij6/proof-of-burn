@@ -16,6 +16,11 @@ serde = { version = "1", features = ["derive"] }
 ciborium = "0.2"
 serde_json = "1"
 sha2 = "0.10"
+# ANSEM LP rewards: Ed25519 wallet-signature verification + Solana
+# base58 addresses + PDA on-curve checks (all wasm-safe, no rand).
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+curve25519-dalek = { version = "4", default-features = false, features = ["alloc"] }
+bs58 = "0.5"
 
 [dev-dependencies]
 pocket-ic = "9"
