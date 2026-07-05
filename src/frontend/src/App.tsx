@@ -37,6 +37,7 @@ import XFarm from "./XFarm";
 import Arcade from "./Arcade";
 import LuckProofPage from "./LuckProofPage";
 import DropZonePage from "./DropZonePage";
+import BullRunPage from "./BullRunPage";
 import Casino from "./Casino";
 import Faucet from "./Faucet";
 import Payouts from "./Payouts";
@@ -54,7 +55,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'luckproof' | 'dropzone' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -71,6 +72,8 @@ export const PAGE_PATH: Record<AppPage, string> = {
   // Drop Zone (target skydive) — own nav page below Luck-Proof, gated on the
   // arcade_skydive per-game flag.
   dropzone: '/drop-zone',
+  // Bull Run (encierro lane-runner) — Play to Earn nav, arcade_bullrun flag.
+  bullrun: '/bull-run',
   explorer: '/explorer',
   arcade: '/arcade',
   // Mini Golf has its own nav page (below Lottery) — same arcade flag gate,
@@ -644,6 +647,7 @@ export default function App() {
   const minigolfEnabled = featureFlags.find(f => f.key === 'arcade_minigolf')?.enabled ?? false;
   const luckproofEnabled = featureFlags.find(f => f.key === 'arcade_luckproof')?.enabled ?? false;
   const dropzoneEnabled = featureFlags.find(f => f.key === 'arcade_skydive')?.enabled ?? false;
+  const bullrunEnabled = featureFlags.find(f => f.key === 'arcade_bullrun')?.enabled ?? false;
   const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
   const casinoEnabled = crashEnabled;
   const faucetEnabled = featureFlags.find(f => f.key === 'cycles_faucet')?.enabled ?? false;
@@ -1270,6 +1274,9 @@ export default function App() {
     if (page === 'dropzone' && featureFlags.length > 0 && !dropzoneEnabled) {
       redirect('dashboard');
     }
+    if (page === 'bullrun' && featureFlags.length > 0 && !bullrunEnabled) {
+      redirect('dashboard');
+    }
     if (page === 'casino' && featureFlags.length > 0 && !casinoEnabled) {
       redirect('dashboard');
     }
@@ -1298,7 +1305,7 @@ export default function App() {
     if (page === 'about' && featureFlags.length > 0 && !missionEnabled) {
       redirect('voting');
     }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, luckproofEnabled, dropzoneEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, xFarmEnabled, dashboardEnabled, missionEnabled, principal, featureFlags.length]);
+  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, xFarmEnabled, dashboardEnabled, missionEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1932,7 +1939,7 @@ export default function App() {
         )}
 
         {/* ── Play to Earn: skill games with staker competitions ── */}
-        {(luckproofEnabled || dropzoneEnabled || minigolfEnabled) && (
+        {(luckproofEnabled || dropzoneEnabled || minigolfEnabled || bullrunEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Play to Earn</Eyebrow>
         )}
         {luckproofEnabled && (
@@ -1945,6 +1952,12 @@ export default function App() {
           <Btn variant={page === 'dropzone' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('dropzone')}>
             <Icon name="parachute" size={14} stroke={page === 'dropzone' ? 'var(--char-950)' : 'currentColor'} />
             Drop Zone
+          </Btn>
+        )}
+        {bullrunEnabled && (
+          <Btn variant={page === 'bullrun' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('bullrun')}>
+            <Icon name="bull" size={14} stroke={page === 'bullrun' ? 'var(--char-950)' : 'currentColor'} />
+            Bull Run
           </Btn>
         )}
         {minigolfEnabled && (
@@ -2507,6 +2520,14 @@ export default function App() {
             />
           ) : page === 'dropzone' && dropzoneEnabled ? (
             <DropZonePage
+              actor={actor}
+              principal={principal}
+              onSignIn={handleLogin}
+              onGoParticipate={() => setPage(losslessEnabled ? 'lottery' : 'voting')}
+              isLocal={config?.is_local ?? false}
+            />
+          ) : page === 'bullrun' && bullrunEnabled ? (
+            <BullRunPage
               actor={actor}
               principal={principal}
               onSignIn={handleLogin}

@@ -11,6 +11,7 @@ shipped.
 - [AI Proposal Review ("AI Review" / Chat with Proposal)](/ideas/ai-proposal-review/README.md) — `ai-proposal-review`
 - [AI Reviewer Agent — Build Spec (PB-510)](/ideas/ai-reviewer/ai-reviewer-spec.md) — `ai-reviewer`
 - [Auto-Recaps — Gemini-drafted "this week in Caldera" posts from on-chain stats](/ideas/auto-recaps/README.md) — `auto-recaps`
+- [Bull Run — the encierro lane-runner (arcade game 5)](/ideas/bull-run/README.md) — `bull-run`
 - [Canister Inbox — Technical Specification](/ideas/canister-inbox/README.md) — `canister-inbox`
 - [Mini-Golf Course Editor — Design Document](/ideas/course-nft/course-editor.md) — `course-nft`
 - [Drop Zone — the target-skydive game (arcade game 4)](/ideas/drop-zone/README.md) — `drop-zone`

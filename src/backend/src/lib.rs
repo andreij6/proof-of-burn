@@ -5260,6 +5260,7 @@ pub const FLAG_ARCADE_MINIGOLF: &str = "arcade_minigolf";
 pub const FLAG_ARCADE_FIELDGOAL: &str = "arcade_fieldgoal";
 pub const FLAG_ARCADE_LUCKPROOF: &str = "arcade_luckproof";
 pub const FLAG_ARCADE_SKYDIVE: &str = "arcade_skydive";
+pub const FLAG_ARCADE_BULLRUN: &str = "arcade_bullrun";
 /// The Casino: Crash (bustabit-style multiplier game) + the shared casino VP
 /// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
 /// until the owner enables it after a playtest.
@@ -5282,10 +5283,10 @@ pub const FLAG_DASHBOARD: &str = "dashboard";
 /// Mission Statement page (`about` route). Ships dark (default OFF) until an
 /// admin enables it.
 pub const FLAG_MISSION_STATEMENT: &str = "mission_statement";
-const KNOWN_FEATURE_FLAGS: [&str; 16] = [
+const KNOWN_FEATURE_FLAGS: [&str; 17] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
-    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE,
+    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN,
     FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS, FLAG_X_FARM,
     FLAG_DASHBOARD, FLAG_MISSION_STATEMENT,
 ];
@@ -5557,6 +5558,7 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE_FIELDGOAL => false,
         FLAG_ARCADE_LUCKPROOF => false,
         FLAG_ARCADE_SKYDIVE => false,
+        FLAG_ARCADE_BULLRUN => false,
         FLAG_X_FARM => false,
         // Dashboard + Mission Statement ship dark (default OFF) — these pages
         // were always-on before; gating them lets an admin hide either page
@@ -12717,6 +12719,7 @@ const FIELDGOAL_MAX_MILLIS: u64 = 30 * 60 * 1000; // 30 min
 // are client input.
 const ARCADE_GAME_LUCKPROOF: &str = "luckproof";
 const ARCADE_GAME_SKYDIVE: &str = "skydive";
+const ARCADE_GAME_BULLRUN: &str = "bullrun";
 const ARCADE_LEADERBOARD_LIMIT: usize = 100;
 // Palette sizes — the frontend mirrors these (index = palette entry).
 const CHARACTER_HAIR_OPTIONS: u8 = 6;
@@ -12826,6 +12829,7 @@ fn arcade_game_flag(game: &str) -> &'static str {
         ARCADE_GAME_FIELDGOAL => FLAG_ARCADE_FIELDGOAL,
         ARCADE_GAME_LUCKPROOF => FLAG_ARCADE_LUCKPROOF,
         ARCADE_GAME_SKYDIVE => FLAG_ARCADE_SKYDIVE,
+        ARCADE_GAME_BULLRUN => FLAG_ARCADE_BULLRUN,
         _ => FLAG_ARCADE_MINIGOLF,
     }
 }
@@ -14113,6 +14117,219 @@ fn complete_skydive_daily(run_id: u64, distance_dm: u32, millis: u64, safe: bool
         );
     });
     let rank = get_skydive_daily_board(Some(run.day))
+        .into_iter()
+        .find(|r| r.player == caller)
+        .map(|r| r.rank)
+        .unwrap_or(0);
+    Ok(rank)
+}
+
+// ── Bull Run (arcade game 5): the encierro lane-runner ──────────────────────
+// A lone black bull charges through Spanish streets toward the bullring:
+// three lanes, jumpable barriers, unjumpable carts, and EXACTLY
+// BULLRUN_COINS coins laid out along the course. The whole course derives
+// client-side from a seed, so the server only needs the seed and the fixed
+// coin total to bounds-validate a completion (Field-Goal-parity trust,
+// like Drop Zone). Ranked coins desc → time asc; stumbles cost speed, so
+// time already prices sloppy running.
+//
+// PRACTICE is client-side (random course). DAILY mirrors the other games:
+// one attempt per UTC day (local nets replay freely), stakers-only, every
+// player runs the SAME day-seeded street.
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct BullRunRun {
+    pub id: u64,
+    pub player: Principal,
+    pub day: u32,
+    pub issued_at: u64,
+    pub completed: bool,
+}
+impl_storable!(BullRunRun);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct BullRunDailyEntry {
+    pub day: u32,
+    pub player: Principal,
+    pub coins: u32,
+    /// Start → arena gate, milliseconds.
+    pub millis: u64,
+    pub submitted_at: u64,
+}
+impl_storable!(BullRunDailyEntry);
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BullRunDayKey {
+    pub day: u32,
+    pub player: Principal,
+}
+impl_storable!(BullRunDayKey);
+
+thread_local! {
+    /// MemoryId 115: in-flight + completed daily runs.
+    static BULLRUN_RUNS: RefCell<StableBTreeMap<u64, BullRunRun, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(115)))));
+    /// MemoryId 116: next run id.
+    static NEXT_BULLRUN_ID: RefCell<StableCell<u64, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(116)), 1u64)));
+    /// MemoryId 117: (day, player) → daily result.
+    static BULLRUN_DAILY: RefCell<StableBTreeMap<BullRunDayKey, BullRunDailyEntry, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(117)))));
+}
+
+/// The course generator ALWAYS places exactly this many coins — the server's
+/// completion bound. Mirrored by the frontend's buildCourse.
+const BULLRUN_COINS: u32 = 120;
+const BULLRUN_RUN_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
+const BULLRUN_MIN_MILLIS: u64 = 45_000; // 1.5 km can't be run faster
+const BULLRUN_MAX_MILLIS: u64 = 10 * 60 * 1000;
+const BULLRUN_BOARD_LIMIT: usize = 100;
+
+fn bullrun_day_seed(day: u32) -> u64 {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"bullrun_daily_v1");
+    h.update(day.to_le_bytes());
+    let d = h.finalize();
+    u64::from_le_bytes(d[..8].try_into().unwrap())
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct BullRunStart {
+    pub run_id: u64,
+    pub day: u32,
+    /// Client derives the whole street (obstacles, coins, buildings) from this.
+    pub course_seed: u64,
+    pub coins_total: u32,
+    pub issued_at: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct BullRunDailyRow {
+    pub rank: u32,
+    pub player: Principal,
+    pub coins: u32,
+    pub millis: u64,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct BullRunDailyStatus {
+    pub day: u32,
+    pub eligible: bool,
+    pub played: bool,
+    pub my_entry: Option<BullRunDailyEntry>,
+    pub players_today: u32,
+    pub coins_total: u32,
+}
+
+/// Board for `day` (default today): coins desc → time asc → earlier entry.
+#[ic_cdk::query]
+fn get_bullrun_daily_board(day: Option<u32>) -> Vec<BullRunDailyRow> {
+    let day = day.unwrap_or_else(|| epoch_day(current_time()));
+    let mut rows: Vec<BullRunDailyEntry> = BULLRUN_DAILY.with(|m| {
+        m.borrow().iter().map(|e| e.value()).filter(|e| e.day == day).collect()
+    });
+    rows.sort_by(|a, b| {
+        b.coins.cmp(&a.coins)
+            .then(a.millis.cmp(&b.millis))
+            .then(a.submitted_at.cmp(&b.submitted_at))
+    });
+    rows.into_iter()
+        .take(BULLRUN_BOARD_LIMIT)
+        .enumerate()
+        .map(|(i, e)| BullRunDailyRow { rank: i as u32 + 1, player: e.player, coins: e.coins, millis: e.millis })
+        .collect()
+}
+
+#[ic_cdk::query]
+fn get_bullrun_daily_status() -> BullRunDailyStatus {
+    let caller = get_caller();
+    let day = epoch_day(current_time());
+    let my_entry = BULLRUN_DAILY.with(|m| m.borrow().get(&BullRunDayKey { day, player: caller }));
+    let players_today = BULLRUN_DAILY.with(|m| {
+        m.borrow().iter().filter(|e| e.value().day == day).count() as u32
+    });
+    BullRunDailyStatus {
+        day,
+        eligible: caller != Principal::anonymous() && author_is_staked(caller),
+        played: my_entry.is_some(),
+        my_entry,
+        players_today,
+        coins_total: BULLRUN_COINS,
+    }
+}
+
+/// Enter today's run. One attempt per UTC day off-local (starting consumes
+/// it); stakers only, like the other Play-to-Earn dailies.
+#[ic_cdk::update]
+fn start_bullrun_daily() -> Result<BullRunStart, String> {
+    require_authenticated()?;
+    require_arcade_game_enabled(ARCADE_GAME_BULLRUN)?;
+    let caller = get_caller();
+    if !author_is_staked(caller) {
+        return Err("NOT_STAKED".to_string());
+    }
+    let now = current_time();
+    let day = epoch_day(now);
+    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+    if !is_local {
+        if BULLRUN_DAILY.with(|m| m.borrow().contains_key(&BullRunDayKey { day, player: caller })) {
+            return Err("ALREADY_PLAYED_TODAY".to_string());
+        }
+        let in_flight = BULLRUN_RUNS.with(|m| {
+            m.borrow().iter().any(|e| {
+                let r = e.value();
+                r.player == caller && r.day == day
+            })
+        });
+        if in_flight {
+            return Err("ALREADY_PLAYED_TODAY".to_string());
+        }
+    }
+    let id = NEXT_BULLRUN_ID.with(|c| {
+        let v = *c.borrow().get();
+        let _ = c.borrow_mut().set(v + 1);
+        v
+    });
+    BULLRUN_RUNS.with(|m| {
+        m.borrow_mut().insert(id, BullRunRun { id, player: caller, day, issued_at: now, completed: false });
+    });
+    Ok(BullRunStart { run_id: id, day, course_seed: bullrun_day_seed(day), coins_total: BULLRUN_COINS, issued_at: now })
+}
+
+/// Submit the finish: coins picked up + start→arena time. Bounds-validated
+/// (coins can never exceed the course's fixed total).
+#[ic_cdk::update]
+fn complete_bullrun_daily(run_id: u64, coins: u32, millis: u64) -> Result<u32, String> {
+    require_authenticated()?;
+    require_arcade_game_enabled(ARCADE_GAME_BULLRUN)?;
+    let caller = get_caller();
+    let now = current_time();
+    let mut run = BULLRUN_RUNS.with(|m| m.borrow().get(&run_id)).ok_or("RUN_NOT_FOUND")?;
+    if run.player != caller {
+        return Err("NOT_YOUR_RUN".to_string());
+    }
+    if run.completed {
+        return Err("ALREADY_COMPLETED".to_string());
+    }
+    if now.saturating_sub(run.issued_at) > BULLRUN_RUN_TTL_NS {
+        return Err("RUN_EXPIRED".to_string());
+    }
+    if coins > BULLRUN_COINS {
+        return Err("INVALID_COINS".to_string());
+    }
+    if !(BULLRUN_MIN_MILLIS..=BULLRUN_MAX_MILLIS).contains(&millis) {
+        return Err("INVALID_TIME".to_string());
+    }
+    run.completed = true;
+    BULLRUN_RUNS.with(|m| { m.borrow_mut().insert(run_id, run.clone()); });
+    BULLRUN_DAILY.with(|m| {
+        m.borrow_mut().insert(
+            BullRunDayKey { day: run.day, player: caller },
+            BullRunDailyEntry { day: run.day, player: caller, coins, millis, submitted_at: now },
+        );
+    });
+    let rank = get_bullrun_daily_board(Some(run.day))
         .into_iter()
         .find(|r| r.player == caller)
         .map(|r| r.rank)
@@ -31033,6 +31250,86 @@ mod tests {
         TICKET_SOURCES.with(|m| { let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
         LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
         FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_LOSSLESS_LOTTERY.to_string()); });
+    }
+
+    // ── Bull Run (arcade game 5) ──────────────────────────────────────────
+
+    fn enable_bullrun() {
+        install_staking_test_config();
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.is_local = false;
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_ARCADE_BULLRUN.to_string(), 1u8); });
+    }
+
+    fn clear_bullrun() {
+        BULLRUN_RUNS.with(|m| {
+            let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        BULLRUN_DAILY.with(|m| {
+            let keys: Vec<BullRunDayKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
+            let mut m = m.borrow_mut();
+            for k in keys { m.remove(&k); }
+        });
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_ARCADE_BULLRUN.to_string()); });
+        set_mock_time(None);
+    }
+
+    #[test]
+    fn test_bullrun_daily_flow_and_board_order() {
+        enable_bullrun();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+
+        set_mock_caller(alice());
+        assert_eq!(start_bullrun_daily().unwrap_err(), "NOT_STAKED");
+        for u in [alice(), bob()] {
+            seed_stake(StakeTier::SixMonths, u, 100_000_000);
+        }
+
+        // The day seed is deterministic and shared.
+        let run = start_bullrun_daily().unwrap();
+        assert_eq!(run.course_seed, bullrun_day_seed(run.day));
+        assert_eq!(run.coins_total, BULLRUN_COINS);
+        assert_eq!(start_bullrun_daily().unwrap_err(), "ALREADY_PLAYED_TODAY");
+
+        // Guards.
+        set_mock_caller(bob());
+        assert_eq!(complete_bullrun_daily(run.run_id, 80, 90_000).unwrap_err(), "NOT_YOUR_RUN");
+        set_mock_caller(alice());
+        assert_eq!(complete_bullrun_daily(run.run_id, BULLRUN_COINS + 1, 90_000).unwrap_err(), "INVALID_COINS");
+        assert_eq!(complete_bullrun_daily(run.run_id, 80, 10).unwrap_err(), "INVALID_TIME");
+        assert_eq!(complete_bullrun_daily(run.run_id, 95, 92_000).unwrap(), 1);
+        assert_eq!(complete_bullrun_daily(run.run_id, 95, 92_000).unwrap_err(), "ALREADY_COMPLETED");
+
+        // Bob: same coins but slower → rank 2; board orders coins → time.
+        set_mock_caller(bob());
+        let rb = start_bullrun_daily().unwrap();
+        assert_eq!(rb.course_seed, run.course_seed, "everyone runs the same street");
+        assert_eq!(complete_bullrun_daily(rb.run_id, 95, 99_000).unwrap(), 2);
+        let board = get_bullrun_daily_board(None);
+        assert_eq!(board[0].player, alice());
+        assert_eq!(board[1].player, bob());
+
+        // Status + local replay bypass + day rollover.
+        let st = get_bullrun_daily_status();
+        assert!(st.eligible && st.played);
+        assert_eq!(st.players_today, 2);
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.is_local = true;
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+        assert!(start_bullrun_daily().is_ok(), "local retry allowed");
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.is_local = false;
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+        set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
+        assert!(start_bullrun_daily().is_ok(), "fresh attempt after UTC rollover");
+
+        for u in [alice(), bob()] {
+            STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, u)); });
+        }
+        clear_bullrun();
     }
 
     // ── Drop Zone (arcade game 4) ─────────────────────────────────────────

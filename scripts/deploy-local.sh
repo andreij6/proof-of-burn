@@ -106,6 +106,8 @@ icp canister call backend admin_set_feature_flag '("arcade_minigolf", true)' -e 
 icp canister call backend admin_set_feature_flag '("arcade_luckproof", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # Drop Zone (arcade game 4) — enabled locally for testing; ships dark on mainnet.
 icp canister call backend admin_set_feature_flag '("arcade_skydive", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+# Bull Run (arcade game 5) — enabled locally for testing; ships dark on mainnet.
+icp canister call backend admin_set_feature_flag '("arcade_bullrun", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 ok "Early Adopters + arcade_minigolf flags enabled (local); arcade forced OFF (default)"
 
 # ── 5b. Wire CourseNFT both directions, then seed a sample course ─────────────

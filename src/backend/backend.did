@@ -1084,6 +1084,40 @@ type SkydiveDailyStatus = record {
   my_entry : opt SkydiveDailyEntry;
   players_today : nat32;
 };
+// Bull Run (arcade game 5) — the encierro lane-runner: a black bull charges
+// through Spanish streets to the bullring collecting coins and dodging
+// obstacles. Course derives client-side from the day seed with EXACTLY
+// coins_total coins; ranked coins desc then time asc. Daily = once/UTC day
+// (local nets replay freely), stakers-only, same street for everyone.
+type BullRunStart = record {
+  run_id : nat64;
+  day : nat32;
+  course_seed : nat64;
+  coins_total : nat32;
+  issued_at : nat64;
+};
+type BullRunDailyEntry = record {
+  day : nat32;
+  player : principal;
+  coins : nat32;
+  millis : nat64;
+  submitted_at : nat64;
+};
+type BullRunDailyRow = record {
+  rank : nat32;
+  player : principal;
+  coins : nat32;
+  millis : nat64;
+};
+type BullRunDailyStatus = record {
+  day : nat32;
+  eligible : bool;
+  played : bool;
+  my_entry : opt BullRunDailyEntry;
+  players_today : nat32;
+  coins_total : nat32;
+};
+type Result_20 = variant { Ok : BullRunStart; Err : text };
 type Result_18 = variant { Ok : SkydiveRunStart; Err : text };
 type Result_19 = variant { Ok : nat32; Err : text };
 type Result_16 = variant { Ok : LuckProofRunStart; Err : text };
@@ -2059,6 +2093,11 @@ service : (InitPayload) -> {
   complete_skydive_daily : (nat64, nat32, nat64, bool) -> (Result_19);
   get_skydive_daily_board : (opt nat32) -> (vec SkydiveDailyRow) query;
   get_skydive_daily_status : () -> (SkydiveDailyStatus) query;
+  // Bull Run daily: enter (stakers, once/day) → finish → board/status.
+  start_bullrun_daily : () -> (Result_20);
+  complete_bullrun_daily : (nat64, nat32, nat64) -> (Result_19);
+  get_bullrun_daily_board : (opt nat32) -> (vec BullRunDailyRow) query;
+  get_bullrun_daily_status : () -> (BullRunDailyStatus) query;
   // Replays unlock by competing: null unless the CALLER has their own entry
   // for that day (or is asking for their own run).
   get_luckproof_daily_replay : (nat32, principal) -> (opt LuckProofReplay) query;
