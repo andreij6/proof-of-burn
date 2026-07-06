@@ -19,6 +19,7 @@ shipped.
 - [Cycles Faucet — Build Spec (PB-400, Phase 1)](/ideas/faucet/build-spec.md) — `faucet`
 - [Featured Dapp — Spec & Task List](/ideas/featured-dapp/README.md) — `featured-dapp`
 - [ICP Feature Gap Analysis — Cycles of Influence](/ideas/icp-features-gap-analysis.md)
+- [The Rewards Program of ICP — product thesis & roadmap](/ideas/icp-rewards-program/README.md) — `icp-rewards-program`
 - [ICPSwap LP — verify + custody-stake ICP/ckUSDC positions](/ideas/icpswap-lp-stake/README.md) — `icpswap-lp-stake`
 - [ID Listings — Repost idgeek Identity Listings (with contract pre-validation)](/ideas/id-listings/README.md) — `id-listings`
 - [Idea Pitch Coach — Gemini feedback before you post to the R&D board](/ideas/idea-pitch-coach/README.md) — `idea-pitch-coach`
