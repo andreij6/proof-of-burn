@@ -7,6 +7,7 @@ import {
 } from './engine';
 import { fitView, isoP, isoUn, renderHoleScene, type IsoView } from './holeRender';
 import { arcadeMusic } from './music';
+import { isTouchDevice } from './DropZone';
 
 // ==========================================
 // Mini Golf — game shell over the isometric voxel renderer (holeRender.ts).
@@ -221,6 +222,16 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
     return () => cancelAnimationFrame(raf);
   }, [look.hair, look.skin, look.outfit, onRoundComplete]);
 
+  // Mobile fullscreen: the round takes the whole screen (page chrome and
+  // scrolling fight the drag-to-putt gesture); desktop layout untouched.
+  const fullscreen = isTouchDevice();
+  useEffect(() => {
+    if (!fullscreen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, [fullscreen]);
+
   const totalStrokes = perHole.reduce((a, b) => a + b, 0);
   const parSoFar = course.slice(0, perHole.length).reduce((a, h) => a + h.par, 0);
   const diff = totalStrokes - parSoFar;
@@ -234,7 +245,16 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
   const def = course[holeIdx];
 
   return (
-    <div className="col" style={{ gap: 10, position: 'relative' }}>
+    <div
+      className="col"
+      style={fullscreen
+        ? {
+            position: 'fixed', inset: 0, zIndex: 80, background: '#0b0f0c', gap: 6,
+            padding: 'calc(env(safe-area-inset-top, 0px) + 8px) 8px calc(env(safe-area-inset-bottom, 0px) + 8px)',
+            overflowY: 'auto',
+          }
+        : { gap: 10, position: 'relative' }}
+    >
       {/* HUD strip */}
       <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
         <span className="row" style={{ gap: 8, alignItems: 'baseline' }}>
@@ -252,7 +272,15 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
         </span>
       </div>
 
-      <div style={{ position: 'relative', borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border-hi)' }}>
+      <div style={fullscreen
+        ? {
+            position: 'relative', borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border-hi)',
+            // As big as the viewport allows without breaking the aspect ratio
+            // (HUD ≈ 80px); centered in the letterbox.
+            width: `min(100%, calc((100dvh - 110px) * ${CANVAS_W / CANVAS_H}))`,
+            margin: '0 auto',
+          }
+        : { position: 'relative', borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border-hi)' }}>
         <canvas
           ref={canvasRef}
           width={CANVAS_W}
