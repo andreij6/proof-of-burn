@@ -262,6 +262,11 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
   const [status, setStatus] = useState<DailyStatus | null>(null);
   const [board, setBoard] = useState<DailyRow[]>([]);
   const [result, setResult] = useState<{ dist: number; ms: number; safe: boolean; daily: boolean; rank: number | null } | null>(null);
+  // Mirrors of g.current.phase / .fall.chute — the game loop mutates the REF,
+  // which never re-renders React, so the mobile overlay (JUMP vs DIVE+CHUTE,
+  // CHUTE vs CUT label) must be driven by state synced each frame.
+  const [phaseUi, setPhaseUi] = useState<'plane' | 'fall' | 'landed'>('plane');
+  const [chuteUi, setChuteUi] = useState(false);
 
   // All live game state in a ref — the RAF loop owns it.
   const g = useRef<{
@@ -298,6 +303,7 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
       mobileUi: isTouchDevice(), t: 0,
     };
     setResult(null); setErr(null);
+    setPhaseUi('plane'); setChuteUi(false);
     setMode('play');
   };
 
@@ -419,6 +425,9 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       game.t += dt;
+      // Keep the control overlay in sync (no-op re-render-wise until a change).
+      setPhaseUi(game.phase);
+      setChuteUi(game.fall.chute);
 
       // ── Advance ──
       if (game.phase === 'plane') {
@@ -1153,7 +1162,7 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
                 style={{ position: 'absolute', top: 'calc(env(safe-area-inset-top, 0px) + 10px)', left: 10, width: 40, height: 40, borderRadius: 20, border: '1px solid var(--border-hi)', background: 'rgba(255,255,255,0.85)', fontSize: 16, color: '#1a1a1a' }}
                 aria-label="Quit"
               >✕</button>
-              {g.current?.phase === 'plane' ? (
+              {phaseUi === 'plane' ? (
                 <button
                   onClick={jump}
                   style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 22px)', left: '50%', transform: 'translateX(-50%)', minWidth: 170, height: 62, borderRadius: 31, border: 'none', background: 'var(--burn)', color: 'var(--char-950)', fontSize: 19, fontWeight: 800, letterSpacing: '0.04em', boxShadow: '0 4px 14px rgba(0,0,0,0.25)' }}
@@ -1169,7 +1178,7 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
                   <button
                     onClick={toggleChute}
                     style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 22px)', right: 14, width: 96, height: 96, borderRadius: 48, border: 'none', background: 'var(--burn)', color: 'var(--char-950)', fontSize: 15, fontWeight: 800, boxShadow: '0 4px 14px rgba(0,0,0,0.25)' }}
-                  >{g.current?.fall.chute ? 'CUT' : 'CHUTE'}</button>
+                  >{chuteUi ? 'CUT' : 'CHUTE'}</button>
                 </>
               )}
               <span className="mono" style={{ position: 'absolute', bottom: 'calc(env(safe-area-inset-bottom, 0px) + 4px)', left: '50%', transform: 'translateX(-50%)', fontSize: 10, color: 'rgba(26,26,26,0.55)', whiteSpace: 'nowrap' }}>
