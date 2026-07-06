@@ -1,5 +1,16 @@
 # Log
 
+## 2026-07-06 — Mainnet deploy ba0b1e1 (mobile playability + 50-hand daily)
+
+Shipped since 4b39efa: Drop Zone mobile control fix (overlay was
+ref-driven — DIVE/CHUTE never appeared after jumping; now state-mirror
+synced); Mini Golf fullscreen shell on mobile; quit-✕ overlap fixes
+(Drop Zone ALT plate + Bull Run coins plate shift right of the button;
+altimeter clamped clear of minimap and CHUTE thumb); Luck-Proof daily
+competition 250 → 50 decisions (min-time bound scaled 60s → 12s).
+Rollback snapshot …25 (528 MiB); prod smoke: daily status reports 50
+decisions, frontend 200.
+
 ## 2026-07-06 — Mainnet deploy 4b39efa (mobile + admin custody card)
 
 Shipped since 8d3ba8e: mobile fullscreen shells + thumb controls for Drop
