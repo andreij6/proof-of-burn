@@ -1,5 +1,18 @@
 # Log
 
+## 2026-07-06 — Mainnet deploy 4b39efa (mobile + admin custody card)
+
+Shipped since 8d3ba8e: mobile fullscreen shells + thumb controls for Drop
+Zone and Bull Run (Drop Zone was unplayable on phones — unreadable HUD,
+steering/button conflict); nav sections renamed "Stake 4 Tickets" / "Play
+4 Tickets"; Admin → Staking & Lottery "ICP LP staked per pool" card
+(admin_get_icp_lp_pool_stats live valuation; smoked on prod — 5 pool
+rows). Fast Lane was built and removed same-day, never reached mainnet.
+Housekeeping: pruned the five oldest backend snapshots (June 25 – Jul 4,
+~2 GiB) after snapshot creation failed on memory-grow cycles; kept …21/
+…22/…23 and took new rollback snapshot …24 (528 MiB). Also committed the
+straggler OKF-migration deletions (audit/, plans/, tasks/).
+
 ## 2026-07-05 — Mainnet deploy 8d3ba8e (value-scaled LP tickets + Stake to Earn)
 
 Shipped since 23860b4: ICP LP tickets now 40/day per $1 of staked LP value
