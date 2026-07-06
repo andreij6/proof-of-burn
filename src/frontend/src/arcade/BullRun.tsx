@@ -873,19 +873,21 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
       }
     }
 
-    // ── HUD ──    // ── HUD ──
+    // ── HUD ── Mobile fullscreen: the quit ✕ owns the top-left corner (a
+    // notch can push it down, never right), so the plate sits right of it.
+    const hudX = fullscreen ? 62 : 8;
     ctx.fillStyle = 'rgba(255,255,255,0.75)';
-    ctx.fillRect(8, 8, 148, 62);
-    ctx.strokeStyle = '#8a8a8a'; ctx.lineWidth = 1; ctx.strokeRect(8, 8, 148, 62);
+    ctx.fillRect(hudX, 8, 148, 62);
+    ctx.strokeStyle = '#8a8a8a'; ctx.lineWidth = 1; ctx.strokeRect(hudX, 8, 148, 62);
     ctx.fillStyle = '#c9931a';
-    ctx.beginPath(); ctx.arc(22, 24, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(hudX + 14, 24, 6, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#8a6a1a'; ctx.stroke();
     ctx.fillStyle = INK;
     ctx.font = '700 14px ui-monospace, monospace';
-    ctx.fillText(`${b.coins}`, 34, 29);
+    ctx.fillText(`${b.coins}`, hudX + 26, 29);
     ctx.font = '600 12px ui-monospace, monospace';
-    ctx.fillText(`${Math.round(b.speed * 3.6)} km/h · ${Math.round(b.z)} m`, 14, 47);
-    ctx.fillText(`${b.t.toFixed(1)} s`, 14, 63);
+    ctx.fillText(`${Math.round(b.speed * 3.6)} km/h · ${Math.round(b.z)} m`, hudX + 6, 47);
+    ctx.fillText(`${b.t.toFixed(1)} s`, hudX + 6, 63);
     // Hits: the run's life bar.
     const hitsLeft = MAX_HITS - b.stumbles;
     ctx.font = `700 ${hitsLeft <= 3 ? 17 : 14}px ui-monospace, monospace`;

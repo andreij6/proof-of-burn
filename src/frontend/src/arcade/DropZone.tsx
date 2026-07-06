@@ -957,17 +957,25 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
       ctx.fillText(`target ${Math.round(dist)} m ${dist < 320 ? '— NOW!' : ''}`, W / 2, H * 0.14 + 22);
       ctx.textAlign = 'left';
     } else {
-      // HUD plate so the numbers read over any terrain.
+      // HUD plate so the numbers read over any terrain. Mobile: the quit ✕
+      // owns the top-left corner (a notch can push it down, never right), so
+      // the plate sits right of the button.
+      const hudX = game.mobileUi ? 62 : 8;
       ctx.fillStyle = 'rgba(255,255,255,0.72)';
-      ctx.fillRect(8, 8, 128, 76);
-      ctx.strokeStyle = '#8a8a8a'; ctx.lineWidth = 1; ctx.strokeRect(8, 8, 128, 76);
+      ctx.fillRect(hudX, 8, 128, 76);
+      ctx.strokeStyle = '#8a8a8a'; ctx.lineWidth = 1; ctx.strokeRect(hudX, 8, 128, 76);
       ctx.fillStyle = INK;
-      ctx.fillText(`ALT    ${Math.max(0, Math.round(p.y))} m`, 14, 24);
-      ctx.fillText(`SINK   ${Math.round(p.vy)} m/s`, 14, 42);
-      ctx.fillText(`TARGET ${Math.round(dist)} m`, 14, 60);
-      ctx.fillText(`T      ${(game.t - game.jumpAt).toFixed(1)} s`, 14, 78);
-      // Altimeter with the 80 m floor marked.
-      const ax = W - 26, ah = H * 0.6, ay = H * 0.2;
+      ctx.fillText(`ALT    ${Math.max(0, Math.round(p.y))} m`, hudX + 6, 24);
+      ctx.fillText(`SINK   ${Math.round(p.vy)} m/s`, hudX + 6, 42);
+      ctx.fillText(`TARGET ${Math.round(dist)} m`, hudX + 6, 60);
+      ctx.fillText(`T      ${(game.t - game.jumpAt).toFixed(1)} s`, hudX + 6, 78);
+      // Altimeter with the 80 m floor marked. Mobile: start below the
+      // top-right minimap (landscape phones are short enough to collide).
+      const ax = W - 26;
+      // Mobile: clear the top-right minimap AND the bottom-right CHUTE thumb
+      // (both bite on short landscape screens).
+      const ay = game.mobileUi ? Math.max(H * 0.2, 156) : H * 0.2;
+      const ah = (game.mobileUi ? Math.min(H * 0.8, H - 126) : H * 0.8) - ay;
       ctx.fillStyle = 'rgba(255,255,255,0.72)';
       ctx.fillRect(ax - 2, ay - 2, 14, ah + 4);
       ctx.strokeStyle = INK; ctx.lineWidth = 1.4;
