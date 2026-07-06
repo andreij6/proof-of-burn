@@ -50,7 +50,7 @@ export default function LuckProofPage({ actor, principal, onSignIn, onGoParticip
               <Eyebrow accent>Practice vs the daily</Eyebrow>
               <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
                 <li><b>Practice:</b> 50-hand sessions, restart anytime, nothing recorded.</li>
-                <li><b>Daily competition:</b> 250 decisions, one attempt per UTC day, stakers-only — everyone faces the SAME deal, ranked EV → accuracy → speed.</li>
+                <li><b>Daily competition:</b> 50 decisions, one attempt per UTC day, stakers-only — everyone faces the SAME deal, ranked EV → accuracy → speed.</li>
                 <li><b>Two daily winners:</b> highest EV and highest actual cash each take lottery tickets equal to the day's player count.</li>
               </ul>
             </div>
@@ -73,7 +73,7 @@ export default function LuckProofPage({ actor, principal, onSignIn, onGoParticip
           <b style={{ fontSize: 14 }}>Sign in to play</b>
           <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
             Practice is free for every signed-in player. Stakers can enter the daily
-            250-decision competition.
+            50-decision competition.
           </span>
           <Btn variant="primary" onClick={onSignIn}>
             <Icon name="zap" size={13} stroke="var(--char-950)" /> Sign in to play

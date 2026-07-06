@@ -13530,7 +13530,7 @@ fn luckproof_generate(seed: [u8; 32], n: usize) -> Vec<LuckProofGamble> {
 
 /// The day's shared deal: every player faces the same gambles, so total EV
 /// earned ranks fairly. (The odds are on screen — the skill is sustained,
-/// fast, accurate EV arithmetic over 250 hands, and speed breaks ties.)
+/// fast, accurate EV arithmetic over the daily hand count, and speed breaks ties.)
 fn luckproof_day_seed(day: u32) -> [u8; 32] {
     use sha2::Digest;
     let mut h = sha2::Sha256::new();
@@ -13542,9 +13542,9 @@ fn luckproof_day_seed(day: u32) -> [u8; 32] {
     s
 }
 
-const LUCKPROOF_DAILY_DECISIONS: usize = 250;
+const LUCKPROOF_DAILY_DECISIONS: usize = 50; // owner 2026-07-06: 50, was 250
 const LUCKPROOF_RUN_TTL_NS: u64 = 60 * 60 * 1_000_000_000; // finish within 1 h
-const LUCKPROOF_MIN_MILLIS: u64 = 60_000; // 250 honest reads take > 1 min
+const LUCKPROOF_MIN_MILLIS: u64 = 12_000; // 50 honest reads take > 12 s (~240 ms each)
 const LUCKPROOF_MAX_MILLIS: u64 = 60 * 60 * 1000;
 const LUCKPROOF_BOARD_LIMIT: usize = 100;
 
@@ -33396,8 +33396,9 @@ mod tests {
             );
             if luckproof_edge_bp(g) > 0 { plus += 1 } else { minus += 1 }
         }
-        // The reference generator swings both ways — a fair day has both.
-        assert!(plus > 60 && minus > 60, "balanced mix of +EV ({plus}) and -EV ({minus})");
+        // The reference generator swings both ways — a fair day has both
+        // (thresholds ≈ 20% of the 50-decision daily).
+        assert!(plus > 10 && minus > 10, "balanced mix of +EV ({plus}) and -EV ({minus})");
         // Same day → same deal for everyone; different day differs.
         assert_eq!(
             format!("{:?}", luckproof_generate(luckproof_day_seed(19_900), 10)),

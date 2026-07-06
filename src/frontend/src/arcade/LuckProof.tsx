@@ -15,7 +15,7 @@ import { Btn, Chip, Icon, LiveDot, formatPrincipal } from '../ui';
 //    decisions against the day's shared deal (identical for everyone — the
 //    deal derives from the day seed, which the replay endpoint recomputes).
 //
-// Competition: one attempt per UTC day, 250 decisions, no-loss-lottery
+// Competition: one attempt per UTC day, 50 decisions, no-loss-lottery
 // stakers only; ranked EV → accuracy → time; the day's winner is paid
 // lottery tickets equal to that day's PLAYER COUNT by the sweep.
 // Keyboard: T / → take · D / ← decline. Mobile-first fluid layout.
@@ -453,7 +453,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
               <Chip tone="burn" style={{ alignSelf: 'flex-start', height: 19, fontSize: 10 }}>
                 <LiveDot color="var(--burn-ink)" size={5} /> Daily competition
               </Chip>
-              <b style={{ fontSize: 15 }}>{status?.decisions ?? 250} decisions · one attempt</b>
+              <b style={{ fontSize: 15 }}>{status?.decisions ?? 50} decisions · one attempt</b>
               <p style={{ fontSize: 12.5, color: 'var(--fg-2)', margin: 0, lineHeight: 1.5, flex: 1 }}>
                 Everyone gets the SAME deal today. TWO winners each day —
                 <b> highest EV</b> (skill) and <b>highest actual cash</b> (luck) — and
@@ -588,7 +588,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
           )}
           {!gamble && inDaily && (
             <div className="card row" style={{ gap: 10, justifyContent: 'center', padding: 24 }}>
-              <LiveDot size={9} color="var(--burn-ink)" /> Scoring your 250 decisions on-chain…
+              <LiveDot size={9} color="var(--burn-ink)" /> Scoring your decisions on-chain…
               {err && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{err} <Btn variant="ghost" sm onClick={submitDaily}>Retry</Btn></span>}
             </div>
           )}
@@ -733,7 +733,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
               <span>
                 <b style={{ color: 'var(--fg)' }}>You have 3 seconds per hand</b>, {PRACTICE_ROUNDS} hands
                 per practice session (restart anytime). If the clock runs out, you decline —
-                hesitation is a decision too. The daily competition is different: 250 hands,
+                hesitation is a decision too. The daily competition is different: 50 hands,
                 <b style={{ color: 'var(--fg)' }}> one attempt, no restarts</b>.
               </span>
               <span>
