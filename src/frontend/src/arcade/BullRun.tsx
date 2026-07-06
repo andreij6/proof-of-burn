@@ -496,17 +496,17 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     const hy = Math.max(0, Math.min(H, horizon ? horizon.sy : H * 0.35));
     const sky = ctx.createLinearGradient(0, 0, 0, Math.max(1, hy));
     sky.addColorStop(0, '#8ec3e6');
-    sky.addColorStop(1, '#f6e2b8');
+    sky.addColorStop(1, '#f6f4ef');
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, hy);
     // Sun sits at the street's vanishing point — anything built after this
     // (backdrops, walls) occludes it naturally.
-    ctx.fillStyle = '#f9d976';
+    ctx.fillStyle = '#f7f3e4';
     ctx.beginPath(); ctx.arc(W * 0.5, hy * 0.45, 22, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#c9a24a'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.strokeStyle = '#b3ae9e'; ctx.lineWidth = 1.5; ctx.stroke();
     const road = ctx.createLinearGradient(0, hy, 0, H);
-    road.addColorStop(0, '#cfc3ae');
-    road.addColorStop(1, '#e5dbc8');
+    road.addColorStop(0, '#d7d5ce');
+    road.addColorStop(1, '#eeece6');
     ctx.fillStyle = road;
     ctx.fillRect(0, hy, W, H - hy);
     ctx.strokeStyle = INK;
@@ -523,7 +523,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
         ctx.beginPath();
         ctx.moveTo(b1.sx, b1.sy); ctx.lineTo(f1.sx, f1.sy); ctx.lineTo(f2.sx, f2.sy); ctx.lineTo(b2.sx, b2.sy);
         ctx.closePath();
-        ctx.fillStyle = '#d9cdb2';
+        ctx.fillStyle = '#dbd9d2';
         ctx.fill();
       }
     }
@@ -558,12 +558,12 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
         const zNear = Math.max(bd.z, cam.z + 1.2);
         const p1 = cnr(zNear, 0), p2 = cnr(bd.z + bd.w, 0), p3 = cnr(bd.z + bd.w, bd.h), p4 = cnr(zNear, bd.h);
         if (!p1 || !p2 || !p3 || !p4) return;
-        const wall = bd.tone < 0.35 ? '#f5efe2' : bd.tone < 0.6 ? '#efe0c0' : bd.tone < 0.85 ? '#e6c890' : '#dba9a0';
+        const wall = bd.tone < 0.35 ? '#f2f0eb' : bd.tone < 0.6 ? '#eae8e1' : bd.tone < 0.85 ? '#dfddd4' : '#d5d3cb';
         ctx.beginPath();
         ctx.moveTo(p1.sx, p1.sy); ctx.lineTo(p2.sx, p2.sy); ctx.lineTo(p3.sx, p3.sy); ctx.lineTo(p4.sx, p4.sy);
         ctx.closePath();
         ctx.fillStyle = wall; ctx.fill();
-        ctx.strokeStyle = '#4a4438'; ctx.lineWidth = 1.4; ctx.stroke();
+        ctx.strokeStyle = '#4c4a46'; ctx.lineWidth = 1.4; ctx.stroke();
         const r4 = cnr(zNear, bd.h + 1.2), r3 = cnr(bd.z + bd.w, bd.h + 1.2);
         if (r3 && r4) {
           ctx.beginPath();
@@ -577,7 +577,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
             const tx2 = r4.sx + (r3.sx - r4.sx) * tt, ty2 = r4.sy + (r3.sy - r4.sy) * tt;
             ctx.beginPath(); ctx.moveTo(tx1, ty1); ctx.lineTo(tx2, ty2); ctx.stroke();
           }
-          ctx.strokeStyle = '#4a4438';
+          ctx.strokeStyle = '#4c4a46';
         }
         // Windows with shutters; balconies on some rows.
         const rows = Math.max(1, Math.floor(bd.h / 3.4));
@@ -590,7 +590,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
             const wp2 = project(cam, x0, wy + 1.4, wz + 0.9);
             if (!wp || !wp2) continue;
             const ww = Math.max(2, wp2.sx - wp.sx), wh = Math.max(2.5, wp.sy - wp2.sy);
-            ctx.fillStyle = '#3a332a';
+            ctx.fillStyle = '#3b3a36';
             ctx.fillRect(wp.sx, wp2.sy, ww, wh);
             // Shutters.
             ctx.fillStyle = '#6d8a56';
@@ -604,7 +604,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
                 const rx = wp.sx - ww * 0.3 + (ww * 1.6 * bx) / 4;
                 ctx.beginPath(); ctx.moveTo(rx, wp2.sy + wh); ctx.lineTo(rx, wp2.sy + wh + Math.max(1.5, wh * 0.3)); ctx.stroke();
               }
-              ctx.strokeStyle = '#4a4438';
+              ctx.strokeStyle = '#4c4a46';
             }
           }
         }
@@ -612,7 +612,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
         ctx.strokeStyle = 'rgba(60,50,40,0.55)';
         ctx.lineWidth = Math.max(1.5, (cam.f * 0.28) / p2.d);
         ctx.beginPath(); ctx.moveTo(p2.sx, p2.sy); ctx.lineTo(p3.sx, p3.sy); ctx.stroke();
-        ctx.strokeStyle = '#4a4438';
+        ctx.strokeStyle = '#4c4a46';
         // Street-level awning.
         if (bd.awning) {
           const az1 = cnr(bd.z + bd.w * 0.2, 2.6), az2 = cnr(bd.z + bd.w * 0.8, 2.6);
@@ -622,7 +622,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
             ctx.beginPath();
             ctx.moveTo(az1.sx, az1.sy); ctx.lineTo(az2.sx, az2.sy); ctx.lineTo(ax2.sx, ax2.sy); ctx.lineTo(ax1.sx, ax1.sy);
             ctx.closePath();
-            ctx.fillStyle = bd.tone < 0.5 ? '#d23b3b' : '#e8b93c';
+            ctx.fillStyle = bd.tone < 0.5 ? '#d23b3b' : '#f2f0eb';
             ctx.fill(); ctx.lineWidth = 1.2; ctx.stroke();
           }
         }
@@ -637,16 +637,18 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
       if (!a || !c2) return;
       q.push({ d: a.d, draw: () => {
         const sag = Math.max(6, (cam.f * 0.9) / a.d);
-        ctx.strokeStyle = '#4a4438'; ctx.lineWidth = 1.2;
+        ctx.strokeStyle = '#4c4a46'; ctx.lineWidth = 1.2;
         ctx.beginPath(); ctx.moveTo(a.sx, a.sy); ctx.quadraticCurveTo((a.sx + c2.sx) / 2, a.sy + sag * 2, c2.sx, c2.sy); ctx.stroke();
         for (let f2 = 1; f2 < 8; f2++) {
           const tt = f2 / 8;
           const fx = a.sx + (c2.sx - a.sx) * tt;
           const fy = a.sy + (c2.sy - a.sy) * tt + Math.sin(Math.PI * tt) * sag * 1.55;
           const fsz = Math.max(2.5, sag * 0.55);
-          ctx.fillStyle = f2 % 2 === 0 ? '#d23b3b' : '#e8b93c';
+          const redFlag = f2 % 2 === 0;
+          ctx.fillStyle = redFlag ? '#d23b3b' : '#f6f4ef';
           ctx.beginPath(); ctx.moveTo(fx - fsz / 2, fy); ctx.lineTo(fx + fsz / 2, fy); ctx.lineTo(fx + boil(i * 9 + f2, tick) * 0.4, fy + fsz);
           ctx.closePath(); ctx.fill();
+          if (!redFlag) { ctx.strokeStyle = 'rgba(40,40,36,0.55)'; ctx.lineWidth = 0.8; ctx.stroke(); ctx.strokeStyle = '#4c4a46'; }
         }
         ctx.strokeStyle = INK;
       }});
@@ -665,7 +667,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
         ctx.strokeStyle = INK;
         if (o.kind === 'barrier') {
           const w2 = scale * 1.15, h2 = scale * 1.0;
-          ctx.fillStyle = '#f2ede2';
+          ctx.fillStyle = '#f4f2ed';
           ctx.fillRect(-w2, -h2, w2 * 2, h2 * 0.8);
           ctx.fillStyle = '#d23b3b';
           for (let sgm = 0; sgm < 4; sgm += 2) ctx.fillRect(-w2 + (sgm * w2) / 2, -h2, w2 / 2, h2 * 0.8);
@@ -674,17 +676,17 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
         } else if (o.kind === 'barrels') {
           const r2 = scale * 0.55;
           for (const ox of [-0.55, 0.55]) {
-            ctx.fillStyle = '#9c6b3f';
+            ctx.fillStyle = '#a09d94';
             ctx.beginPath(); ctx.ellipse(ox * scale, -r2, r2 * 0.8, r2, 0, 0, Math.PI * 2); ctx.fill();
             ctx.lineWidth = 1.3; ctx.stroke();
           }
         } else {
           const w2 = scale * 1.3, h2 = scale * 2.3;
-          ctx.fillStyle = '#8a5a34';
+          ctx.fillStyle = '#98958c';
           ctx.fillRect(-w2, -h2, w2 * 2, h2 * 0.9);
           ctx.lineWidth = 1.6;
           ctx.strokeRect(-w2, -h2, w2 * 2, h2 * 0.9);
-          ctx.fillStyle = '#3a332a';
+          ctx.fillStyle = '#3b3a36';
           for (const wx of [-0.75, 0.75]) {
             ctx.beginPath(); ctx.arc(wx * scale, -scale * 0.32, scale * 0.34, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
           }
@@ -997,7 +999,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
         <div
           className={fullscreen ? undefined : 'col'}
           style={fullscreen
-            ? { position: 'fixed', inset: 0, zIndex: 80, background: '#e9dfc8', touchAction: 'none' }
+            ? { position: 'fixed', inset: 0, zIndex: 80, background: '#f6f4ef', touchAction: 'none' }
             : { gap: 8 }}
         >
           <canvas
@@ -1006,8 +1008,8 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
             height={440}
             onTouchStart={fullscreen ? onCanvasTouch : undefined}
             style={fullscreen
-              ? { width: '100%', height: '100%', display: 'block', touchAction: 'none', background: '#e9dfc8' }
-              : { width: '100%', height: 'auto', borderRadius: 10, border: '1px solid var(--border-hi)', touchAction: 'none', background: '#e9dfc8' }}
+              ? { width: '100%', height: '100%', display: 'block', touchAction: 'none', background: '#f6f4ef' }
+              : { width: '100%', height: 'auto', borderRadius: 10, border: '1px solid var(--border-hi)', touchAction: 'none', background: '#f6f4ef' }}
           />
           {fullscreen ? (
             <>
