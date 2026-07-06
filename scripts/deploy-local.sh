@@ -110,8 +110,6 @@ icp canister call backend admin_set_feature_flag '("arcade_skydive", true)' -e "
 icp canister call backend admin_set_feature_flag '("arcade_bullrun", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # ANSEM LP rewards — enabled locally for testing; ships dark on mainnet.
 icp canister call backend admin_set_feature_flag '("solana_lp_rewards", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-# Degen Fast Lane — enabled locally for testing; ships dark on mainnet.
-icp canister call backend admin_set_feature_flag '("fast_lane", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # ICPSwap LP staking — enabled locally for testing; ships dark on mainnet.
 icp canister call backend admin_set_feature_flag '("icpswap_lp_stake", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 ok "Early Adopters + arcade_minigolf flags enabled (local); arcade forced OFF (default)"
