@@ -31,6 +31,7 @@ import type {
 import IdeaBoard, { parseTokenAmount, fmtTokenAmount } from "./IdeaBoard";
 import LotteryHub from "./LotteryHub";
 import NeuronStakePage from "./NeuronStakePage";
+import FastLane from "./FastLane";
 import Explorer from "./Explorer";
 import Discussions from "./Discussions";
 import DiscussionsPage from "./DiscussionsPage";
@@ -58,7 +59,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'fastlane' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   dashboard: '/dashboard',
@@ -69,6 +70,8 @@ export const PAGE_PATH: Record<AppPage, string> = {
   earn: '/earn',
   staking: '/staking',
   lottery: '/lottery',
+  // Degen Fast Lane — guided Solana-user onboarding (sign in → fund → stake).
+  fastlane: '/fast-lane',
   // Neuron Stake — the pooled-neuron staking page (was the Lottery hub's
   // "Stake to Earn Tickets" tab); Stake to Earn nav section.
   neuronstake: '/neuron-stake',
@@ -661,6 +664,7 @@ export default function App() {
   const dropzoneEnabled = featureFlags.find(f => f.key === 'arcade_skydive')?.enabled ?? false;
   const bullrunEnabled = featureFlags.find(f => f.key === 'arcade_bullrun')?.enabled ?? false;
   const ansemLpEnabled = featureFlags.find(f => f.key === 'solana_lp_rewards')?.enabled ?? false;
+  const fastLaneEnabled = featureFlags.find(f => f.key === 'fast_lane')?.enabled ?? false;
   const icpLpEnabled = featureFlags.find(f => f.key === 'icpswap_lp_stake')?.enabled ?? false;
   const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
   const casinoEnabled = crashEnabled;
@@ -1295,6 +1299,9 @@ export default function App() {
       redirect('dashboard');
     }
     if (page === 'neuronstake' && featureFlags.length > 0 && !(losslessEnabled || earlyAdoptersEnabled)) {
+      redirect('dashboard');
+    }
+    if (page === 'fastlane' && featureFlags.length > 0 && !fastLaneEnabled) {
       redirect('dashboard');
     }
     if (page === 'icplp' && featureFlags.length > 0 && !icpLpEnabled) {
@@ -1962,8 +1969,14 @@ export default function App() {
         )}
 
         {/* ── Stake 4 Tickets: staking + LP rewards ── */}
-        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled || ansemLpEnabled) && (
+        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled || ansemLpEnabled || fastLaneEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Stake 4 Tickets</Eyebrow>
+        )}
+        {fastLaneEnabled && (
+          <Btn variant={page === 'fastlane' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('fastlane')}>
+            <Icon name="spark" size={14} stroke={page === 'fastlane' ? 'var(--char-950)' : 'currentColor'} />
+            Fast Lane
+          </Btn>
         )}
         {(losslessEnabled || earlyAdoptersEnabled) && (
           <Btn variant={page === 'neuronstake' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('neuronstake')}>
@@ -2499,6 +2512,17 @@ export default function App() {
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
               onGoNeuronStake={() => setPage('neuronstake')}
+            />
+          ) : page === 'fastlane' && fastLaneEnabled ? (
+            <FastLane
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
+              onSignIn={handleLogin}
+              onGoLottery={() => setPage('lottery')}
             />
           ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
             <NeuronStakePage

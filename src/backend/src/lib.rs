@@ -5265,6 +5265,7 @@ pub const FLAG_ARCADE_SKYDIVE: &str = "arcade_skydive";
 pub const FLAG_ARCADE_BULLRUN: &str = "arcade_bullrun";
 pub const FLAG_SOLANA_LP: &str = "solana_lp_rewards";
 pub const FLAG_ICPSWAP_LP: &str = "icpswap_lp_stake";
+pub const FLAG_FAST_LANE: &str = "fast_lane";
 /// The Casino: Crash (bustabit-style multiplier game) + the shared casino VP
 /// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
 /// until the owner enables it after a playtest.
@@ -5287,10 +5288,10 @@ pub const FLAG_DASHBOARD: &str = "dashboard";
 /// Mission Statement page (`about` route). Ships dark (default OFF) until an
 /// admin enables it.
 pub const FLAG_MISSION_STATEMENT: &str = "mission_statement";
-const KNOWN_FEATURE_FLAGS: [&str; 19] = [
+const KNOWN_FEATURE_FLAGS: [&str; 20] = [
     FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
     FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
-    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN, FLAG_SOLANA_LP, FLAG_ICPSWAP_LP,
+    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN, FLAG_SOLANA_LP, FLAG_ICPSWAP_LP, FLAG_FAST_LANE,
     FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS, FLAG_X_FARM,
     FLAG_DASHBOARD, FLAG_MISSION_STATEMENT,
 ];
@@ -5565,6 +5566,7 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE_BULLRUN => false,
         FLAG_SOLANA_LP => false,
         FLAG_ICPSWAP_LP => false,
+        FLAG_FAST_LANE => false,
         FLAG_X_FARM => false,
         // Dashboard + Mission Statement ship dark (default OFF) — these pages
         // were always-on before; gating them lets an admin hide either page
