@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { LiveDot, formatPrincipal, DiscordMark, DISCORD_INVITE, BrandMark } from './ui';
-import type { LotteryInfo, LotteryDraw, StakingPoolInfo } from './bindings/backend';
+import type { LotteryInfo, LotteryDraw } from './bindings/backend';
 
 type UsdRate = { token: string; rate_usd_e8s: bigint };
 
@@ -55,12 +55,6 @@ const e8sToIcp = (n: bigint) => Number(n) / 100_000_000;
 const fmt2 = (e8s: bigint) =>
   e8sToIcp(e8s).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 /** Compact ICP: "1.42M" / "24.8K" / "812". */
-function fmtCompact(e8s: bigint): string {
-  const v = e8sToIcp(e8s);
-  if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + 'M';
-  if (v >= 1_000) return (v / 1_000).toFixed(1) + 'K';
-  return Math.round(v).toLocaleString('en-US');
-}
 const fmtDate = (ns: bigint) =>
   new Date(Number(ns / 1_000_000n)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -86,7 +80,6 @@ const COL_HEAD: React.CSSProperties = { fontFamily: MONO, fontSize: 10, letterSp
 export default function Landing({ onEnter, actor }: LandingProps) {
   const [info, setInfo] = useState<LotteryInfo | null>(null);
   const [winners, setWinners] = useState<LotteryDraw[]>([]);
-  const [pool, setPool] = useState<StakingPoolInfo | null>(null);
   const [icpUsdE8s, setIcpUsdE8s] = useState<bigint>(0n);
   const [nowMs, setNowMs] = useState<number>(Date.now());
 
@@ -96,16 +89,14 @@ export default function Landing({ onEnter, actor }: LandingProps) {
     if (!actor) return;
     let cancelled = false;
     (async () => {
-      const [i, w, p, rates] = await Promise.all([
+      const [i, w, rates] = await Promise.all([
         actor.get_lottery_info().catch(() => null),
         actor.list_recent_winners().catch(() => [] as LotteryDraw[]),
-        actor.get_staking_pool_info().catch(() => null),
         actor.get_usd_rates().catch(() => [] as UsdRate[]),
       ]);
       if (cancelled) return;
       setInfo(i);
       setWinners(w ?? []);
-      setPool(p);
       const icp = (rates ?? []).find((r: UsdRate) => r.token === 'ICP');
       setIcpUsdE8s(icp?.rate_usd_e8s ?? 0n);
     })();
@@ -201,17 +192,19 @@ export default function Landing({ onEnter, actor }: LandingProps) {
               <button onClick={onEnter} style={primaryBtn}>Stake ICP →</button>
               <a href="#odds" style={{ ...ghostBtn, textDecoration: 'none' }}>Read the odds</a>
             </div>
+            {/* Value facts, not live counts — scale numbers stay off the
+                landing until there's scale worth showing. */}
             <div style={{ display: 'flex', gap: 28, marginTop: 38, flexWrap: 'wrap' }}>
-              {stat(pool ? fmtCompact(pool.total_staked_e8s) : '—', 'ICP staked')}
-              {stat(info ? Number(info.unique_holders).toLocaleString('en-US') : '—', 'playing')}
-              {stat(info ? Number(info.draws_held).toLocaleString('en-US') : '—', 'draws')}
+              {stat('3×', 'draws weekly')}
+              {stat('65%', 'to the winner')}
+              {stat('100%', 'principal kept')}
             </div>
           </div>
 
           {/* right: console */}
           <div style={{ background: 'var(--char-900)', border: '1px solid var(--burn)', borderRadius: 12, padding: 24, boxShadow: '0 12px 32px -8px rgba(0,0,0,.45)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={COL_HEAD}>draw #{info ? Number(info.draws_held) + 1 : '—'}</span>
+              <span style={COL_HEAD}>next draw</span>
               <span style={{ fontFamily: MONO, fontSize: 10, color: 'var(--burn)', letterSpacing: '.08em', textTransform: 'uppercase', display: 'inline-flex', alignItems: 'center', gap: 6 }}><LiveDot size={6} /> live</span>
             </div>
             <div style={{ ...COL_HEAD, marginTop: 22 }}>prize pool</div>
@@ -226,7 +219,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
             <div style={{ ...COL_HEAD, marginTop: 16 }}>both gates must clear to draw</div>
             {([
               { pct: potPct, cap: info ? `pot · ${fmt2(info.pot_e8s)} / ${fmt2(info.min_pot_e8s)} ICP` : 'pot vs. minimum' },
-              { pct: playersPct, cap: info ? (minHolders > 0 ? `players · ${Number(info.unique_holders).toLocaleString('en-US')} / ${minHolders.toLocaleString('en-US')} needed` : `players · ${Number(info.unique_holders).toLocaleString('en-US')} (no minimum)`) : 'players vs. minimum' },
+              { pct: playersPct, cap: 'players vs. minimum' },
             ] as const).map((g, i) => (
               <div key={i} style={{ marginTop: i === 0 ? 10 : 12 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -298,7 +291,6 @@ export default function Landing({ onEnter, actor }: LandingProps) {
             <p style={{ color: 'var(--fg-2)', fontSize: 15, lineHeight: 1.55, margin: '0 0 22px' }}>No one funds the prize but the network. Every pooled neuron's maturity yield flows into one pot — nobody's stake is ever spent, only the yield is at stake.</p>
             <div style={{ display: 'grid', gap: 14 }}>
               {[
-                { k: 'Total staked', v: pool ? `${fmt2(pool.total_staked_e8s)} ICP` : '—', c: 'var(--fg)' },
                 { k: 'Paid out to date', v: info ? `${fmt2(info.total_paid_e8s)} ICP` : '—', c: 'var(--sprout)' },
                 { k: "This draw's prize", v: info ? `${poolStr} ICP` : '—', c: 'var(--burn)' },
               ].map(r => (
@@ -312,7 +304,9 @@ export default function Landing({ onEnter, actor }: LandingProps) {
         </div>
       </section>
 
-      {/* ===== RECENT WINNERS ===== */}
+      {/* ===== RECENT WINNERS ===== (hidden until the history reads as
+          social proof — 5+ draws — rather than as emptiness) */}
+      {info && Number(info.draws_held) >= 5 && (
       <section id="winners" style={{ borderBottom: '1px solid var(--char-800)' }}>
         <div style={{ maxWidth: 1200, margin: '0 auto', padding: '96px 24px' }}>
           <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 28, gap: 16, flexWrap: 'wrap' }}>
@@ -321,7 +315,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
               <h2 style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 40, lineHeight: 1.05, letterSpacing: '-.03em', color: 'var(--fg)', margin: '10px 0 0' }}>No house. Just winners.</h2>
             </div>
             <button onClick={onEnter} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--fg-2)', fontSize: 14, fontFamily: BODY }}>
-              {info ? `All ${Number(info.draws_held).toLocaleString('en-US')} draws →` : 'All draws →'}
+              All draws →
             </button>
           </div>
           <div className="ll-table-wrap" style={{ border: '1px solid var(--char-800)', borderRadius: 8, overflow: 'hidden' }}>
@@ -350,6 +344,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
           </div>
         </div>
       </section>
+      )}
 
       {/* ===== CTA ===== */}
       <section style={{ position: 'relative', borderBottom: '1px solid var(--char-800)', overflow: 'hidden' }}>
