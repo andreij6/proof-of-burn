@@ -193,12 +193,12 @@ describe('courseNftTokenUrl', () => {
 describe('course share links', () => {
   it('builds the canonical deep link from the origin', () => {
     expect(courseShareUrl(7n, 'https://kyclk-5qaaa-aaaap-quthq-cai.icp0.io'))
-      .toBe('https://kyclk-5qaaa-aaaap-quthq-cai.icp0.io/#/arcade/course/7');
+      .toBe('https://kyclk-5qaaa-aaaap-quthq-cai.icp0.io/#/mini-golf/course/7');
   });
 
-  it('round-trips through the arcade screen parser', () => {
+  it('round-trips through the mini-golf screen parser', () => {
     const url = courseShareUrl(123n, 'http://frontend.local.localhost:8000');
-    const screen = url.split('#/arcade/')[1]; // what useHashScreen yields
+    const screen = url.split('#/mini-golf/')[1]; // what useHashScreen yields
     expect(courseIdFromScreen(screen)).toBe(123n);
   });
 
@@ -211,9 +211,9 @@ describe('course share links', () => {
   });
 
   it('share intent embeds the course name and URL-encodes the link', () => {
-    const intent = courseShareIntent('Ember Fields', 'https://x.test/#/arcade/course/1');
+    const intent = courseShareIntent('Ember Fields', 'https://x.test/#/mini-golf/course/1');
     expect(intent).toContain('twitter.com/intent/tweet');
     expect(intent).toContain(encodeURIComponent('Ember Fields'));
-    expect(intent).toContain(encodeURIComponent('https://x.test/#/arcade/course/1'));
+    expect(intent).toContain(encodeURIComponent('https://x.test/#/mini-golf/course/1'));
   });
 });

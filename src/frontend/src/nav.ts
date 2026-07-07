@@ -3,19 +3,19 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // ==========================================================================
 // Hash-driven sub-screen routing for hub pages.
 //
-// A hub page (Lottery, Arcade, Casino) shows a landing grid plus several
+// A hub page (Lottery, Mini Golf) shows a landing grid plus several
 // sub-screens. Keeping the active sub-screen in local React state makes the
 // browser/device Back button useless inside the hub — Back skips straight out
 // of the page because the sub-screen was never a history entry. Instead the
 // active screen lives in the URL after the page path, e.g.
 //
-//     #/arcade            → the hub ("lobby")
-//     #/arcade/course-play → a sub-screen
+//     #/mini-golf            → the hub ("lobby")
+//     #/mini-golf/course/7   → a sub-screen
 //
 // so every screen transition is a real history entry and Back returns to the
 // previous screen. App.pageFromHash() resolves any `#/<page>/<sub>` back to its
 // hub page, so the top-level router stays put while the sub-screen changes.
-// (Casino pioneered this pattern; this hook generalises it.)
+// (The retired Casino hub pioneered this pattern; this hook generalises it.)
 // ==========================================================================
 
 /**

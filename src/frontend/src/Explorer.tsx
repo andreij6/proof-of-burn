@@ -13,7 +13,7 @@ import { ExplorerToken, DappStatus, FeaturedStatus } from "./bindings/backend";
 import type { DappListing, ExplorerInfo, ExplorerQuote, FeaturedInfo, FeaturedView } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal, usePageDevControls } from "./ui";
-import { fmtTokenAmount } from "./IdeaBoard";
+import { fmtTokenAmount } from "./tokens";
 import { usdToTokenUnits } from "./tokens";
 import { useErrorImpression } from "./analytics";
 

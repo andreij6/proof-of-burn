@@ -77,3 +77,29 @@ export function commitInsufficient(balance: bigint | null, needed: bigint): bool
   if (balance === null) return false;
   return needed > balance;
 }
+
+/// Parse a human decimal amount ("1.25") into smallest units; null when
+/// malformed or more fractional digits than the token has. (Moved from
+/// IdeaBoard.tsx when the Idea Board was removed, 2026-07.)
+export function parseTokenAmount(input: string, decimals: number): bigint | null {
+  const s = input.trim();
+  if (!/^\d+(\.\d+)?$/.test(s)) return null;
+  const [whole, frac = ''] = s.split('.');
+  if (frac.length > decimals) return null;
+  try {
+    return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(frac.padEnd(decimals, '0') || '0');
+  } catch {
+    return null;
+  }
+}
+
+/// Smallest units → grouped display string ("1,234.5678", ≤6 frac digits).
+export function fmtTokenAmount(units: bigint, decimals: number): string {
+  const base = 10n ** BigInt(decimals);
+  const whole = units / base;
+  const frac = units % base;
+  const wholeStr = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  if (frac === 0n) return wholeStr;
+  const fracStr = frac.toString().padStart(decimals, '0').replace(/0+$/, '').slice(0, 6);
+  return fracStr ? `${wholeStr}.${fracStr}` : wholeStr;
+}

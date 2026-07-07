@@ -1,11 +1,5 @@
-// Pure decision/formatting logic for the Dashboard hub — kept free of
-// components so it is unit-testable and the page file stays fast-refreshable.
-import type { Proposal } from "./bindings/backend";
-import type { AppPage } from "./App";
-
-const DAY_NS = 86_400_000_000_000n;
-
-// ── Pure helpers (unit-tested in test/dashboard.test.ts) ──
+// Pure countdown formatting (the sidebar's next-draw chip). The Dashboard
+// hub this file once served was removed 2026-07; countdownShort survived it.
 
 /** "2d 4h" / "3h 12m" / "45m" until a nanosecond timestamp; null if past/unset. */
 export function countdownShort(atNs: bigint, nowMs: number): string | null {
@@ -18,46 +12,4 @@ export function countdownShort(atNs: bigint, nowMs: number): string | null {
   if (d > 0) return `${d}d ${h}h`;
   if (h > 0) return `${h}h ${m % 60}m`;
   return `${Math.max(1, m)}m`;
-}
-
-export interface AttentionItem {
-  kind: 'draw_soon' | 'closing_votes';
-  page: AppPage;
-  title: string;
-  detail: string;
-}
-
-/** Action-needed cards, most valuable first. Pure so the ranking is testable. */
-export function attentionItems(args: {
-  nowNs: bigint;
-  lottery: { nextDrawAt: bigint; myTickets: bigint } | null;
-  proposals: Proposal[];
-  actedProposalIds: Set<string>;
-}): AttentionItem[] {
-  const items: AttentionItem[] = [];
-  const closing = args.proposals.filter(p =>
-    p.status === 'open' &&
-    p.deadline > args.nowNs &&
-    p.deadline - args.nowNs <= DAY_NS &&
-    !args.actedProposalIds.has(p.id.toString())
-  );
-  if (closing.length > 0) {
-    items.push({
-      kind: 'closing_votes',
-      page: 'voting',
-      title: closing.length === 1 ? 'A vote closes within 24h' : `${closing.length} votes close within 24h`,
-      detail: 'Open proposals you haven\'t weighed in on hit their commitment cutoff soon.',
-    });
-  }
-  if (args.lottery && args.lottery.myTickets > 0n &&
-      args.lottery.nextDrawAt > args.nowNs &&
-      args.lottery.nextDrawAt - args.nowNs <= DAY_NS) {
-    items.push({
-      kind: 'draw_soon',
-      page: 'lottery',
-      title: 'Lottery draw within 24h',
-      detail: `You hold ${args.lottery.myTickets.toString()} tickets in the current round.`,
-    });
-  }
-  return items;
 }

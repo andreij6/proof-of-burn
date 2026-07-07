@@ -4,7 +4,7 @@ import type { CourseCard, MarketplaceFilter, CourseRatingSummary } from './bindi
 import { DifficultyFilter, ListedFilter } from './bindings/backend';
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal, fmtICP, usePageDevControls } from './ui';
 import { useErrorImpression } from './analytics';
-import { parseTokenAmount } from './IdeaBoard';
+import { parseTokenAmount } from './tokens';
 import { makeApprover } from './minters';
 import {
   difficultyBucket, mulberry32, poolOrder, pageSlice, pageCount, freshSeed,
