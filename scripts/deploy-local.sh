@@ -14,8 +14,7 @@
 #      okf/operations/OPS.md / memory note; a mismatch breaks every balance/burn op).
 #   5. Wires the backend at the local ckBTC/ckETH ledgers (admin call).
 #   6. Prepopulates mock data when missing:
-#        - mock proposals + 3 sample ideas  (auto-seeded by init/post_upgrade)
-#        - 2 sample fundable projects       (admin_add_project as dev1)
+#        - mock proposals (auto-seeded by init/post_upgrade)
 #        - 2 active pool neurons            (dev_seed_pool_neuron as dev1+dev2)
 #
 # Identities (override via env):
@@ -155,7 +154,6 @@ icp canister call backend admin_backfill_course_fingerprints '()' -e "$ENV" --id
   || note "fingerprint backfill skipped (course_nft not ready)"
 # Casino (Crash) is DISABLED pending the SVPP/points redesign. Force the flag
 # OFF (earlier deploys may have turned it on; flags persist across upgrades) and
-# skip casino seeding. Re-enable here once the new point system lands.
 ok "Casino (Crash) disabled (local)"
 
 # ── 5c. X-Farm (Stream B): leave the flag dark + upload the Farmer wasm ────────
@@ -210,24 +208,7 @@ else
 fi
 
 # ── 6. Mock data (only seeds what is missing) ────────────────────────────────
-# 6a. Proposals + sample ideas auto-seed in init/post_upgrade when empty.
-IDEA_COUNT=$(icp canister call backend list_ideas '()' --query -e "$ENV" | grep -c 'id = ' || true)
-ok "Ideas on board: $IDEA_COUNT (3 samples auto-seed when the board is empty)"
-
-# 6b. Sample fundable projects (admin-curated).
-if icp canister call backend list_projects '()' --query -e "$ENV" | grep -q 'id = '; then
-  ok "Projects already present — skipping project seed"
-else
-  note "Seeding 2 sample projects…"
-  # admin_add_project(title, description, detail, goal_usd_e8s). $1 = 100_000_000.
-  icp canister call backend admin_add_project \
-    '("Burn Dashboard v1", "A public dashboard ranking dapps by cycles burned, updated daily on-chain.", "Pull cycle-consumption metrics per canister, normalise by subnet, surface a verifiable burn ranking.", 5_000_000_000_000 : nat64)' \
-    -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-  icp canister call backend admin_add_project \
-    '("ckBTC Tipping Widget", "An embeddable tip button for ICP dapps that routes a fee share to the treasury.", "ICRC-1 tips with a 2% protocol fee converted to cycles via the CMC — every tip burns ICP.", 2_500_000_000_000 : nat64)' \
-    -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-  ok "Seeded 2 sample projects (\$50,000 and \$25,000 USD goals)"
-fi
+# (Idea Board + Community R&D projects removed 2026-07-07 — no seeding.)
 
 # 6c. Sample active pool neurons (so the pool sidebar isn't empty).
 ACTIVE_COUNT=$(icp canister call backend get_pool_info '()' --query -e "$ENV" \
