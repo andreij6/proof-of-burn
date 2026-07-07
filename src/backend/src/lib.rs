@@ -383,29 +383,6 @@ fn default_lottery_min_unique_holders() -> u64 {
     25
 }
 
-// ── Cycles Faucet (PB-400) defaults ──
-/// Per-claim grant, FIXED in USD e8s ($1 = 100_000_000). Priced to ICP at claim
-/// time via the cached XRC oracle. $2.00.
-fn default_faucet_grant_usd_e8s() -> u64 {
-    25_000_000 // $0.25 per grant (USD e8s)
-}
-/// Max claims per canister, EVER (25 × $2 = $50 lifetime ceiling per canister).
-fn default_faucet_canister_lifetime_cap() -> u32 {
-    25
-}
-/// Rolling weekly cooldown (per-dev AND per-canister), in nanoseconds.
-fn default_faucet_claim_window_ns() -> u64 {
-    7 * DAY_NANOS
-}
-/// "Recent burn-vote" window (G3), in nanoseconds. Matches arcade's 30 days.
-fn default_faucet_vote_window_ns() -> u64 {
-    30 * DAY_NANOS
-}
-/// Hard treasury floor (ICP e8s) below which the faucet is closed. Mirrors the
-/// 15-ICP global floor by default; admin-tunable.
-fn default_faucet_treasury_floor_e8s() -> u64 {
-    1_500_000_000
-}
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
@@ -438,15 +415,6 @@ pub struct Config {
     pub ckusdc_ledger_canister_id: Option<Principal>,
     #[serde(default)]
     pub ckusdt_ledger_canister_id: Option<Principal>,
-    /// Admin overrides for the per-token minimum upvote (smallest units).
-    /// `None` falls back to the value-aligned defaults; retune via
-    /// `admin_set_min_upvote` as exchange rates drift.
-    #[serde(default)]
-    pub min_upvote_icp_e8s: Option<u64>,
-    #[serde(default)]
-    pub min_upvote_ckbtc_e8s: Option<u64>,
-    #[serde(default)]
-    pub min_upvote_cketh_wei: Option<u64>,
     /// ── Lossless staking (3 fixed tiers: 6mo / 1y / 2y) ──
     #[serde(default = "default_min_stake_e8s")]
     pub min_stake_e8s: u64,
@@ -471,17 +439,6 @@ pub struct Config {
     /// allowlisted minter/custodian on that canister.
     #[serde(default)]
     pub course_nft_canister: Option<Principal>,
-    /// ── Cycles Faucet (PB-400) — all admin-settable, defaulted on decode ──
-    #[serde(default = "default_faucet_grant_usd_e8s")]
-    pub faucet_grant_usd_e8s: u64,
-    #[serde(default = "default_faucet_canister_lifetime_cap")]
-    pub faucet_canister_lifetime_cap: u32,
-    #[serde(default = "default_faucet_claim_window_ns")]
-    pub faucet_claim_window_ns: u64,
-    #[serde(default = "default_faucet_vote_window_ns")]
-    pub faucet_vote_window_ns: u64,
-    #[serde(default = "default_faucet_treasury_floor_e8s")]
-    pub faucet_treasury_floor_e8s: u64,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -527,18 +484,7 @@ pub struct CommitmentKey {
     pub principal: Principal,
 }
 
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct IdeaViewKey {
-    pub idea_id: u64,
-    pub user: Principal,
-}
 
-/// One free upvote per user per idea. Mirrors `IdeaViewKey`.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct IdeaUpvoteKey {
-    pub idea_id: u64,
-    pub user: Principal,
-}
 
 /// Cumulative pool-reward already paid (gross e8s, i.e. including the ledger fee
 /// consumed by each transfer) to one recipient for one settled proposal. Lets
@@ -652,8 +598,6 @@ impl_storable!(Config);
 impl_storable!(Proposal);
 impl_storable!(Commitment);
 impl_storable!(CommitmentKey);
-impl_storable!(IdeaViewKey);
-impl_storable!(IdeaUpvoteKey);
 impl_storable!(PoolRewardKey);
 impl_storable!(VoteRecord);
 impl_storable!(UserAggregates);
@@ -683,20 +627,12 @@ thread_local! {
             cketh_ledger_canister_id: None,
             ckusdc_ledger_canister_id: None,
             ckusdt_ledger_canister_id: None,
-            min_upvote_icp_e8s: None,
-            min_upvote_ckbtc_e8s: None,
-            min_upvote_cketh_wei: None,
             min_stake_e8s: default_min_stake_e8s(),
             min_unstake_e8s: default_min_unstake_e8s(),
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
             lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
-            faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
-            faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
-            faucet_claim_window_ns: default_faucet_claim_window_ns(),
-            faucet_vote_window_ns: default_faucet_vote_window_ns(),
-            faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -867,20 +803,12 @@ fn init(payload: InitPayload) {
         cketh_ledger_canister_id: None,
         ckusdc_ledger_canister_id: None, // local: set via admin_set_explorer_ledger
         ckusdt_ledger_canister_id: None,
-        min_upvote_icp_e8s: None,
-        min_upvote_ckbtc_e8s: None,
-        min_upvote_cketh_wei: None,
         min_stake_e8s: default_min_stake_e8s(),
         min_unstake_e8s: default_min_unstake_e8s(),
         maturity_threshold_e8s: default_maturity_threshold_e8s(),
         lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
         default_threshold_usd_e8s: None,
         course_nft_canister: None,
-        faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
-        faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
-        faucet_claim_window_ns: default_faucet_claim_window_ns(),
-        faucet_vote_window_ns: default_faucet_vote_window_ns(),
-        faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
@@ -890,7 +818,6 @@ fn init(payload: InitPayload) {
     // populated from live NNS data (kicked off immediately + on the sweep timer).
     if is_local {
         seed_mock_proposals();
-        seed_mock_ideas();
         seed_mock_supply_history();
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
@@ -903,6 +830,7 @@ fn init(payload: InitPayload) {
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), async {
         let config = CONFIG.with(|cell| cell.borrow().get().clone());
         refresh_treasury_cache(&config).await;
+        refresh_lottery_pot_cache(&config).await;
     });
     recompute_pool_info();
     setup_timers();
@@ -915,7 +843,6 @@ fn post_upgrade() {
     let is_local = CONFIG.with(|c| c.borrow().get().is_local);
     if is_local {
         seed_mock_proposals();
-        seed_mock_ideas();
         seed_mock_supply_history();
     } else {
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_live_proposals());
@@ -936,14 +863,16 @@ fn post_upgrade() {
     });
     recompute_pool_info();
     setup_timers();
-    // Re-arm the crash round loop from the persisted phase (timers don't survive
-    // upgrades; a mid-flight round resumes from its remaining time, plans/crash/01).
-    crash_resume();
     // One-time purge of feature flags for removed features (poker, the Turbo
     // Rush arcade game, the global ticker). Their flag values persisted in
     // stable memory from earlier deploys; no code reads them anymore, but
     // list_feature_flags would still surface them as dead admin toggles.
-    for retired in ["poker", "arcade_turborush", "ticker"] {
+    for retired in [
+        "poker", "arcade_turborush", "ticker",
+        // Removed 2026-07-06 (owner): whole features deleted outright.
+        "idea_board", "discussions", "crash", "cycles_faucet",
+        "arcade", "arcade_fieldgoal", "dashboard", "mission_statement",
+    ] {
         FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&retired.to_string()); });
     }
 }
@@ -1382,16 +1311,15 @@ fn proposals_at_quota() -> bool {
 
 #[ic_cdk::update(guard = "require_admin")]
 async fn admin_trigger_sweep() -> Result<(), String> {
+    // Explicit admin action: reset the sweep throttles so the maturity reads,
+    // inbox distribution, and cycle guards run NOW, not at their next window.
+    SWEEP_LAST_RUNS.with(|m| m.borrow_mut().clear());
     proposal_sync_sweep().await;
     retry_failed_settlements().await;
-    retry_failed_upvotes().await;
-    retry_failed_fundings().await;
-    delete_expired_ideas();
     delete_expired_dapps();
     cycle_topup_check().await;
     staking_sweep().await;
     early_adopter_settlement_check().await;
-    casino_weekly_burn();
     Ok(())
 }
 
@@ -3629,6 +3557,37 @@ fn set_cached_treasury_e8s(e8s: u64) {
     CACHED_TREASURY_E8S.with(|c| { c.borrow_mut().set(e8s); });
 }
 
+thread_local! {
+    /// Cached lottery-pot balance (ICP e8s of the [3u8;32] subaccount).
+    /// Refreshed by the sweep and after every pot-touching flow so
+    /// `get_lottery_info` can be a QUERY (no consensus round, no ledger call
+    /// per page view — cycles optimization 2026-07-06). MemoryId 127.
+    static CACHED_LOTTERY_POT_E8S: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(127)), 0u64))
+    });
+}
+
+fn cached_lottery_pot_e8s() -> u64 {
+    CACHED_LOTTERY_POT_E8S.with(|c| *c.borrow().get())
+}
+
+fn set_cached_lottery_pot_e8s(e8s: u64) {
+    CACHED_LOTTERY_POT_E8S.with(|c| { c.borrow_mut().set(e8s); });
+}
+
+/// Fetch the live pot balance and refresh the cache (best-effort — a
+/// transient ledger error keeps the previous value).
+async fn refresh_lottery_pot_cache(config: &Config) -> u64 {
+    let pot = LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(LOTTERY_SUBACCOUNT),
+    };
+    match call_ledger_balance(config.ledger_canister_id, pot).await {
+        Ok(bal) => { set_cached_lottery_pot_e8s(bal); bal }
+        Err(_) => cached_lottery_pot_e8s(),
+    }
+}
+
 /// Fetch the live treasury balance and refresh the cache. On a transient ledger
 /// error it returns the last cached value, so a blip never spuriously reports
 /// the treasury as depleted.
@@ -4433,10 +4392,6 @@ async fn process_proposal_cutoff(pid: u64) -> Result<(), String> {
 
     settle_proposal_commitments(pid).await;
 
-    // The proposal is decided — discussion threads are about a live decision, so
-    // delete them (earned lottery tickets are kept). D3 of the discussions design.
-    delete_proposal_discussions(pid);
-
     Ok(())
 }
 
@@ -5038,6 +4993,91 @@ fn seed_mock_supply_history() {
     }
 }
 
+// ── Game-data retention (owner 2026-07-06) ─────────────────────────────────
+// "We don't need game data for more than 1 day since the competition
+// refreshes daily." Runs are consumed at completion; this sweep reaps what
+// remains: abandoned runs past their TTL, and daily board entries older than
+// YESTERDAY (yesterday must survive until luckproof_daily_award settles its
+// winners). Batch-limited so one tick never does unbounded work.
+const RETENTION_SWEEP_BATCH: usize = 200;
+
+fn sweep_game_retention() {
+    let now = current_time();
+    let today = epoch_day(now) as u64;
+
+    // Abandoned (never-completed) runs past their TTL.
+    macro_rules! reap_runs {
+        ($map:ident, $ttl:expr) => {
+            $map.with(|m| {
+                let dead: Vec<u64> = m.borrow().iter()
+                    .filter(|e| now.saturating_sub(e.value().issued_at) > $ttl)
+                    .map(|e| *e.key())
+                    .take(RETENTION_SWEEP_BATCH)
+                    .collect();
+                let mut m = m.borrow_mut();
+                for k in dead { m.remove(&k); }
+            });
+        };
+    }
+    reap_runs!(LUCKPROOF_RUNS, LUCKPROOF_RUN_TTL_NS);
+    reap_runs!(SKYDIVE_RUNS, SKYDIVE_RUN_TTL_NS);
+    reap_runs!(BULLRUN_RUNS, BULLRUN_RUN_TTL_NS);
+
+    // Daily entries: keep today + yesterday, delete older.
+    let cutoff = today.saturating_sub(1);
+    macro_rules! reap_daily {
+        ($map:ident, $key:ty) => {
+            $map.with(|m| {
+                let dead: Vec<$key> = m.borrow().iter()
+                    .filter(|e| (e.key().day as u64) < cutoff)
+                    .map(|e| e.key().clone())
+                    .take(RETENTION_SWEEP_BATCH)
+                    .collect();
+                let mut m = m.borrow_mut();
+                for k in dead { m.remove(&k); }
+            });
+        };
+    }
+    reap_daily!(LUCKPROOF_DAILY, LuckProofDayKey);
+    reap_daily!(SKYDIVE_DAILY, SkydiveDayKey);
+    reap_daily!(BULLRUN_DAILY, BullRunDayKey);
+}
+
+// ── Sweep-leg throttles (cycles optimization 2026-07-06) ────────────────────
+// The 300s sweep used to fire ~10 inter-canister calls per tick when fully
+// idle (4× get_full_neuron maturity reads, NNS proposal fetches, 3 ledger
+// balance reads, a canister_status). Slow-moving legs now run on their own
+// cadence; heap timestamps reset on upgrade → the first post-upgrade sweep
+// runs everything once, then the throttles engage.
+const SWEEP_HOURLY_NS: u64 = 60 * 60 * 1_000_000_000;
+const SWEEP_15MIN_NS: u64 = 15 * 60 * 1_000_000_000;
+
+thread_local! {
+    static SWEEP_LAST_RUNS: RefCell<std::collections::HashMap<&'static str, u64>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// True when `interval_ns` has elapsed since `key` last ran (and marks it run).
+/// Local dev networks bypass the throttles entirely — dev flows trigger sweeps
+/// explicitly (dev_run_staking_sweep, admin_trigger_sweep) and expect instant
+/// effect; the cycle cost only matters on mainnet.
+fn sweep_due(key: &'static str, interval_ns: u64) -> bool {
+    if CONFIG.with(|c| c.borrow().get().is_local) {
+        return true;
+    }
+    let now = current_time();
+    SWEEP_LAST_RUNS.with(|m| {
+        let mut m = m.borrow_mut();
+        let last = m.get(key).copied().unwrap_or(0);
+        if now.saturating_sub(last) >= interval_ns {
+            m.insert(key, now);
+            true
+        } else {
+            false
+        }
+    })
+}
+
 fn setup_timers() {
     // ICP total-supply: one sample shortly after boot, then every 30 minutes.
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(30), async { sample_icp_supply().await; });
@@ -5045,38 +5085,42 @@ fn setup_timers() {
         sample_icp_supply().await;
     });
     ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || async {
-        // PB-117: refresh live NNS proposals on mainnet before settling.
-        let is_local = CONFIG.with(|c| c.borrow().get().is_local);
-        if !is_local {
-            fetch_live_proposals().await;
+        // ── every 15 min: the NNS feeds (big list_proposals payload) ──
+        if sweep_due("nns_feeds", SWEEP_15MIN_NS) {
+            // PB-117: refresh live NNS proposals on mainnet before settling.
+            let is_local = CONFIG.with(|c| c.borrow().get().is_local);
+            if !is_local {
+                fetch_live_proposals().await;
+            }
+            fetch_leader_neuron_info().await;
         }
-        fetch_leader_neuron_info().await;
+        // ── every sweep (time-sensitive or call-free when idle) ──
         proposal_sync_sweep().await;
         retry_failed_settlements().await;
-        retry_failed_upvotes().await;
-        retry_failed_fundings().await;
-        delete_expired_ideas();
         delete_expired_dapps();
         expire_featured().await;
-        cycle_topup_check().await;
-        course_nft_cycle_guard().await; // forward surplus cycles when the NFT canister runs low
         luckproof_daily_award(); // pay yesterday's Sklansky Trainer winner (tickets = player count)
+        sweep_game_retention(); // 1-day game-data retention (owner 2026-07-06)
         icpswap_lp_grant_daily_tickets().await; // ICP LP: 40 tickets/day per $1 of LP value
-        harvest_icpswap_lp().await; // claim + route ICPSwap LP yield (throttled)
-        staking_sweep().await;
+        harvest_icpswap_lp().await; // claim + route ICPSwap LP yield (throttled 1h internally)
+        staking_sweep().await; // bootstrap/unstakes every sweep; maturity+inbox hourly inside
         lottery_draw_check().await;
-        early_adopter_settlement_check().await;
-        casino_weekly_burn();
+        early_adopter_settlement_check().await; // draw-keyed; maturity read hourly inside
         sweep_play_sessions(); // PB-306: reap completed/expired play sessions.
         xfarm_sweep().await; // X-Farm: reap depleted Farmers + re-notify pending CMC legs.
-        // Keep the treasury-balance cache warm so the UI's commit/"Add More"
-        // gating reflects reality between commits.
-        refresh_treasury_cache(&CONFIG.with(|c| c.borrow().get().clone())).await;
-    });
-    // Short watchdog so the crash loop self-heals if a one-shot timer is ever
-    // dropped (e.g. across an upgrade). Cheap: a couple of reads when idle.
-    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(15), || async {
-        crash_watchdog().await;
+        // ── hourly: pure balance/status polling ──
+        if sweep_due("balance_caches", SWEEP_HOURLY_NS) {
+            // Treasury cache is ALSO refreshed on-demand by the commit-fronting
+            // gate; the pot cache after every pot-touching flow. This is drift
+            // correction only.
+            let config = CONFIG.with(|c| c.borrow().get().clone());
+            refresh_treasury_cache(&config).await;
+            refresh_lottery_pot_cache(&config).await;
+        }
+        if sweep_due("cycle_guards", SWEEP_HOURLY_NS) {
+            cycle_topup_check().await;
+            course_nft_cycle_guard().await; // forward surplus cycles when the NFT canister runs low
+        }
     });
 }
 
@@ -5246,7 +5290,6 @@ fn get_audit_log(offset: u64, limit: u64) -> Vec<AuditLogEntry> {
 
 /// Feature-flag key for the Idea Board. Flags default via `feature_default`;
 /// an admin override in FEATURE_FLAGS (1 = on, 0 = off) wins over the default.
-pub const FLAG_IDEA_BOARD: &str = "idea_board";
 /// Kill switch for lossless staking (stake/unstake). Staking earns lottery
 /// tickets only; it no longer grants voting power (voting is burn-only).
 pub const FLAG_LOSSLESS_VOTING: &str = "lossless_voting";
@@ -5254,76 +5297,34 @@ pub const FLAG_LOSSLESS_VOTING: &str = "lossless_voting";
 /// pot). Ships dark — default OFF until an admin flips it on.
 pub const FLAG_LOSSLESS_LOTTERY: &str = "lossless_lottery";
 pub const FLAG_EXPLORER: &str = "dapp_explorer";
-pub const FLAG_ARCADE: &str = "arcade";
 pub const FLAG_EARLY_ADOPTERS: &str = "early_adopters";
-// Per-game arcade kill switches — a game is live only when BOTH the parent
-// `arcade` flag and its own flag are on.
+// Per-game arcade kill switches (the parent `arcade` hub flag was retired
+// 2026-07-06 — each game's own flag now gates it alone).
 pub const FLAG_ARCADE_MINIGOLF: &str = "arcade_minigolf";
-pub const FLAG_ARCADE_FIELDGOAL: &str = "arcade_fieldgoal";
 pub const FLAG_ARCADE_LUCKPROOF: &str = "arcade_luckproof";
 pub const FLAG_ARCADE_SKYDIVE: &str = "arcade_skydive";
 pub const FLAG_ARCADE_BULLRUN: &str = "arcade_bullrun";
 pub const FLAG_SOLANA_LP: &str = "solana_lp_rewards";
 pub const FLAG_ICPSWAP_LP: &str = "icpswap_lp_stake";
-/// The Casino: Crash (bustabit-style multiplier game) + the shared casino VP
-/// ledger. Irreversible-feeling money-shaped play — ships dark (default OFF)
-/// until the owner enables it after a playtest.
-pub const FLAG_CRASH: &str = "crash";
-/// Cycles Faucet (PB-400): recycles a slice of treasury ICP into cycles grants
-/// for eligible pool members. Ships dark (default OFF) — owner kill switch.
-pub const FLAG_CYCLES_FAUCET: &str = "cycles_faucet";
-/// Proposal Discussions: forum-style threads on proposals (PB-DISC). Ships dark
-/// (default OFF) until the owner enables it.
-pub const FLAG_DISCUSSIONS: &str = "discussions";
 /// X-Farm: autonomous per-user Farmer canisters burn ICP→cycles to run Gemini
 /// (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X. Ships
 /// dark (default OFF) until the owner enables it after a playtest.
 pub const FLAG_X_FARM: &str = "x_farm";
-/// Dashboard (the signed-in home/landing page). Ships dark (default OFF)
-/// until an admin enables it — the existing flag-off redirects fall back to
-/// `voting` (always-on) when Dashboard is disabled, so disabling it never
-/// leaves a dead-end route.
-pub const FLAG_DASHBOARD: &str = "dashboard";
-/// Mission Statement page (`about` route). Ships dark (default OFF) until an
-/// admin enables it.
-pub const FLAG_MISSION_STATEMENT: &str = "mission_statement";
-const KNOWN_FEATURE_FLAGS: [&str; 19] = [
-    FLAG_IDEA_BOARD, FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER,
-    FLAG_ARCADE, FLAG_EARLY_ADOPTERS,
-    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_FIELDGOAL, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN, FLAG_SOLANA_LP, FLAG_ICPSWAP_LP,
-    FLAG_CRASH, FLAG_CYCLES_FAUCET, FLAG_DISCUSSIONS, FLAG_X_FARM,
-    FLAG_DASHBOARD, FLAG_MISSION_STATEMENT,
+const KNOWN_FEATURE_FLAGS: [&str; 11] = [
+    FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER, FLAG_EARLY_ADOPTERS,
+    FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN,
+    FLAG_SOLANA_LP, FLAG_ICPSWAP_LP, FLAG_X_FARM,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
 const MAX_FLAG_KEY_LEN: usize = 64;
 
-const MAX_IDEAS: u64 = 500;
-const MAX_ACTIVE_IDEAS_PER_USER: usize = 10;
-const MAX_IDEA_TITLE_LEN: usize = 80;
-const MAX_IDEA_DESCRIPTION_LEN: usize = 280;
-const MAX_IDEA_DETAIL_LEN: usize = 4000;
-/// An idea expires after 30 days without a single upvote (measured from the
-/// later of `created_at` / last upvote).
-const IDEA_EXPIRY_NANOS: u64 = 30 * 24 * 60 * 60 * 1_000_000_000;
-/// Upper bound on a single upvote, in the token's smallest unit. u64::MAX / 4
-/// keeps the 75% split (`amount * 3 / 4`) overflow-free by construction.
-const MAX_UPVOTE_UNITS: u64 = u64::MAX / 4;
-/// Posting an idea costs 1 ICP (anti-spam; 100% to the treasury).
-const IDEA_POST_FEE_USD_E8S: u64 = 5_000_000; // $0.05 (USD e8s); priced per token via XRC
 /// Subaccount seed for the posting-fee escrow — far above any real idea id.
 const IDEA_POST_SEED: u64 = u64::MAX;
-const MAX_PROJECTS: u64 = 200;
 
 const MAINNET_CKBTC_LEDGER: &str = "mxzaz-hqaaa-aaaar-qaada-cai";
 const MAINNET_CKETH_LEDGER: &str = "ss2fx-dyaaa-aaaar-qacoq-cai";
 
-/// Value-aligned default minimum upvotes — each ≈ $1 at approximate
-/// June-2026 exchange rates (ICP ≈ $5, BTC ≈ $100k, ETH ≈ $3k). Admins
-/// retune at runtime via `admin_set_min_upvote` as rates drift.
-const DEFAULT_MIN_UPVOTE_ICP_E8S: u64 = 20_000_000;            // 0.2 ICP
-const DEFAULT_MIN_UPVOTE_CKBTC_SATS: u64 = 1_000;              // 0.00001 ckBTC
-const DEFAULT_MIN_UPVOTE_CKETH_WEI: u64 = 330_000_000_000_000; // 0.00033 ckETH
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IdeaToken {
@@ -5336,32 +5337,6 @@ pub enum IdeaToken {
     CkUSDT,
 }
 
-/// An idea is implicitly Active while stored; the sweep DELETES ideas whose
-/// 30-day no-upvote window has lapsed (no Expired state is kept around).
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct Idea {
-    pub id: u64,
-    pub poster: Principal,
-    pub title: String,
-    pub description: String,
-    pub detail: String,
-    pub created_at: u64,
-    /// Timestamp of the most recent upvote; equals `created_at` until the
-    /// first upvote. Drives the 30-day expiry window.
-    pub last_upvote_at: u64,
-    pub upvote_count: u64,
-    /// Detail-view opens by signed-in users (drives "most viewed" sorting).
-    #[serde(default)]
-    pub views: u64,
-    /// Filled per-caller at query time: whether the caller has upvoted. Not stored.
-    #[serde(default)]
-    pub has_upvoted: bool,
-    // Legacy per-token contribution totals from the old paid-upvote model —
-    // retained for upgrade-safety. Upvotes are now free; these stay at 0.
-    pub total_icp_e8s: u64,
-    pub total_ckbtc_e8s: u64,
-    pub total_cketh_wei: u64,
-}
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum UpvoteStatus {
@@ -5369,21 +5344,6 @@ pub enum UpvoteStatus {
     FailedPayout,
 }
 
-/// Saga journal for one upvote payout (75% treasury / 25% poster). Block
-/// indices are set per completed transfer so a retry skips finished steps —
-/// same idempotency pattern as `settle_burn_split` / pool registration.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct IdeaUpvote {
-    pub id: u64,
-    pub idea_id: u64,
-    pub voter: Principal,
-    pub token: IdeaToken,
-    pub amount: u64,
-    pub status: UpvoteStatus,
-    pub created_at: u64,
-    pub treasury_block: Option<u64>,
-    pub poster_block: Option<u64>,
-}
 
 /// A feature's three states. `Off` = nobody; `On` = everybody; `AdminOn` =
 /// admins only (preview/playtest a feature live without exposing it).
@@ -5409,48 +5369,6 @@ fn default_true() -> bool {
     true
 }
 
-/// goes 100% to the protocol treasury, which pays for the project's
-/// execution. Each project has ONE USD-denominated goal and accepts any
-/// supported crypto; contributions (tracked per-token) are valued at the
-/// cached USD rate and summed into `raised_usd_e8s` for progress.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct Project {
-    pub id: u64,
-    pub title: String,
-    pub description: String,
-    pub detail: String,
-    pub created_at: u64,
-    /// The single funding goal, in USD e8s ($1 = 100_000_000).
-    #[serde(default)]
-    pub goal_usd_e8s: u64,
-    /// Filled at query time: per-token raised pots valued in USD e8s. Not stored.
-    #[serde(default)]
-    pub raised_usd_e8s: u64,
-    // Legacy per-token goals — retained for upgrade-safety, no longer used
-    // (all projects now use the single USD goal above).
-    pub goal_icp_e8s: u64,
-    pub goal_ckbtc_e8s: u64,
-    pub goal_cketh_wei: u64,
-    pub raised_icp_e8s: u64,
-    pub raised_ckbtc_e8s: u64,
-    pub raised_cketh_wei: u64,
-    pub funding_count: u64,
-    // Every project accepts every supported crypto; kept for upgrade-safety.
-    #[serde(default = "default_true")]
-    pub accept_icp: bool,
-    #[serde(default = "default_true")]
-    pub accept_ckbtc: bool,
-    #[serde(default = "default_true")]
-    pub accept_cketh: bool,
-}
-
-/// A project's total raised across all tokens, valued in USD e8s at the
-/// cached rate. Used for the single-goal progress display.
-fn project_raised_usd_e8s(p: &Project) -> u64 {
-    icp_amount_usd_e8s(p.raised_icp_e8s)
-        .saturating_add(token_amount_usd_e8s(ExplorerToken::CkBTC, p.raised_ckbtc_e8s))
-        .saturating_add(token_amount_usd_e8s(ExplorerToken::CkETH, p.raised_cketh_wei))
-}
 
 /// Saga journal for one project funding (single transfer → treasury), same
 /// idempotency pattern as IdeaUpvote.
@@ -5466,48 +5384,13 @@ pub struct ProjectFunding {
     pub treasury_block: Option<u64>,
 }
 
-/// Everything the Idea Board UI needs in one query: the flag, per-token
-/// ledger canister ids, per-token minimum upvotes (value-aligned across
-/// tokens via exchange rates) and ledger fees, in smallest units.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct IdeaBoardInfo {
-    pub enabled: bool,
-    pub icp_ledger: Principal,
-    pub ckbtc_ledger: Principal,
-    pub cketh_ledger: Principal,
-    pub min_upvote_icp_e8s: u64,
-    pub min_upvote_ckbtc_e8s: u64,
-    pub min_upvote_cketh_wei: u64,
-    pub fee_icp_e8s: u64,
-    pub fee_ckbtc_sats: u64,
-    pub fee_cketh_wei: u64,
-    pub expiry_nanos: u64,
-    /// Post fee in USD e8s ($0.05), priced per token via XRC. ICP burns 100%;
-    /// other tokens go 100% to the treasury.
-    pub post_fee_usd_e8s: u64,
-}
 
-impl_storable!(Idea);
-impl_storable!(IdeaUpvote);
-impl_storable!(Project);
 impl_storable!(ProjectFunding);
 
 thread_local! {
-    static IDEAS: RefCell<StableBTreeMap<u64, Idea, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(9))))
-    });
 
-    static NEXT_IDEA_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(10)), 1u64))
-    });
 
-    static IDEA_UPVOTES: RefCell<StableBTreeMap<u64, IdeaUpvote, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(11))))
-    });
 
-    static NEXT_UPVOTE_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(12)), 1u64))
-    });
 
     // Admin feature-flag overrides: 1 = enabled, 0 = disabled. A key absent
     // here falls back to `feature_default`.
@@ -5515,30 +5398,14 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(13))))
     });
 
-    static PROJECTS: RefCell<StableBTreeMap<u64, Project, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(14))))
-    });
 
-    static NEXT_PROJECT_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(15)), 1u64))
-    });
 
     static PROJECT_FUNDINGS: RefCell<StableBTreeMap<u64, ProjectFunding, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(16))))
     });
 
-    static NEXT_FUNDING_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(17)), 1u64))
-    });
 
-    static IDEA_VIEWS: RefCell<StableBTreeMap<IdeaViewKey, (), Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(18))))
-    });
 
-    // One free upvote per user per idea (dedupe set). MemoryId 74.
-    static IDEA_UPVOTERS: RefCell<StableBTreeMap<IdeaUpvoteKey, (), Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(74))))
-    });
 
     // Cumulative pool-reward paid (gross e8s) per (settled proposal, recipient).
     // Drives idempotent, incremental top-ups + failed-payout retries so retried
@@ -5551,28 +5418,17 @@ thread_local! {
 
 fn feature_default(key: &str) -> bool {
     match key {
-        // Default OFF (ship dark): Crash (casino, pending the points redesign),
-        // the Cycles Faucet (PB-400, moves treasury value), and the whole Arcade
-        // surface — Arcade + both games (Mini Golf, Field Goal) launch dark and
-        // are turned on deliberately by an admin, never on a fresh install.
-        FLAG_CRASH => false,
-        FLAG_CYCLES_FAUCET => false,
-        FLAG_ARCADE => false,
+        // Games + LP rewards ship dark (default OFF) and are turned on
+        // deliberately by an admin, never on a fresh install.
         FLAG_ARCADE_MINIGOLF => false,
-        FLAG_ARCADE_FIELDGOAL => false,
         FLAG_ARCADE_LUCKPROOF => false,
         FLAG_ARCADE_SKYDIVE => false,
         FLAG_ARCADE_BULLRUN => false,
         FLAG_SOLANA_LP => false,
         FLAG_ICPSWAP_LP => false,
         FLAG_X_FARM => false,
-        // Dashboard + Mission Statement ship dark (default OFF) — these pages
-        // were always-on before; gating them lets an admin hide either page
-        // without a deploy. The frontend redirects both to `voting` when dark.
-        FLAG_DASHBOARD => false,
-        FLAG_MISSION_STATEMENT => false,
-        // Every other SHIPPED feature (Idea Board, Lossless Voting/Lottery,
-        // Explorer, Early Adopters) defaults ON; unknown keys stay OFF.
+        // Every other SHIPPED feature (Lossless Voting/Lottery, Explorer,
+        // Early Adopters) defaults ON; unknown keys stay OFF.
         k => KNOWN_FEATURE_FLAGS.contains(&k),
     }
 }
@@ -5624,13 +5480,6 @@ fn feature_visible(key: &str, caller: Principal) -> bool {
         FlagState::AdminOn => is_admin_principal(caller),
         FlagState::Off => false,
     }
-}
-
-fn require_idea_board_enabled() -> Result<(), String> {
-    if !feature_visible(FLAG_IDEA_BOARD, get_caller()) {
-        return Err("FEATURE_DISABLED".to_string());
-    }
-    Ok(())
 }
 
 fn valid_flag_key(key: &str) -> bool {
@@ -5749,19 +5598,6 @@ fn token_fee(token: IdeaToken, config: &Config) -> u64 {
     }
 }
 
-/// Minimum upvote per token: admin override, else the value-aligned default
-/// (~$1 equivalent per token — see DEFAULT_MIN_UPVOTE_* rates).
-fn token_min_upvote(token: IdeaToken, config: &Config) -> u64 {
-    match token {
-        // Stables are payout-record-only — an unreachable upvote minimum
-        // keeps them out of the idea board without touching call sites.
-        IdeaToken::CkUSDC | IdeaToken::CkUSDT => u64::MAX,
-        IdeaToken::ICP => config.min_upvote_icp_e8s.unwrap_or(DEFAULT_MIN_UPVOTE_ICP_E8S),
-        IdeaToken::CkBTC => config.min_upvote_ckbtc_e8s.unwrap_or(DEFAULT_MIN_UPVOTE_CKBTC_SATS),
-        IdeaToken::CkETH => config.min_upvote_cketh_wei.unwrap_or(DEFAULT_MIN_UPVOTE_CKETH_WEI),
-    }
-}
-
 /// Admin: point ckBTC/ckETH at locally deployed test ledgers. Local-only —
 /// mainnet token ledgers are hard-pinned to the canonical canisters.
 #[ic_cdk::update(guard = "require_admin")]
@@ -5785,630 +5621,28 @@ fn admin_set_token_ledger(token: IdeaToken, ledger: Principal) -> Result<(), Str
     })
 }
 
-/// Admin: retune a token's minimum upvote (smallest units) as exchange
-/// rates move, keeping minimums roughly value-aligned across tokens.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_min_upvote(token: IdeaToken, min: u64) -> Result<(), String> {
-    if min == 0 || min > MAX_UPVOTE_UNITS {
-        return Err("INVALID_MINIMUM".to_string());
-    }
-    CONFIG.with(|cell| {
-        let mut cfg = cell.borrow().get().clone();
-        match token {
-            IdeaToken::ICP => cfg.min_upvote_icp_e8s = Some(min),
-            IdeaToken::CkUSDC | IdeaToken::CkUSDT => return Err("UNSUPPORTED_TOKEN".to_string()),
-            IdeaToken::CkBTC => cfg.min_upvote_ckbtc_e8s = Some(min),
-            IdeaToken::CkETH => cfg.min_upvote_cketh_wei = Some(min),
-        }
-        cell.borrow_mut().set(cfg);
-        Ok(())
-    })
-}
-
-/// Admin: remove an idea from the board at any time. Settled upvotes stay in the
-/// treasury/poster; any in-flight upvote saga refunds via the orphan path.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_remove_idea(idea_id: u64) -> Result<(), String> {
-    IDEAS.with(|m| {
-        if m.borrow_mut().remove(&idea_id).is_none() {
-            return Err("IDEA_NOT_FOUND".to_string());
-        }
-        Ok(())
-    })
-}
-
-/// 75% → treasury, 25% (plus rounding remainder) → idea poster.
-fn split_upvote(amount: u64) -> (u64, u64) {
-    let treasury = amount / 4 * 3;
-    let poster = amount - treasury;
-    (treasury, poster)
-}
-
-fn idea_is_expired(last_upvote_at: u64, now: u64) -> bool {
-    now > last_upvote_at.saturating_add(IDEA_EXPIRY_NANOS)
-}
-
-/// Principal- and idea-bound deposit subaccount for upvote escrow. Domain-
-/// separated from the proposal escrow (`proof_of_burn_escrow_v1`).
-fn derive_idea_subaccount(user: &Principal, idea_id: u64) -> [u8; 32] {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(b"proof_of_burn_idea_v1");
-    hasher.update(user.as_slice());
-    hasher.update(&idea_id.to_be_bytes());
-    let result = hasher.finalize();
-    let mut sub = [0u8; 32];
-    sub.copy_from_slice(&result);
-    sub
-}
-
-fn validate_idea_text(title: &str, description: &str, detail: &str) -> Result<(), String> {
-    if title.is_empty() || title.chars().count() > MAX_IDEA_TITLE_LEN {
-        return Err("INVALID_TITLE".to_string());
-    }
-    if description.is_empty() || description.chars().count() > MAX_IDEA_DESCRIPTION_LEN {
-        return Err("INVALID_DESCRIPTION".to_string());
-    }
-    if detail.chars().count() > MAX_IDEA_DETAIL_LEN {
-        return Err("INVALID_DETAIL".to_string());
-    }
-    Ok(())
-}
-
-#[ic_cdk::query]
-fn get_idea_board_info() -> IdeaBoardInfo {
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    IdeaBoardInfo {
-        enabled: feature_visible(FLAG_IDEA_BOARD, get_caller()),
-        icp_ledger: token_ledger(IdeaToken::ICP, &config),
-        ckbtc_ledger: token_ledger(IdeaToken::CkBTC, &config),
-        cketh_ledger: token_ledger(IdeaToken::CkETH, &config),
-        min_upvote_icp_e8s: token_min_upvote(IdeaToken::ICP, &config),
-        min_upvote_ckbtc_e8s: token_min_upvote(IdeaToken::CkBTC, &config),
-        min_upvote_cketh_wei: token_min_upvote(IdeaToken::CkETH, &config),
-        fee_icp_e8s: token_fee(IdeaToken::ICP, &config),
-        fee_ckbtc_sats: token_fee(IdeaToken::CkBTC, &config),
-        fee_cketh_wei: token_fee(IdeaToken::CkETH, &config),
-        expiry_nanos: IDEA_EXPIRY_NANOS,
-        post_fee_usd_e8s: IDEA_POST_FEE_USD_E8S,
-    }
-}
-
-/// All live ideas, newest first. Time-expired ideas are omitted even before
-/// the sweep deletes them, so the UI never shows a dead idea.
-#[ic_cdk::query]
-fn list_ideas() -> Vec<Idea> {
-    let now = current_time();
-    let caller = get_caller();
-    let mut ideas: Vec<Idea> = IDEAS.with(|m| {
-        m.borrow()
-            .iter()
-            .map(|entry| entry.value())
-            .filter(|idea| !idea_is_expired(idea.last_upvote_at, now))
-            .collect()
-    });
-    // Per-caller flag so the UI can show "Upvoted" and one upvote per idea.
-    for idea in ideas.iter_mut() {
-        idea.has_upvoted = IDEA_UPVOTERS
-            .with(|m| m.borrow().contains_key(&IdeaUpvoteKey { idea_id: idea.id, user: caller }));
-    }
-    ideas.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-    ideas
-}
-
-/// Count a detail-view open (signed-in users only — anonymous ingress is
-/// already rejected by inspect_message). Drives "most viewed" sorting.
-#[ic_cdk::update]
-fn record_idea_view(idea_id: u64) -> Result<(), String> {
-    require_authenticated()?;
-    require_idea_board_enabled()?;
-    let caller = get_caller();
-    let key = IdeaViewKey { idea_id, user: caller };
-
-    let already_viewed = IDEA_VIEWS.with(|m| m.borrow().contains_key(&key));
-    if already_viewed {
-        return Ok(());
-    }
-
-    // Insert key before checking idea existence, but we should make sure the idea exists
-    let idea_exists = IDEAS.with(|m| m.borrow().contains_key(&idea_id));
-    if !idea_exists {
-        return Err("IDEA_NOT_FOUND".to_string());
-    }
-
-    IDEA_VIEWS.with(|m| m.borrow_mut().insert(key, ()));
-
-    IDEAS.with(|m| {
-        let mut m = m.borrow_mut();
-        match m.get(&idea_id) {
-            Some(mut idea) => {
-                idea.views = idea.views.saturating_add(1);
-                m.insert(idea_id, idea);
-                Ok(())
-            }
-            None => Err("IDEA_NOT_FOUND".to_string()),
-        }
-    })
-}
-
 thread_local! {
     // Heap-only 15-min locked post-fee quotes per caller (ephemeral; like XFARM_QUOTES).
     static IDEA_POST_QUOTES: RefCell<std::collections::HashMap<Principal, ExplorerQuote>> =
         RefCell::new(std::collections::HashMap::new());
 }
 
-/// The caller's deposit account for the idea-posting fee. Quote with
-/// `get_idea_post_quote(token)`, fund this account on that token's ledger with
-/// `quote.amount + token fee`, then call `post_idea`.
-#[ic_cdk::query]
-fn get_idea_post_deposit_address() -> LedgerAccount {
-    let caller = get_caller();
-    LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(derive_idea_subaccount(&caller, IDEA_POST_SEED)),
-    }
-}
-
-/// Quote the $0.05 idea-post fee in `token` at the live XRC rate; locks the price
-/// for the caller for 15 minutes. ICP is burned 100%; other tokens → the treasury.
-#[ic_cdk::update]
-async fn get_idea_post_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
-    require_authenticated()?;
-    require_idea_board_enabled()?;
-    let caller = get_caller();
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let rate = explorer_usd_rate_e8s(token, &config).await?;
-    let amount = discussion_quote_amount(IDEA_POST_FEE_USD_E8S, rate, explorer_token_decimals(token))?;
-    let now = current_time();
-    let quote = ExplorerQuote {
-        token, days: 0, amount, rate_usd_e8s: rate,
-        usd_total_e8s: IDEA_POST_FEE_USD_E8S,
-        created_at: now, expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
-    };
-    IDEA_POST_QUOTES.with(|m| { m.borrow_mut().insert(caller, quote.clone()); });
-    Ok(quote)
-}
-
-#[ic_cdk::update]
-async fn post_idea(title: String, description: String, detail: String, token: ExplorerToken) -> Result<u64, String> {
-    require_authenticated()?;
-    require_idea_board_enabled()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    let title = title.trim().to_string();
-    let description = description.trim().to_string();
-    let detail = detail.trim().to_string();
-    validate_idea_text(&title, &description, &detail)?;
-
-    let now = current_time();
-    let quota_err = IDEAS.with(|m| {
-        let m = m.borrow();
-        if m.len() >= MAX_IDEAS {
-            return Some("IDEA_QUOTA_REACHED");
-        }
-        let active_by_caller = m
-            .iter()
-            .filter(|e| {
-                let i = e.value();
-                i.poster == caller && !idea_is_expired(i.last_upvote_at, now)
-            })
-            .count();
-        if active_by_caller >= MAX_ACTIVE_IDEAS_PER_USER {
-            return Some("TOO_MANY_ACTIVE_IDEAS");
-        }
-        None
-    });
-    if let Some(e) = quota_err {
-        return Err(e.to_string());
-    }
-
-    // $0.05 post fee, priced per token (anti-spam). ICP burns 100% to backend cycles
-    // (proof-of-burn); any other token goes 100% to the treasury. Charged before the
-    // idea is created; if collection fails nothing is stored. Reuses the discussions
-    // fee collector (ICP→burn / non-ICP→treasury).
-    let quote = IDEA_POST_QUOTES.with(|m| m.borrow().get(&caller).cloned())
-        .ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.token != token || quote.usd_total_e8s != IDEA_POST_FEE_USD_E8S {
-        return Err("QUOTE_MISMATCH".to_string());
-    }
-    if now > quote.expires_at {
-        return Err("QUOTE_EXPIRED".to_string());
-    }
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let sub = derive_idea_subaccount(&caller, IDEA_POST_SEED);
-    collect_discussion_fee(token, sub, quote.amount, &config).await?;
-    IDEA_POST_QUOTES.with(|m| { m.borrow_mut().remove(&caller); });
-
-    let id = NEXT_IDEA_ID.with(|c| {
-        let id = *c.borrow().get();
-        c.borrow_mut().set(id + 1);
-        id
-    });
-
-    let idea = Idea {
-        id,
-        poster: caller,
-        title,
-        description,
-        detail,
-        created_at: now,
-        last_upvote_at: now,
-        upvote_count: 0,
-        views: 0,
-        has_upvoted: false,
-        total_icp_e8s: 0,
-        total_ckbtc_e8s: 0,
-        total_cketh_wei: 0,
-    };
-    IDEAS.with(|m| {
-        m.borrow_mut().insert(id, idea);
-    });
-
-    let log_entry = AuditLogEntry {
-        timestamp: now,
-        event_type: "idea_post".to_string(),
-        proposal_id: id,
-        user: caller,
-        amount_e8s: quote.amount,
-    };
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&log_entry);
-    });
-
-    Ok(id)
-}
-
 // ════════════════════════════════════════════════════════════════════════════
-// Proposal Discussions (PB-DISC) — forum-style threads on proposals.
-// A signed-in user starts a thread on a proposal for $1; others comment ($0.25)
-// and up/down-vote (free). Fees route BY TOKEN: ICP is burned to backend cycles
-// (proof-of-burn, self-funds compute); non-ICP goes 100% to the treasury. The
-// thread author earns 1 lottery ticket per qualifying upvote (Phase 2). Threads
-// auto-delete when the proposal settles (Phase 2). Ships dark behind the
-// `discussions` flag. MemoryIds: THREADS 95, NEXT_THREAD_ID 97, DISCUSSION_QUOTES
-// 98 (Phase-2 adds comments/votes 99/100/101).
+// Proposal Discussions — REMOVED 2026-07-06 (owner). Paid threads/comments
+// on proposals; never enabled on mainnet (flag `discussions` retired).
+// ORPHANED MemoryIds: 95 THREADS · 97 NEXT_THREAD_ID · 98 DISCUSSION_QUOTES ·
+// 99 COMMENTS · 100 NEXT_COMMENT_ID · 101 DISCUSSION_VOTES · 102
+// DISCUSSION_REWARDED — never reuse. The shared ticket machinery that lived
+// here (grant_lottery_tickets / note_ticket_source / TICKET_SOURCES 111 /
+// author_is_staked / get_my_ticket_breakdown) is KEPT below.
 // ════════════════════════════════════════════════════════════════════════════
 
-const DISCUSSION_THREAD_FEE_USD_E8S: u64 = 100_000_000; // $1.00
-const MAX_THREAD_TITLE_LEN: usize = 100;
-const MAX_THREAD_BODY_LEN: usize = 1000;
-const MAX_THREADS_PER_PROPOSAL: u64 = 200;
 
-#[derive(CandidType, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-pub enum VoteDir { Up, Down }
 
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct Thread {
-    pub id: u64,
-    pub proposal_id: u64,
-    pub author: Principal,
-    pub title: String,
-    pub body: String,
-    pub created_at: u64,
-    pub last_activity_at: u64,
-    pub comment_count: u64,
-    pub upvote_count: u64,
-    pub downvote_count: u64,
-    /// Lottery tickets minted to the author so far (per-thread reward cap).
-    pub tickets_awarded: u64,
-    /// Filled per-caller at query time (the caller's vote on this thread); not stored.
-    #[serde(default)]
-    pub my_vote: Option<VoteDir>,
-}
-impl_storable!(Thread);
+
+
 
 thread_local! {
-    static THREADS: RefCell<StableBTreeMap<u64, Thread, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(95))))
-    });
-    static NEXT_THREAD_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(97)), 1u64))
-    });
-    static DISCUSSION_QUOTES: RefCell<StableBTreeMap<Principal, ExplorerQuote, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(98))))
-    });
-}
-
-fn next_thread_id() -> u64 {
-    NEXT_THREAD_ID.with(|c| {
-        let id = *c.borrow().get();
-        c.borrow_mut().set(id + 1);
-        id
-    })
-}
-
-/// Per-caller escrow subaccount for discussion fees (distinct domain tag).
-fn derive_discussion_subaccount(user: &Principal) -> [u8; 32] {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(b"proof_of_burn_discussion_v1");
-    hasher.update(user.as_slice());
-    let mut sub = [0u8; 32];
-    sub.copy_from_slice(&hasher.finalize());
-    sub
-}
-
-fn require_discussions_enabled() -> Result<(), String> {
-    if !feature_visible(FLAG_DISCUSSIONS, get_caller()) {
-        return Err("FEATURE_DISABLED".to_string());
-    }
-    Ok(())
-}
-
-/// Token-amount for a flat USD fee at the live rate: `fee_usd * 10^decimals / rate`.
-fn discussion_quote_amount(fee_usd_e8s: u64, rate_usd_e8s: u64, decimals: u32) -> Result<u64, String> {
-    if rate_usd_e8s == 0 {
-        return Err("RATE_UNAVAILABLE".to_string());
-    }
-    let scale = 10u128.pow(decimals);
-    let amount = u64::try_from((fee_usd_e8s as u128).saturating_mul(scale) / (rate_usd_e8s as u128))
-        .map_err(|_| "AMOUNT_OVERFLOW".to_string())?;
-    if amount == 0 {
-        return Err("AMOUNT_TOO_SMALL".to_string());
-    }
-    Ok(amount)
-}
-
-/// A proposal accepts new discussion while it's still live (open or met). Once it
-/// settles/votes/abstains/fails, threads are deleted (Phase 2 sweep).
-fn proposal_open_for_discussion(proposal_id: u64) -> bool {
-    PROPOSALS.with(|m| m.borrow().get(&proposal_id))
-        .map(|p| p.status == "open" || p.status == "met")
-        .unwrap_or(false)
-}
-
-/// Route a paid discussion fee held in `escrow_sub`: ICP is burned to backend
-/// cycles (CMC); any other token goes 100% to the treasury. Charged before the
-/// content is stored (a failure leaves nothing).
-async fn collect_discussion_fee(
-    token: ExplorerToken,
-    escrow_sub: [u8; 32],
-    amount: u64,
-    config: &Config,
-) -> Result<(), String> {
-    let ledger_id = explorer_token_ledger(token, config);
-    let fee = explorer_token_fee(token, config);
-    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(escrow_sub) };
-    let balance = call_ledger_balance(ledger_id, escrow).await?;
-    if balance < amount.saturating_add(fee) {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
-    }
-    if token == ExplorerToken::ICP {
-        // Burn to backend-canister cycles via the CMC (proof-of-burn). The
-        // escrow→CMC TRANSFER is the charge — once it lands, the user has paid.
-        // `notify_top_up` (mint-to-cycles) is BEST-EFFORT: a failure leaves the
-        // ICP at the CMC (recoverable / pending mint), and must not block the
-        // post or strand the user's intent. (This also sidesteps the PB-148
-        // local quirk where the local CMC rejects the local ledger's block.)
-        let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
-        let block = call_cmc_topup_transfer(ledger_id, Some(escrow_sub), get_canister_id(), amount, fee)
-            .await
-            .map_err(|e| format!("BURN_XFER_FAILED: {}", e))?;
-        if let Err(e) = notify_cmc_topup(cmc, get_canister_id(), block, true).await {
-            canister_print(&format!(
-                "discussion burn: notify_top_up failed for block {} (ICP at CMC, mint pending): {}",
-                block, e
-            ));
-        }
-    } else {
-        // Non-ICP → 100% to the treasury (held as the token).
-        let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-        call_ledger_transfer(ledger_id, Some(escrow_sub), treasury_dest, amount, Some(fee))
-            .await
-            .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
-    }
-    Ok(())
-}
-
-fn validate_thread_text(title: &str, body: &str) -> Result<(), String> {
-    if title.is_empty() || title.chars().count() > MAX_THREAD_TITLE_LEN {
-        return Err("INVALID_TITLE".to_string());
-    }
-    if body.is_empty() || body.chars().count() > MAX_THREAD_BODY_LEN {
-        return Err("INVALID_BODY".to_string());
-    }
-    Ok(())
-}
-
-/// The caller's per-proposal-independent discussion fee escrow account. Fund it
-/// on the chosen token's ledger, then call `start_thread` / `add_comment`.
-#[ic_cdk::query]
-fn get_discussion_deposit_address() -> LedgerAccount {
-    LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(derive_discussion_subaccount(&get_caller())),
-    }
-}
-
-/// Quote the thread-start fee ($1 USD) in `token` at the live rate; locks the
-/// price for the caller for 15 minutes.
-#[ic_cdk::update]
-async fn get_thread_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
-    require_authenticated()?;
-    require_discussions_enabled()?;
-    let caller = get_caller();
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let rate = explorer_usd_rate_e8s(token, &config).await?;
-    let amount = discussion_quote_amount(DISCUSSION_THREAD_FEE_USD_E8S, rate, explorer_token_decimals(token))?;
-    let now = current_time();
-    let quote = ExplorerQuote {
-        token, days: 0, amount, rate_usd_e8s: rate,
-        usd_total_e8s: DISCUSSION_THREAD_FEE_USD_E8S,
-        created_at: now, expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
-    };
-    DISCUSSION_QUOTES.with(|m| { m.borrow_mut().insert(caller, quote.clone()); });
-    Ok(quote)
-}
-
-/// Start a discussion thread on `proposal_id` for the $1 fee (deposited on
-/// get_discussion_deposit_address, quoted via get_thread_quote). ICP burns to
-/// backend cycles; non-ICP goes to the treasury.
-#[ic_cdk::update]
-async fn start_thread(proposal_id: u64, title: String, body: String, token: ExplorerToken) -> Result<u64, String> {
-    require_authenticated()?;
-    require_discussions_enabled()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    let title = title.trim().to_string();
-    let body = body.trim().to_string();
-    validate_thread_text(&title, &body)?;
-
-    if !proposal_open_for_discussion(proposal_id) {
-        return Err("PROPOSAL_NOT_OPEN".to_string());
-    }
-    let count = THREADS.with(|m| m.borrow().iter().filter(|e| e.value().proposal_id == proposal_id).count());
-    if count as u64 >= MAX_THREADS_PER_PROPOSAL {
-        return Err("THREAD_QUOTA_REACHED".to_string());
-    }
-
-    let now = current_time();
-    let quote = DISCUSSION_QUOTES.with(|m| m.borrow().get(&caller)).ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.token != token || quote.usd_total_e8s != DISCUSSION_THREAD_FEE_USD_E8S {
-        return Err("QUOTE_MISMATCH".to_string());
-    }
-    if now > quote.expires_at {
-        return Err("QUOTE_EXPIRED".to_string());
-    }
-
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let sub = derive_discussion_subaccount(&caller);
-    collect_discussion_fee(token, sub, quote.amount, &config).await?;
-    DISCUSSION_QUOTES.with(|m| { m.borrow_mut().remove(&caller); });
-
-    let id = next_thread_id();
-    THREADS.with(|m| {
-        m.borrow_mut().insert(id, Thread {
-            id, proposal_id, author: caller, title, body,
-            created_at: now, last_activity_at: now,
-            comment_count: 0, upvote_count: 0, downvote_count: 0,
-            tickets_awarded: 0, my_vote: None,
-        });
-    });
-    log_dapp_event("thread_start", id, caller, quote.amount);
-    Ok(id)
-}
-
-fn thread_score(t: &Thread) -> i128 {
-    (t.upvote_count as i128) - (t.downvote_count as i128)
-}
-
-/// Threads on a proposal, sorted by net score (upvotes − downvotes), then newest.
-/// `my_vote` is filled in Phase 2 (currently None).
-#[ic_cdk::query]
-fn list_threads(proposal_id: u64) -> Vec<Thread> {
-    let caller = get_caller();
-    let mut threads: Vec<Thread> = THREADS.with(|m| {
-        m.borrow().iter().map(|e| e.value()).filter(|t| t.proposal_id == proposal_id).collect()
-    });
-    threads.sort_by(|a, b| thread_score(b).cmp(&thread_score(a)).then(b.created_at.cmp(&a.created_at)));
-    for t in threads.iter_mut() {
-        t.my_vote = caller_vote(0, t.id, caller);
-    }
-    threads
-}
-
-#[ic_cdk::query]
-fn get_thread(thread_id: u64) -> Option<Thread> {
-    let caller = get_caller();
-    THREADS.with(|m| m.borrow().get(&thread_id)).map(|mut t| {
-        t.my_vote = caller_vote(0, t.id, caller);
-        t
-    })
-}
-
-/// Cheap count for the proposal card badge ("See open threads (N)").
-#[ic_cdk::query]
-fn get_thread_count(proposal_id: u64) -> u64 {
-    THREADS.with(|m| m.borrow().iter().filter(|e| e.value().proposal_id == proposal_id).count() as u64)
-}
-
-#[ic_cdk::query]
-fn list_my_threads() -> Vec<Thread> {
-    let caller = get_caller();
-    if caller == Principal::anonymous() {
-        return vec![];
-    }
-    THREADS.with(|m| m.borrow().iter().map(|e| e.value()).filter(|t| t.author == caller).collect())
-}
-
-/// Every thread across all proposals (for the full Discussions page; the client
-/// groups by `proposal_id`). Sorted by net score then newest; `my_vote` filled.
-#[ic_cdk::query]
-fn list_all_threads() -> Vec<Thread> {
-    let caller = get_caller();
-    let mut ts: Vec<Thread> = THREADS.with(|m| m.borrow().iter().map(|e| e.value()).collect());
-    ts.sort_by(|a, b| thread_score(b).cmp(&thread_score(a)).then(b.created_at.cmp(&a.created_at)));
-    for t in ts.iter_mut() {
-        t.my_vote = caller_vote(0, t.id, caller);
-    }
-    ts
-}
-
-// ── Proposal Discussions: comments, votes, reward, delete-on-settle (Phase 2) ──
-
-const DISCUSSION_COMMENT_FEE_USD_E8S: u64 = 25_000_000; // $0.25
-const MAX_COMMENTS_PER_THREAD: u64 = 1_000;
-/// Cap on lottery tickets a single thread can mint for its author (sybil bound).
-const TICKETS_PER_THREAD_CAP: u64 = 50;
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct Comment {
-    pub id: u64,
-    pub thread_id: u64,
-    /// None = top-level; Some(top_level_comment_id) = a one-level reply.
-    pub parent_id: Option<u64>,
-    pub author: Principal,
-    pub body: String,
-    pub created_at: u64,
-    pub upvote_count: u64,
-    pub downvote_count: u64,
-    #[serde(default)]
-    pub my_vote: Option<VoteDir>,
-}
-impl_storable!(Comment);
-impl_storable!(VoteDir);
-
-/// Vote dedupe key. `kind` 0 = thread, 1 = comment.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DiscussionVoteKey {
-    pub kind: u8,
-    pub item_id: u64,
-    pub voter: Principal,
-}
-impl_storable!(DiscussionVoteKey);
-
-thread_local! {
-    static COMMENTS: RefCell<StableBTreeMap<u64, Comment, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(99))))
-    });
-    static NEXT_COMMENT_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(100)), 1u64))
-    });
-    static DISCUSSION_VOTES: RefCell<StableBTreeMap<DiscussionVoteKey, VoteDir, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(101))))
-    });
-    // Marker set: (kind=2, thread_id, voter) once an upvoter has minted the
-    // author a ticket — so toggling upvote off/on can't farm repeat rewards.
-    static DISCUSSION_REWARDED: RefCell<StableBTreeMap<DiscussionVoteKey, (), Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(102))))
-    });
-}
-
-fn next_comment_id() -> u64 {
-    NEXT_COMMENT_ID.with(|c| {
-        let id = *c.borrow().get();
-        c.borrow_mut().set(id + 1);
-        id
-    })
-}
-
-fn caller_vote(kind: u8, item_id: u64, caller: Principal) -> Option<VoteDir> {
-    if caller == Principal::anonymous() {
-        return None;
-    }
-    DISCUSSION_VOTES.with(|m| m.borrow().get(&DiscussionVoteKey { kind, item_id, voter: caller }))
 }
 
 /// Record where `count` freshly credited tickets came from (round-scoped;
@@ -6506,965 +5740,8 @@ fn author_is_staked(user: Principal) -> bool {
         || EARLY_ADOPTERS.with(|m| m.borrow().get(&user)).map(|e| e.staked_e8s > 0).unwrap_or(false)
 }
 
-/// The reward (D-reward): on a NEW upvote of a thread, mint the AUTHOR 1 lottery
-/// ticket — gated: the lottery is live; not the author's own upvote; the AUTHOR
-/// is staked (only stakers play the lottery); the upvoter has participation
-/// history (committed/voted before — sybil cost); this upvoter hasn't already
-/// rewarded this thread (toggle-farming guard); under the per-thread cap.
-fn maybe_award_thread_upvote(thread: &mut Thread, voter: Principal) {
-    if !feature_active(FLAG_LOSSLESS_LOTTERY) { return; }
-    if voter == thread.author { return; }
-    if thread.tickets_awarded >= TICKETS_PER_THREAD_CAP { return; }
-    if !author_is_staked(thread.author) { return; }
-    let has_history = USER_AGGREGATES
-        .with(|m| m.borrow().get(&voter))
-        .map(|a| a.proposals_joined > 0)
-        .unwrap_or(false);
-    if !has_history { return; }
-    let rkey = DiscussionVoteKey { kind: 2, item_id: thread.id, voter };
-    if DISCUSSION_REWARDED.with(|m| m.borrow().get(&rkey)).is_some() { return; }
-    grant_lottery_tickets(thread.author, 1, "discussions");
-    thread.tickets_awarded = thread.tickets_awarded.saturating_add(1);
-    DISCUSSION_REWARDED.with(|m| { m.borrow_mut().insert(rkey, ()); });
-}
-
-/// Quote the comment fee ($0.25 USD) in `token`. Shares DISCUSSION_QUOTES with
-/// the thread quote; the op-specific `usd_total_e8s` distinguishes them.
-#[ic_cdk::update]
-async fn get_comment_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
-    require_authenticated()?;
-    require_discussions_enabled()?;
-    let caller = get_caller();
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let rate = explorer_usd_rate_e8s(token, &config).await?;
-    let amount = discussion_quote_amount(DISCUSSION_COMMENT_FEE_USD_E8S, rate, explorer_token_decimals(token))?;
-    let now = current_time();
-    let quote = ExplorerQuote {
-        token, days: 0, amount, rate_usd_e8s: rate,
-        usd_total_e8s: DISCUSSION_COMMENT_FEE_USD_E8S,
-        created_at: now, expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
-    };
-    DISCUSSION_QUOTES.with(|m| { m.borrow_mut().insert(caller, quote.clone()); });
-    Ok(quote)
-}
-
-/// Add a comment ($0.25) to a thread. `parent_id` = None for top-level, or a
-/// top-level comment id for a one-level reply. Fee routes by token (ICP burns,
-/// non-ICP → treasury), same as threads.
-#[ic_cdk::update]
-async fn add_comment(thread_id: u64, parent_id: Option<u64>, body: String, token: ExplorerToken) -> Result<u64, String> {
-    require_authenticated()?;
-    require_discussions_enabled()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    let body = body.trim().to_string();
-    if body.is_empty() || body.chars().count() > MAX_THREAD_BODY_LEN {
-        return Err("INVALID_BODY".to_string());
-    }
-    let thread = THREADS.with(|m| m.borrow().get(&thread_id)).ok_or_else(|| "THREAD_NOT_FOUND".to_string())?;
-    if !proposal_open_for_discussion(thread.proposal_id) {
-        return Err("PROPOSAL_NOT_OPEN".to_string());
-    }
-    // One-level only: a reply's parent must be a top-level comment in this thread.
-    if let Some(pid) = parent_id {
-        let parent = COMMENTS.with(|m| m.borrow().get(&pid)).ok_or_else(|| "PARENT_NOT_FOUND".to_string())?;
-        if parent.thread_id != thread_id || parent.parent_id.is_some() {
-            return Err("INVALID_PARENT".to_string());
-        }
-    }
-    if thread.comment_count >= MAX_COMMENTS_PER_THREAD {
-        return Err("COMMENT_QUOTA_REACHED".to_string());
-    }
-
-    let now = current_time();
-    let quote = DISCUSSION_QUOTES.with(|m| m.borrow().get(&caller)).ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.token != token || quote.usd_total_e8s != DISCUSSION_COMMENT_FEE_USD_E8S {
-        return Err("QUOTE_MISMATCH".to_string());
-    }
-    if now > quote.expires_at {
-        return Err("QUOTE_EXPIRED".to_string());
-    }
-
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let sub = derive_discussion_subaccount(&caller);
-    collect_discussion_fee(token, sub, quote.amount, &config).await?;
-    DISCUSSION_QUOTES.with(|m| { m.borrow_mut().remove(&caller); });
-
-    let id = next_comment_id();
-    COMMENTS.with(|m| {
-        m.borrow_mut().insert(id, Comment {
-            id, thread_id, parent_id, author: caller, body,
-            created_at: now, upvote_count: 0, downvote_count: 0, my_vote: None,
-        });
-    });
-    THREADS.with(|m| {
-        let mut t = m.borrow().get(&thread_id).unwrap();
-        t.comment_count = t.comment_count.saturating_add(1);
-        t.last_activity_at = now;
-        m.borrow_mut().insert(thread_id, t);
-    });
-    log_dapp_event("thread_comment", id, caller, quote.amount);
-    Ok(id)
-}
-
-/// Comments on a thread, newest first, with the caller's vote filled in.
-#[ic_cdk::query]
-fn list_comments(thread_id: u64) -> Vec<Comment> {
-    let caller = get_caller();
-    let mut cs: Vec<Comment> = COMMENTS.with(|m| {
-        m.borrow().iter().map(|e| e.value()).filter(|c| c.thread_id == thread_id).collect()
-    });
-    for c in cs.iter_mut() {
-        c.my_vote = caller_vote(1, c.id, caller);
-    }
-    cs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    cs
-}
-
-/// Up/down vote a thread (free, toggle). A NEW upvote may mint the author a
-/// lottery ticket (maybe_award_thread_upvote).
-#[ic_cdk::update]
-fn vote_thread(thread_id: u64, dir: VoteDir) -> Result<(), String> {
-    require_authenticated()?;
-    require_discussions_enabled()?;
-    let caller = get_caller();
-    let mut thread = THREADS.with(|m| m.borrow().get(&thread_id)).ok_or_else(|| "THREAD_NOT_FOUND".to_string())?;
-    let key = DiscussionVoteKey { kind: 0, item_id: thread_id, voter: caller };
-    let prev = DISCUSSION_VOTES.with(|m| m.borrow().get(&key));
-    let mut newly_up = false;
-    match prev {
-        Some(p) if p == dir => {
-            DISCUSSION_VOTES.with(|m| { m.borrow_mut().remove(&key); });
-            match dir {
-                VoteDir::Up => thread.upvote_count = thread.upvote_count.saturating_sub(1),
-                VoteDir::Down => thread.downvote_count = thread.downvote_count.saturating_sub(1),
-            }
-        }
-        Some(p) => {
-            DISCUSSION_VOTES.with(|m| { m.borrow_mut().insert(key, dir); });
-            match p {
-                VoteDir::Up => thread.upvote_count = thread.upvote_count.saturating_sub(1),
-                VoteDir::Down => thread.downvote_count = thread.downvote_count.saturating_sub(1),
-            }
-            match dir {
-                VoteDir::Up => { thread.upvote_count = thread.upvote_count.saturating_add(1); newly_up = true; }
-                VoteDir::Down => thread.downvote_count = thread.downvote_count.saturating_add(1),
-            }
-        }
-        None => {
-            DISCUSSION_VOTES.with(|m| { m.borrow_mut().insert(key, dir); });
-            match dir {
-                VoteDir::Up => { thread.upvote_count = thread.upvote_count.saturating_add(1); newly_up = true; }
-                VoteDir::Down => thread.downvote_count = thread.downvote_count.saturating_add(1),
-            }
-        }
-    }
-    if newly_up {
-        maybe_award_thread_upvote(&mut thread, caller);
-    }
-    THREADS.with(|m| { m.borrow_mut().insert(thread_id, thread); });
-    Ok(())
-}
-
-/// Up/down vote a comment (free, toggle). Comment votes earn NO reward.
-#[ic_cdk::update]
-fn vote_comment(comment_id: u64, dir: VoteDir) -> Result<(), String> {
-    require_authenticated()?;
-    require_discussions_enabled()?;
-    let caller = get_caller();
-    let mut comment = COMMENTS.with(|m| m.borrow().get(&comment_id)).ok_or_else(|| "COMMENT_NOT_FOUND".to_string())?;
-    let key = DiscussionVoteKey { kind: 1, item_id: comment_id, voter: caller };
-    let prev = DISCUSSION_VOTES.with(|m| m.borrow().get(&key));
-    match prev {
-        Some(p) if p == dir => {
-            DISCUSSION_VOTES.with(|m| { m.borrow_mut().remove(&key); });
-            match dir {
-                VoteDir::Up => comment.upvote_count = comment.upvote_count.saturating_sub(1),
-                VoteDir::Down => comment.downvote_count = comment.downvote_count.saturating_sub(1),
-            }
-        }
-        Some(p) => {
-            DISCUSSION_VOTES.with(|m| { m.borrow_mut().insert(key, dir); });
-            match p {
-                VoteDir::Up => comment.upvote_count = comment.upvote_count.saturating_sub(1),
-                VoteDir::Down => comment.downvote_count = comment.downvote_count.saturating_sub(1),
-            }
-            match dir {
-                VoteDir::Up => comment.upvote_count = comment.upvote_count.saturating_add(1),
-                VoteDir::Down => comment.downvote_count = comment.downvote_count.saturating_add(1),
-            }
-        }
-        None => {
-            DISCUSSION_VOTES.with(|m| { m.borrow_mut().insert(key, dir); });
-            match dir {
-                VoteDir::Up => comment.upvote_count = comment.upvote_count.saturating_add(1),
-                VoteDir::Down => comment.downvote_count = comment.downvote_count.saturating_add(1),
-            }
-        }
-    }
-    COMMENTS.with(|m| { m.borrow_mut().insert(comment_id, comment); });
-    Ok(())
-}
-
-/// Delete every thread, comment, and vote tied to a proposal (called on settle).
-/// Earned lottery tickets are NOT touched.
-fn delete_proposal_discussions(proposal_id: u64) {
-    let tids: Vec<u64> = THREADS.with(|m| {
-        m.borrow().iter().filter(|e| e.value().proposal_id == proposal_id).map(|e| *e.key()).collect()
-    });
-    if tids.is_empty() {
-        return;
-    }
-    let cids: Vec<u64> = COMMENTS.with(|m| {
-        m.borrow().iter().filter(|e| tids.contains(&e.value().thread_id)).map(|e| *e.key()).collect()
-    });
-    let vkeys: Vec<DiscussionVoteKey> = DISCUSSION_VOTES.with(|m| {
-        m.borrow().iter().filter(|e| {
-            let k = e.key();
-            (k.kind == 0 && tids.contains(&k.item_id)) || (k.kind == 1 && cids.contains(&k.item_id))
-        }).map(|e| e.key().clone()).collect()
-    });
-    let rkeys: Vec<DiscussionVoteKey> = DISCUSSION_REWARDED.with(|m| {
-        m.borrow().iter().filter(|e| tids.contains(&e.key().item_id)).map(|e| e.key().clone()).collect()
-    });
-    DISCUSSION_VOTES.with(|m| { let mut m = m.borrow_mut(); for k in vkeys { m.remove(&k); } });
-    DISCUSSION_REWARDED.with(|m| { let mut m = m.borrow_mut(); for k in rkeys { m.remove(&k); } });
-    COMMENTS.with(|m| { let mut m = m.borrow_mut(); for id in cids { m.remove(&id); } });
-    THREADS.with(|m| { let mut m = m.borrow_mut(); for id in tids { m.remove(&id); } });
-}
-
-/// Admin: delete a thread + its comments + their votes (the only moderation
-/// lever; D4 = no queue/filter).
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_remove_thread(thread_id: u64) -> Result<(), String> {
-    if THREADS.with(|m| m.borrow().get(&thread_id)).is_none() {
-        return Err("THREAD_NOT_FOUND".to_string());
-    }
-    let cids: Vec<u64> = COMMENTS.with(|m| {
-        m.borrow().iter().filter(|e| e.value().thread_id == thread_id).map(|e| *e.key()).collect()
-    });
-    let vkeys: Vec<DiscussionVoteKey> = DISCUSSION_VOTES.with(|m| {
-        m.borrow().iter().filter(|e| {
-            let k = e.key();
-            (k.kind == 0 && k.item_id == thread_id) || (k.kind == 1 && cids.contains(&k.item_id))
-        }).map(|e| e.key().clone()).collect()
-    });
-    let rkeys: Vec<DiscussionVoteKey> = DISCUSSION_REWARDED.with(|m| {
-        m.borrow().iter().filter(|e| e.key().item_id == thread_id).map(|e| e.key().clone()).collect()
-    });
-    DISCUSSION_VOTES.with(|m| { let mut m = m.borrow_mut(); for k in vkeys { m.remove(&k); } });
-    DISCUSSION_REWARDED.with(|m| { let mut m = m.borrow_mut(); for k in rkeys { m.remove(&k); } });
-    COMMENTS.with(|m| { let mut m = m.borrow_mut(); for id in cids { m.remove(&id); } });
-    THREADS.with(|m| { m.borrow_mut().remove(&thread_id); });
-    log_dapp_event("thread_remove", thread_id, get_caller(), 0);
-    Ok(())
-}
-
-/// Local-dev: seed `n_threads` threads (each with `n_comments` comments) on a
-/// proposal, no fee, for previewing the UI. Local only.
-#[ic_cdk::update]
-fn dev_seed_threads(proposal_id: u64, n_threads: u64, n_comments: u64) -> Result<u64, String> {
-    require_authenticated()?;
-    require_local_dev()?;
-    let caller = get_caller();
-    let now = current_time();
-    for i in 0..n_threads {
-        let id = next_thread_id();
-        THREADS.with(|m| {
-            m.borrow_mut().insert(id, Thread {
-                id, proposal_id, author: caller,
-                title: format!("Sample thread {}", i + 1),
-                body: "Seeded discussion thread for local UI testing.".to_string(),
-                created_at: now, last_activity_at: now,
-                comment_count: n_comments, upvote_count: 0, downvote_count: 0,
-                tickets_awarded: 0, my_vote: None,
-            });
-        });
-        for j in 0..n_comments {
-            let cid = next_comment_id();
-            COMMENTS.with(|m| {
-                m.borrow_mut().insert(cid, Comment {
-                    id: cid, thread_id: id, parent_id: None, author: caller,
-                    body: format!("Seeded comment {}", j + 1),
-                    created_at: now, upvote_count: 0, downvote_count: 0, my_vote: None,
-                });
-            });
-        }
-    }
-    Ok(n_threads)
-}
-
-/// Local-dev: wipe all threads, comments, votes, and reward markers. Local only.
-#[ic_cdk::update]
-fn dev_clear_threads() -> Result<(), String> {
-    require_authenticated()?;
-    require_local_dev()?;
-    THREADS.with(|m| { let ks: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-    COMMENTS.with(|m| { let ks: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-    DISCUSSION_QUOTES.with(|m| { let ks: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-    DISCUSSION_VOTES.with(|m| { let ks: Vec<DiscussionVoteKey> = m.borrow().iter().map(|e| e.key().clone()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-    DISCUSSION_REWARDED.with(|m| { let ks: Vec<DiscussionVoteKey> = m.borrow().iter().map(|e| e.key().clone()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-    Ok(())
-}
-
-/// The caller's deposit account for upvoting `idea_id`. The same subaccount
-/// is used on every token's ledger — fund it on the ledger of the token you
-/// intend to upvote with, then call `upvote_idea`.
-#[ic_cdk::query]
-fn get_idea_deposit_address(idea_id: u64) -> LedgerAccount {
-    let caller = get_caller();
-    LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(derive_idea_subaccount(&caller, idea_id)),
-    }
-}
-
-/// Run (or resume) the two-step payout for an upvote. Each completed transfer
-/// persists its block index so a retry never double-sends.
-async fn run_upvote_payout(
-    ledger_id: Principal,
-    from_sub: [u8; 32],
-    poster: Principal,
-    fee: u64,
-    uv: &mut IdeaUpvote,
-) -> Result<(), String> {
-    let (treasury_amt, poster_amt) = split_upvote(uv.amount);
-
-    if uv.treasury_block.is_none() {
-        let dest = LedgerAccount {
-            owner: get_canister_id(),
-            subaccount: Some(TREASURY_SUBACCOUNT),
-        };
-        let b = call_ledger_transfer(ledger_id, Some(from_sub), dest, treasury_amt, Some(fee))
-            .await
-            .map_err(|e| format!("TREASURY_XFER: {}", e))?;
-        uv.treasury_block = Some(b);
-        IDEA_UPVOTES.with(|m| {
-            m.borrow_mut().insert(uv.id, uv.clone());
-        });
-    }
-
-    if uv.poster_block.is_none() {
-        let dest = LedgerAccount { owner: poster, subaccount: None };
-        let b = call_ledger_transfer(ledger_id, Some(from_sub), dest, poster_amt, Some(fee))
-            .await
-            .map_err(|e| format!("POSTER_XFER: {}", e))?;
-        uv.poster_block = Some(b);
-        IDEA_UPVOTES.with(|m| {
-            m.borrow_mut().insert(uv.id, uv.clone());
-        });
-        record_payout(poster, PayoutType::IdeaUpvoteShare, uv.token, poster_amt, uv.id);
-    }
-
-    Ok(())
-}
-
-/// Apply a settled upvote to its idea: bump totals and reset the 30-day
-/// expiry clock. Called exactly once per upvote (at settle).
-fn apply_upvote_to_idea(uv: &IdeaUpvote, now: u64) {
-    IDEAS.with(|m| {
-        let mut m = m.borrow_mut();
-        if let Some(mut idea) = m.get(&uv.idea_id) {
-            idea.upvote_count = idea.upvote_count.saturating_add(1);
-            idea.last_upvote_at = now;
-            match uv.token {
-                IdeaToken::CkUSDC | IdeaToken::CkUSDT => {}
-                IdeaToken::ICP => {
-                    idea.total_icp_e8s = idea.total_icp_e8s.saturating_add(uv.amount)
-                }
-                IdeaToken::CkBTC => {
-                    idea.total_ckbtc_e8s = idea.total_ckbtc_e8s.saturating_add(uv.amount)
-                }
-                IdeaToken::CkETH => {
-                    idea.total_cketh_wei = idea.total_cketh_wei.saturating_add(uv.amount)
-                }
-            }
-            m.insert(uv.idea_id, idea);
-        }
-    });
-}
-
-/// Upvote an idea — FREE. No crypto is collected; one upvote per user per idea
-/// (mirrors `record_idea_view`). Bumps the idea's count and resets its 30-day
-/// expiry clock.
-#[ic_cdk::update]
-fn upvote_idea(idea_id: u64) -> Result<(), String> {
-    require_authenticated()?;
-    require_idea_board_enabled()?;
-    let caller = get_caller();
-
-    let idea = IDEAS
-        .with(|m| m.borrow().get(&idea_id))
-        .ok_or_else(|| "IDEA_NOT_FOUND".to_string())?;
-    let now = current_time();
-    if idea_is_expired(idea.last_upvote_at, now) {
-        return Err("IDEA_EXPIRED".to_string());
-    }
-
-    // Creators can't upvote their own idea (the UI also hides the button).
-    if idea.poster == caller {
-        return Err("OWN_IDEA".to_string());
-    }
-
-    // One upvote per user per idea — enforced here, not just in the UI.
-    let key = IdeaUpvoteKey { idea_id, user: caller };
-    if IDEA_UPVOTERS.with(|m| m.borrow().contains_key(&key)) {
-        return Err("ALREADY_UPVOTED".to_string());
-    }
-    IDEA_UPVOTERS.with(|m| m.borrow_mut().insert(key, ()));
-
-    IDEAS.with(|m| {
-        let mut m = m.borrow_mut();
-        if let Some(mut idea) = m.get(&idea_id) {
-            idea.upvote_count = idea.upvote_count.saturating_add(1);
-            idea.last_upvote_at = now;
-            m.insert(idea_id, idea);
-        }
-    });
-
-    let log_entry = AuditLogEntry {
-        timestamp: now,
-        event_type: "idea_upvote".to_string(),
-        proposal_id: idea_id,
-        user: caller,
-        amount_e8s: 0,
-    };
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&log_entry);
-    });
-
-    Ok(())
-}
-
-/// Sweep: resume upvote payouts that failed mid-saga. Completed steps are
-/// skipped via their persisted block indices.
-async fn retry_failed_upvotes() {
-    let to_retry: Vec<u64> = IDEA_UPVOTES.with(|m| {
-        m.borrow()
-            .iter()
-            .filter(|e| e.value().status == UpvoteStatus::FailedPayout)
-            .map(|e| *e.key())
-            .collect()
-    });
-    if to_retry.is_empty() {
-        return;
-    }
-
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let now = current_time();
-
-    for id in to_retry {
-        let mut uv = match IDEA_UPVOTES.with(|m| m.borrow().get(&id)) {
-            Some(uv) => uv,
-            None => continue,
-        };
-        let ledger_id = token_ledger(uv.token, &config);
-        let fee = token_fee(uv.token, &config);
-        let sub = derive_idea_subaccount(&uv.voter, uv.idea_id);
-
-        let poster = match IDEAS.with(|m| m.borrow().get(&uv.idea_id)).map(|i| i.poster) {
-            Some(p) => p,
-            None => {
-                // The idea was deleted (expired) before this payout settled.
-                // Return whatever is recoverable from the voter's escrow and
-                // close the journal entry so it stops retrying.
-                let escrow = LedgerAccount {
-                    owner: get_canister_id(),
-                    subaccount: Some(sub),
-                };
-                let bal = match call_ledger_balance(ledger_id, escrow).await {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                if bal > fee {
-                    let dest = LedgerAccount { owner: uv.voter, subaccount: None };
-                    if call_ledger_transfer(ledger_id, Some(sub), dest, bal - fee, Some(fee)).await.is_err() {
-                        continue;
-                    }
-                    let log_entry = AuditLogEntry {
-                        timestamp: now,
-                        event_type: "idea_upvote_refund".to_string(),
-                        proposal_id: uv.idea_id,
-                        user: uv.voter,
-                        amount_e8s: bal - fee,
-                    };
-                    AUDIT_LOG.with(|log| {
-                        let _ = log.borrow_mut().append(&log_entry);
-                    });
-                }
-                uv.status = UpvoteStatus::Settled;
-                IDEA_UPVOTES.with(|m| {
-                    m.borrow_mut().insert(id, uv);
-                });
-                continue;
-            }
-        };
-
-        if run_upvote_payout(ledger_id, sub, poster, fee, &mut uv).await.is_ok() {
-            uv.status = UpvoteStatus::Settled;
-            IDEA_UPVOTES.with(|m| {
-                m.borrow_mut().insert(id, uv.clone());
-            });
-            apply_upvote_to_idea(&uv, now);
-        } else {
-            IDEA_UPVOTES.with(|m| {
-                m.borrow_mut().insert(id, uv);
-            });
-        }
-    }
-}
-
 // ── Projects (Community R&D, admin-curated) ──
 
-fn derive_project_subaccount(user: &Principal, project_id: u64) -> [u8; 32] {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(b"proof_of_burn_project_v1");
-    hasher.update(user.as_slice());
-    hasher.update(&project_id.to_be_bytes());
-    let result = hasher.finalize();
-    let mut sub = [0u8; 32];
-    sub.copy_from_slice(&result);
-    sub
-}
-
-/// Minimum project funding goal: $1 (USD e8s).
-const MIN_PROJECT_GOAL_USD_E8S: u64 = 100_000_000;
-
-/// Admin: add a fundable project with a single USD goal. Every project accepts
-/// any supported crypto; contributions are valued in USD toward the goal.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_add_project(
-    title: String,
-    description: String,
-    detail: String,
-    goal_usd_e8s: u64,
-) -> Result<u64, String> {
-    let title = title.trim().to_string();
-    let description = description.trim().to_string();
-    let detail = detail.trim().to_string();
-    validate_idea_text(&title, &description, &detail)?;
-    if goal_usd_e8s < MIN_PROJECT_GOAL_USD_E8S {
-        return Err("GOAL_BELOW_MIN".to_string());
-    }
-    if PROJECTS.with(|m| m.borrow().len()) >= MAX_PROJECTS {
-        return Err("PROJECT_QUOTA_REACHED".to_string());
-    }
-
-    let id = NEXT_PROJECT_ID.with(|c| {
-        let id = *c.borrow().get();
-        c.borrow_mut().set(id + 1);
-        id
-    });
-    let now = current_time();
-    PROJECTS.with(|m| {
-        m.borrow_mut().insert(id, Project {
-            id,
-            title,
-            description,
-            detail,
-            created_at: now,
-            goal_usd_e8s,
-            raised_usd_e8s: 0,
-            goal_icp_e8s: 0,
-            goal_ckbtc_e8s: 0,
-            goal_cketh_wei: 0,
-            raised_icp_e8s: 0,
-            raised_ckbtc_e8s: 0,
-            raised_cketh_wei: 0,
-            funding_count: 0,
-            accept_icp: true,
-            accept_ckbtc: true,
-            accept_cketh: true,
-        });
-    });
-    Ok(id)
-}
-
-/// Admin: update a project's details and its single USD funding goal.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_update_project(
-    id: u64,
-    title: String,
-    description: String,
-    detail: String,
-    goal_usd_e8s: u64,
-) -> Result<(), String> {
-    let title = title.trim().to_string();
-    let description = description.trim().to_string();
-    let detail = detail.trim().to_string();
-    validate_idea_text(&title, &description, &detail)?;
-    if goal_usd_e8s < MIN_PROJECT_GOAL_USD_E8S {
-        return Err("GOAL_BELOW_MIN".to_string());
-    }
-    PROJECTS.with(|m| {
-        let mut m = m.borrow_mut();
-        if let Some(mut project) = m.get(&id) {
-            project.title = title;
-            project.description = description;
-            project.detail = detail;
-            project.goal_usd_e8s = goal_usd_e8s;
-            // Every project accepts every supported crypto.
-            project.accept_icp = true;
-            project.accept_ckbtc = true;
-            project.accept_cketh = true;
-            m.insert(id, project);
-            Ok(())
-        } else {
-            Err("PROJECT_NOT_FOUND".to_string())
-        }
-    })
-}
-
-/// Admin: remove a project from the board. Settled funding stays in the
-/// treasury; any in-flight funding saga refunds via the orphan path.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_remove_project(project_id: u64) -> Result<(), String> {
-    PROJECTS.with(|m| {
-        if m.borrow_mut().remove(&project_id).is_none() {
-            return Err("PROJECT_NOT_FOUND".to_string());
-        }
-        Ok(())
-    })
-}
-
-/// All projects, newest first. `raised_usd_e8s` is computed per call from the
-/// per-token raised pots at the cached USD rate.
-#[ic_cdk::query]
-fn list_projects() -> Vec<Project> {
-    let mut projects: Vec<Project> = PROJECTS.with(|m| {
-        m.borrow().iter().map(|entry| entry.value()).collect()
-    });
-    for p in projects.iter_mut() {
-        p.raised_usd_e8s = project_raised_usd_e8s(p);
-    }
-    projects.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-    projects
-}
-
-/// The caller's deposit account for funding `project_id`. Fund it on the
-/// chosen token's ledger with `amount + fee`, then call `fund_project`.
-#[ic_cdk::query]
-fn get_project_deposit_address(project_id: u64) -> LedgerAccount {
-    let caller = get_caller();
-    LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(derive_project_subaccount(&caller, project_id)),
-    }
-}
-
-fn apply_funding_to_project(f: &ProjectFunding) {
-    PROJECTS.with(|m| {
-        let mut m = m.borrow_mut();
-        if let Some(mut project) = m.get(&f.project_id) {
-            project.funding_count = project.funding_count.saturating_add(1);
-            match f.token {
-                IdeaToken::CkUSDC | IdeaToken::CkUSDT => {}
-                IdeaToken::ICP => {
-                    project.raised_icp_e8s = project.raised_icp_e8s.saturating_add(f.amount)
-                }
-                IdeaToken::CkBTC => {
-                    project.raised_ckbtc_e8s = project.raised_ckbtc_e8s.saturating_add(f.amount)
-                }
-                IdeaToken::CkETH => {
-                    project.raised_cketh_wei = project.raised_cketh_wei.saturating_add(f.amount)
-                }
-            }
-            m.insert(f.project_id, project);
-        }
-    });
-}
-
-/// Fund a project with deposited tokens — 100% goes to the protocol
-/// treasury (which pays for the project's execution). Same minimums as
-/// upvotes (value-aligned across tokens).
-#[ic_cdk::update]
-async fn fund_project(project_id: u64, token: IdeaToken, amount: u64) -> Result<(), String> {
-    require_authenticated()?;
-    require_idea_board_enabled()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let fee = token_fee(token, &config);
-    if amount < token_min_upvote(token, &config) {
-        return Err("BELOW_MINIMUM".to_string());
-    }
-    if amount > MAX_UPVOTE_UNITS {
-        return Err("EXCEEDS_GLOBAL_CAP".to_string());
-    }
-    let project = PROJECTS.with(|m| m.borrow().get(&project_id))
-        .ok_or_else(|| "PROJECT_NOT_FOUND".to_string())?;
-
-    let accepted = match token {
-        IdeaToken::CkUSDC | IdeaToken::CkUSDT => false,
-        IdeaToken::ICP => project.accept_icp,
-        IdeaToken::CkBTC => project.accept_ckbtc,
-        IdeaToken::CkETH => project.accept_cketh,
-    };
-    if !accepted {
-        return Err("TOKEN_NOT_ACCEPTED".to_string());
-    }
-
-    let ledger_id = token_ledger(token, &config);
-    let sub = derive_project_subaccount(&caller, project_id);
-    let escrow = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(sub),
-    };
-    let balance = call_ledger_balance(ledger_id, escrow).await?;
-    let required = amount.checked_add(fee).ok_or("OVERFLOW")?;
-    if balance < required {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
-    }
-
-    // Journal before moving funds (retryable from the sweep).
-    let funding_id = NEXT_FUNDING_ID.with(|c| {
-        let id = *c.borrow().get();
-        c.borrow_mut().set(id + 1);
-        id
-    });
-    let now = current_time();
-    let mut f = ProjectFunding {
-        id: funding_id,
-        project_id,
-        funder: caller,
-        token,
-        amount,
-        status: UpvoteStatus::FailedPayout,
-        created_at: now,
-        treasury_block: None,
-    };
-    PROJECT_FUNDINGS.with(|m| {
-        m.borrow_mut().insert(funding_id, f.clone());
-    });
-
-    let treasury_dest = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(TREASURY_SUBACCOUNT),
-    };
-    let b = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, amount, Some(fee))
-        .await
-        .map_err(|e| format!("TREASURY_XFER: {}", e))?;
-    f.treasury_block = Some(b);
-    f.status = UpvoteStatus::Settled;
-    PROJECT_FUNDINGS.with(|m| {
-        m.borrow_mut().insert(funding_id, f.clone());
-    });
-    apply_funding_to_project(&f);
-
-    let log_entry = AuditLogEntry {
-        timestamp: now,
-        event_type: "project_fund".to_string(),
-        proposal_id: project_id,
-        user: caller,
-        amount_e8s: amount,
-    };
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&log_entry);
-    });
-
-    Ok(())
-}
-
-/// Sweep: resume project fundings that failed mid-transfer; if the project
-/// has been removed, refund the funder's escrow instead.
-async fn retry_failed_fundings() {
-    let to_retry: Vec<u64> = PROJECT_FUNDINGS.with(|m| {
-        m.borrow()
-            .iter()
-            .filter(|e| e.value().status == UpvoteStatus::FailedPayout)
-            .map(|e| *e.key())
-            .collect()
-    });
-    if to_retry.is_empty() {
-        return;
-    }
-
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let now = current_time();
-
-    for id in to_retry {
-        let mut f = match PROJECT_FUNDINGS.with(|m| m.borrow().get(&id)) {
-            Some(f) => f,
-            None => continue,
-        };
-        let ledger_id = token_ledger(f.token, &config);
-        let fee = token_fee(f.token, &config);
-        let sub = derive_project_subaccount(&f.funder, f.project_id);
-
-        let project_exists = PROJECTS.with(|m| m.borrow().get(&f.project_id)).is_some();
-        if !project_exists {
-            // Project removed mid-saga: return whatever's recoverable.
-            let escrow = LedgerAccount {
-                owner: get_canister_id(),
-                subaccount: Some(sub),
-            };
-            let bal = match call_ledger_balance(ledger_id, escrow).await {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            if bal > fee {
-                let dest = LedgerAccount { owner: f.funder, subaccount: None };
-                if call_ledger_transfer(ledger_id, Some(sub), dest, bal - fee, Some(fee)).await.is_err() {
-                    continue;
-                }
-            }
-            f.status = UpvoteStatus::Settled;
-            PROJECT_FUNDINGS.with(|m| {
-                m.borrow_mut().insert(id, f);
-            });
-            continue;
-        }
-
-        if f.treasury_block.is_none() {
-            let treasury_dest = LedgerAccount {
-                owner: get_canister_id(),
-                subaccount: Some(TREASURY_SUBACCOUNT),
-            };
-            match call_ledger_transfer(ledger_id, Some(sub), treasury_dest, f.amount, Some(fee)).await {
-                Ok(b) => f.treasury_block = Some(b),
-                Err(_) => {
-                    PROJECT_FUNDINGS.with(|m| {
-                        m.borrow_mut().insert(id, f);
-                    });
-                    continue;
-                }
-            }
-        }
-        f.status = UpvoteStatus::Settled;
-        PROJECT_FUNDINGS.with(|m| {
-            m.borrow_mut().insert(id, f.clone());
-        });
-        apply_funding_to_project(&f);
-
-        let log_entry = AuditLogEntry {
-            timestamp: now,
-            event_type: "project_fund".to_string(),
-            proposal_id: f.project_id,
-            user: f.funder,
-            amount_e8s: f.amount,
-        };
-        AUDIT_LOG.with(|log| {
-            let _ = log.borrow_mut().append(&log_entry);
-        });
-    }
-}
-
-/// Sweep: DELETE ideas that have gone 30 days without an upvote. No funds
-/// move on expiry (all upvote funds were split at upvote time); each
-/// deletion is audit-logged.
-fn delete_expired_ideas() {
-    let now = current_time();
-    let stale: Vec<(u64, Principal)> = IDEAS.with(|m| {
-        m.borrow()
-            .iter()
-            .filter(|e| idea_is_expired(e.value().last_upvote_at, now))
-            .map(|e| (*e.key(), e.value().poster))
-            .collect()
-    });
-    IDEAS.with(|m| {
-        let mut m = m.borrow_mut();
-        for (id, _) in &stale {
-            m.remove(id);
-        }
-    });
-    for (id, poster) in stale {
-        let log_entry = AuditLogEntry {
-            timestamp: now,
-            event_type: "idea_expire".to_string(),
-            proposal_id: id,
-            user: poster,
-            amount_e8s: 0,
-        };
-        AUDIT_LOG.with(|log| {
-            let _ = log.borrow_mut().append(&log_entry);
-        });
-    }
-}
-
-/// Local-dev faucet for idea-board tokens: 100 ICP, 0.1 ckBTC, or 1 ckETH
-/// from the canister's own account on the token's local ledger. Rejected on
-/// mainnet (ledger canister ID check). Never callable by anonymous.
-#[ic_cdk::update]
-async fn dev_faucet_token(token: IdeaToken) -> Result<(), String> {
-    require_authenticated()?;
-    let config = CONFIG.with(|cell| cell.borrow().get().clone());
-    if !config.is_local
-        || config.ledger_canister_id == Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
-    {
-        return Err("dev_faucet_token is only available on the local network".to_string());
-    }
-
-    let ledger = token_ledger(token, &config);
-    let fee = token_fee(token, &config);
-    let amount: u64 = match token {
-        IdeaToken::ICP => 10_000_000_000,             // 100 ICP
-        IdeaToken::CkBTC => 10_000_000,               // 0.1 ckBTC
-        IdeaToken::CkETH => 1_000_000_000_000_000_000, // 1 ckETH
-        IdeaToken::CkUSDC | IdeaToken::CkUSDT => 100_000_000, // 100 USD (dev faucet)
-    };
-    let dest = LedgerAccount { owner: get_caller(), subaccount: None };
-    call_ledger_transfer(ledger, None, dest, amount, Some(fee))
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("Faucet transfer failed: {}", e))
-}
-
-/// Local-dev: seed a few sample ideas so the board renders content on a
-/// fresh network. No-op if any ideas exist.
-fn seed_mock_ideas() {
-    let already_seeded = IDEAS.with(|m| !m.borrow().is_empty());
-    if already_seeded {
-        return;
-    }
-    let owner = CONFIG.with(|c| {
-        c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
-    });
-    let now = current_time();
-    let samples: [(&str, &str, &str); 3] = [
-        (
-            "ICP gas-burn leaderboard",
-            "A public leaderboard ranking dapps by the cycles (burned ICP) they consume, updated on-chain daily.",
-            "Pull cycle-consumption metrics per canister from the management canister and public dashboards, normalise by subnet, and surface a verifiable burn ranking. Sponsors could pay (in ICP, burned) to pin a featured slot.",
-        ),
-        (
-            "Burn-to-mint collectible badges",
-            "Soulbound badges minted only by burning ICP — tiered by cumulative burn, displayed on user profiles.",
-            "Each badge tier requires a verifiable burn via the CMC. Badges are non-transferable ICRC-7 tokens; the burn record is the provenance. Drives recurring deflationary pressure from collectors.",
-        ),
-        (
-            "Cycle-funded compute marketplace",
-            "Let users prepay AI/compute jobs in ICP that is immediately converted to cycles, burning it from supply.",
-            "A job queue canister prices workloads in cycles, accepts ICP, tops itself up via the CMC (burning the ICP), and pays worker canisters in cycles. Every job permanently reduces ICP supply.",
-        ),
-    ];
-    for (title, description, detail) in samples {
-        let id = NEXT_IDEA_ID.with(|c| {
-            let id = *c.borrow().get();
-            c.borrow_mut().set(id + 1);
-            id
-        });
-        IDEAS.with(|m| {
-            m.borrow_mut().insert(id, Idea {
-                id,
-                poster: owner,
-                title: title.to_string(),
-                description: description.to_string(),
-                detail: detail.to_string(),
-                created_at: now,
-                last_upvote_at: now,
-                upvote_count: 0,
-                views: 0,
-                has_upvoted: false,
-                total_icp_e8s: 0,
-                total_ckbtc_e8s: 0,
-                total_cketh_wei: 0,
-            });
-        });
-    }
-}
 
 // ==========================================
 // 13. Lossless Voting (Pooled Staking, WaterNeuron-inspired)
@@ -7912,21 +6189,6 @@ fn set_tier_pool(tier: StakeTier, pool: StakingPool) {
 
 fn stake_key(tier: StakeTier, user: Principal) -> StakeKey {
     StakeKey { tier: tier.idx(), user }
-}
-
-/// The caller's total voting weight: Σ stake × term multiplier over tiers.
-fn user_voting_weight(user: Principal) -> u64 {
-    // Voting power = Σ per-tier (staked ICP ÷ 10) × tenure multiplier
-    // (doubles every 6 months staked, capped 16× — see vp_tenure_multiplier).
-    // The TERM multiplier (1×/2×/4×) still scales lottery tickets only.
-    let now = current_time();
-    StakeTier::all().iter().fold(0u64, |acc, &tier| {
-        let w = STAKES
-            .with(|m| m.borrow().get(&stake_key(tier, user)))
-            .map(|s| stake_weight_e8s(s.amount_e8s, s.staked_at, now))
-            .unwrap_or(0);
-        acc.saturating_add(w)
-    })
 }
 
 /// True when the user holds a stake in any tier (the lottery eligibility gate).
@@ -8874,8 +7136,19 @@ async fn staking_sweep() {
         canister_print(&format!("staking_sweep: bootstrap: {}", e));
     }
     process_pending_unstakes().await;
-    harvest_staking_maturity().await;
-    distribute_yield_inbox().await;
+    // Maturity accrues daily — polling get_full_neuron ×3 every 5 min was
+    // pure waste. Hourly is still 24× denser than the signal.
+    if sweep_due("tier_maturity", SWEEP_HOURLY_NS) {
+        harvest_staking_maturity().await;
+    }
+    // The inbox read is a ledger call; hourly unless a journaled distribution
+    // is mid-flight (then every sweep so it resumes promptly).
+    let mid_flight = YIELD_DISTRIBUTIONS.with(|m| {
+        m.borrow().iter().any(|e| e.value().status == YieldStatus::InProgress)
+    });
+    if mid_flight || sweep_due("yield_inbox", SWEEP_HOURLY_NS) {
+        distribute_yield_inbox().await;
+    }
 }
 
 async fn process_pending_unstakes() {
@@ -9045,6 +7318,7 @@ async fn distribute_yield_inbox() {
         YIELD_DISTRIBUTIONS.with(|m| {
             m.borrow_mut().insert(dist.id, dist);
         });
+        refresh_lottery_pot_cache(&config).await;
         return;
     }
 
@@ -9092,6 +7366,7 @@ async fn distribute_yield_inbox() {
     YIELD_DISTRIBUTIONS.with(|m| {
         m.borrow_mut().insert(id, dist);
     });
+    refresh_lottery_pot_cache(&config).await;
 }
 
 /// 70% → lottery prize pot, 30% → treasury. Idempotent via per-leg block
@@ -9899,6 +8174,8 @@ async fn run_lottery_draw(forced_winning_ticket: Option<u64>) {
         // pot immediately — the next round starts pre-seeded instead of
         // waiting for a monthly settlement (owner, 2026-07-06).
         early_adopter_settlement_check().await;
+        let config = CONFIG.with(|c| c.borrow().get().clone());
+        refresh_lottery_pot_cache(&config).await;
     }
 
     // Prune ancient draws so the history map stays bounded.
@@ -10096,25 +8373,17 @@ fn claim_daily_tickets() -> Result<u64, String> {
 
 /// Update (not query): reads the live pot balance from the ledger. Safe for
 /// anonymous callers — `my_tickets` is simply 0.
-#[ic_cdk::update]
-async fn get_lottery_info() -> LotteryInfo {
+#[ic_cdk::query]
+fn get_lottery_info() -> LotteryInfo {
     let caller = get_caller();
     let config = CONFIG.with(|cell| cell.borrow().get().clone());
     let enabled = feature_visible(FLAG_LOSSLESS_LOTTERY, get_caller());
     let state = lottery_state();
     let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
 
-    let pot_e8s = if enabled {
-        let pot_account = LedgerAccount {
-            owner: get_canister_id(),
-            subaccount: Some(LOTTERY_SUBACCOUNT),
-        };
-        call_ledger_balance(config.ledger_canister_id, pot_account)
-            .await
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    // QUERY-safe: the pot balance is served from the cache the sweep and
+    // every pot-touching flow keep warm (refresh_lottery_pot_cache).
+    let pot_e8s = if enabled { cached_lottery_pot_e8s() } else { 0 };
 
     let entry = LOTTERY_TICKETS.with(|m| m.borrow().get(&caller));
     let (my_tickets, claimed_today) = match entry {
@@ -10236,37 +8505,6 @@ fn get_my_transactions() -> Vec<TransactionRecord> {
         }
     });
 
-    // Out (token-typed): upvotes and project fundings carry their own token.
-    IDEA_UPVOTES.with(|m| {
-        for e in m.borrow().iter() {
-            let uv = e.value();
-            if uv.voter == caller {
-                txs.push(TransactionRecord {
-                    direction: TxDirection::Out,
-                    kind: "idea_upvote".to_string(),
-                    token: uv.token,
-                    amount: uv.amount,
-                    timestamp: uv.created_at,
-                    ref_id: uv.idea_id,
-                });
-            }
-        }
-    });
-    PROJECT_FUNDINGS.with(|m| {
-        for e in m.borrow().iter() {
-            let f = e.value();
-            if f.funder == caller {
-                txs.push(TransactionRecord {
-                    direction: TxDirection::Out,
-                    kind: "project_fund".to_string(),
-                    token: f.token,
-                    amount: f.amount,
-                    timestamp: f.created_at,
-                    ref_id: f.project_id,
-                });
-            }
-        }
-    });
 
     txs.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     txs.truncate(MAX_TX_RETURNED);
@@ -10405,8 +8643,9 @@ async fn dev_fund_lottery_pot(amount_e8s: u64) -> Result<(), String> {
     };
     call_ledger_transfer(config.ledger_canister_id, None, dest, amount_e8s, Some(10_000))
         .await
-        .map(|_| ())
-        .map_err(|e| format!("pot funding failed: {}", e))
+        .map_err(|e| format!("pot funding failed: {}", e))?;
+    refresh_lottery_pot_cache(&config).await;
+    Ok(())
 }
 
 /// Local-dev: seed `count` synthetic unique ticket-holders (1 ticket each) in the
@@ -12385,6 +10624,49 @@ fn commitment_in_flight(caller: &Principal, proposal_id: u64) -> bool {
 /// ckUSDT deposit stranded in the same subaccount on the ckUSDT ledger. A token
 /// commitment owns only its own token. Used to gate refunds precisely so a
 /// genuinely stranded token deposit isn't blocked by an unrelated commitment.
+// ── Recovery-only escrow derivations (features REMOVED 2026-07-06) ─────────
+// The Idea Board, Proposal Discussions, and Community R&D projects are gone,
+// but `reclaim_escrow` is deliberately never gated: any deposit a user parked
+// in those flows' subaccounts must stay recoverable forever. These derivations
+// exist ONLY so the matching EscrowKind arms keep working.
+/// Principal- and idea-bound deposit subaccount for upvote escrow. Domain-
+/// separated from the proposal escrow (`proof_of_burn_escrow_v1`).
+fn derive_idea_subaccount(user: &Principal, idea_id: u64) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_idea_v1");
+    hasher.update(user.as_slice());
+    hasher.update(&idea_id.to_be_bytes());
+    let result = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&result);
+    sub
+}
+
+/// Per-caller escrow subaccount for discussion fees (distinct domain tag).
+fn derive_discussion_subaccount(user: &Principal) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_discussion_v1");
+    hasher.update(user.as_slice());
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&hasher.finalize());
+    sub
+}
+
+fn derive_project_subaccount(user: &Principal, project_id: u64) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"proof_of_burn_project_v1");
+    hasher.update(user.as_slice());
+    hasher.update(&project_id.to_be_bytes());
+    let result = hasher.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&result);
+    sub
+}
+
+
 fn commitment_owns_token(caller: &Principal, proposal_id: u64, token: ExplorerToken) -> bool {
     let key = CommitmentKey { proposal_id, principal: *caller };
     match COMMITMENTS.with(|m| m.borrow().get(&key)) {
@@ -12581,10 +10863,6 @@ fn admin_collect_user_principals() -> Vec<Principal> {
     STAKES.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.key().user); }));
     LOTTERY_TICKETS.with(|m| m.borrow().iter().for_each(|e| { set.insert(*e.key()); }));
     EARLY_ADOPTERS.with(|m| m.borrow().iter().for_each(|e| { set.insert(*e.key()); }));
-    IDEAS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().poster); }));
-    PROJECT_FUNDINGS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().funder); }));
-    THREADS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().author); }));
-    COMMENTS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().author); }));
     XFARM_FARMERS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().owner); }));
     POOL_NEURONS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().registered_by); }));
     set.remove(&Principal::anonymous());
@@ -12714,12 +10992,7 @@ const MINIGOLF_MAX_MILLIS: u64 = 2 * 60 * 60 * 1000; // 2 h
 // Game 2: "Field Goal" — 5 kicks from random spots, 3-second pressure clock.
 // per_hole carries POINTS per kick (the kick distance in yards on a make,
 // 0 on a miss), so the board ranks by MOST points — see arcade_rank_key.
-const ARCADE_GAME_FIELDGOAL: &str = "fieldgoal";
-const FIELDGOAL_ROUNDS: usize = 5;
 /// Longest possible make is 20–58 yds in the frontend; 70 leaves headroom.
-const FIELDGOAL_MAX_POINTS_PER_KICK: u8 = 70;
-const FIELDGOAL_MIN_MILLIS: u64 = 5_000; // 5 snaps can't finish in <5 s
-const FIELDGOAL_MAX_MILLIS: u64 = 30 * 60 * 1000; // 30 min
 // Game 3: "Luck-Proof" — the EV-decision trainer. A run is LUCKPROOF_ROUNDS
 // server-generated gambles; the player takes or passes each under a shot
 // clock. The RANKED score is EV LEAKED (chip-basis-points of expected value
@@ -12731,15 +11004,12 @@ const FIELDGOAL_MAX_MILLIS: u64 = 30 * 60 * 1000; // 30 min
 const ARCADE_GAME_LUCKPROOF: &str = "luckproof";
 const ARCADE_GAME_SKYDIVE: &str = "skydive";
 const ARCADE_GAME_BULLRUN: &str = "bullrun";
-const ARCADE_LEADERBOARD_LIMIT: usize = 100;
 // Palette sizes — the frontend mirrors these (index = palette entry).
 const CHARACTER_HAIR_OPTIONS: u8 = 6;
 const CHARACTER_SKIN_OPTIONS: u8 = 6;
 const CHARACTER_OUTFIT_OPTIONS: u8 = 8;
 // Kicker persona palettes (Field Goal): helmet/jersey share the 8-color
 // outfit palette, skin shares the 6-tone skin palette.
-const KICKER_HELMET_OPTIONS: u8 = 8;
-const KICKER_JERSEY_OPTIONS: u8 = 8;
 
 /// Palette indices for the low-poly golfer (defaults are all 0).
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -12749,23 +11019,7 @@ pub struct ArcadeCharacter {
     pub outfit: u8,
 }
 
-/// One leaderboard slot per (game, player) — insert-if-better keeps only the
-/// player's best round.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ArcadeScoreKey {
-    pub game: String,
-    pub player: Principal,
-}
 
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct ArcadeScore {
-    pub game: String,
-    pub player: Principal,
-    pub strokes: u32,
-    pub millis: u64,
-    pub per_hole: Vec<u8>,
-    pub submitted_at: u64,
-}
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct ArcadeLeaderboardRow {
@@ -12779,10 +11033,8 @@ pub struct ArcadeLeaderboardRow {
 /// Everything the Arcade UI needs in one caller-aware query.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct ArcadeInfo {
-    pub enabled: bool,
-    /// Per-game kill switches (only meaningful when `enabled` is true).
+    /// Per-game kill switches.
     pub minigolf_enabled: bool,
-    pub fieldgoal_enabled: bool,
     pub luckproof_enabled: bool,
     /// Caller may finish full rounds + submit scores (stake or recent vote).
     pub full_access: bool,
@@ -12791,21 +11043,14 @@ pub struct ArcadeInfo {
     /// $1.00 in USD e8s — convert with get_arcade_customize_quote.
     pub customize_fee_usd_e8s: u64,
     pub my_character: Option<ArcadeCharacter>,
-    /// Field Goal kicker persona — fields map hair→helmet, outfit→jersey.
-    pub my_kicker: Option<ArcadeCharacter>,
     pub hair_options: u8,
     pub skin_options: u8,
     pub outfit_options: u8,
 }
 
 impl_storable!(ArcadeCharacter);
-impl_storable!(ArcadeScoreKey);
-impl_storable!(ArcadeScore);
 
 thread_local! {
-    static ARCADE_SCORES: RefCell<StableBTreeMap<ArcadeScoreKey, ArcadeScore, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(43))))
-    });
 
     static ARCADE_CHARACTERS: RefCell<StableBTreeMap<Principal, ArcadeCharacter, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(44))))
@@ -12818,18 +11063,9 @@ thread_local! {
     });
 
     // Field Goal kicker personas — reuses ArcadeCharacter with the mapping
-    // hair→helmet, outfit→jersey (skin is skin).
-    static ARCADE_KICKERS: RefCell<StableBTreeMap<Principal, ArcadeCharacter, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(52))))
-    });
-    // MemoryId 53 was ARCADE_CARS (Turbo Rush personas) — game removed; id retired.
-}
-
-fn require_arcade_enabled() -> Result<(), String> {
-    if !feature_visible(FLAG_ARCADE, get_caller()) {
-        return Err("FEATURE_DISABLED".to_string());
-    }
-    Ok(())
+    // MemoryId 52 was ARCADE_KICKERS (Field Goal personas) — game removed
+    // 2026-07-06; id retired. MemoryId 53 was ARCADE_CARS (Turbo Rush) — id
+    // retired earlier.
 }
 
 /// Each game's own kill switch. Mini-golf has its own nav page, so the per-game
@@ -12837,7 +11073,6 @@ fn require_arcade_enabled() -> Result<(), String> {
 /// (which now only governs the Arcade hub page itself).
 fn arcade_game_flag(game: &str) -> &'static str {
     match game {
-        ARCADE_GAME_FIELDGOAL => FLAG_ARCADE_FIELDGOAL,
         ARCADE_GAME_LUCKPROOF => FLAG_ARCADE_LUCKPROOF,
         ARCADE_GAME_SKYDIVE => FLAG_ARCADE_SKYDIVE,
         ARCADE_GAME_BULLRUN => FLAG_ARCADE_BULLRUN,
@@ -12882,24 +11117,6 @@ fn arcade_access(user: Principal) -> (bool, bool) {
     (has_stake, voted_recently)
 }
 
-/// Leaderboard ordering key — LOWER key ranks higher for every game.
-/// Mini golf ranks by fewest strokes; Field Goal stores POINTS in the same
-/// slot and ranks by most, so its key inverts the score. Ties break by
-/// faster time, then earlier submission.
-fn arcade_rank_key(game: &str, score: u32, millis: u64, at: u64) -> (u32, u64, u64) {
-    // Field Goal ranks by MOST points; mini golf by fewest strokes.
-    if game == ARCADE_GAME_FIELDGOAL {
-        (u32::MAX - score, millis, at)
-    } else {
-        (score, millis, at)
-    }
-}
-
-/// True when `a` beats `b` on `game`'s board.
-fn arcade_score_beats(game: &str, a: (u32, u64, u64), b: (u32, u64, u64)) -> bool {
-    arcade_rank_key(game, a.0, a.1, a.2) < arcade_rank_key(game, b.0, b.1, b.2)
-}
-
 /// Caller-bound deposit subaccount for arcade fees (character customization).
 fn derive_arcade_subaccount(user: &Principal) -> [u8; 32] {
     use sha2::Digest;
@@ -12921,9 +11138,7 @@ fn get_arcade_info() -> ArcadeInfo {
         arcade_access(caller)
     };
     ArcadeInfo {
-        enabled: feature_visible(FLAG_ARCADE, get_caller()),
         minigolf_enabled: feature_visible(FLAG_ARCADE_MINIGOLF, get_caller()),
-        fieldgoal_enabled: feature_visible(FLAG_ARCADE_FIELDGOAL, get_caller()),
         luckproof_enabled: feature_visible(FLAG_ARCADE_LUCKPROOF, get_caller()),
         // Owner decision 2026-07-04: every SIGNED-IN user plays every game in
         // full — no stake/vote gate. Staking now only gates lottery tickets
@@ -12933,7 +11148,6 @@ fn get_arcade_info() -> ArcadeInfo {
         voted_recently,
         customize_fee_usd_e8s: ARCADE_CUSTOMIZE_FEE_USD_E8S,
         my_character: ARCADE_CHARACTERS.with(|m| m.borrow().get(&caller)),
-        my_kicker: ARCADE_KICKERS.with(|m| m.borrow().get(&caller)),
         hair_options: CHARACTER_HAIR_OPTIONS,
         skin_options: CHARACTER_SKIN_OPTIONS,
         outfit_options: CHARACTER_OUTFIT_OPTIONS,
@@ -12958,12 +11172,7 @@ fn get_arcade_deposit_address() -> LedgerAccount {
 async fn get_arcade_customize_quote(token: ExplorerToken) -> Result<ExplorerQuote, String> {
     require_authenticated()?;
     let caller = get_caller();
-    // The quote serves both the golfer (mini-golf) and kicker (field-goal)
-    // customize flows, so allow whenever either game is enabled — independent
-    // of the parent `arcade` hub flag (mini-golf has its own page now).
-    if !(feature_visible(FLAG_ARCADE_MINIGOLF, caller)
-        || feature_visible(FLAG_ARCADE_FIELDGOAL, caller))
-    {
+    if !feature_visible(FLAG_ARCADE_MINIGOLF, caller) {
         return Err("FEATURE_DISABLED".to_string());
     }
     if token != ExplorerToken::ICP {
@@ -13072,155 +11281,6 @@ async fn customize_character(hair: u8, skin: u8, outfit: u8, token: ExplorerToke
         let _ = log.borrow_mut().append(&entry);
     });
     Ok(())
-}
-
-/// Change the Field Goal kicker's look for a flat 0.5 ICP (same quote +
-/// deposit flow and 50/25/25 split as the golfer).
-#[ic_cdk::update]
-async fn customize_kicker(helmet: u8, skin: u8, jersey: u8, token: ExplorerToken) -> Result<(), String> {
-    require_authenticated()?;
-    require_arcade_game_enabled(ARCADE_GAME_FIELDGOAL)?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    if helmet >= KICKER_HELMET_OPTIONS || skin >= CHARACTER_SKIN_OPTIONS || jersey >= KICKER_JERSEY_OPTIONS {
-        return Err("INVALID_CHARACTER_OPTION".to_string());
-    }
-    if token != ExplorerToken::ICP {
-        return Err("ICP_ONLY".to_string());
-    }
-    let now = current_time();
-    let quote = ARCADE_QUOTES
-        .with(|m| m.borrow().get(&caller))
-        .ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.token != token {
-        return Err("QUOTE_MISMATCH".to_string());
-    }
-    if now > quote.expires_at {
-        return Err("QUOTE_EXPIRED".to_string());
-    }
-
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let ledger_id = explorer_token_ledger(token, &config);
-    let fee = explorer_token_fee(token, &config);
-    let sub = derive_arcade_subaccount(&caller);
-    let escrow = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(sub),
-    };
-    let balance = call_ledger_balance(ledger_id, escrow).await?;
-    if balance < quote.amount.saturating_add(fee) {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
-    }
-    settle_arcade_fee(caller, ledger_id, sub, quote.amount)
-        .await
-        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
-
-    ARCADE_KICKERS.with(|m| {
-        m.borrow_mut().insert(caller, ArcadeCharacter { hair: helmet, skin, outfit: jersey });
-    });
-    ARCADE_QUOTES.with(|m| {
-        m.borrow_mut().remove(&caller);
-    });
-
-    let entry = AuditLogEntry {
-        timestamp: now,
-        event_type: "arcade_customize_kicker".to_string(),
-        proposal_id: 0,
-        user: caller,
-        amount_e8s: quote.amount,
-    };
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&entry);
-    });
-    Ok(())
-}
-
-/// Submit a finished round. Requires full access (the hole-1 preview can't
-/// produce a 9-hole score). Insert-if-better per (game, player); returns the
-/// caller's resulting 1-based rank on that game's board.
-#[ic_cdk::update]
-fn submit_arcade_score(game: String, millis: u64, per_hole: Vec<u8>) -> Result<u32, String> {
-    require_authenticated()?;
-    require_arcade_enabled()?;
-    let caller = get_caller();
-    // Owner decision 2026-07-04: any signed-in user can play + rank — the old
-    // stake-or-voted PARTICIPATION_REQUIRED gate is gone (staking only gates
-    // lottery tickets now).
-    match game.as_str() {
-        ARCADE_GAME_MINIGOLF => {
-            // PB-309 (D4): the global mini-golf leaderboard is retired — the
-            // Course Marketplace replaces it. Reject score writes for minigolf
-            // before any state mutation; Field Goal / Turbo Rush are unaffected.
-            return Err("MINIGOLF_RETIRED".to_string());
-        }
-        ARCADE_GAME_FIELDGOAL => {
-            // per_hole = points per kick: the distance in yards on a make,
-            // 0 on a miss (so an all-miss round is a valid 0-point entry).
-            if per_hole.len() != FIELDGOAL_ROUNDS {
-                return Err("INVALID_HOLE_COUNT".to_string());
-            }
-            if per_hole.iter().any(|&p| p > FIELDGOAL_MAX_POINTS_PER_KICK) {
-                return Err("INVALID_STROKES".to_string());
-            }
-            if !(FIELDGOAL_MIN_MILLIS..=FIELDGOAL_MAX_MILLIS).contains(&millis) {
-                return Err("INVALID_TIME".to_string());
-            }
-        }
-        _ => return Err("UNKNOWN_GAME".to_string()),
-    }
-    require_arcade_game_enabled(&game)?;
-    let strokes: u32 = per_hole.iter().map(|&s| s as u32).sum();
-
-    let now = current_time();
-    let key = ArcadeScoreKey { game: game.clone(), player: caller };
-    // The caller's best after this submission — tracked here so the rank
-    // computation below doesn't re-read the row it just wrote.
-    let (improved, best) = ARCADE_SCORES.with(|m| {
-        let mut m = m.borrow_mut();
-        let prev = m.get(&key).map(|p| (p.strokes, p.millis, p.submitted_at));
-        let keep_new = match prev {
-            Some(p) => arcade_score_beats(&game, (strokes, millis, now), p),
-            None => true,
-        };
-        if keep_new {
-            m.insert(key.clone(), ArcadeScore {
-                game: game.clone(),
-                player: caller,
-                strokes,
-                millis,
-                per_hole,
-                submitted_at: now,
-            });
-        }
-        (keep_new, if keep_new { (strokes, millis, now) } else { prev.unwrap() })
-    });
-
-    if improved {
-        let entry = AuditLogEntry {
-            timestamp: now,
-            event_type: "arcade_score".to_string(),
-            proposal_id: strokes as u64,
-            user: caller,
-            amount_e8s: 0,
-        };
-        AUDIT_LOG.with(|log| {
-            let _ = log.borrow_mut().append(&entry);
-        });
-    }
-
-    // Current rank (count of entries that beat the caller's best, +1).
-    let rank = ARCADE_SCORES.with(|m| {
-        m.borrow()
-            .iter()
-            .filter(|e| {
-                let s = e.value();
-                s.game == game && arcade_score_beats(&game, (s.strokes, s.millis, s.submitted_at), best)
-            })
-            .count() as u32
-            + 1
-    });
-    Ok(rank)
 }
 
 // ── Course editor (admin-built voxel hole layouts) ──
@@ -13354,36 +11414,6 @@ fn admin_reset_arcade_hole(index: u8) -> Result<(), String> {
     }
     log_dapp_event("arcade_hole_reset", index as u64, get_caller(), 0);
     Ok(())
-}
-
-/// Top 100 for one game: fewest strokes, fastest time, earliest submission.
-#[ic_cdk::query]
-fn get_arcade_leaderboard(game: String) -> Vec<ArcadeLeaderboardRow> {
-    // PB-309 (D4): mini-golf leaderboard retired — always empty. Field Goal /
-    // Turbo Rush boards are unchanged.
-    if game == ARCADE_GAME_MINIGOLF {
-        return vec![];
-    }
-    let mut scores: Vec<ArcadeScore> = ARCADE_SCORES.with(|m| {
-        m.borrow()
-            .iter()
-            .map(|e| e.value())
-            .filter(|s| s.game == game)
-            .collect()
-    });
-    scores.sort_by_key(|s| arcade_rank_key(&game, s.strokes, s.millis, s.submitted_at));
-    scores
-        .into_iter()
-        .take(ARCADE_LEADERBOARD_LIMIT)
-        .enumerate()
-        .map(|(i, s)| ArcadeLeaderboardRow {
-            rank: i as u32 + 1,
-            player: s.player,
-            strokes: s.strokes,
-            millis: s.millis,
-            submitted_at: s.submitted_at,
-        })
-        .collect()
 }
 
 // ── Sklansky Trainer / Luck-Proof (arcade game 3) ───────────────────────────
@@ -13833,8 +11863,9 @@ fn complete_luckproof_daily(run_id: u64, decisions: Vec<bool>, millis: u64) -> R
     if !(LUCKPROOF_MIN_MILLIS..=LUCKPROOF_MAX_MILLIS).contains(&millis) {
         return Err("INVALID_TIME".to_string());
     }
-    run.completed = true;
-    LUCKPROOF_RUNS.with(|m| { m.borrow_mut().insert(run_id, run.clone()); });
+    // Completion CONSUMES the run journal (owner 2026-07-06: game data lives
+    // 1 day max; the daily entry below is the only record the board needs).
+    LUCKPROOF_RUNS.with(|m| { m.borrow_mut().remove(&run_id); });
 
     let mut ev_bp: i64 = 0;
     let mut correct: u16 = 0;
@@ -14119,8 +12150,8 @@ fn complete_skydive_daily(run_id: u64, distance_dm: u32, millis: u64, safe: bool
     if !(SKYDIVE_MIN_MILLIS..=SKYDIVE_MAX_MILLIS).contains(&millis) {
         return Err("INVALID_TIME".to_string());
     }
-    run.completed = true;
-    SKYDIVE_RUNS.with(|m| { m.borrow_mut().insert(run_id, run.clone()); });
+    // Completion CONSUMES the run journal (owner 2026-07-06).
+    SKYDIVE_RUNS.with(|m| { m.borrow_mut().remove(&run_id); });
     SKYDIVE_DAILY.with(|m| {
         m.borrow_mut().insert(
             SkydiveDayKey { day: run.day, player: caller },
@@ -14336,8 +12367,8 @@ fn complete_bullrun_daily(run_id: u64, coins: u32, millis: u64) -> Result<u32, S
     if (coins as u64) > (millis / 1_000) * BULLRUN_COIN_RATE_CAP + 20 {
         return Err("INVALID_COINS".to_string());
     }
-    run.completed = true;
-    BULLRUN_RUNS.with(|m| { m.borrow_mut().insert(run_id, run.clone()); });
+    // Completion CONSUMES the run journal (owner 2026-07-06).
+    BULLRUN_RUNS.with(|m| { m.borrow_mut().remove(&run_id); });
     BULLRUN_DAILY.with(|m| {
         m.borrow_mut().insert(
             BullRunDayKey { day: run.day, player: caller },
@@ -15573,6 +13604,8 @@ async fn harvest_icpswap_lp() {
             match call_ledger_transfer(ledger, Some(ICPSWAP_LP_YIELD_SUBACCOUNT), pot_dest, pot_amt, Some(10_000)).await {
                 Ok(_) => {
                     stats.total_pot_e8s = stats.total_pot_e8s.saturating_add(pot_amt);
+                    let config = CONFIG.with(|c| c.borrow().get().clone());
+                    refresh_lottery_pot_cache(&config).await;
                 }
                 Err(e) => {
                     canister_print(&format!("icpswap harvest: pot leg failed: {}", e));
@@ -16279,6 +14312,7 @@ async fn early_adopter_run_settlement(now: u64) -> Result<(), String> {
             call_ledger_transfer(ledger_id, Some(EARLY_ADOPTER_YIELD_SUBACCOUNT), lottery, job.excess_net_e8s, Some(fee))
                 .await
                 .map_err(|e| format!("LOTTERY_TRANSFER_FAILED: {}", e))?;
+            refresh_lottery_pot_cache(&config).await;
         }
         job.pool_done = true;
         persist_job(&job);
@@ -16344,7 +14378,9 @@ async fn early_adopter_settlement_check() {
     // Feed the EA yield inbox: pull the neuron's accrued maturity into [6u8;32]
     // so the settlement below has something to route. (No-op until the neuron
     // is bootstrapped and maturity crosses the threshold.)
-    harvest_early_adopter_maturity().await;
+    if sweep_due("ea_maturity", SWEEP_HOURLY_NS) {
+        harvest_early_adopter_maturity().await;
+    }
     let now = current_time();
     let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
     // Run right after every lottery draw (the round bump is the signal), and
@@ -16522,1273 +14558,15 @@ fn get_my_twitter_handle() -> Option<String> {
 }
 
 // ==========================================
-// 20. Crash / Casino (Epic J)
+// 20. Crash / Casino — REMOVED 2026-07-06 (owner). The bustabit-style crash
+// game (Epic J) was deleted outright; it had been dormant behind the retired
+// `crash` flag since the 2026-06-13 burn-only-voting migration. MemoryIds
+// 60–72 are ORPHANED (crash rounds/bets/chat/counters/bots) — never reuse.
 // ==========================================
-//
-// A bustabit-style multiplier game wrapped in a Casino section. One global
-// round every ~20 s; a multiplier climbs from 1.00x until it crashes at a
-// provably-fair point fixed at genesis (commit-reveal hash chain). Wagers are
-// "chips" drawn from a shared casino VP ledger derived from each user's
-// staking weight — STAKED ICP IS NEVER TOUCHED. The house banks every round
-// (1% edge) and BURNS its winnings weekly (a VP furnace), so the edge can only
-// re-enter the system through staking. See plans/crash/ (decisions C1–C18).
 
-// ── Units (plans/crash/02) ────────────────────────────────────────────────
-/// 1 VP = 1e8 weight-e8s (the staking-weight unit `user_voting_weight` returns).
-const VP_E8S: u64 = 100_000_000;
-/// 1 chip = 0.001 VP = 1e5 weight-e8s. chips = effective_vp_e8s / CHIP_E8S.
-/// The chip is what the UI calls **SVPP** (Staked Voting Power Points): because
-/// the casino base credits stake at full value (see `casino_staking_weight_e8s`,
-/// no 10× voting discount), 1 staked ICP = 1,000 SVPP at base tenure.
-const CHIP_E8S: u64 = 100_000;
-const CRASH_MIN_BET_CHIPS: u64 = 10; // 0.01 VP
-const CRASH_MAX_BET_CHIPS: u64 = 10_000_000; // 10,000 VP (1 VP = 1,000 chips)
-/// Hard cap on a single player's payout in a single round: 10,000 VP. A bet
-/// whose `wager × target` would exceed this is auto-cashed at the capped
-/// multiplier instead (e.g. a 5,000 VP bet auto-cashes at 2.00×).
-const CASINO_PAYOUT_CAP_VP: u64 = 10_000;
-const CRASH_MIN_TARGET_X100: u64 = 101; // 1.01x
-const CRASH_MAX_TARGET_X100: u64 = 5_000; // 50.00x
-const CRASH_CAP_X100: u64 = 5_000; // 50.00x cap on the curve (max multiplier 5000)
-const CRASH_DOMAIN: &[u8] = b"caldera-crash-v1";
-/// Round phase durations.
-const CRASH_INTERMISSION_NANOS: u64 = 5 * 1_000_000_000;
-const CRASH_BETTING_NANOS: u64 = 10 * 1_000_000_000;
-/// Default per-round potential-payout cap (VP). Admin-tunable in [100, 100_000].
-const CRASH_DEFAULT_EXPOSURE_CAP_VP: u64 = 100_000;
-const CRASH_EXPOSURE_CAP_MIN_VP: u64 = 100;
-const CRASH_EXPOSURE_CAP_MAX_VP: u64 = 1_000_000;
-/// How many finished rounds to keep in the archive.
-const CRASH_ARCHIVE_KEEP: u64 = 500;
-/// Genesis hash chain: N rounds (~7 months at 20 s/round), checkpoint stride.
-const CRASH_CHAIN_N: u64 = 1_000_000;
-const CRASH_CHAIN_STRIDE: u64 = 10_000;
-/// Casino-wide stop-loss floor (effective VP, e8s) a bet may not breach.
-/// Default 0 = "you can play down to zero chips but never into principal".
-const CASINO_STOP_LOSS_FLOOR_E8S: u64 = 0;
-/// Auto-pilots serviced per betting window (FIFO fairness).
-const CRASH_AUTOPILOT_CAP: usize = 500;
-/// Casino chat (plans/crash/03).
-const CASINO_CHAT_RING: u64 = 500;
-const CASINO_CHAT_MAX_LEN: usize = 200;
-const CASINO_CHAT_COOLDOWN_NANOS: u64 = 5 * 1_000_000_000;
-const WEEK_NANOS: u64 = 7 * DAY_NANOS;
-/// $5 to author a crash strategy (USD e8s); marketplace sale split 80/20.
-const CRASH_STRATEGY_FEE_USD_E8S: u64 = 500_000_000;
-const MAX_STRATEGIES_PER_AUTHOR: usize = 20;
-const MAX_STRATEGY_JSON_BYTES: usize = 4096;
-const MARKET_PRICE_MIN_USD_E8S: u64 = 100_000_000; // $1
-const MARKET_PRICE_MAX_USD_E8S: u64 = 50_000_000_000; // $500
-const MARKET_SELLER_BPS: u64 = 8_000; // 80% to seller, 20% treasury
-
-// ── Domain types (plans/crash/01) ──────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum CrashPhase {
-    #[default]
-    Intermission,
-    Betting,
-    Running,
-    Crashed,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum BetOutcome {
-    #[default]
-    Pending,
-    Won,
-    Lost,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CrashBet {
-    pub user: Principal,
-    pub wager_chips: u64,
-    pub target_x100: u64,
-    /// Set when the player smashed manual CASH OUT before the crash (the
-    /// recorded multiplier, never above their own auto target).
-    pub manual_x100: Option<u64>,
-    pub outcome: BetOutcome,
-    /// Multiplier the bet settled at (0 = lost). x100 fixed point.
-    pub payout_x100: u64,
-    /// Signed VP delta written at settlement (weight-e8s).
-    pub delta_e8s: i128,
-    /// True for bets placed by the round loop on a user's behalf (auto-pilot).
-    pub auto_pilot: bool,
-    /// Strategy id that placed the bet (auto-pilot), for the VP leaderboard.
-    pub strategy_id: Option<u64>,
-}
-
-/// The single live/archived round record. The live copy lives in CRASH_STATE;
-/// finished copies are archived into CRASH_ROUNDS. `crash_x100`/`seed_reveal`
-/// are sealed at betting close but only EXPOSED to callers after the crash.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct CrashRound {
-    pub id: u64,
-    pub phase: CrashPhase,
-    pub chain_index: u64,
-    /// 0 until the round seals at betting close.
-    pub crash_x100: u64,
-    pub seed_reveal: Option<[u8; 32]>,
-    pub phase_deadline: u64, // ns; intermission/betting end, or the crash time
-    pub run_started_at: u64,
-    pub crashed_at: u64,
-    /// Σ(wager_e8s × target) reserved this round, for the exposure cap.
-    pub potential_payout_e8s: u128,
-    pub bets: Vec<CrashBet>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct CasinoBook {
-    /// The house's signed VP balance (weight-e8s). May go negative (players up).
-    pub house_e8s: i128,
-    /// Lifetime VP destroyed by the weekly house burn (weight-e8s).
-    pub burned_e8s: u128,
-    /// Lifetime VP forgiven by the tenure jubilee (weight-e8s).
-    pub jubilee_e8s: u128,
-    /// Week index of the last burn (now / WEEK_NANOS).
-    pub last_burn_week: u64,
-    /// Round loop paused by admin (current round still settles).
-    pub paused: bool,
-    /// Per-round potential-payout cap (VP).
-    pub exposure_cap_vp: u64,
-}
-
-/// Per-user casino ledger entry: a signed modifier on staking weight plus the
-/// tenure-jubilee bookmark.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct UserCasino {
-    pub delta_e8s: i128,
-    pub last_jubilee_period: u64,
-}
-
-/// Monotonic id counters (one cell beats many).
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CrashCounters {
-    pub next_round_id: u64,
-    pub next_chain_index: u64,
-    pub next_chat_id: u64,
-    pub next_strategy_id: u64,
-    pub next_listing_id: u64,
-    pub next_license_id: u64,
-}
-impl Default for CrashCounters {
-    fn default() -> Self {
-        CrashCounters {
-            next_round_id: 1,
-            next_chain_index: 1,
-            next_chat_id: 1,
-            next_strategy_id: 1,
-            next_listing_id: 1,
-            next_license_id: 1,
-        }
-    }
-}
-
-/// Genesis hash chain (plans/crash/01 C5). `chain_seed` is h_N; hashing it down
-/// yields h_{N-1}…h_0; `terminal` = h_0 is the public commitment. We store one
-/// checkpoint every `stride` so any round seed costs ≤ stride hashes to recover.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct CrashChain {
-    pub initialized: bool,
-    pub chain_seed: [u8; 32],
-    pub terminal: [u8; 32],
-    pub n: u64,
-    pub stride: u64,
-    /// checkpoints[k] = h_{k*stride}; checkpoints[0] = terminal (h_0).
-    pub checkpoints: Vec<[u8; 32]>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ChatMsg {
-    pub id: u64,
-    pub author: Principal,
-    pub text: String,
-    pub at: u64,
-}
-
-/// One progression rule (on_loss / on_win): how to size the next bet.
-#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum BetAction {
-    #[default]
-    Reset,
-    /// Multiply the current bet by factor_x100 (1.00x–10.00x).
-    Multiply,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, Default)]
-pub struct ProgressionRule {
-    pub action: BetAction,
-    pub factor_x100: u64,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
-pub struct StrategyStop {
-    /// +profit in VP-x1000 that ends the session (0 = none).
-    pub take_profit_vp_x1000: u64,
-    /// -loss in VP-x1000 that ends the session (0 = none).
-    pub stop_loss_vp_x1000: u64,
-    /// max rounds before stopping (0 = none).
-    pub max_rounds: u64,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CrashStrategy {
-    pub id: u64,
-    pub author: Principal,
-    pub name: String,
-    pub description: String,
-    pub base_bet_chips: u64,
-    pub auto_target_x100: u64,
-    pub on_loss: ProgressionRule,
-    pub on_win: ProgressionRule,
-    pub max_bet_chips: u64,
-    pub max_consecutive_losses: u64, // 0 = unlimited
-    pub skip_rounds_after_loss: u64, // 0..10
-    pub stop: StrategyStop,
-    pub version: u64,
-    pub builtin: bool,
-    /// Lifetime VP (weight-e8s) won/lost by all pilots running this strategy.
-    pub lifetime_vp_e8s: i128,
-    pub created_at: u64,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
-pub struct AutopilotState {
-    pub strategy_id: u64,
-    pub active: bool,
-    pub current_bet_chips: u64,
-    pub consecutive_losses: u64,
-    pub skip_counter: u64,
-    pub rounds_played: u64,
-    pub session_pnl_e8s: i128,
-    pub started_at: u64,
-    /// Set when a stop fired; surfaced to the UI ("take-profit +50 VP reached").
-    pub stop_reason: Option<String>,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum MarketKind {
-    #[default]
-    Crash,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct Listing {
-    pub id: u64,
-    pub kind: MarketKind,
-    pub seller: Principal,
-    /// For Crash: the strategy id whose body unlocks on license.
-    pub item_id: u64,
-    pub title: String,
-    /// Public shape teaser ("martingale ×2.0 @ 2.00×"). Body stays hidden.
-    pub teaser: String,
-    pub price_usd_e8s: u64,
-    pub sales: u64,
-    pub created_at: u64,
-    pub active: bool,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct License {
-    pub id: u64,
-    pub listing_id: u64,
-    pub buyer: Principal,
-    pub at: u64,
-}
-
-impl_storable!(CrashRound);
-impl_storable!(CasinoBook);
-impl_storable!(UserCasino);
-impl_storable!(CrashCounters);
-impl_storable!(CrashChain);
-impl_storable!(ChatMsg);
-impl_storable!(CrashStrategy);
-impl_storable!(AutopilotState);
-impl_storable!(Listing);
-impl_storable!(License);
-
-thread_local! {
-    /// Per-user casino VP ledger (delta on staking weight). MemoryId 60.
-    static CASINO_VP_DELTA: RefCell<StableBTreeMap<Principal, UserCasino, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(60)))));
-    /// House / burn / jubilee bookkeeping + loop config. MemoryId 61.
-    static CASINO_BOOK: RefCell<StableCell<CasinoBook, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(61)), CasinoBook {
-            exposure_cap_vp: CRASH_DEFAULT_EXPOSURE_CAP_VP, ..Default::default()
-        })));
-    /// The live round. MemoryId 62.
-    static CRASH_STATE: RefCell<StableCell<CrashRound, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(62)), CrashRound::default())));
-    /// Finished-round archive. MemoryId 63.
-    static CRASH_ROUNDS: RefCell<StableBTreeMap<u64, CrashRound, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(63)))));
-    /// Id counters. MemoryId 64.
-    static CRASH_COUNTERS: RefCell<StableCell<CrashCounters, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(64)), CrashCounters::default())));
-    /// Casino chat ring. MemoryId 65.
-    static CASINO_CHAT: RefCell<StableBTreeMap<u64, ChatMsg, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(65)))));
-    /// Crash strategies (incl. builtins). MemoryId 66.
-    static CRASH_STRATEGIES: RefCell<StableBTreeMap<u64, CrashStrategy, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(66)))));
-    /// Per-user auto-pilot state. MemoryId 67.
-    static CRASH_AUTOPILOT: RefCell<StableBTreeMap<Principal, AutopilotState, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(67)))));
-    /// Genesis hash chain. MemoryId 68.
-    static CRASH_CHAIN: RefCell<StableCell<CrashChain, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(68)), CrashChain::default())));
-    /// Chat mutes (principal -> muted-until ns). MemoryId 69.
-    static CASINO_MUTES: RefCell<StableBTreeMap<Principal, u64, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(69)))));
-    /// Marketplace listings. MemoryId 70.
-    static MARKET_LISTINGS: RefCell<StableBTreeMap<u64, Listing, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(70)))));
-    /// Marketplace licenses (id -> license; scanned by buyer/listing). MemoryId 71.
-    static MARKET_LICENSES: RefCell<StableBTreeMap<u64, License, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(71)))));
-}
-
-fn crash_counters() -> CrashCounters {
-    CRASH_COUNTERS.with(|c| c.borrow().get().clone())
-}
-fn set_crash_counters(c: CrashCounters) {
-    CRASH_COUNTERS.with(|cell| { let _ = cell.borrow_mut().set(c); });
-}
-fn casino_book() -> CasinoBook {
-    CASINO_BOOK.with(|c| c.borrow().get().clone())
-}
-fn set_casino_book(b: CasinoBook) {
-    CASINO_BOOK.with(|cell| { let _ = cell.borrow_mut().set(b); });
-}
-fn crash_state() -> CrashRound {
-    CRASH_STATE.with(|c| c.borrow().get().clone())
-}
-fn set_crash_state(r: CrashRound) {
-    CRASH_STATE.with(|cell| { let _ = cell.borrow_mut().set(r); });
-}
-
-fn require_crash_enabled() -> Result<(), String> {
-    if !feature_visible(FLAG_CRASH, get_caller()) {
-        return Err("FEATURE_DISABLED".to_string());
-    }
-    Ok(())
-}
-
-thread_local! {
-    /// Local-dev simulation bots (principal -> display handle). MemoryId 72.
-    /// Used only by `dev_seed_casino_play` to make the table feel alive locally.
-    static CASINO_BOTS: RefCell<StableBTreeMap<Principal, String, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(72)))));
-}
-
-/// Insert a chat line on a principal's behalf, bypassing the rate limit — only
-/// ever called for simulation bots (plus the ring eviction the public path uses).
-fn bot_say(author: Principal, text: &str) {
-    let now = current_time();
-    let mut counters = crash_counters();
-    let id = counters.next_chat_id;
-    counters.next_chat_id += 1;
-    set_crash_counters(counters);
-    CASINO_CHAT.with(|m| {
-        let mut map = m.borrow_mut();
-        map.insert(id, ChatMsg { id, author, text: text.to_string(), at: now });
-        while map.len() > CASINO_CHAT_RING {
-            if let Some(oldest) = map.iter().next().map(|e| *e.key()) {
-                map.remove(&oldest);
-            } else {
-                break;
-            }
-        }
-    });
-}
-
-/// After a round settles, occasionally have a bot react — keeps the local chat
-/// lively. Entropy comes from the (already-public) round outcome; no-op when no
-/// bots are seeded (i.e. always on mainnet).
-fn crash_bot_chatter(r: &CrashRound) {
-    let bots: Vec<Principal> = CASINO_BOTS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-    if bots.is_empty() {
-        return;
-    }
-    let e = r.crash_x100.wrapping_mul(2_654_435_761).wrapping_add(r.id);
-    if e % 10 == 0 {
-        return; // ~90% of rounds someone talks
-    }
-    let win = ["ez money 💰", "called it", "🚀🚀🚀", "cashed in time", "10x club", "to the moon 🌙"];
-    let bust = ["rip", "so close", "one more round", "the house burns it all 🔥", "set auto lower next time", "knew it would dump"];
-    let neutral = ["gl all", "who's in?", "2x and run", "let it ride", "feeling lucky", "send it"];
-    let pool: &[&str] = if r.crash_x100 >= 1000 { &win } else if r.crash_x100 <= 130 { &bust } else { &neutral };
-    bot_say(bots[(e as usize) % bots.len()], pool[(e as usize / 7) % pool.len()]);
-    // ~40% of the time a second bot chimes in with a different line.
-    if e % 5 < 2 && bots.len() > 1 {
-        let other = bots[(e as usize / 3 + 1) % bots.len()];
-        bot_say(other, pool[(e as usize / 11 + 1) % pool.len()]);
-    }
-}
-
-// ── Provably-fair engine (plans/crash/01 C4/C5, PB-232) ─────────────────────
-
-fn sha256(data: &[u8]) -> [u8; 32] {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(data);
-    hasher.finalize().into()
-}
-
-/// Build the genesis chain from `chain_seed` (= h_N). Returns (terminal h_0,
-/// checkpoints) where checkpoints[k] = h_{k*stride}. Pure + testable.
-fn build_crash_chain(chain_seed: [u8; 32], n: u64, stride: u64) -> ([u8; 32], Vec<[u8; 32]>) {
-    let count = (n / stride) as usize + 1;
-    let mut checkpoints = vec![[0u8; 32]; count];
-    let mut h = chain_seed; // h_n
-    let mut i = n;
-    if i % stride == 0 {
-        checkpoints[(i / stride) as usize] = h;
-    }
-    while i > 0 {
-        h = sha256(&h);
-        i -= 1; // now h == h_i
-        if i % stride == 0 {
-            checkpoints[(i / stride) as usize] = h;
-        }
-    }
-    (h, checkpoints) // h == h_0 == terminal
-}
-
-/// Recover seed h_index from the nearest checkpoint at/above it (≤ stride hashes).
-fn crash_seed_at(chain: &CrashChain, index: u64) -> [u8; 32] {
-    let stride = chain.stride.max(1);
-    // smallest multiple of stride that is >= index (clamped to n)
-    let mut c = index.div_ceil(stride) * stride;
-    if c > chain.n {
-        c = chain.n;
-    }
-    let ck = chain.checkpoints.get((c / stride) as usize).copied().unwrap_or(chain.terminal);
-    let mut h = ck; // h_c
-    let mut steps = c.saturating_sub(index);
-    while steps > 0 {
-        h = sha256(&h);
-        steps -= 1;
-    }
-    h // h_index
-}
-
-/// Normative crash-point formula (bustabit-classic, 1% edge): 1/101 instant
-/// bust at 1.00×; otherwise floor((100·2^52 − h)/(2^52 − h)) in ×100 fixed
-/// point, capped at 100.00×. Closed form: P[crash ≥ x] ≈ 99/(100·x).
-fn crash_point_x100(seed: &[u8; 32]) -> u64 {
-    let mut data = seed.to_vec();
-    data.extend_from_slice(CRASH_DOMAIN);
-    let h = sha256(&data);
-    let u = u64::from_be_bytes(h[0..8].try_into().unwrap());
-    if u % 101 == 0 {
-        return 100; // 1.00× instant bust
-    }
-    let e: u128 = 1u128 << 52;
-    let hb = (u as u128) & (e - 1);
-    let x = (100 * e - hb) / (e - hb); // ≥ 100, increasing in hb
-    (x as u64).clamp(100, CRASH_CAP_X100)
-}
-
-/// Multiplier at `elapsed_ms` into the run: m(t) = e^(0.06·t), ×100 fixed point,
-/// floored, never below 1.00×. f64 exp is deterministic on wasm.
-fn crash_multiplier_x100(elapsed_ms: u64) -> u64 {
-    let t = elapsed_ms as f64 / 1000.0;
-    let m = (0.06 * t).exp();
-    ((m * 100.0).floor() as u64).max(100)
-}
-
-/// Time (ns from run start) at which the curve reaches `crash_x100`.
-fn crash_time_offset_nanos(crash_x100: u64) -> u64 {
-    let m = (crash_x100 as f64 / 100.0).max(1.0);
-    let t = m.ln() / 0.06; // seconds
-    (t * 1_000_000_000.0).round() as u64
-}
-
-/// The auto-cashout target a bet is actually settled at: the lesser of the
-/// player's chosen target and the multiplier at which `wager × multiplier` hits
-/// the per-round payout cap (10,000 VP). So a 5,000 VP bet is auto-cashed at
-/// 2.00× no matter how high the player set their target. `target_x100 == 0`
-/// means "no auto cash-out" (manual only) — the payout cap is the sole ceiling,
-/// which for small bets is far above the 50× curve cap (i.e. effectively none).
-fn effective_target_x100(wager_chips: u64, target_x100: u64) -> u64 {
-    let cap_chips = CASINO_PAYOUT_CAP_VP.saturating_mul(1_000); // VP → chips
-    let cap_target = (cap_chips.saturating_mul(100) / wager_chips.max(1)).max(100);
-    if target_x100 == 0 {
-        cap_target
-    } else {
-        target_x100.min(cap_target)
-    }
-}
-
-/// Pure settlement of one bet against a sealed crash point. Returns the signed
-/// VP delta (weight-e8s) and the multiplier it paid at (0 = lost). The auto
-/// target — capped by the payout ceiling — pays iff `effective ≤ crash`; a
-/// recorded manual cashout pays at its (≤ effective, < crash) multiplier. The
-/// wager principal never moves — only profit (win) or the wager (loss) is
-/// written, since chips are reserved, not debited (plans/crash/02).
-fn settle_crash_bet(wager_chips: u64, target_x100: u64, manual_x100: Option<u64>, crash_x100: u64) -> (i128, u64) {
-    let wager_e8s = (wager_chips as i128) * (CHIP_E8S as i128);
-    let eff = effective_target_x100(wager_chips, target_x100);
-    let pay_x100 = match manual_x100 {
-        Some(m) => m.min(eff), // recorded only when cashed before the crash → a win
-        None if eff <= crash_x100 => eff,
-        None => 0,
-    };
-    if pay_x100 >= 100 && (manual_x100.is_some() || eff <= crash_x100) {
-        let profit = wager_e8s * (pay_x100 as i128 - 100) / 100;
-        (profit, pay_x100)
-    } else {
-        (-wager_e8s, 0)
-    }
-}
-
-// ── Casino VP ledger (plans/crash/02, PB-230) ───────────────────────────────
-
-/// Each user's casino SVPP base, in weight-e8s. Staked ICP is never wagered;
-/// the ledger only ever modifies a *derived* number.
-///
-/// SVPP (Staked Voting Power Points) deliberately does NOT apply the 10×
-/// staked-voting discount (`STAKED_VP_DIVISOR`): voting weight (SVP) discounts
-/// stake 10:1 vs. an irreversible burn, but the casino credits stake at full
-/// value so that **1 staked ICP = 1,000 SVPP** at base tenure (and scales with
-/// the same tenure multiplier — up to 16,000 after 2 years). We reuse
-/// `user_voting_weight` (which carries the tenure multiplier) and multiply the
-/// discount back out, keeping the single tenure code path.
-fn casino_staking_weight_e8s(user: Principal) -> u64 {
-    user_voting_weight(user).saturating_mul(STAKED_VP_DIVISOR)
-}
-
-/// Tenure-jubilee period: completed 6-month spans since the user first staked
-/// (the earliest `staked_at` across their tiers).
-fn casino_tenure_period(user: Principal) -> u64 {
-    let now = current_time();
-    let staked_at = StakeTier::all()
-        .iter()
-        .filter_map(|&tier| STAKES.with(|m| m.borrow().get(&stake_key(tier, user)).map(|s| s.staked_at)))
-        .min()
-        .unwrap_or(0);
-    if staked_at == 0 || now <= staked_at {
-        return 0;
-    }
-    (now - staked_at) / (182 * DAY_NANOS + DAY_NANOS / 2)
-}
-
-/// Lazily forgive a negative delta when the user crosses a 6-month tenure tick
-/// (writer #7). Forgiven VP accrues to `jubilee_e8s` (separate from the burn).
-fn casino_apply_jubilee(user: Principal) {
-    let period = casino_tenure_period(user);
-    let mut entry = CASINO_VP_DELTA.with(|m| m.borrow().get(&user)).unwrap_or_default();
-    if period > entry.last_jubilee_period {
-        if entry.delta_e8s < 0 {
-            let forgiven = (-entry.delta_e8s) as u128;
-            let mut book = casino_book();
-            book.jubilee_e8s = book.jubilee_e8s.saturating_add(forgiven);
-            set_casino_book(book);
-            entry.delta_e8s = 0;
-        }
-        entry.last_jubilee_period = period;
-        CASINO_VP_DELTA.with(|m| m.borrow_mut().insert(user, entry));
-    }
-}
-
-fn casino_delta_e8s(user: Principal) -> i128 {
-    casino_apply_jubilee(user);
-    CASINO_VP_DELTA.with(|m| m.borrow().get(&user)).map(|e| e.delta_e8s).unwrap_or(0)
-}
-
-/// Effective casino VP (weight-e8s), never negative (invariant I-2).
-fn casino_effective_vp_e8s(user: Principal) -> u64 {
-    let base = casino_staking_weight_e8s(user) as i128;
-    (base + casino_delta_e8s(user)).max(0) as u64
-}
-
-fn casino_chips(user: Principal) -> u64 {
-    casino_effective_vp_e8s(user) / CHIP_E8S
-}
-
-/// Chips reserved by a live (pending) crash bet — invisible to a second crash
-/// bet, so they can't be double-spent (plans/crash/02).
-fn reserved_chips(user: Principal) -> u64 {
-    let r = crash_state();
-    if matches!(r.phase, CrashPhase::Betting | CrashPhase::Running) {
-        r.bets.iter().filter(|b| b.user == user && b.outcome == BetOutcome::Pending).map(|b| b.wager_chips).sum()
-    } else {
-        0
-    }
-}
-
-fn casino_available_chips(user: Principal) -> u64 {
-    casino_chips(user).saturating_sub(reserved_chips(user))
-}
-
-fn casino_add_delta(user: Principal, d: i128) {
-    casino_apply_jubilee(user);
-    let mut entry = CASINO_VP_DELTA.with(|m| m.borrow().get(&user)).unwrap_or_default();
-    entry.delta_e8s += d;
-    if entry.last_jubilee_period == 0 {
-        entry.last_jubilee_period = casino_tenure_period(user);
-    }
-    CASINO_VP_DELTA.with(|m| m.borrow_mut().insert(user, entry));
-}
-
-/// Σ user deltas + house + burned − jubilee == 0, forever (invariants I-1c/I-6).
-fn casino_reconciliation_e8s() -> i128 {
-    let users: i128 = CASINO_VP_DELTA.with(|m| m.borrow().iter().map(|e| e.value().delta_e8s).sum());
-    let book = casino_book();
-    users + book.house_e8s + book.burned_e8s as i128 - book.jubilee_e8s as i128
-}
-
-/// Weekly house burn (plans/crash/02 C3): once per ISO week, a positive house
-/// balance is destroyed (set to 0, lifetime-burned incremented, audit-logged);
-/// a negative house carries over (never minted away). Called from the sweep.
-fn casino_weekly_burn() {
-    let now = current_time();
-    let week = now / WEEK_NANOS;
-    let mut book = casino_book();
-    if week <= book.last_burn_week && book.last_burn_week != 0 {
-        return;
-    }
-    if book.last_burn_week == 0 {
-        // First tick just anchors the week; nothing to burn yet.
-        book.last_burn_week = week;
-        set_casino_book(book);
-        return;
-    }
-    if book.house_e8s > 0 {
-        let amount = book.house_e8s as u128;
-        book.burned_e8s = book.burned_e8s.saturating_add(amount);
-        book.house_e8s = 0;
-        AUDIT_LOG.with(|log| {
-            let _ = log.borrow_mut().append(&AuditLogEntry {
-                timestamp: now,
-                event_type: "crash_house_burn".to_string(),
-                proposal_id: 0,
-                user: get_canister_id(),
-                amount_e8s: u64::try_from(amount).unwrap_or(u64::MAX),
-            });
-        });
-    }
-    book.last_burn_week = week;
-    set_casino_book(book);
-}
-
-// ── Round loop (plans/crash/01, PB-233) ─────────────────────────────────────
-
-#[cfg(target_arch = "wasm32")]
-fn crash_arm_timer(after_nanos: u64) {
-    let dur = std::time::Duration::from_nanos(after_nanos);
-    ic_cdk_timers::set_timer(dur, async { crash_tick().await; });
-}
-#[cfg(not(target_arch = "wasm32"))]
-fn crash_arm_timer(_after_nanos: u64) {}
-
-/// 32 random bytes for the genesis chain (raw_rand on wasm; fixed in tests).
-#[cfg(target_arch = "wasm32")]
-async fn crash_random_seed() -> Result<[u8; 32], String> {
-    let res: Result<(Vec<u8>,), _> = ic_cdk::call(Principal::management_canister(), "raw_rand", ()).await;
-    match res {
-        Ok((bytes,)) if bytes.len() >= 32 => Ok(bytes[..32].try_into().unwrap()),
-        Ok(_) => Err("RAW_RAND_TOO_SHORT".to_string()),
-        Err((code, msg)) => Err(format!("raw_rand failed ({:?}): {}", code, msg)),
-    }
-}
-#[cfg(not(target_arch = "wasm32"))]
-async fn crash_random_seed() -> Result<[u8; 32], String> {
-    Ok(sha256(b"caldera-crash-test-seed"))
-}
-
-/// Resume the loop after init/upgrade: if crash is live and a round is mid-flight,
-/// re-arm its timer from the remaining time; otherwise (idle) kick a fresh cycle.
-fn crash_resume() {
-    if !feature_active(FLAG_CRASH) || casino_book().paused || !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
-        return;
-    }
-    let r = crash_state();
-    let now = current_time();
-    match r.phase {
-        CrashPhase::Intermission | CrashPhase::Betting | CrashPhase::Running => {
-            let remaining = r.phase_deadline.saturating_sub(now);
-            crash_arm_timer(remaining);
-        }
-        CrashPhase::Crashed => crash_arm_timer(0),
-    }
-}
-
-/// Watchdog (runs on a short interval): if the current phase is overdue — a
-/// one-shot timer was dropped, e.g. across an upgrade — drive the transition so
-/// the loop self-heals instead of wedging. No-op when off/paused/uninitialised.
-async fn crash_watchdog() {
-    if !feature_active(FLAG_CRASH) || casino_book().paused {
-        return;
-    }
-    if !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
-        return;
-    }
-    let r = crash_state();
-    if current_time() > r.phase_deadline.saturating_add(1_000_000_000) {
-        crash_tick().await;
-    }
-}
-
-/// One phase transition. Idempotent w.r.t. the flag/pause (a stale timer that
-/// fires after a pause/flag-off simply settles the current round then stops).
-async fn crash_tick() {
-    if !CRASH_CHAIN.with(|c| c.borrow().get().initialized) {
-        return;
-    }
-    let mut r = crash_state();
-    let now = current_time();
-    // Defuse stale/early timers: a round only advances once its current phase is
-    // actually due. Without this, an armed one-shot timer left over from an
-    // earlier round (settled via the watchdog) could fire late and settle the
-    // CURRENT running round before its real crash time — making the multiplier
-    // appear to jump (e.g. 1.4× → instantly "crashed @ 10.1×"). The legitimate
-    // armed timer (set at phase entry) and the watchdog drive the transition at
-    // the right moment. 50 ms grace absorbs scheduling jitter.
-    if r.phase_deadline > now.saturating_add(50_000_000) {
-        return;
-    }
-    match r.phase {
-        // Idle (initial), or the gap after a crash → open the next round, unless
-        // the loop has been stopped (flag off / paused).
-        CrashPhase::Intermission | CrashPhase::Crashed => {
-            if !feature_active(FLAG_CRASH) || casino_book().paused {
-                return;
-            }
-            crash_open_round(now);
-        }
-        CrashPhase::Betting => {
-            crash_close_betting(&mut r, now);
-            set_crash_state(r.clone());
-            // Arm the crash timer for t_crash.
-            let dt = crash_time_offset_nanos(r.crash_x100);
-            crash_arm_timer(dt);
-        }
-        CrashPhase::Running => {
-            crash_settle_round(&mut r, now);
-            // Hold the crashed result for the intermission window; the watchdog
-            // and the armed timer both open the next round once it elapses.
-            r.phase_deadline = now + CRASH_INTERMISSION_NANOS;
-            set_crash_state(r.clone());
-            crash_archive(r);
-            if feature_active(FLAG_CRASH) && !casino_book().paused {
-                crash_arm_timer(CRASH_INTERMISSION_NANOS);
-            }
-        }
-    }
-}
-
-/// Public nudge: advance the loop if a phase is overdue. On a real subnet the
-/// autonomous timers do this; locally (and as a self-heal) the frontend calls
-/// this each poll so the round loop progresses whenever someone is watching.
-#[ic_cdk::update]
-async fn crash_poke() {
-    crash_watchdog().await;
-}
-
-fn crash_open_round(now: u64) {
-    let mut counters = crash_counters();
-    let id = counters.next_round_id;
-    let chain_index = counters.next_chain_index;
-    counters.next_round_id += 1;
-    counters.next_chain_index += 1;
-    set_crash_counters(counters);
-    let round = CrashRound {
-        id,
-        phase: CrashPhase::Betting,
-        chain_index,
-        crash_x100: 0,
-        seed_reveal: None,
-        phase_deadline: now + CRASH_BETTING_NANOS,
-        run_started_at: 0,
-        crashed_at: 0,
-        potential_payout_e8s: 0,
-        bets: Vec::new(),
-    };
-    set_crash_state(round);
-    // Place auto-pilot bets for this betting window.
-    crash_run_autopilots();
-    crash_arm_timer(CRASH_BETTING_NANOS);
-}
-
-fn crash_close_betting(r: &mut CrashRound, now: u64) {
-    let chain = CRASH_CHAIN.with(|c| c.borrow().get().clone());
-    let seed = crash_seed_at(&chain, r.chain_index);
-    r.crash_x100 = crash_point_x100(&seed); // sealed, not yet revealed
-    r.phase = CrashPhase::Running;
-    r.run_started_at = now;
-    r.phase_deadline = now + crash_time_offset_nanos(r.crash_x100);
-}
-
-/// Atomic settle pass (writer #5): per-bet deltas + the house's negation, so
-/// Σ(round) + house round-delta = 0 (invariant I-7). Reveals the seed.
-fn crash_settle_round(r: &mut CrashRound, now: u64) {
-    let chain = CRASH_CHAIN.with(|c| c.borrow().get().clone());
-    let seed = crash_seed_at(&chain, r.chain_index);
-    r.seed_reveal = Some(seed);
-    r.phase = CrashPhase::Crashed;
-    r.crashed_at = now;
-    let mut round_sum: i128 = 0;
-    for bet in r.bets.iter_mut() {
-        if bet.outcome != BetOutcome::Pending {
-            continue;
-        }
-        let (delta, pay) = settle_crash_bet(bet.wager_chips, bet.target_x100, bet.manual_x100, r.crash_x100);
-        bet.delta_e8s = delta;
-        bet.payout_x100 = pay;
-        bet.outcome = if pay > 0 { BetOutcome::Won } else { BetOutcome::Lost };
-        casino_add_delta(bet.user, delta);
-        round_sum += delta;
-        // Strategy lifetime-VP leaderboard + auto-pilot session bookkeeping.
-        if let Some(sid) = bet.strategy_id {
-            let existing = CRASH_STRATEGIES.with(|m| m.borrow().get(&sid));
-            if let Some(mut s) = existing {
-                s.lifetime_vp_e8s += delta;
-                CRASH_STRATEGIES.with(|m| m.borrow_mut().insert(sid, s));
-            }
-        }
-        if bet.auto_pilot {
-            crash_autopilot_after_round(bet.user, delta, pay > 0);
-        }
-    }
-    // House absorbs the exact negation of the round's net.
-    let mut book = casino_book();
-    book.house_e8s -= round_sum;
-    set_casino_book(book);
-    // Local-dev colour: bots react to the result (no-op when none are seeded).
-    crash_bot_chatter(r);
-}
-
-fn crash_archive(r: CrashRound) {
-    CRASH_ROUNDS.with(|m| {
-        let mut map = m.borrow_mut();
-        map.insert(r.id, r);
-        // Trim oldest beyond the keep window.
-        let len = map.len();
-        if len > CRASH_ARCHIVE_KEEP {
-            let mut to_remove = len - CRASH_ARCHIVE_KEEP;
-            let oldest: Vec<u64> = map.iter().map(|e| *e.key()).take(to_remove as usize).collect();
-            for k in oldest {
-                map.remove(&k);
-                to_remove -= 1;
-                if to_remove == 0 {
-                    break;
-                }
-            }
-        }
-    });
-}
-
-/// Shared placement core for both human and auto-pilot bets. Enforces every
-/// guard (rails, one-bet-per-round, available chips, casino stop-loss floor,
-/// exposure cap). Returns the placed bet on success.
-fn crash_place_bet(
-    user: Principal,
-    wager_chips: u64,
-    target_x100: u64,
-    auto_pilot: bool,
-    strategy_id: Option<u64>,
-) -> Result<(), String> {
-    let mut r = crash_state();
-    if r.phase != CrashPhase::Betting {
-        return Err("NOT_BETTING".to_string());
-    }
-    if !(CRASH_MIN_BET_CHIPS..=CRASH_MAX_BET_CHIPS).contains(&wager_chips) {
-        return Err("WAGER_OUT_OF_RANGE".to_string());
-    }
-    // target_x100 == 0 means "no auto cash-out" (manual only); otherwise rails.
-    if target_x100 != 0 && !(CRASH_MIN_TARGET_X100..=CRASH_MAX_TARGET_X100).contains(&target_x100) {
-        return Err("TARGET_OUT_OF_RANGE".to_string());
-    }
-    if r.bets.iter().any(|b| b.user == user) {
-        return Err("ALREADY_BET".to_string());
-    }
-    // Available chips (effective VP minus existing reservations).
-    if casino_available_chips(user) < wager_chips {
-        return Err("INSUFFICIENT_CHIPS".to_string());
-    }
-    // Casino-wide stop-loss floor: losing this bet may not breach the floor.
-    let wager_e8s = wager_chips * CHIP_E8S;
-    let effective = casino_effective_vp_e8s(user);
-    if effective.saturating_sub(wager_e8s) < CASINO_STOP_LOSS_FLOOR_E8S {
-        return Err("STOP_LOSS_FLOOR".to_string());
-    }
-    // Exposure cap: Σ(wager × effective target) ≤ cap (VP). Closes betting when
-    // tripped. The effective target already reflects the per-player payout cap.
-    let cap_e8s = (casino_book().exposure_cap_vp as u128) * (VP_E8S as u128);
-    let bet_potential = (wager_e8s as u128) * (effective_target_x100(wager_chips, target_x100) as u128) / 100;
-    if r.potential_payout_e8s + bet_potential > cap_e8s {
-        return Err("ROUND_FULL".to_string());
-    }
-    r.potential_payout_e8s += bet_potential;
-    r.bets.push(CrashBet {
-        user,
-        wager_chips,
-        target_x100,
-        manual_x100: None,
-        outcome: BetOutcome::Pending,
-        payout_x100: 0,
-        delta_e8s: 0,
-        auto_pilot,
-        strategy_id,
-    });
-    set_crash_state(r);
-    Ok(())
-}
-
-// ── Bets API (plans/crash/01 C7/C9, PB-234) ─────────────────────────────────
-
-/// Place a crash bet. `wager_chips` 10..10_000_000; `target_x100` is the auto
-/// cash-out (101..5_000) or **0 for no auto cash-out** (manual only — cash out
-/// with `crash_cashout`). Humans and agent principals are identical here — no
-/// registry, no claim step (C9). The auto target is the latency-fair primary
-/// mechanism (C7); the payout cap is always enforced.
-#[ic_cdk::update]
-fn crash_bet(wager_chips: u64, target_x100: u64) -> Result<(), String> {
-    require_crash_enabled()?;
-    require_authenticated()?;
-    let caller = get_caller();
-    crash_place_bet(caller, wager_chips, target_x100, false, None)
-}
-
-/// Manual CASH OUT (the bonus action, C7). Executes at the multiplier of the
-/// block that processes it — never above your own auto target, and only while
-/// the round is still running (i.e. before the crash). First writer wins;
-/// duplicate/late calls return ALREADY_SETTLED / TOO_LATE without mutation.
-#[ic_cdk::update]
-fn crash_cashout() -> Result<u64, String> {
-    require_crash_enabled()?;
-    require_authenticated()?;
-    let caller = get_caller();
-    let mut r = crash_state();
-    if r.phase != CrashPhase::Running {
-        return Err("TOO_LATE".to_string());
-    }
-    let now = current_time();
-    let elapsed_ms = (now.saturating_sub(r.run_started_at)) / 1_000_000;
-    let live_x100 = crash_multiplier_x100(elapsed_ms);
-    let bet = r.bets.iter_mut().find(|b| b.user == caller);
-    let bet = match bet {
-        Some(b) => b,
-        None => return Err("NO_BET".to_string()),
-    };
-    if bet.manual_x100.is_some() {
-        return Err("ALREADY_SETTLED".to_string());
-    }
-    // Never beat the crash, never beat your own (payout-capped) auto target.
-    if live_x100 >= r.crash_x100 {
-        return Err("TOO_LATE".to_string());
-    }
-    let recorded = live_x100.min(effective_target_x100(bet.wager_chips, bet.target_x100));
-    bet.manual_x100 = Some(recorded);
-    set_crash_state(r);
-    Ok(recorded)
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CrashBetView {
-    pub user: Principal,
-    pub wager_chips: u64,
-    pub target_x100: u64,
-    pub manual_x100: Option<u64>,
-    pub outcome: String,
-    pub payout_x100: u64,
-    pub auto_pilot: bool,
-}
-
-impl From<&CrashBet> for CrashBetView {
-    fn from(b: &CrashBet) -> Self {
-        CrashBetView {
-            user: b.user,
-            wager_chips: b.wager_chips,
-            target_x100: b.target_x100,
-            manual_x100: b.manual_x100,
-            outcome: match b.outcome {
-                BetOutcome::Pending => "pending",
-                BetOutcome::Won => "won",
-                BetOutcome::Lost => "lost",
-            }
-            .to_string(),
-            payout_x100: b.payout_x100,
-            auto_pilot: b.auto_pilot,
-        }
-    }
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CrashRoundView {
-    pub id: u64,
-    pub phase: String,
-    pub run_started_at: u64,
-    pub phase_deadline: u64,
-    /// Only revealed once the round has crashed (0 while running).
-    pub crash_x100: u64,
-    pub players: Vec<CrashBetView>,
-    pub my_bet: Option<CrashBetView>,
-    pub exposure_cap_vp: u64,
-    pub paused: bool,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CrashHistoryItem {
-    pub id: u64,
-    pub crash_x100: u64,
-    pub chain_index: u64,
-    pub seed_hex: String,
-    pub crashed_at: u64,
-}
-
-fn hex32(b: &[u8; 32]) -> String {
-    b.iter().map(|x| format!("{:02x}", x)).collect()
-}
-
-/// The live round (curve drawn client-side from `run_started_at`). The crash
-/// point and seed are redacted until the round crashes — no result-aware betting.
-#[ic_cdk::query]
-fn get_crash_round() -> CrashRoundView {
-    let r = crash_state();
-    let caller = get_caller();
-    let crashed = matches!(r.phase, CrashPhase::Crashed);
-    CrashRoundView {
-        id: r.id,
-        phase: match r.phase {
-            CrashPhase::Intermission => "intermission",
-            CrashPhase::Betting => "betting",
-            CrashPhase::Running => "running",
-            CrashPhase::Crashed => "crashed",
-        }
-        .to_string(),
-        run_started_at: r.run_started_at,
-        phase_deadline: r.phase_deadline,
-        crash_x100: if crashed { r.crash_x100 } else { 0 },
-        players: r.bets.iter().map(CrashBetView::from).collect(),
-        my_bet: r.bets.iter().find(|b| b.user == caller).map(CrashBetView::from),
-        exposure_cap_vp: casino_book().exposure_cap_vp,
-        paused: casino_book().paused,
-    }
-}
-
-/// Last `n` finished rounds (newest first), each with its revealed seed for the
-/// client-side verify dialog (C14).
-#[ic_cdk::query]
-fn get_crash_history(n: u64) -> Vec<CrashHistoryItem> {
-    let take = n.clamp(1, 100) as usize;
-    CRASH_ROUNDS.with(|m| {
-        m.borrow()
-            .iter()
-            .rev()
-            .take(take)
-            .map(|e| {
-                let r = e.value();
-                CrashHistoryItem {
-                    id: r.id,
-                    crash_x100: r.crash_x100,
-                    chain_index: r.chain_index,
-                    seed_hex: r.seed_reveal.map(|s| hex32(&s)).unwrap_or_default(),
-                    crashed_at: r.crashed_at,
-                }
-            })
-            .collect()
-    })
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CrashVerifyView {
-    pub round_id: u64,
-    pub chain_index: u64,
-    pub seed_hex: String,
-    pub recomputed_x100: u64,
-    pub terminal_hex: String,
-    /// seed hashed forward `chain_index` times must equal the terminal h_0.
-    pub chain_verified: bool,
-}
-
-/// Provably-fair verification for a finished round (C14): returns the seed, the
-/// recomputed crash point, and the chain-link proof back to the genesis terminal.
-#[ic_cdk::query]
-fn verify_crash_round(round_id: u64) -> Result<CrashVerifyView, String> {
-    let r = CRASH_ROUNDS.with(|m| m.borrow().get(&round_id)).ok_or("ROUND_NOT_FOUND")?;
-    let seed = r.seed_reveal.ok_or("NOT_REVEALED")?;
-    let chain = CRASH_CHAIN.with(|c| c.borrow().get().clone());
-    // Hash the seed forward chain_index times → must land on the terminal h_0.
-    let mut h = seed;
-    for _ in 0..r.chain_index {
-        h = sha256(&h);
-    }
-    Ok(CrashVerifyView {
-        round_id,
-        chain_index: r.chain_index,
-        seed_hex: hex32(&seed),
-        recomputed_x100: crash_point_x100(&seed),
-        terminal_hex: hex32(&chain.terminal),
-        chain_verified: h == chain.terminal,
-    })
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CasinoStatsView {
-    pub house_vp_e8s: i64,
-    pub lifetime_burned_vp_e8s: u64,
-    pub jubilee_minted_vp_e8s: u64,
-    pub reconciliation_e8s: i64,
-    pub exposure_cap_vp: u64,
-    pub paused: bool,
-    pub crash_enabled: bool,
-    pub chain_initialized: bool,
-    pub terminal_hex: String,
-}
-
-#[ic_cdk::query]
-fn get_casino_stats() -> CasinoStatsView {
-    let book = casino_book();
-    let chain = CRASH_CHAIN.with(|c| c.borrow().get().clone());
-    CasinoStatsView {
-        house_vp_e8s: i64::try_from(book.house_e8s).unwrap_or(i64::MAX),
-        lifetime_burned_vp_e8s: u64::try_from(book.burned_e8s).unwrap_or(u64::MAX),
-        jubilee_minted_vp_e8s: u64::try_from(book.jubilee_e8s).unwrap_or(u64::MAX),
-        reconciliation_e8s: i64::try_from(casino_reconciliation_e8s()).unwrap_or(i64::MAX),
-        exposure_cap_vp: book.exposure_cap_vp,
-        paused: book.paused,
-        crash_enabled: feature_visible(FLAG_CRASH, get_caller()),
-        chain_initialized: chain.initialized,
-        terminal_hex: hex32(&chain.terminal),
-    }
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct MyCasinoView {
-    pub staking_weight_e8s: u64,
-    pub delta_e8s: i64,
-    pub effective_vp_e8s: u64,
-    pub chips: u64,
-    pub available_chips: u64,
-    pub reserved_chips: u64,
-}
-
-#[ic_cdk::query]
-fn get_my_casino() -> MyCasinoView {
-    let caller = get_caller();
-    MyCasinoView {
-        staking_weight_e8s: casino_staking_weight_e8s(caller),
-        delta_e8s: i64::try_from(casino_delta_e8s(caller)).unwrap_or(i64::MIN),
-        effective_vp_e8s: casino_effective_vp_e8s(caller),
-        chips: casino_chips(caller),
-        available_chips: casino_available_chips(caller),
-        reserved_chips: reserved_chips(caller),
-    }
-}
-
-// ── Casino chat (plans/crash/03 C13, PB-235) ────────────────────────────────
-
-fn valid_chat_text(t: &str) -> bool {
-    !t.is_empty() && t.chars().count() <= CASINO_CHAT_MAX_LEN && t.chars().all(|c| !c.is_control() || c == ' ')
-}
-
-/// Post to the global casino chat (signed-in only, 200 chars, 1 msg/5 s).
-/// Rendered as plain text by the UI — no markup, no links: zero injection
-/// surface. Muted users' posts are silently accepted but only echoed to them.
-#[ic_cdk::update]
-fn post_casino_chat(text: String) -> Result<u64, String> {
-    require_crash_enabled()?;
-    require_authenticated()?;
-    let caller = get_caller();
-    let text = text.trim().to_string();
-    if !valid_chat_text(&text) {
-        return Err("INVALID_TEXT".to_string());
-    }
-    let now = current_time();
-    // Mute check: muted users see only their own messages (handled client-side
-    // via the returned id); we still rate-limit and persist nothing for them.
-    let muted_until = CASINO_MUTES.with(|m| m.borrow().get(&caller)).unwrap_or(0);
-    if now < muted_until {
-        return Err("MUTED".to_string());
-    }
-    // Rate limit: last message by this author within the cooldown.
-    let too_soon = CASINO_CHAT.with(|m| {
-        m.borrow().iter().rev().take(50).any(|e| {
-            let msg = e.value();
-            msg.author == caller && now.saturating_sub(msg.at) < CASINO_CHAT_COOLDOWN_NANOS
-        })
-    });
-    if too_soon {
-        return Err("RATE_LIMITED".to_string());
-    }
-    let mut counters = crash_counters();
-    let id = counters.next_chat_id;
-    counters.next_chat_id += 1;
-    set_crash_counters(counters);
-    CASINO_CHAT.with(|m| {
-        let mut map = m.borrow_mut();
-        map.insert(id, ChatMsg { id, author: caller, text, at: now });
-        // Ring eviction: keep the newest CASINO_CHAT_RING messages.
-        while map.len() > CASINO_CHAT_RING {
-            if let Some(oldest) = map.iter().next().map(|e| *e.key()) {
-                map.remove(&oldest);
-            } else {
-                break;
-            }
-        }
-    });
-    Ok(id)
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct ChatMsgView {
-    pub id: u64,
-    pub author: Principal,
-    pub text: String,
-    pub at: u64,
-}
-
-/// Chat messages with id > `since_id` (0 = the whole ring), oldest→newest.
-#[ic_cdk::query]
-fn get_casino_chat(since_id: u64) -> Vec<ChatMsgView> {
-    CASINO_CHAT.with(|m| {
-        m.borrow()
-            .iter()
-            .filter(|e| *e.key() > since_id)
-            .map(|e| {
-                let v = e.value();
-                ChatMsgView { id: v.id, author: v.author, text: v.text, at: v.at }
-            })
-            .collect()
-    })
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_mute_chat(user: Principal, until: u64) -> Result<(), String> {
-    CASINO_MUTES.with(|m| m.borrow_mut().insert(user, until));
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&AuditLogEntry {
-            timestamp: current_time(),
-            event_type: "crash_chat_mute".to_string(),
-            proposal_id: 0,
-            user,
-            amount_e8s: until,
-        });
-    });
-    Ok(())
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_delete_chat(id: u64) -> Result<(), String> {
-    let removed = CASINO_CHAT.with(|m| m.borrow_mut().remove(&id));
-    if removed.is_some() {
-        AUDIT_LOG.with(|log| {
-            let _ = log.borrow_mut().append(&AuditLogEntry {
-                timestamp: current_time(),
-                event_type: "crash_chat_delete".to_string(),
-                proposal_id: id,
-                user: get_caller(),
-                amount_e8s: 0,
-            });
-        });
-    }
-    Ok(())
-}
-
+// ── Paid-flow helpers: ICRC-2 transfer_from (approve-based) ────────────────
+// Shared by the course-NFT marketplace (and formerly the removed casino) —
+// kept when the Crash/Casino section was deleted 2026-07-06.
 // ── Paid-flow helpers: ICRC-2 transfer_from (approve-based, PB-236/237) ─────
 //
 // The $5 strategy fee and marketplace sales pull tokens FROM the buyer via
@@ -17825,13 +14603,6 @@ enum TransferFromError {
 enum Icrc2TransferFromResult {
     Ok(candid::Nat),
     Err(TransferFromError),
-}
-
-/// Token smallest-units worth `usd_e8s` USD at the cached oracle rate.
-fn usd_to_token_amount(token: ExplorerToken, usd_e8s: u64) -> u64 {
-    let rate = cached_usd_rate_e8s(token).max(1) as u128;
-    let scale = 10u128.pow(explorer_token_decimals(token));
-    u64::try_from((usd_e8s as u128) * scale / rate).unwrap_or(u64::MAX)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -17880,615 +14651,6 @@ async fn call_icrc2_transfer_from(
         return acct_move(from, None, to.owner, to_sub, amount, fee).map(|_| ());
     }
     Ok(())
-}
-
-/// Charge `usd_e8s` (in `token`) from `payer` to the treasury (100% treasury).
-async fn charge_usd_fee_to_treasury(payer: Principal, token: ExplorerToken, usd_e8s: u64) -> Result<(), String> {
-    let config = get_config();
-    let amount = usd_to_token_amount(token, usd_e8s);
-    let ledger = explorer_token_ledger(token, &config);
-    let fee = explorer_token_fee(token, &config);
-    let treasury = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-    call_icrc2_transfer_from(ledger, payer, treasury, amount.saturating_sub(fee), fee).await
-}
-
-/// The seller's share of a marketplace sale. u128 intermediate — the old
-/// `amount * seller_bps` u64 multiply overflowed (and, with overflow-checks
-/// on, trapped) for large small-unit amounts like a $500 ckETH listing.
-fn marketplace_seller_amount(amount: u64, seller_bps: u64) -> u64 {
-    ((amount as u128) * (seller_bps as u128) / 10_000) as u64
-}
-
-/// Charge `usd_e8s` from `payer`, paying `seller_bps`/10_000 to `seller` and the
-/// rest to the treasury (the 80/20 marketplace split).
-///
-/// Money-safety (2026-07-02 audit): the buyer is debited ONCE, in full, into
-/// the treasury subaccount — the old two-transfer_from version could charge
-/// the 80% seller leg and then fail the treasury leg, leaving the buyer paid
-/// but without the purchase. The seller payout now leaves the treasury as a
-/// second step; if THAT leg fails the sale still stands and the seller's
-/// share stays in the treasury for manual settlement (logged) — the paying
-/// buyer is never the victim of a partial failure.
-async fn charge_usd_split_to_seller(
-    payer: Principal,
-    seller: Principal,
-    token: ExplorerToken,
-    usd_e8s: u64,
-    seller_bps: u64,
-) -> Result<(), String> {
-    let config = get_config();
-    let amount = usd_to_token_amount(token, usd_e8s);
-    let ledger = explorer_token_ledger(token, &config);
-    let fee = explorer_token_fee(token, &config);
-    let treasury = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-
-    // 1) Atomic buyer debit — the full price reaches the treasury or nothing does.
-    call_icrc2_transfer_from(ledger, payer, treasury, amount.saturating_sub(fee), fee).await?;
-
-    // 2) Seller payout from the proceeds (treasury absorbs this transfer's fee).
-    let seller_amt = marketplace_seller_amount(amount, seller_bps).saturating_sub(fee);
-    if seller_amt > 0 {
-        let seller_acct = LedgerAccount { owner: seller, subaccount: None };
-        if let Err(e) =
-            call_ledger_transfer(ledger, Some(TREASURY_SUBACCOUNT), seller_acct, seller_amt, Some(fee)).await
-        {
-            canister_print(&format!(
-                "charge_usd_split_to_seller: seller payout failed — sale stands, {} {:?} units retained in treasury for manual settlement to {}: {}",
-                seller_amt, token, seller, e
-            ));
-        }
-    }
-    Ok(())
-}
-
-// ── Strategy DSL + auto-pilot (plans/crash/04, PB-236) ──────────────────────
-
-/// Validate the DSL rails (plans/crash/04 C11). A finite stop trigger is
-/// REQUIRED — no immortal martingales.
-fn validate_strategy(s: &CrashStrategy) -> Result<(), String> {
-    if s.name.is_empty() || s.name.len() > 64 {
-        return Err("BAD_NAME".to_string());
-    }
-    if s.description.len() > 280 {
-        return Err("BAD_DESCRIPTION".to_string());
-    }
-    if !(CRASH_MIN_BET_CHIPS..=CRASH_MAX_BET_CHIPS).contains(&s.base_bet_chips) {
-        return Err("BAD_BASE_BET".to_string());
-    }
-    if !(CRASH_MIN_BET_CHIPS..=CRASH_MAX_BET_CHIPS).contains(&s.max_bet_chips) || s.max_bet_chips < s.base_bet_chips {
-        return Err("BAD_MAX_BET".to_string());
-    }
-    if !(CRASH_MIN_TARGET_X100..=CRASH_MAX_TARGET_X100).contains(&s.auto_target_x100) {
-        return Err("BAD_TARGET".to_string());
-    }
-    for rule in [&s.on_loss, &s.on_win] {
-        if rule.action == BetAction::Multiply && !(100..=1000).contains(&rule.factor_x100) {
-            return Err("BAD_FACTOR".to_string());
-        }
-    }
-    if s.skip_rounds_after_loss > 10 {
-        return Err("BAD_SKIP".to_string());
-    }
-    if s.stop.max_rounds > 5000 {
-        return Err("BAD_MAX_ROUNDS".to_string());
-    }
-    let has_stop = s.stop.take_profit_vp_x1000 > 0 || s.stop.stop_loss_vp_x1000 > 0 || s.stop.max_rounds > 0;
-    if !has_stop {
-        return Err("STOP_REQUIRED".to_string());
-    }
-    Ok(())
-}
-
-/// Seed the four free builtin strategies (idempotent; called from init/enable).
-fn seed_builtin_strategies() {
-    let exists = CRASH_STRATEGIES.with(|m| m.borrow().iter().any(|e| e.value().builtin));
-    if exists {
-        return;
-    }
-    let house = get_canister_id();
-    let now = current_time();
-    let mut mk = |id: u64, name: &str, desc: &str, base: u64, target: u64, on_loss: ProgressionRule, on_win: ProgressionRule, max_bet: u64, skip: u64| CrashStrategy {
-        id,
-        author: house,
-        name: name.to_string(),
-        description: desc.to_string(),
-        base_bet_chips: base,
-        auto_target_x100: target,
-        on_loss,
-        on_win,
-        max_bet_chips: max_bet,
-        max_consecutive_losses: 0,
-        skip_rounds_after_loss: skip,
-        stop: StrategyStop { take_profit_vp_x1000: 0, stop_loss_vp_x1000: 0, max_rounds: 1000 },
-        version: 1,
-        builtin: true,
-        lifetime_vp_e8s: 0,
-        created_at: now,
-    };
-    let reset = ProgressionRule { action: BetAction::Reset, factor_x100: 0 };
-    let dbl = ProgressionRule { action: BetAction::Multiply, factor_x100: 200 };
-    let builtins = vec![
-        mk(1, "Flat", "Same bet every round, 2.00× target.", 100, 200, reset, reset, 100, 0),
-        mk(2, "Classic Martingale", "Double on loss, reset on win, 2.00× target.", 100, 200, dbl, reset, 5000, 0),
-        mk(3, "Paroli", "Double on win, reset on loss (reverse martingale), 2.00× target.", 100, 200, reset, dbl, 5000, 0),
-        mk(4, "Target Sniper", "Flat bets at 10× target, cool down 2 rounds after a loss.", 100, 1000, reset, reset, 100, 2),
-    ];
-    CRASH_STRATEGIES.with(|m| {
-        for b in builtins {
-            m.borrow_mut().insert(b.id, b);
-        }
-    });
-    let mut counters = crash_counters();
-    if counters.next_strategy_id < 5 {
-        counters.next_strategy_id = 5;
-        set_crash_counters(counters);
-    }
-}
-
-/// Author a crash strategy. Costs $5 (charged in `token` via the shared quote
-/// flow — same machinery as the explorer/idea-board fees: the caller must have
-/// pre-approved the canister via icrc2_approve). ≤ 20 per author, ≤ 4 KB.
-#[ic_cdk::update]
-async fn create_crash_strategy(strategy: CrashStrategyInput, token: ExplorerToken) -> Result<u64, String> {
-    require_crash_enabled()?;
-    require_authenticated()?;
-    let caller = get_caller();
-    let owned = CRASH_STRATEGIES.with(|m| m.borrow().iter().filter(|e| e.value().author == caller && !e.value().builtin).count());
-    if owned >= MAX_STRATEGIES_PER_AUTHOR {
-        return Err("TOO_MANY_STRATEGIES".to_string());
-    }
-    // Size guard via the JSON the frontend would store.
-    if serde_json::to_vec(&strategy).map(|v| v.len()).unwrap_or(usize::MAX) > MAX_STRATEGY_JSON_BYTES {
-        return Err("STRATEGY_TOO_LARGE".to_string());
-    }
-    let mut counters = crash_counters();
-    let id = counters.next_strategy_id;
-    let s = CrashStrategy {
-        id,
-        author: caller,
-        name: strategy.name,
-        description: strategy.description,
-        base_bet_chips: strategy.base_bet_chips,
-        auto_target_x100: strategy.auto_target_x100,
-        on_loss: ProgressionRule { action: if strategy.on_loss_multiply { BetAction::Multiply } else { BetAction::Reset }, factor_x100: strategy.on_loss_factor_x100 },
-        on_win: ProgressionRule { action: if strategy.on_win_multiply { BetAction::Multiply } else { BetAction::Reset }, factor_x100: strategy.on_win_factor_x100 },
-        max_bet_chips: strategy.max_bet_chips,
-        max_consecutive_losses: strategy.max_consecutive_losses,
-        skip_rounds_after_loss: strategy.skip_rounds_after_loss,
-        stop: StrategyStop {
-            take_profit_vp_x1000: strategy.take_profit_vp_x1000,
-            stop_loss_vp_x1000: strategy.stop_loss_vp_x1000,
-            max_rounds: strategy.max_rounds,
-        },
-        version: 1,
-        builtin: false,
-        lifetime_vp_e8s: 0,
-        created_at: current_time(),
-    };
-    validate_strategy(&s)?;
-    // Charge the $5 fee to the treasury (skipped on local where rates are mock-
-    // pinned but the transfer still runs against the local ledger).
-    charge_usd_fee_to_treasury(caller, token, CRASH_STRATEGY_FEE_USD_E8S).await?;
-    counters.next_strategy_id += 1;
-    set_crash_counters(counters);
-    CRASH_STRATEGIES.with(|m| m.borrow_mut().insert(id, s));
-    Ok(id)
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct CrashStrategyInput {
-    pub name: String,
-    pub description: String,
-    pub base_bet_chips: u64,
-    pub auto_target_x100: u64,
-    pub on_loss_multiply: bool,
-    pub on_loss_factor_x100: u64,
-    pub on_win_multiply: bool,
-    pub on_win_factor_x100: u64,
-    pub max_bet_chips: u64,
-    pub max_consecutive_losses: u64,
-    pub skip_rounds_after_loss: u64,
-    pub take_profit_vp_x1000: u64,
-    pub stop_loss_vp_x1000: u64,
-    pub max_rounds: u64,
-}
-
-#[ic_cdk::query]
-fn list_crash_strategies() -> Vec<CrashStrategy> {
-    let caller = get_caller();
-    CRASH_STRATEGIES.with(|m| {
-        m.borrow()
-            .iter()
-            .map(|e| e.value())
-            // Builtins + the caller's own + anything they hold a license to.
-            .filter(|s| s.builtin || s.author == caller || user_has_license_for_strategy(caller, s.id))
-            .collect()
-    })
-}
-
-/// Start auto-pilot with a strategy the caller may use (builtin / owned / licensed).
-#[ic_cdk::update]
-fn start_autopilot(strategy_id: u64) -> Result<(), String> {
-    require_crash_enabled()?;
-    require_authenticated()?;
-    let caller = get_caller();
-    let s = CRASH_STRATEGIES.with(|m| m.borrow().get(&strategy_id)).ok_or("STRATEGY_NOT_FOUND")?;
-    if !(s.builtin || s.author == caller || user_has_license_for_strategy(caller, strategy_id)) {
-        return Err("NO_LICENSE".to_string());
-    }
-    CRASH_AUTOPILOT.with(|m| {
-        m.borrow_mut().insert(caller, AutopilotState {
-            strategy_id,
-            active: true,
-            current_bet_chips: s.base_bet_chips,
-            consecutive_losses: 0,
-            skip_counter: 0,
-            rounds_played: 0,
-            session_pnl_e8s: 0,
-            started_at: current_time(),
-            stop_reason: None,
-        })
-    });
-    Ok(())
-}
-
-#[ic_cdk::update]
-fn stop_autopilot() -> Result<(), String> {
-    require_authenticated()?;
-    let caller = get_caller();
-    let existing = CRASH_AUTOPILOT.with(|m| m.borrow().get(&caller));
-    if let Some(mut st) = existing {
-        st.active = false;
-        st.stop_reason = Some("stopped by user".to_string());
-        CRASH_AUTOPILOT.with(|m| m.borrow_mut().insert(caller, st));
-    }
-    Ok(())
-}
-
-#[ic_cdk::query]
-fn get_my_autopilot() -> Option<AutopilotState> {
-    CRASH_AUTOPILOT.with(|m| m.borrow().get(&get_caller()))
-}
-
-/// Place a bet for every active auto-pilot at the betting window (FIFO, capped).
-fn crash_run_autopilots() {
-    let pilots: Vec<(Principal, AutopilotState)> = CRASH_AUTOPILOT.with(|m| {
-        m.borrow().iter().filter(|e| e.value().active).map(|e| (*e.key(), e.value())).take(CRASH_AUTOPILOT_CAP).collect()
-    });
-    for (user, mut st) in pilots {
-        if st.skip_counter > 0 {
-            st.skip_counter -= 1;
-            CRASH_AUTOPILOT.with(|m| m.borrow_mut().insert(user, st));
-            continue;
-        }
-        let s = match CRASH_STRATEGIES.with(|m| m.borrow().get(&st.strategy_id)) {
-            Some(s) => s,
-            None => continue,
-        };
-        let wager = st.current_bet_chips.clamp(CRASH_MIN_BET_CHIPS, s.max_bet_chips.min(CRASH_MAX_BET_CHIPS));
-        // Every guard still applies (rails, floor, exposure). A rejected bet
-        // simply skips this round; the strategy state is untouched.
-        let _ = crash_place_bet(user, wager, s.auto_target_x100, true, Some(s.id));
-    }
-}
-
-/// Advance an auto-pilot's state after its bet settled, then check stops.
-fn crash_autopilot_after_round(user: Principal, delta_e8s: i128, won: bool) {
-    let mut st = match CRASH_AUTOPILOT.with(|m| m.borrow().get(&user)) {
-        Some(s) if s.active => s,
-        _ => return,
-    };
-    let s = match CRASH_STRATEGIES.with(|m| m.borrow().get(&st.strategy_id)) {
-        Some(s) => s,
-        None => return,
-    };
-    st.rounds_played += 1;
-    st.session_pnl_e8s += delta_e8s;
-    // Bet sizing for next round.
-    let next_rule = if won { s.on_win } else { s.on_loss };
-    let base = st.current_bet_chips;
-    st.current_bet_chips = match next_rule.action {
-        BetAction::Reset => s.base_bet_chips,
-        BetAction::Multiply => (base * next_rule.factor_x100 / 100).clamp(CRASH_MIN_BET_CHIPS, s.max_bet_chips),
-    };
-    if won {
-        st.consecutive_losses = 0;
-    } else {
-        st.consecutive_losses += 1;
-        st.skip_counter = s.skip_rounds_after_loss;
-    }
-    // Stop conditions (any one ends the session).
-    let pnl_vp_x1000 = st.session_pnl_e8s / (CHIP_E8S as i128); // VP×1000 == chips
-    let mut stop_reason: Option<String> = None;
-    if s.max_consecutive_losses > 0 && st.consecutive_losses >= s.max_consecutive_losses {
-        stop_reason = Some(format!("max {} consecutive losses", s.max_consecutive_losses));
-    } else if s.stop.max_rounds > 0 && st.rounds_played >= s.stop.max_rounds {
-        stop_reason = Some(format!("max-rounds {} reached", s.stop.max_rounds));
-    } else if s.stop.take_profit_vp_x1000 > 0 && pnl_vp_x1000 >= s.stop.take_profit_vp_x1000 as i128 {
-        stop_reason = Some("take-profit reached".to_string());
-    } else if s.stop.stop_loss_vp_x1000 > 0 && pnl_vp_x1000 <= -(s.stop.stop_loss_vp_x1000 as i128) {
-        stop_reason = Some("stop-loss reached".to_string());
-    }
-    if let Some(reason) = stop_reason {
-        st.active = false;
-        st.stop_reason = Some(reason);
-    }
-    CRASH_AUTOPILOT.with(|m| m.borrow_mut().insert(user, st));
-}
-
-// ── Shared marketplace (plans/crash/04 C12, PB-237) ─────────────────────────
-
-fn user_has_license_for_strategy(user: Principal, strategy_id: u64) -> bool {
-    MARKET_LISTINGS.with(|lm| {
-        lm.borrow().iter().any(|e| {
-            let l = e.value();
-            l.kind == MarketKind::Crash
-                && l.item_id == strategy_id
-                && MARKET_LICENSES.with(|cm| cm.borrow().iter().any(|c| {
-                    let lic = c.value();
-                    lic.listing_id == l.id && lic.buyer == user
-                }))
-        })
-    })
-}
-
-/// List a crash strategy (you authored) on the shared marketplace. $1–$500.
-#[ic_cdk::update]
-fn list_strategy(strategy_id: u64, price_usd_e8s: u64, teaser: String) -> Result<u64, String> {
-    require_crash_enabled()?;
-    require_authenticated()?;
-    let caller = get_caller();
-    if !(MARKET_PRICE_MIN_USD_E8S..=MARKET_PRICE_MAX_USD_E8S).contains(&price_usd_e8s) {
-        return Err("BAD_PRICE".to_string());
-    }
-    let s = CRASH_STRATEGIES.with(|m| m.borrow().get(&strategy_id)).ok_or("STRATEGY_NOT_FOUND")?;
-    if s.author != caller || s.builtin {
-        return Err("NOT_OWNER".to_string());
-    }
-    let mut counters = crash_counters();
-    let id = counters.next_listing_id;
-    counters.next_listing_id += 1;
-    set_crash_counters(counters);
-    MARKET_LISTINGS.with(|m| m.borrow_mut().insert(id, Listing {
-        id,
-        kind: MarketKind::Crash,
-        seller: caller,
-        item_id: strategy_id,
-        title: s.name.clone(),
-        teaser: teaser.chars().take(120).collect(),
-        price_usd_e8s,
-        sales: 0,
-        created_at: current_time(),
-        active: true,
-    }));
-    Ok(id)
-}
-
-#[ic_cdk::query]
-fn list_marketplace(kind_filter: Option<MarketKind>) -> Vec<Listing> {
-    MARKET_LISTINGS.with(|m| {
-        m.borrow()
-            .iter()
-            .map(|e| e.value())
-            .filter(|l| l.active && kind_filter.map(|k| k == l.kind).unwrap_or(true))
-            .collect()
-    })
-}
-
-/// Buy a license: 80% to the seller, 20% to the treasury (one payment path for
-/// both kinds). The buyer must have pre-approved the canister via icrc2_approve.
-#[ic_cdk::update]
-async fn buy_license(listing_id: u64, token: ExplorerToken) -> Result<u64, String> {
-    require_crash_enabled()?;
-    require_authenticated()?;
-    let caller = get_caller();
-    let listing = MARKET_LISTINGS.with(|m| m.borrow().get(&listing_id)).ok_or("LISTING_NOT_FOUND")?;
-    if !listing.active {
-        return Err("LISTING_INACTIVE".to_string());
-    }
-    if listing.seller == caller {
-        return Err("CANNOT_BUY_OWN".to_string());
-    }
-    if user_has_license_for_strategy(caller, listing.item_id) {
-        return Err("ALREADY_LICENSED".to_string());
-    }
-    // Charge buyer; split 80/20.
-    charge_usd_split_to_seller(caller, listing.seller, token, listing.price_usd_e8s, MARKET_SELLER_BPS).await?;
-    let mut counters = crash_counters();
-    let id = counters.next_license_id;
-    counters.next_license_id += 1;
-    set_crash_counters(counters);
-    MARKET_LICENSES.with(|m| m.borrow_mut().insert(id, License { id, listing_id, buyer: caller, at: current_time() }));
-    let listing_now = MARKET_LISTINGS.with(|m| m.borrow().get(&listing_id));
-    if let Some(mut l) = listing_now {
-        l.sales += 1;
-        MARKET_LISTINGS.with(|m| m.borrow_mut().insert(listing_id, l));
-    }
-    Ok(id)
-}
-
-#[ic_cdk::query]
-fn get_my_licenses() -> Vec<License> {
-    let caller = get_caller();
-    MARKET_LICENSES.with(|m| m.borrow().iter().filter(|e| e.value().buyer == caller).map(|e| e.value()).collect())
-}
-
-// ── Admin: genesis, pause, void, exposure cap (plans/crash/01 + 02) ─────────
-
-/// Owner one-time bootstrap: draw the genesis seed, build the hash chain,
-/// publish the terminal commitment, seed builtin strategies, and start the
-/// round loop. Idempotent (re-running with an initialized chain is a no-op
-/// except for re-arming the loop). The `crash` flag must already be ON.
-#[ic_cdk::update(guard = "require_admin")]
-async fn admin_init_crash() -> Result<String, String> {
-    if !feature_active(FLAG_CRASH) {
-        return Err("ENABLE_FLAG_FIRST".to_string());
-    }
-    let already = CRASH_CHAIN.with(|c| c.borrow().get().initialized);
-    if !already {
-        let seed = crash_random_seed().await?;
-        let (terminal, checkpoints) = build_crash_chain(seed, CRASH_CHAIN_N, CRASH_CHAIN_STRIDE);
-        CRASH_CHAIN.with(|c| {
-            let _ = c.borrow_mut().set(CrashChain {
-                initialized: true,
-                chain_seed: seed,
-                terminal,
-                n: CRASH_CHAIN_N,
-                stride: CRASH_CHAIN_STRIDE,
-                checkpoints,
-            });
-        });
-    }
-    seed_builtin_strategies();
-    let mut book = casino_book();
-    book.paused = false;
-    book.exposure_cap_vp = CRASH_DEFAULT_EXPOSURE_CAP_VP;
-    set_casino_book(book);
-    // Start a fresh cycle.
-    crash_arm_timer(0);
-    let terminal = CRASH_CHAIN.with(|c| hex32(&c.borrow().get().terminal));
-    Ok(terminal)
-}
-
-/// Pause/unpause the round loop. The current round still settles; no new
-/// betting window opens while paused.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_pause_crash(paused: bool) -> Result<(), String> {
-    let mut book = casino_book();
-    book.paused = paused;
-    set_casino_book(book);
-    if !paused {
-        crash_resume();
-    }
-    Ok(())
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_exposure_cap(cap_vp: u64) -> Result<(), String> {
-    if !(CRASH_EXPOSURE_CAP_MIN_VP..=CRASH_EXPOSURE_CAP_MAX_VP).contains(&cap_vp) {
-        return Err("CAP_OUT_OF_RANGE".to_string());
-    }
-    let mut book = casino_book();
-    book.exposure_cap_vp = cap_vp;
-    set_casino_book(book);
-    Ok(())
-}
-
-/// Catastrophic-wedge escape hatch (writer #4): refund every wager in the
-/// current round (delta 0 for all, house delta 0) and archive it void.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_void_crash_round() -> Result<(), String> {
-    let mut r = crash_state();
-    if matches!(r.phase, CrashPhase::Crashed | CrashPhase::Intermission) {
-        return Err("NOTHING_TO_VOID".to_string());
-    }
-    for bet in r.bets.iter_mut() {
-        bet.outcome = BetOutcome::Lost; // marked settled with zero delta
-        bet.payout_x100 = 0;
-        bet.delta_e8s = 0;
-    }
-    r.phase = CrashPhase::Crashed;
-    r.crashed_at = current_time();
-    set_crash_state(r.clone());
-    crash_archive(r);
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&AuditLogEntry {
-            timestamp: current_time(),
-            event_type: "crash_void_round".to_string(),
-            proposal_id: 0,
-            user: get_caller(),
-            amount_e8s: 0,
-        });
-    });
-    if feature_active(FLAG_CRASH) && !casino_book().paused {
-        crash_arm_timer(CRASH_INTERMISSION_NANOS);
-    }
-    Ok(())
-}
-
-/// Local-dev only (admin): make the table playable + lively. Grants the CALLER a
-/// dev stake (so they have chips to play), then seeds six auto-pilot bots with
-/// dev stakes and varied builtin strategies so every round has company, plus a
-/// little opening chatter. Bots react to outcomes via `crash_bot_chatter`.
-#[ic_cdk::update(guard = "require_admin")]
-fn dev_seed_casino_play() -> Result<String, String> {
-    require_local_dev()?;
-    let now = current_time();
-    // 100,000 ICP of dev stake ≈ 10,000 VP of chips — enough to test the
-    // 10,000-VP payout cap (e.g. a 5,000-VP bet auto-cashing at 2×).
-    dev_grant_stake(get_caller(), 100_000 * ONE_ICP_E8S, now);
-    let house = get_canister_id();
-    // (handle, bet in VP, target ×100). Big bettors set a high target so the
-    // 10,000-VP payout cap is what stops them (auto-cash at 2.00× / 1.67× / 1.25×).
-    let bots: [(&str, u64, u64); 6] = [
-        ("rocketRandy", 500, 200),
-        ("2xTina", 1_500, 200),
-        ("moonGoblin", 3_000, 200),
-        ("serStaker", 5_000, 1_000),
-        ("autoAnnie", 6_000, 1_000),
-        ("diamondDan", 8_000, 1_000),
-    ];
-    let mut counters = crash_counters();
-    for (i, (h, bet_vp, target)) in bots.iter().enumerate() {
-        let p = Principal::from_slice(&[0xB0, i as u8, 0xCA, 0x51, 0x00]);
-        let bet_chips = bet_vp * 1_000;
-        // A deep bankroll (≈ 500× the bet) so bots don't bust mid-review and the
-        // table stays full. Local-dev only.
-        dev_grant_stake(p, bet_vp * 5_000 * ONE_ICP_E8S, now);
-        CASINO_BOTS.with(|m| m.borrow_mut().insert(p, h.to_string()));
-        // A per-bot flat strategy so the bet stays fixed each round.
-        let sid = counters.next_strategy_id;
-        counters.next_strategy_id += 1;
-        let reset = ProgressionRule { action: BetAction::Reset, factor_x100: 0 };
-        CRASH_STRATEGIES.with(|m| {
-            m.borrow_mut().insert(sid, CrashStrategy {
-                id: sid,
-                author: house,
-                name: format!("{} flat {}VP", h, bet_vp),
-                description: String::new(),
-                base_bet_chips: bet_chips,
-                auto_target_x100: *target,
-                on_loss: reset,
-                on_win: reset,
-                max_bet_chips: bet_chips,
-                max_consecutive_losses: 0,
-                skip_rounds_after_loss: 0,
-                stop: StrategyStop { take_profit_vp_x1000: 0, stop_loss_vp_x1000: 0, max_rounds: 1_000_000 },
-                version: 1,
-                builtin: false,
-                lifetime_vp_e8s: 0,
-                created_at: now,
-            })
-        });
-        CRASH_AUTOPILOT.with(|m| {
-            m.borrow_mut().insert(p, AutopilotState {
-                strategy_id: sid,
-                active: true,
-                current_bet_chips: bet_chips,
-                consecutive_losses: 0,
-                skip_counter: 0,
-                rounds_played: 0,
-                session_pnl_e8s: 0,
-                started_at: now,
-                stop_reason: None,
-            })
-        });
-    }
-    set_crash_counters(counters);
-    bot_say(Principal::from_slice(&[0xB0, 0, 0xCA, 0x51, 0x00]), "gm degens — who's hitting 10x today");
-    bot_say(Principal::from_slice(&[0xB0, 3, 0xCA, 0x51, 0x00]), "betting 5k VP, capped at 2x but it's free money");
-    Ok("seeded 6 auto-pilot bots (500–8,000 VP) + granted you 100,000 ICP of dev stake to play".to_string())
-}
-
-/// Dev helper: park a stake directly in tier 0 so a principal has casino chips
-/// without running the real staking flow. Overwrites any existing dev stake.
-fn dev_grant_stake(user: Principal, amount_e8s: u64, now: u64) {
-    STAKES.with(|m| {
-        m.borrow_mut().insert(
-            stake_key(StakeTier::all()[0], user),
-            UserStake { amount_e8s, staked_at: now, last_action_at: now },
-        );
-    });
 }
 
 // ==========================================
@@ -21177,554 +17339,20 @@ async fn dev_clear_courses() -> Result<u64, String> {
 }
 
 // ==========================================
-// 21. Cycles Faucet (PB-400)
+// 21. Cycles Faucet — REMOVED 2026-07-06 (owner). PB-400 treasury-ICP→cycles
+// grants; never enabled on mainnet (flag `cycles_faucet` retired). MemoryIds
+// used by its registration/usage maps are ORPHANED — never reuse (see §3).
 // ==========================================
-//
-// Recycles a slice of treasury ICP into cycles grants for engaged pool members.
-// A claim is a narrower cousin of `settle_burn_split`: price a fixed $2 USD grant
-// to ICP via the cached XRC oracle, then top up the developer's REGISTERED
-// canister with cycles through the existing CMC pipeline
-// (`call_cmc_topup_transfer` → `notify_cmc_topup`, idempotent on block index).
-//
-// The new surface is eligibility + rate-limit + circuit-breaker:
-//   G1 registered canister   G2 active pool neuron   G3 burn-vote in last 30d
-//   G4 weekly cooldown (per-dev AND per-canister)   G5 canister 25× lifetime cap
-//   G6 treasury floor circuit-breaker (incl. this grant's ICP)
-//
-// Ships behind the `cycles_faucet` flag (default OFF — owner kill switch).
-// Mainnet-only behaviour: PB-148 makes end-to-end local claims unreliable; the
-// host tests below exercise every gate + the saga via the existing mock seams.
 
-/// Proof-of-control registration record. A target canister calls
-/// `register_faucet_canister` ON ITSELF — `msg_caller == canister_id` is
-/// cryptographic proof of control (the IC authenticates every message's caller),
-/// which blocks the "register a popular canister to burn its weekly slot"
-/// griefing vector (review C1). `pending_block` journals an in-flight CMC
-/// transfer's block index so a retried claim re-notifies the same block (never
-/// double-mints); dropped on a `Refunded` leg.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct FaucetRegistration {
-    pub canister_id: Principal,
-    pub registered_at: u64,
-    #[serde(default)]
-    pub pending_block: Option<u64>,
-}
-
-/// Per-canister usage: last claim time (weekly cooldown G4) + lifetime count
-/// (25× cap G5). Two O(1) checks — no history (that lives in the audit log).
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
-pub struct FaucetCanisterUsage {
-    pub last_claim_ns: u64,
-    pub count: u32,
-}
-
-/// All-time faucet stats (public transparency).
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
-pub struct FaucetStats {
-    /// All-time count of successful grants.
-    pub total_claims: u64,
-    /// All-time ICP spent on grants (e8s; the treasury outflow, fees excluded).
-    pub total_granted_icp_e8s: u64,
-    pub last_grant_at: u64,
-}
-
-/// One recorded faucet grant, for the public transaction list. `block_index` is
-/// the ICP-ledger block of the treasury→CMC transfer — the on-chain transaction
-/// a UI can link to. Keyed in FAUCET_GRANTS by `id` (== the grant's sequence).
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct FaucetGrant {
-    pub id: u64,
-    pub dev: Principal,
-    pub canister_id: Principal,
-    pub amount_icp_e8s: u64,
-    pub block_index: u64,
-    pub at: u64,
-}
-
-impl_storable!(FaucetRegistration);
-impl_storable!(FaucetCanisterUsage);
-impl_storable!(FaucetStats);
-impl_storable!(FaucetGrant);
-
-thread_local! {
-    static FAUCET_REGISTRATIONS: RefCell<StableBTreeMap<Principal, FaucetRegistration, Memory>> =
-        MEMORY_MANAGER.with(|mm| {
-            RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(90))))
-        });
-
-    static FAUCET_DEV_LAST_CLAIM: RefCell<StableBTreeMap<Principal, u64, Memory>> =
-        MEMORY_MANAGER.with(|mm| {
-            RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(91))))
-        });
-
-    static FAUCET_CANISTER_USAGE: RefCell<StableBTreeMap<Principal, FaucetCanisterUsage, Memory>> =
-        MEMORY_MANAGER.with(|mm| {
-            RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(92))))
-        });
-
-    // 93 reserved (Phase 2 cached-balance / weekly-budget cell); stats live here.
-    static FAUCET_STATS: RefCell<StableCell<FaucetStats, Memory>> =
-        MEMORY_MANAGER.with(|mm| {
-            RefCell::new(StableCell::init(
-                mm.borrow().get(MemoryId::new(93)),
-                FaucetStats::default(),
-            ))
-        });
-
-    // 96 — recorded grants for the public transaction list (keyed by grant id).
-    static FAUCET_GRANTS: RefCell<StableBTreeMap<u64, FaucetGrant, Memory>> =
-        MEMORY_MANAGER.with(|mm| {
-            RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(96))))
-        });
-}
-
-/// Structured eligibility result — a developer's CLI/agent can render exactly
-/// which gate is blocking and when they're next eligible (review optimization).
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub enum FaucetGate {
-    Eligible,
-    FaucetDisabled,
-    CanisterNotRegistered,
-    NoPoolNeuron,
-    NotVotedInWindow,
-    ClaimedThisWeek { next_at: u64 },
-    CanisterLifetimeReached { count: u32 },
-    TreasuryLow,
-}
-
-/// Everything the faucet UI / a CLI needs in one query.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct FaucetStatus {
-    /// Effective flag for the caller (On for all, AdminOn → admins only).
-    pub enabled: bool,
-    /// The blocking gate for `(caller, canister_id)`, or `Eligible`.
-    pub gate: FaucetGate,
-    pub registered: bool,
-    /// Caller has an active pool neuron (G2).
-    pub has_pool_neuron: bool,
-    /// Caller burn-voted within the window (G3).
-    pub voted_in_window: bool,
-    /// Lifetime claims used by the registered canister (of `lifetime_cap`).
-    pub canister_claims_used: u32,
-    /// Next time this dev OR canister may claim again (max of the two), 0 if now.
-    pub next_eligible_at: u64,
-    // ── params (admin-tunable; echoed for the UI) ──
-    pub grant_usd_e8s: u64,
-    pub lifetime_cap: u32,
-    pub claim_window_ns: u64,
-    pub vote_window_ns: u64,
-    pub treasury_floor_e8s: u64,
-    /// Estimated grant ICP at the current cached rate (e8s). 0 if rate unknown.
-    pub est_grant_icp_e8s: u64,
-}
-
-/// $2-of-USD (e8s) → ICP (e8s) at the cached XRC rate. Mirrors
+/// USD (e8s) → ICP (e8s) at the cached XRC rate. Mirrors
 /// `expected_icp_for_token`'s maths. Returns 0 if no rate is cached.
+/// (Kept when the Cycles Faucet was removed — X-Farm tier pricing uses it.)
 fn usd_e8s_to_icp_e8s(usd_e8s: u64) -> u64 {
     let icp_rate = cached_usd_rate_e8s(ExplorerToken::ICP); // USD e8s per 1 ICP
     if icp_rate == 0 {
         return 0;
     }
     u64::try_from(usd_e8s as u128 * 100_000_000u128 / icp_rate as u128).unwrap_or(u64::MAX)
-}
-
-/// True when the caller has an ACTIVE pool neuron (G2). Admins bypass (same
-/// posture as `arcade_access`).
-fn faucet_has_pool_access(caller: Principal) -> bool {
-    if is_admin_principal(caller) {
-        return true;
-    }
-    matches!(get_my_pool_neuron(), Some(pn) if pn.status == PoolStatus::Active)
-}
-
-/// True when the caller burn-voted within `window_ns` (G3). Same scan as
-/// `arcade_access`: any COMMITMENT created in-window, or any LOSSLESS_VOTE cast
-/// in-window. Admins bypass.
-fn faucet_voted_in_window(caller: Principal, window_ns: u64) -> bool {
-    if is_admin_principal(caller) {
-        return true;
-    }
-    let cutoff = current_time().saturating_sub(window_ns);
-    COMMITMENTS.with(|m| {
-        m.borrow().iter().any(|e| {
-            let c = e.value();
-            c.principal == caller && c.created_at >= cutoff
-        })
-    }) || LOSSLESS_VOTES.with(|m| {
-        m.borrow().iter().any(|e| {
-            let v = e.value();
-            v.principal == caller && v.cast_at >= cutoff
-        })
-    })
-}
-
-/// Pure eligibility evaluation for `(caller, canister_id)`. Order matches the
-/// gate numbering; the FIRST failing gate is returned. The treasury floor (G6)
-/// is checked separately at claim time (it needs an async balance read).
-fn faucet_eligibility_sync(caller: Principal, canister_id: Principal, config: &Config) -> FaucetGate {
-    if !feature_visible(FLAG_CYCLES_FAUCET, caller) {
-        return FaucetGate::FaucetDisabled;
-    }
-    // G1: registered canister.
-    let registration = FAUCET_REGISTRATIONS.with(|m| m.borrow().get(&canister_id));
-    if registration.is_none() {
-        return FaucetGate::CanisterNotRegistered;
-    }
-    // G2: active pool neuron.
-    if !faucet_has_pool_access(caller) {
-        return FaucetGate::NoPoolNeuron;
-    }
-    // G3: burn-vote within the window.
-    if !faucet_voted_in_window(caller, config.faucet_vote_window_ns) {
-        return FaucetGate::NotVotedInWindow;
-    }
-    let now = current_time();
-    // G4: weekly cooldown — per-dev AND per-canister.
-    let dev_last = FAUCET_DEV_LAST_CLAIM.with(|m| m.borrow().get(&caller).unwrap_or(0));
-    let usage = FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&canister_id).unwrap_or_default());
-    let dev_next = dev_last.saturating_add(config.faucet_claim_window_ns);
-    let can_next = usage.last_claim_ns.saturating_add(config.faucet_claim_window_ns);
-    let next_at = dev_next.max(can_next);
-    if (dev_last != 0 && now < dev_next) || (usage.last_claim_ns != 0 && now < can_next) {
-        return FaucetGate::ClaimedThisWeek { next_at };
-    }
-    // G5: canister lifetime cap.
-    if usage.count >= config.faucet_canister_lifetime_cap {
-        return FaucetGate::CanisterLifetimeReached { count: usage.count };
-    }
-    FaucetGate::Eligible
-}
-
-/// Proof-of-control registration. The TARGET canister calls this on itself, so
-/// `get_caller()` (the message's authenticated caller) IS the canister to
-/// register. Cheap, network-free rejects for obviously-bad principals.
-#[ic_cdk::update]
-fn register_faucet_canister(canister_id: Principal) -> Result<(), String> {
-    // Any authenticated dev can register a canister id from the dapp — the
-    // self-call proof-of-control constraint was removed by product decision.
-    // The grant only ever tops up the target canister with cycles, so registering
-    // a canister you don't control just spends your own eligibility on it.
-    require_authenticated()?;
-    // Must be an opaque (canister) principal — a user/self-authenticating
-    // principal can't be a cycles destination. Opaque principals end in the
-    // 0x01 type byte.
-    let bytes = canister_id.as_slice();
-    if bytes.is_empty() || *bytes.last().unwrap() != 0x01 {
-        return Err("NOT_A_CANISTER".to_string());
-    }
-    if canister_id == get_canister_id() {
-        return Err("CANNOT_REGISTER_SELF".to_string());
-    }
-    let now = current_time();
-    FAUCET_REGISTRATIONS.with(|m| {
-        let mut m = m.borrow_mut();
-        // Re-registration refreshes the timestamp but preserves any pending block.
-        let pending = m.get(&canister_id).and_then(|r| r.pending_block);
-        m.insert(
-            canister_id,
-            FaucetRegistration { canister_id, registered_at: now, pending_block: pending },
-        );
-    });
-    Ok(())
-}
-
-/// Claim a $2-USD cycles grant for a previously-registered canister. Enforces
-/// G1–G6, then tops up the target via the existing CMC pipeline. Idempotent
-/// saga: the in-flight block index is journaled on the registration so a retry
-/// re-notifies the same block (never double-mints); a CMC refund drops it so the
-/// retry re-transfers. Records the claim only AFTER the cycles are minted.
-#[ic_cdk::update]
-async fn claim_faucet_cycles(canister_id: Principal) -> Result<(), String> {
-    require_authenticated()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-
-    // Gates G1–G5 (sync).
-    match faucet_eligibility_sync(caller, canister_id, &config) {
-        FaucetGate::Eligible => {}
-        FaucetGate::FaucetDisabled => return Err("FAUCET_DISABLED".to_string()),
-        FaucetGate::CanisterNotRegistered => return Err("CANISTER_NOT_REGISTERED".to_string()),
-        FaucetGate::NoPoolNeuron => return Err("NO_POOL_NEURON".to_string()),
-        FaucetGate::NotVotedInWindow => return Err("NOT_VOTED_IN_WINDOW".to_string()),
-        FaucetGate::ClaimedThisWeek { .. } => return Err("CLAIMED_THIS_WEEK".to_string()),
-        FaucetGate::CanisterLifetimeReached { .. } => return Err("CANISTER_LIFETIME_REACHED".to_string()),
-        FaucetGate::TreasuryLow => return Err("TREASURY_LOW".to_string()),
-    }
-
-    // Price the $2 grant into ICP (warm the cache on mainnet first).
-    refresh_icp_rate(&config).await;
-    let grant_icp_e8s = usd_e8s_to_icp_e8s(config.faucet_grant_usd_e8s);
-    if grant_icp_e8s == 0 {
-        return Err("RATE_UNAVAILABLE".to_string());
-    }
-
-    // G6: treasury floor circuit-breaker — fail CLOSED. The outflow includes the
-    // grant ICP plus the ledger fee the treasury fronts.
-    let outflow = grant_icp_e8s.saturating_add(ICP_FEE_E8S);
-    {
-        let treasury = LedgerAccount {
-            owner: get_canister_id(),
-            subaccount: Some(TREASURY_SUBACCOUNT),
-        };
-        let balance = call_ledger_balance(config.ledger_canister_id, treasury)
-            .await
-            .map_err(|e| format!("TREASURY_BALANCE: {}", e))?;
-        if balance.saturating_sub(outflow) < config.faucet_treasury_floor_e8s {
-            return Err("TREASURY_LOW".to_string());
-        }
-    }
-
-    // ── Saga: move ICP → CMC for the dev's canister, then notify (mint). ──
-    let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
-    let mut registration = FAUCET_REGISTRATIONS.with(|m| m.borrow().get(&canister_id))
-        .ok_or_else(|| "CANISTER_NOT_REGISTERED".to_string())?;
-
-    // Reserve the slot's transfer leg: only transfer if no block is journaled.
-    if registration.pending_block.is_none() {
-        let block = call_cmc_topup_transfer(
-            config.ledger_canister_id,
-            Some(TREASURY_SUBACCOUNT),
-            canister_id,
-            grant_icp_e8s,
-            ICP_FEE_E8S,
-        )
-        .await
-        .map_err(|e| format!("FAUCET_CMC_XFER: {}", e))?;
-        registration.pending_block = Some(block);
-        FAUCET_REGISTRATIONS.with(|m| { m.borrow_mut().insert(canister_id, registration.clone()); });
-    }
-
-    let block = registration.pending_block.unwrap();
-    // is_local non-existent CMC tolerated like the burn flow (proposal != 138388
-    // there; here we just always require notify success off the local no-op path).
-    if let Err(e) = notify_cmc_topup(cmc, canister_id, block, !config.is_local).await {
-        if e.starts_with("CMC_REFUNDED") {
-            // The CMC sent the ICP back to the backend — drop the block so a
-            // retry re-transfers. (Nothing lost beyond the ledger fee.)
-            registration.pending_block = None;
-            FAUCET_REGISTRATIONS.with(|m| { m.borrow_mut().insert(canister_id, registration.clone()); });
-        }
-        return Err(format!("FAUCET_CMC_NOTIFY: {}", e));
-    }
-
-    // ── Success: cycles minted. Finalize the slot + record the claim. ──
-    let now = current_time();
-    registration.pending_block = None;
-    FAUCET_REGISTRATIONS.with(|m| { m.borrow_mut().insert(canister_id, registration); });
-    FAUCET_DEV_LAST_CLAIM.with(|m| { m.borrow_mut().insert(caller, now); });
-    FAUCET_CANISTER_USAGE.with(|m| {
-        let mut m = m.borrow_mut();
-        let mut usage = m.get(&canister_id).unwrap_or_default();
-        usage.last_claim_ns = now;
-        usage.count = usage.count.saturating_add(1);
-        m.insert(canister_id, usage);
-    });
-    let grant_id = FAUCET_STATS.with(|c| {
-        let mut s = c.borrow().get().clone();
-        s.total_claims = s.total_claims.saturating_add(1);
-        s.total_granted_icp_e8s = s.total_granted_icp_e8s.saturating_add(grant_icp_e8s);
-        s.last_grant_at = now;
-        let id = s.total_claims;
-        let _ = c.borrow_mut().set(s);
-        id
-    });
-    // Record the grant for the public transaction list (with the on-chain block).
-    FAUCET_GRANTS.with(|m| {
-        m.borrow_mut().insert(grant_id, FaucetGrant {
-            id: grant_id,
-            dev: caller,
-            canister_id,
-            amount_icp_e8s: grant_icp_e8s,
-            block_index: block,
-            at: now,
-        });
-    });
-    AUDIT_LOG.with(|log| {
-        let _ = log.borrow_mut().append(&AuditLogEntry {
-            timestamp: now,
-            event_type: "cycles_faucet_grant".to_string(),
-            proposal_id: 0,
-            user: caller,
-            amount_e8s: grant_icp_e8s,
-        });
-    });
-    Ok(())
-}
-
-/// Public faucet status for `(caller, canister_id)`. `canister_id == None` gives
-/// flag + params + the caller's G2/G3 standing (no canister-specific gate).
-#[ic_cdk::query]
-fn get_faucet_status(canister_id: Option<Principal>) -> FaucetStatus {
-    let caller = get_caller();
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let enabled = feature_visible(FLAG_CYCLES_FAUCET, caller);
-
-    let has_pool_neuron = faucet_has_pool_access(caller);
-    let voted_in_window = faucet_voted_in_window(caller, config.faucet_vote_window_ns);
-
-    let (gate, registered, canister_claims_used, next_eligible_at) = match canister_id {
-        Some(cid) => {
-            let registered = FAUCET_REGISTRATIONS.with(|m| m.borrow().contains_key(&cid));
-            let usage = FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&cid).unwrap_or_default());
-            let dev_last = FAUCET_DEV_LAST_CLAIM.with(|m| m.borrow().get(&caller).unwrap_or(0));
-            let next = dev_last
-                .saturating_add(config.faucet_claim_window_ns)
-                .max(usage.last_claim_ns.saturating_add(config.faucet_claim_window_ns));
-            let next_at = if next > current_time() { next } else { 0 };
-            (faucet_eligibility_sync(caller, cid, &config), registered, usage.count, next_at)
-        }
-        None => {
-            let gate = if !enabled {
-                FaucetGate::FaucetDisabled
-            } else {
-                FaucetGate::CanisterNotRegistered
-            };
-            (gate, false, 0, 0)
-        }
-    };
-
-    FaucetStatus {
-        enabled,
-        gate,
-        registered,
-        has_pool_neuron,
-        voted_in_window,
-        canister_claims_used,
-        next_eligible_at,
-        grant_usd_e8s: config.faucet_grant_usd_e8s,
-        lifetime_cap: config.faucet_canister_lifetime_cap,
-        claim_window_ns: config.faucet_claim_window_ns,
-        vote_window_ns: config.faucet_vote_window_ns,
-        treasury_floor_e8s: config.faucet_treasury_floor_e8s,
-        est_grant_icp_e8s: usd_e8s_to_icp_e8s(config.faucet_grant_usd_e8s),
-    }
-}
-
-#[ic_cdk::query]
-fn get_faucet_stats() -> FaucetStats {
-    FAUCET_STATS.with(|c| c.borrow().get().clone())
-}
-
-/// Recent faucet grants, most-recent-first, capped at 25 — backs the public
-/// transaction list. Each `block_index` is the on-chain ICP-ledger tx.
-#[ic_cdk::query]
-fn list_faucet_grants(limit: u32) -> Vec<FaucetGrant> {
-    let n = limit.min(25) as usize;
-    FAUCET_GRANTS.with(|m| m.borrow().iter().rev().take(n).map(|e| e.value()).collect())
-}
-
-/// Local-dev: move ICP from the canister's own default account (same source as
-/// `dev_faucet_token`) into the treasury subaccount, so the faucet floor gate
-/// passes and grants have ICP to draw from.
-#[ic_cdk::update]
-async fn dev_fund_treasury(amount_e8s: u64) -> Result<(), String> {
-    require_authenticated()?;
-    require_local_dev()?;
-    let ledger = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
-    let dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-    call_ledger_transfer(ledger, None, dest, amount_e8s, Some(10_000))
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("DEV_FUND_TREASURY: {}", e))
-}
-
-/// Local-dev: insert mock faucet grants so the "Recent grants" list renders.
-#[ic_cdk::update]
-fn dev_seed_faucet_grants(count: u32) -> Result<(), String> {
-    require_authenticated()?;
-    require_local_dev()?;
-    let caller = get_caller();
-    let n = count.min(25);
-    let now = current_time();
-    let base = FAUCET_STATS.with(|c| c.borrow().get().total_claims);
-    let mock_amount: u64 = 25_000_000; // 0.25 ICP each
-    for i in 0..n {
-        let id = base + (i as u64) + 1;
-        FAUCET_GRANTS.with(|m| {
-            m.borrow_mut().insert(id, FaucetGrant {
-                id,
-                dev: caller,
-                canister_id: mock_principal((i % 7) as u8),
-                amount_icp_e8s: mock_amount,
-                block_index: 1_000_000 + id,
-                at: now.saturating_sub((i as u64) * 86_400_000_000_000), // staggered days back
-            });
-        });
-    }
-    FAUCET_STATS.with(|c| {
-        let mut s = c.borrow().get().clone();
-        s.total_claims = s.total_claims.saturating_add(n as u64);
-        s.total_granted_icp_e8s = s.total_granted_icp_e8s.saturating_add(mock_amount.saturating_mul(n as u64));
-        s.last_grant_at = now;
-        let _ = c.borrow_mut().set(s);
-    });
-    Ok(())
-}
-
-// ── Admin param setters (all admin-settable, sanity-railed) ──
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_faucet_grant_usd(usd_e8s: u64) -> Result<(), String> {
-    // $0.10 .. $100 rails.
-    if !(10_000_000..=10_000_000_000).contains(&usd_e8s) {
-        return Err("OUT_OF_RANGE".to_string());
-    }
-    CONFIG.with(|c| {
-        let mut cfg = c.borrow().get().clone();
-        cfg.faucet_grant_usd_e8s = usd_e8s;
-        let _ = c.borrow_mut().set(cfg);
-    });
-    Ok(())
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_faucet_lifetime_cap(cap: u32) -> Result<(), String> {
-    if cap == 0 || cap > 10_000 {
-        return Err("OUT_OF_RANGE".to_string());
-    }
-    CONFIG.with(|c| {
-        let mut cfg = c.borrow().get().clone();
-        cfg.faucet_canister_lifetime_cap = cap;
-        let _ = c.borrow_mut().set(cfg);
-    });
-    Ok(())
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_faucet_claim_window_days(days: u64) -> Result<(), String> {
-    if days == 0 || days > 365 {
-        return Err("OUT_OF_RANGE".to_string());
-    }
-    CONFIG.with(|c| {
-        let mut cfg = c.borrow().get().clone();
-        cfg.faucet_claim_window_ns = days.saturating_mul(DAY_NANOS);
-        let _ = c.borrow_mut().set(cfg);
-    });
-    Ok(())
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_faucet_vote_window_days(days: u64) -> Result<(), String> {
-    if days == 0 || days > 365 {
-        return Err("OUT_OF_RANGE".to_string());
-    }
-    CONFIG.with(|c| {
-        let mut cfg = c.borrow().get().clone();
-        cfg.faucet_vote_window_ns = days.saturating_mul(DAY_NANOS);
-        let _ = c.borrow_mut().set(cfg);
-    });
-    Ok(())
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_faucet_treasury_floor(floor_e8s: u64) -> Result<(), String> {
-    CONFIG.with(|c| {
-        let mut cfg = c.borrow().get().clone();
-        cfg.faucet_treasury_floor_e8s = floor_e8s;
-        let _ = c.borrow_mut().set(cfg);
-    });
-    Ok(())
 }
 
 // ====================================================================
@@ -22952,20 +18580,12 @@ mod tests {
             cketh_ledger_canister_id: None,
             ckusdc_ledger_canister_id: None,
             ckusdt_ledger_canister_id: None,
-            min_upvote_icp_e8s: None,
-            min_upvote_ckbtc_e8s: None,
-            min_upvote_cketh_wei: None,
             min_stake_e8s: default_min_stake_e8s(),
             min_unstake_e8s: default_min_unstake_e8s(),
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
             lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
-            faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
-            faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
-            faucet_claim_window_ns: default_faucet_claim_window_ns(),
-            faucet_vote_window_ns: default_faucet_vote_window_ns(),
-            faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -23199,20 +18819,12 @@ mod tests {
                 cketh_ledger_canister_id: None,
                 ckusdc_ledger_canister_id: None,
             ckusdt_ledger_canister_id: None,
-                min_upvote_icp_e8s: None,
-                min_upvote_ckbtc_e8s: None,
-                min_upvote_cketh_wei: None,
                 min_stake_e8s: default_min_stake_e8s(),
                 min_unstake_e8s: default_min_unstake_e8s(),
                 maturity_threshold_e8s: default_maturity_threshold_e8s(),
                 lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
                 default_threshold_usd_e8s: None,
                 course_nft_canister: None,
-                faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
-                faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
-                faucet_claim_window_ns: default_faucet_claim_window_ns(),
-                faucet_vote_window_ns: default_faucet_vote_window_ns(),
-                faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
             }
         };
         let mainnet = Config {
@@ -23312,29 +18924,6 @@ mod tests {
         assert_eq!(decoded.rating_count, 4);
     }
 
-    #[test]
-    fn test_faucet_registration_pending_block_serde_default() {
-        // Upgrade safety (PB-400 faucet): a FaucetRegistration serialized BEFORE
-        // the `pending_block` field existed must still decode after upgrade, with
-        // `pending_block == None`.
-        #[derive(serde::Serialize)]
-        struct OldFaucetRegistration {
-            canister_id: Principal,
-            registered_at: u64,
-        }
-
-        let old = OldFaucetRegistration {
-            canister_id: Principal::anonymous(),
-            registered_at: 999,
-        };
-
-        let mut buf = Vec::new();
-        ciborium::into_writer(&old, &mut buf).unwrap();
-        let decoded: FaucetRegistration = ciborium::from_reader(buf.as_slice()).unwrap();
-
-        assert_eq!(decoded.pending_block, None, "old registrations have no pending block");
-        assert_eq!(decoded.registered_at, 999);
-    }
 
     #[test]
     fn test_neuron_helpers() {
@@ -24317,69 +19906,45 @@ mod tests {
 
     // ── Idea Board & feature flags ─────────────────────────────────────────────
 
-    #[test]
-    fn test_split_upvote_75_25() {
-        for amount in [1_000_000u64, 4_000_000, 7, 1_000_000_001, MAX_UPVOTE_UNITS] {
-            let (treasury, poster) = split_upvote(amount);
-            assert_eq!(treasury + poster, amount, "split must sum to amount");
-            // Treasury never exceeds 75%; poster takes the rounding remainder.
-            assert!(treasury <= amount / 4 * 3 + 3);
-            assert!(poster >= amount - treasury);
-        }
-        // Exact case: 1 ICP → 0.75 / 0.25.
-        assert_eq!(split_upvote(100_000_000), (75_000_000, 25_000_000));
-    }
 
-    #[test]
-    fn test_idea_expiry_window() {
-        let last = 1_700_000_000_000_000_000u64;
-        assert!(!idea_is_expired(last, last));
-        assert!(!idea_is_expired(last, last + IDEA_EXPIRY_NANOS));
-        assert!(idea_is_expired(last, last + IDEA_EXPIRY_NANOS + 1));
-        // saturating: a recent upvote near u64::MAX never wraps into expired
-        assert!(!idea_is_expired(u64::MAX - 1, u64::MAX));
-    }
 
-    #[test]
-    fn test_validate_idea_text_limits() {
-        assert!(validate_idea_text("t", "d", "").is_ok());
-        assert!(validate_idea_text("", "d", "").is_err());
-        assert!(validate_idea_text("t", "", "").is_err());
-        assert!(validate_idea_text(&"x".repeat(MAX_IDEA_TITLE_LEN), "d", "").is_ok());
-        assert!(validate_idea_text(&"x".repeat(MAX_IDEA_TITLE_LEN + 1), "d", "").is_err());
-        assert!(validate_idea_text("t", &"x".repeat(MAX_IDEA_DESCRIPTION_LEN + 1), "").is_err());
-        assert!(validate_idea_text("t", "d", &"x".repeat(MAX_IDEA_DETAIL_LEN + 1)).is_err());
-    }
 
     #[test]
     fn test_feature_flag_default_and_override() {
-        // idea_board defaults ON; unknown flags default OFF.
-        assert!(feature_enabled(FLAG_IDEA_BOARD));
+        // dapp_explorer defaults ON; unknown flags default OFF.
+        assert!(feature_enabled(FLAG_EXPLORER));
         assert!(!feature_enabled("nonexistent_future_feature"));
 
         // Admin override wins over the default.
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_IDEA_BOARD.to_string(), 0u8);
+            m.borrow_mut().insert(FLAG_EXPLORER.to_string(), 0u8);
         });
-        assert!(!feature_enabled(FLAG_IDEA_BOARD));
-        assert!(require_idea_board_enabled().is_err());
+        assert!(!feature_enabled(FLAG_EXPLORER));
 
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_IDEA_BOARD.to_string(), 1u8);
+            m.borrow_mut().insert(FLAG_EXPLORER.to_string(), 1u8);
         });
-        assert!(feature_enabled(FLAG_IDEA_BOARD));
+        assert!(feature_enabled(FLAG_EXPLORER));
+
+        // Retired flags are gone from the known list — they no longer surface
+        // as admin toggles even if stale stable rows linger pre-purge.
+        for retired in ["idea_board", "discussions", "crash", "cycles_faucet",
+                        "arcade", "arcade_fieldgoal", "dashboard", "mission_statement"] {
+            assert!(!KNOWN_FEATURE_FLAGS.contains(&retired), "{retired} must be retired");
+            assert!(!feature_default(retired), "retired flags default OFF");
+        }
 
         // list merges known defaults with stored overrides, no duplicates.
         FEATURE_FLAGS.with(|m| {
             m.borrow_mut().insert("future_thing".to_string(), 1u8);
         });
         let flags = list_feature_flags();
-        assert_eq!(flags.iter().filter(|f| f.key == FLAG_IDEA_BOARD).count(), 1);
+        assert_eq!(flags.iter().filter(|f| f.key == FLAG_EXPLORER).count(), 1);
         assert!(flags.iter().any(|f| f.key == "future_thing" && f.enabled));
 
         // cleanup for other tests on this thread
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().remove(&FLAG_IDEA_BOARD.to_string());
+            m.borrow_mut().remove(&FLAG_EXPLORER.to_string());
             m.borrow_mut().remove(&"future_thing".to_string());
         });
     }
@@ -24427,60 +19992,8 @@ mod tests {
         assert!(!valid_flag_key(&"x".repeat(MAX_FLAG_KEY_LEN + 1)));
     }
 
-    #[test]
-    fn test_idea_subaccount_domain_separated() {
-        let user = p("2vxsx-fae");
-        let idea_sub = derive_idea_subaccount(&user, 42);
-        let escrow_sub = derive_subaccount(&user, 42);
-        assert_ne!(idea_sub, escrow_sub, "idea escrow must not collide with proposal escrow");
-        assert_eq!(idea_sub, derive_idea_subaccount(&user, 42), "deterministic");
-        assert_ne!(idea_sub, derive_idea_subaccount(&user, 43));
-    }
 
-    #[test]
-    fn test_storable_idea_roundtrip() {
-        let idea = Idea {
-            id: 7,
-            poster: p("2vxsx-fae"),
-            title: "Burn more ICP".to_string(),
-            description: "A thing".to_string(),
-            detail: "Long detail".to_string(),
-            created_at: 1,
-            last_upvote_at: 2,
-            upvote_count: 3,
-            views: 9,
-            has_upvoted: false,
-            total_icp_e8s: 4,
-            total_ckbtc_e8s: 5,
-            total_cketh_wei: 6,
-        };
-        let decoded = Idea::from_bytes(idea.to_bytes());
-        assert_eq!(decoded.id, idea.id);
-        assert_eq!(decoded.poster, idea.poster);
-        assert_eq!(decoded.title, idea.title);
-        assert_eq!(decoded.views, idea.views);
-        assert_eq!(decoded.total_cketh_wei, idea.total_cketh_wei);
-    }
 
-    #[test]
-    fn test_storable_idea_upvote_roundtrip() {
-        let uv = IdeaUpvote {
-            id: 1,
-            idea_id: 7,
-            voter: p("2vxsx-fae"),
-            token: IdeaToken::CkBTC,
-            amount: 123_456,
-            status: UpvoteStatus::FailedPayout,
-            created_at: 9,
-            treasury_block: Some(11),
-            poster_block: None,
-        };
-        let decoded = IdeaUpvote::from_bytes(uv.to_bytes());
-        assert_eq!(decoded.token, uv.token);
-        assert_eq!(decoded.status, uv.status);
-        assert_eq!(decoded.treasury_block, Some(11));
-        assert_eq!(decoded.poster_block, None);
-    }
 
     // ── Dapp Explorer ──────────────────────────────────────────────────────
 
@@ -24874,19 +20387,15 @@ mod tests {
     // ── Arcade ─────────────────────────────────────────────────────────────
 
     fn enable_arcade_flag() {
-        // Arcade + both games now ship dark (default OFF), so tests must turn the
-        // whole surface on explicitly — same as deploy-local.sh does for local dev.
+        // Games ship dark (default OFF), so tests must turn mini golf on
+        // explicitly — same as deploy-local.sh does for local dev. (The parent
+        // `arcade` hub flag and Field Goal were removed 2026-07-06.)
         FEATURE_FLAGS.with(|m| {
-            let mut m = m.borrow_mut();
-            m.insert(FLAG_ARCADE.to_string(), 1);
-            m.insert(FLAG_ARCADE_MINIGOLF.to_string(), 1);
-            m.insert(FLAG_ARCADE_FIELDGOAL.to_string(), 1);
+            m.borrow_mut().insert(FLAG_ARCADE_MINIGOLF.to_string(), 1);
         });
     }
 
     fn clear_arcade() {
-        let keys: Vec<ArcadeScoreKey> = ARCADE_SCORES.with(|m| m.borrow().iter().map(|e| e.key().clone()).collect());
-        ARCADE_SCORES.with(|m| { let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
         let chars: Vec<Principal> = ARCADE_CHARACTERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
         ARCADE_CHARACTERS.with(|m| { let mut m = m.borrow_mut(); for k in chars { m.remove(&k); } });
         let quotes: Vec<Principal> = ARCADE_QUOTES.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
@@ -24940,114 +20449,7 @@ mod tests {
         LOSSLESS_VOTES.with(|m| { m.borrow_mut().remove(&CommitmentKey { proposal_id: 901, principal: voter }); });
     }
 
-    #[test]
-    fn test_submit_arcade_score_gating_and_ranking() {
-        clear_arcade();
-        enable_arcade_flag();
-        let now = current_time();
-        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
-        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
-        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
 
-        // Owner decision 2026-07-04: NO participation gate — any signed-in user
-        // ranks. An unstaked player's score lands on the board (tickets, not
-        // play, are what staking now gates).
-        set_mock_caller(alice);
-        assert_eq!(
-            submit_arcade_score("fieldgoal".into(), 120_000, vec![3; FIELDGOAL_ROUNDS]).unwrap(),
-            1,
-            "unstaked signed-in player ranks"
-        );
-
-        // Stakes are irrelevant to scoring now, kept to mirror real players.
-        for u in [alice, bob] {
-            STAKES.with(|m| {
-                m.borrow_mut().insert(
-                    StakeKey { tier: 0, user: u },
-                    UserStake { amount_e8s: 100_000_000, staked_at: now, last_action_at: now },
-                );
-            });
-        }
-
-        // Unknown game still rejected.
-        assert_eq!(submit_arcade_score("pacman".into(), 120_000, vec![3; 9]).unwrap_err(), "UNKNOWN_GAME");
-
-        // PB-309 (D4): mini-golf scoring is RETIRED — the marketplace replaces
-        // the global leaderboard. Any minigolf submission is rejected before any
-        // state write, and the minigolf board is always empty.
-        assert_eq!(
-            submit_arcade_score("minigolf".into(), 120_000, vec![3; 9]).unwrap_err(),
-            "MINIGOLF_RETIRED"
-        );
-        assert!(get_arcade_leaderboard("minigolf".into()).is_empty());
-
-        // Field Goal scoring is unaffected by the migration (returns the rank).
-        set_mock_caller(alice);
-        assert_eq!(
-            submit_arcade_score("fieldgoal".into(), 120_000, vec![30; FIELDGOAL_ROUNDS]).unwrap(),
-            1
-        );
-        assert_eq!(get_arcade_leaderboard("fieldgoal".into()).len(), 1);
-
-        for u in [alice, bob] {
-            STAKES.with(|m| { m.borrow_mut().remove(&StakeKey { tier: 0, user: u }); });
-        }
-        clear_arcade();
-    }
-
-    #[test]
-    fn test_submit_fieldgoal_score_points_ranking() {
-        clear_arcade();
-        enable_arcade_flag();
-        let now = current_time();
-        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
-        let bob = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
-        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
-        for u in [alice, bob] {
-            STAKES.with(|m| {
-                m.borrow_mut().insert(
-                    StakeKey { tier: 0, user: u },
-                    UserStake { amount_e8s: 100_000_000, staked_at: now, last_action_at: now },
-                );
-            });
-        }
-        set_mock_caller(alice);
-
-        // Validation: 5 kicks, per-kick points cap, time bounds. Misses (0)
-        // are valid — an all-miss round is a legitimate 0-point entry.
-        assert_eq!(submit_arcade_score("fieldgoal".into(), 60_000, vec![40; 4]).unwrap_err(), "INVALID_HOLE_COUNT");
-        assert_eq!(submit_arcade_score("fieldgoal".into(), 60_000, vec![71; 5]).unwrap_err(), "INVALID_STROKES");
-        assert_eq!(submit_arcade_score("fieldgoal".into(), 1_000, vec![40; 5]).unwrap_err(), "INVALID_TIME");
-        assert_eq!(submit_arcade_score("fieldgoal".into(), 60_000, vec![0; 5]).unwrap(), 1);
-
-        // MOST points ranks first — Bob's 200 beats Alice's 0.
-        set_mock_caller(bob);
-        assert_eq!(submit_arcade_score("fieldgoal".into(), 90_000, vec![40; 5]).unwrap(), 1);
-        let board = get_arcade_leaderboard("fieldgoal".into());
-        assert_eq!(board[0].player, bob);
-        assert_eq!(board[0].strokes, 200, "points live in the strokes slot");
-        assert_eq!(board[1].player, alice);
-
-        // Equal points → faster time wins the tiebreak.
-        set_mock_caller(alice);
-        assert_eq!(submit_arcade_score("fieldgoal".into(), 60_000, vec![40; 5]).unwrap(), 1);
-        let board = get_arcade_leaderboard("fieldgoal".into());
-        assert_eq!(board[0].player, alice);
-        assert_eq!(board[0].millis, 60_000);
-
-        // A LOWER-point round never overwrites the player's best.
-        assert_eq!(submit_arcade_score("fieldgoal".into(), 30_000, vec![10; 5]).unwrap(), 1);
-        let board = get_arcade_leaderboard("fieldgoal".into());
-        assert_eq!(board[0].strokes, 200);
-
-        // The games keep separate boards.
-        assert_eq!(get_arcade_leaderboard("minigolf".into()).len(), 0);
-
-        for u in [alice, bob] {
-            STAKES.with(|m| { m.borrow_mut().remove(&StakeKey { tier: 0, user: u }); });
-        }
-        clear_arcade();
-    }
 
     // ── Early Adopters ────────────────────────────────────────────────────────
 
@@ -25627,9 +21029,6 @@ mod tests {
             cketh_ledger_canister_id: None,
             ckusdc_ledger_canister_id: None,
             ckusdt_ledger_canister_id: None,
-            min_upvote_icp_e8s: None,
-            min_upvote_ckbtc_e8s: None,
-            min_upvote_cketh_wei: None,
             min_stake_e8s: default_min_stake_e8s(),
             min_unstake_e8s: default_min_unstake_e8s(),
             maturity_threshold_e8s: default_maturity_threshold_e8s(),
@@ -25639,53 +21038,9 @@ mod tests {
             // DISTINCT from get_canister_id()'s native mock (aaaaa-aa) so
             // split-leg assertions can tell the two CMC subaccounts apart.
             course_nft_canister: Some(p("qoctq-giaaa-aaaaa-aaaea-cai")),
-            faucet_grant_usd_e8s: default_faucet_grant_usd_e8s(),
-            faucet_canister_lifetime_cap: default_faucet_canister_lifetime_cap(),
-            faucet_claim_window_ns: default_faucet_claim_window_ns(),
-            faucet_vote_window_ns: default_faucet_vote_window_ns(),
-            faucet_treasury_floor_e8s: default_faucet_treasury_floor_e8s(),
         }
     }
 
-    #[test]
-    fn test_token_economics_value_aligned() {
-        let mainnet = test_config(false);
-
-        // Exchange-rate alignment: minimums must NOT be a flat per-token
-        // number — each token's min reflects its unit value.
-        let min_icp = token_min_upvote(IdeaToken::ICP, &mainnet);
-        let min_btc = token_min_upvote(IdeaToken::CkBTC, &mainnet);
-        let min_eth = token_min_upvote(IdeaToken::CkETH, &mainnet);
-        assert!(min_btc < min_icp, "a ckBTC sat is worth far more than an ICP e8");
-        assert_ne!(min_icp, min_eth);
-
-        // The 25% poster share at the minimum must clear the ledger fee on
-        // every real ledger (mainnet, and local with dedicated test ledgers).
-        let mut local_with_ledgers = test_config(true);
-        local_with_ledgers.ckbtc_ledger_canister_id = Some(p("2vxsx-fae"));
-        local_with_ledgers.cketh_ledger_canister_id = Some(p("2vxsx-fae"));
-        for cfg in [&mainnet, &local_with_ledgers] {
-            for token in [IdeaToken::ICP, IdeaToken::CkBTC, IdeaToken::CkETH] {
-                let min = token_min_upvote(token, cfg);
-                let fee = token_fee(token, cfg);
-                let (_, poster) = split_upvote(min);
-                assert!(
-                    poster > fee,
-                    "poster share {} must exceed fee {} ({:?}, local={})",
-                    poster, fee, token, cfg.is_local
-                );
-            }
-        }
-
-        // Admin overrides win over the defaults.
-        let mut tuned = test_config(false);
-        tuned.min_upvote_icp_e8s = Some(40_000_000);
-        tuned.min_upvote_ckbtc_e8s = Some(2_000);
-        tuned.min_upvote_cketh_wei = Some(660_000_000_000_000);
-        assert_eq!(token_min_upvote(IdeaToken::ICP, &tuned), 40_000_000);
-        assert_eq!(token_min_upvote(IdeaToken::CkBTC, &tuned), 2_000);
-        assert_eq!(token_min_upvote(IdeaToken::CkETH, &tuned), 660_000_000_000_000);
-    }
 
     #[test]
     fn test_token_ledger_resolution() {
@@ -25716,387 +21071,15 @@ mod tests {
         assert_eq!(token_fee(IdeaToken::CkBTC, &local_cfg), 10);
     }
 
-    // Quote ($0.05 in ICP at the host static rate), fund the escrow, post, return id.
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn seed_idea(title: &str, desc: &str, detail: &str) -> u64 {
-        set_mock_ledger_transfer(Ok(1));
-        let q = get_idea_post_quote(ExplorerToken::ICP).await.unwrap();
-        set_mock_ledger_balance(q.amount + 10_000);
-        post_idea(title.into(), desc.into(), detail.into(), ExplorerToken::ICP).await.unwrap()
-    }
 
-    #[tokio::test]
-    async fn test_post_idea_validation_quota_and_fee() {
-        let caller = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(caller);
-        set_mock_ledger_transfer(Ok(5));
 
-        // No locked quote → rejected.
-        assert_eq!(
-            post_idea("NoQuote".into(), "Desc".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
-            "NO_QUOTE"
-        );
 
-        // $0.05 in ICP at the static $5 rate = 0.01 ICP.
-        let q = get_idea_post_quote(ExplorerToken::ICP).await.unwrap();
-        assert_eq!(q.amount, 1_000_000);
-        assert_eq!(q.usd_total_e8s, IDEA_POST_FEE_USD_E8S);
 
-        // Underfunded escrow → rejected, nothing stored (quote not consumed on failure).
-        set_mock_ledger_balance(q.amount); // missing the ledger fee
-        assert_eq!(
-            post_idea("Unpaid".into(), "Desc".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
-            "INSUFFICIENT_DEPOSIT"
-        );
-        assert!(IDEAS.with(|m| m.borrow().is_empty()));
 
-        // happy path (fee escrow funded) — consumes the quote.
-        set_mock_ledger_balance(q.amount + 10_000);
-        let id = post_idea("Title".into(), "Desc".into(), "Detail".into(), ExplorerToken::ICP).await.unwrap();
-        let idea = IDEAS.with(|m| m.borrow().get(&id)).unwrap();
-        assert_eq!(idea.poster, caller);
-        assert_eq!(idea.views, 0);
-        assert_eq!(idea.last_upvote_at, idea.created_at);
 
-        // invalid title (validated before the fee/quote is touched).
-        assert_eq!(
-            post_idea("   ".into(), "Desc".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
-            "INVALID_TITLE"
-        );
 
-        // per-user active quota — each successful post needs a fresh quote.
-        for i in 0..MAX_ACTIVE_IDEAS_PER_USER {
-            set_mock_ledger_transfer(Ok(1));
-            if let Ok(q) = get_idea_post_quote(ExplorerToken::ICP).await {
-                set_mock_ledger_balance(q.amount + 10_000);
-            }
-            let _ = post_idea(format!("Idea {}", i), "Desc".into(), "".into(), ExplorerToken::ICP).await;
-        }
-        // Quota reached → rejected (the quota check precedes the quote check).
-        assert_eq!(
-            post_idea("One too many".into(), "Desc".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
-            "TOO_MANY_ACTIVE_IDEAS"
-        );
 
-        // anonymous rejected
-        set_mock_caller(anon());
-        assert!(post_idea("T".into(), "D".into(), "".into(), ExplorerToken::ICP).await.is_err());
 
-        // disabled flag rejected
-        set_mock_caller(caller);
-        FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_IDEA_BOARD.to_string(), 0u8);
-        });
-        assert_eq!(
-            post_idea("T".into(), "D".into(), "".into(), ExplorerToken::ICP).await.unwrap_err(),
-            "FEATURE_DISABLED"
-        );
-        FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().remove(&FLAG_IDEA_BOARD.to_string());
-        });
-    }
-
-    #[tokio::test]
-    async fn test_projects_fund_flow() {
-        let funder = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-
-        // admin_add_project is guard-gated on-chain; exercise the body's
-        // validation rules through a direct insert + the public flows.
-        assert!(validate_idea_text("Project X", "Build it", "Detail").is_ok());
-        let now = current_time();
-        let project_id = 71u64;
-        PROJECTS.with(|m| {
-            m.borrow_mut().insert(project_id, Project {
-                id: project_id,
-                title: "Project X".into(),
-                description: "Build it".into(),
-                detail: "Detail".into(),
-                created_at: now,
-                goal_usd_e8s: 50_000_000_000_000,
-                raised_usd_e8s: 0,
-                goal_icp_e8s: 0,
-                goal_ckbtc_e8s: 0,
-                goal_cketh_wei: 0,
-                raised_icp_e8s: 0,
-                raised_ckbtc_e8s: 0,
-                raised_cketh_wei: 0,
-                funding_count: 0,
-                accept_icp: true,
-                accept_ckbtc: true,
-                accept_cketh: true,
-            });
-        });
-        assert!(list_projects().iter().any(|pr| pr.id == project_id));
-
-        set_mock_caller(funder);
-        set_mock_ledger_transfer(Ok(9));
-
-        // Below minimum / unknown project / insufficient deposit
-        set_mock_ledger_balance(10_000_000_000);
-        assert_eq!(
-            fund_project(project_id, IdeaToken::ICP, 1).await.unwrap_err(),
-            "BELOW_MINIMUM"
-        );
-        assert_eq!(
-            fund_project(999_999, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
-            "PROJECT_NOT_FOUND"
-        );
-        set_mock_ledger_balance(100);
-        assert_eq!(
-            fund_project(project_id, IdeaToken::ICP, 100_000_000).await.unwrap_err(),
-            "INSUFFICIENT_DEPOSIT"
-        );
-
-        // Happy path: 100% to treasury, raised totals + count bump.
-        set_mock_ledger_balance(10_000_000_000);
-        fund_project(project_id, IdeaToken::ICP, 100_000_000).await.unwrap();
-        let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
-        assert_eq!(pr.raised_icp_e8s, 100_000_000);
-        assert_eq!(pr.funding_count, 1);
-
-        // Failed transfer journals FailedPayout; sweep retry settles it.
-        set_mock_ledger_transfer(Err("down".into()));
-        assert!(fund_project(project_id, IdeaToken::CkBTC, 1_000_000).await.is_err());
-        set_mock_ledger_transfer(Ok(10));
-        retry_failed_fundings().await;
-        let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
-        assert_eq!(pr.raised_ckbtc_e8s, 1_000_000);
-        assert_eq!(pr.funding_count, 2);
-        assert!(PROJECT_FUNDINGS.with(|m| {
-            m.borrow().iter().all(|e| e.value().status == UpvoteStatus::Settled)
-        }));
-
-        // Orphan path: funding fails, project removed → funder refunded.
-        set_mock_ledger_transfer(Err("down".into()));
-        assert!(fund_project(project_id, IdeaToken::ICP, 100_000_000).await.is_err());
-        PROJECTS.with(|m| { m.borrow_mut().remove(&project_id); });
-        set_mock_ledger_transfer(Ok(11));
-        retry_failed_fundings().await;
-        assert!(PROJECT_FUNDINGS.with(|m| {
-            m.borrow().iter().all(|e| e.value().status == UpvoteStatus::Settled)
-        }));
-    }
-
-    #[tokio::test]
-    async fn test_admin_project_usd_goal_and_accepts_all_crypto() {
-        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
-        CONFIG.with(|c| {
-            let mut cfg = c.borrow().get().clone();
-            cfg.admins = vec![admin];
-            c.borrow_mut().set(cfg);
-        });
-        set_mock_caller(admin);
-
-        // Goal below $1 is rejected.
-        assert_eq!(
-            admin_add_project("P".into(), "D".into(), "X".into(), 0).unwrap_err(),
-            "GOAL_BELOW_MIN"
-        );
-
-        // 1. Add a project with a single USD goal ($50,000).
-        let project_id = admin_add_project(
-            "Project A".into(),
-            "Desc A".into(),
-            "Detail A".into(),
-            5_000_000_000_000,
-        ).unwrap();
-        let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
-        assert_eq!(pr.goal_usd_e8s, 5_000_000_000_000);
-        // Every supported crypto is accepted.
-        assert!(pr.accept_icp && pr.accept_ckbtc && pr.accept_cketh);
-
-        // 2. Update the goal; all crypto stays accepted.
-        admin_update_project(
-            project_id,
-            "Project A Updated".into(),
-            "Desc A".into(),
-            "Detail A".into(),
-            2_500_000_000_000,
-        ).unwrap();
-        let pr = PROJECTS.with(|m| m.borrow().get(&project_id)).unwrap();
-        assert_eq!(pr.title, "Project A Updated");
-        assert_eq!(pr.goal_usd_e8s, 2_500_000_000_000);
-        assert!(pr.accept_icp && pr.accept_ckbtc && pr.accept_cketh);
-
-        // 3. Any supported crypto funds it; raised is valued in USD.
-        let funder = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-        set_mock_caller(funder);
-        set_mock_ledger_balance(10_000_000_000);
-        set_mock_ledger_transfer(Ok(12));
-        assert!(fund_project(project_id, IdeaToken::ICP, 100_000_000).await.is_ok());
-        assert!(fund_project(project_id, IdeaToken::CkBTC, 1_000_000).await.is_ok());
-        let listed = list_projects().into_iter().find(|x| x.id == project_id).unwrap();
-        assert!(listed.raised_usd_e8s > 0, "raised valued in USD across tokens");
-    }
-
-    #[tokio::test]
-    async fn test_upvote_idea_flow() {
-        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        let voter = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-
-        set_mock_caller(poster);
-        let idea_id = seed_idea("Upvotable", "Desc", "").await;
-
-        // Unknown idea.
-        set_mock_caller(voter);
-        assert_eq!(upvote_idea(999_999).unwrap_err(), "IDEA_NOT_FOUND");
-
-        // Free upvote: no ledger transfer happens (force every transfer to fail
-        // so a stray one would surface), count bumps, no crypto moves.
-        set_mock_ledger_transfer(Err("upvotes are free — must not move ICP".to_string()));
-        upvote_idea(idea_id).unwrap();
-        let idea = IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap();
-        assert_eq!(idea.upvote_count, 1);
-        assert_eq!(idea.total_icp_e8s, 0, "no crypto collected");
-
-        // One upvote per user per idea.
-        assert_eq!(upvote_idea(idea_id).unwrap_err(), "ALREADY_UPVOTED");
-        assert_eq!(IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap().upvote_count, 1);
-
-        // A different user can upvote, and list_ideas reports has_upvoted per caller.
-        let voter2 = p("rkp4c-7iaaa-aaaaa-aaaca-cai");
-        set_mock_caller(voter2);
-        upvote_idea(idea_id).unwrap();
-        assert_eq!(IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap().upvote_count, 2);
-        assert!(list_ideas().iter().find(|i| i.id == idea_id).unwrap().has_upvoted);
-        set_mock_caller(poster);
-        assert!(!list_ideas().iter().find(|i| i.id == idea_id).unwrap().has_upvoted);
-    }
-
-    #[tokio::test]
-    async fn test_record_idea_view() {
-        let caller1 = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        let caller2 = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-
-        set_mock_caller(caller1);
-        let id = seed_idea("Viewable", "Desc", "").await;
-
-        // Caller 1 views -> view count = 1
-        record_idea_view(id).unwrap();
-        // Caller 1 views again -> view count still 1
-        record_idea_view(id).unwrap();
-        assert_eq!(IDEAS.with(|m| m.borrow().get(&id)).unwrap().views, 1);
-
-        // Caller 2 views -> view count = 2
-        set_mock_caller(caller2);
-        record_idea_view(id).unwrap();
-        assert_eq!(IDEAS.with(|m| m.borrow().get(&id)).unwrap().views, 2);
-
-        assert_eq!(record_idea_view(999_999).unwrap_err(), "IDEA_NOT_FOUND");
-        set_mock_caller(anon());
-        assert!(record_idea_view(id).is_err());
-    }
-
-    #[tokio::test]
-    async fn test_upvote_failed_payout_is_retried() {
-        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        let voter = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-
-        set_mock_caller(poster);
-        let idea_id = seed_idea("Retry me", "Desc", "").await;
-
-        // Upvotes are now free, but the paid-upvote retry machinery is retained
-        // for any legacy journal entries. Simulate one that failed mid-payout.
-        set_mock_caller(voter);
-        set_mock_ledger_balance(10_000_000_000);
-        let uv_id = NEXT_UPVOTE_ID.with(|c| { let id = *c.borrow().get(); c.borrow_mut().set(id + 1); id });
-        IDEA_UPVOTES.with(|m| { m.borrow_mut().insert(uv_id, IdeaUpvote {
-            id: uv_id, idea_id, voter, token: IdeaToken::ICP, amount: 100_000_000,
-            status: UpvoteStatus::FailedPayout, created_at: current_time(),
-            treasury_block: None, poster_block: None,
-        }); });
-        let uv = IDEA_UPVOTES.with(|m| m.borrow().get(&uv_id)).unwrap();
-        assert_eq!(uv.status, UpvoteStatus::FailedPayout);
-        assert_eq!(IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap().upvote_count, 0);
-
-        // Sweep retry settles it once the ledger recovers.
-        set_mock_ledger_transfer(Ok(77));
-        retry_failed_upvotes().await;
-
-        let uv = IDEA_UPVOTES.with(|m| m.borrow().get(&uv.id)).unwrap();
-        assert_eq!(uv.status, UpvoteStatus::Settled);
-        assert_eq!(uv.treasury_block, Some(77));
-        assert_eq!(uv.poster_block, Some(77));
-        let idea = IDEAS.with(|m| m.borrow().get(&idea_id)).unwrap();
-        assert_eq!(idea.upvote_count, 1);
-        assert_eq!(idea.total_icp_e8s, 100_000_000);
-    }
-
-    #[tokio::test]
-    async fn test_orphaned_upvote_refunds_voter() {
-        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        let voter = p("ryjl3-tyaaa-aaaaa-aaaba-cai");
-        set_mock_caller(poster);
-        let idea_id = seed_idea("Doomed idea", "Desc", "").await;
-
-        // A legacy paid upvote that failed mid-saga, journaled as FailedPayout.
-        set_mock_caller(voter);
-        set_mock_ledger_balance(10_000_000_000);
-        let uv_id = NEXT_UPVOTE_ID.with(|c| { let id = *c.borrow().get(); c.borrow_mut().set(id + 1); id });
-        IDEA_UPVOTES.with(|m| { m.borrow_mut().insert(uv_id, IdeaUpvote {
-            id: uv_id, idea_id, voter, token: IdeaToken::ICP, amount: 100_000_000,
-            status: UpvoteStatus::FailedPayout, created_at: current_time(),
-            treasury_block: None, poster_block: None,
-        }); });
-
-        // The idea expires and is deleted before the retry succeeds.
-        IDEAS.with(|m| { m.borrow_mut().remove(&idea_id); });
-
-        // Retry refunds the voter's escrow and closes the journal entry.
-        set_mock_ledger_transfer(Ok(88));
-        retry_failed_upvotes().await;
-
-        let uv = IDEA_UPVOTES.with(|m| {
-            m.borrow().iter().map(|e| e.value())
-                .find(|u| u.idea_id == idea_id && u.voter == voter)
-        }).unwrap();
-        assert_eq!(uv.status, UpvoteStatus::Settled);
-        // No payout blocks: the funds went back to the voter, not the split.
-        assert!(uv.treasury_block.is_none());
-        assert!(uv.poster_block.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_expired_idea_rejected_then_deleted() {
-        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(poster);
-        let idea_id = seed_idea("Old idea", "Desc", "").await;
-
-        // Age the idea past the 30-day window.
-        IDEAS.with(|m| {
-            let mut idea = m.borrow().get(&idea_id).unwrap();
-            idea.last_upvote_at = current_time() - IDEA_EXPIRY_NANOS - 1;
-            idea.created_at = idea.last_upvote_at;
-            m.borrow_mut().insert(idea_id, idea);
-        });
-
-        assert_eq!(upvote_idea(idea_id).unwrap_err(), "IDEA_EXPIRED");
-
-        // list_ideas omits it even before the sweep...
-        assert!(list_ideas().into_iter().all(|i| i.id != idea_id));
-        // ...and the sweep DELETES it (expired = gone).
-        delete_expired_ideas();
-        assert!(IDEAS.with(|m| m.borrow().get(&idea_id)).is_none());
-    }
-
-    #[tokio::test]
-    async fn test_admin_remove_idea() {
-        let poster = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(poster);
-        let idea_id = seed_idea("Idea to remove", "Desc", "").await;
-        assert!(IDEAS.with(|m| m.borrow().get(&idea_id)).is_some());
-
-        // Remove the idea (guard isn't executed in unit tests, so we test core logic)
-        assert!(admin_remove_idea(idea_id).is_ok());
-        assert!(IDEAS.with(|m| m.borrow().get(&idea_id)).is_none());
-        assert!(list_ideas().into_iter().all(|i| i.id != idea_id));
-
-        // Removing non-existent idea -> Err
-        assert_eq!(
-            admin_remove_idea(999_999u64).unwrap_err(),
-            "IDEA_NOT_FOUND"
-        );
-    }
 
     // ── Lossless Voting (pooled staking) ────────────────────────────────────────
 
@@ -26186,80 +21169,7 @@ mod tests {
         assert_eq!(StakeTier::TwoYears.weight_multiplier(), 4);
     }
 
-    #[test]
-    fn test_vp_tenure_doubling() {
-        const P: u64 = VP_TENURE_PERIOD_NANOS;
-        let t0 = 1_000_000_000_000u64;
-        // Doubles every 6 months: 1× → 2× → 4× → 8× → 16×, capped at 16×.
-        assert_eq!(vp_tenure_multiplier(t0, t0), 1);
-        assert_eq!(vp_tenure_multiplier(t0, t0 + P - 1), 1);
-        assert_eq!(vp_tenure_multiplier(t0, t0 + P), 2);
-        assert_eq!(vp_tenure_multiplier(t0, t0 + 2 * P), 4);
-        assert_eq!(vp_tenure_multiplier(t0, t0 + 3 * P), 8);
-        assert_eq!(vp_tenure_multiplier(t0, t0 + 4 * P), 16);
-        assert_eq!(vp_tenure_multiplier(t0, t0 + 9 * P), 16, "capped after 2 years");
-        // Weight: 100 ICP staked, 1 year of tenure → 100/10 × 4 = 40 VP.
-        assert_eq!(
-            stake_weight_e8s(10_000_000_000, t0, t0 + 2 * P),
-            4_000_000_000
-        );
-        // user_voting_weight picks tenure up per tier.
-        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
-        let now = current_time();
-        STAKES.with(|m| {
-            m.borrow_mut().insert(
-                StakeKey { tier: 0, user: alice },
-                UserStake { amount_e8s: 100_000_000, staked_at: now.saturating_sub(P), last_action_at: now },
-            );
-            m.borrow_mut().insert(
-                StakeKey { tier: 2, user: alice },
-                UserStake { amount_e8s: 100_000_000, staked_at: now, last_action_at: now },
-            );
-        });
-        // tier0: 0.1 VP × 2 (6 months in) + tier2: 0.1 VP × 1 = 0.3 VP.
-        assert_eq!(user_voting_weight(alice), 30_000_000);
-        STAKES.with(|m| {
-            m.borrow_mut().remove(&StakeKey { tier: 0, user: alice });
-            m.borrow_mut().remove(&StakeKey { tier: 2, user: alice });
-        });
-    }
 
-    #[test]
-    fn test_casino_svpp_mapping() {
-        // SVPP credits stake at FULL value (no 10× voting discount), so
-        // 1 staked ICP = 1,000 SVPP at base tenure, doubling with tenure.
-        let bob = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
-        let now = current_time();
-        // 1 ICP, just staked → base tenure (1×).
-        STAKES.with(|m| {
-            m.borrow_mut().insert(
-                StakeKey { tier: 0, user: bob },
-                UserStake { amount_e8s: ONE_ICP_E8S, staked_at: now, last_action_at: now },
-            );
-        });
-        // Voting weight (SVP) is discounted 10:1 → 0.1 VP for 1 ICP…
-        assert_eq!(user_voting_weight(bob), ONE_ICP_E8S / STAKED_VP_DIVISOR);
-        // …but SVPP credits full stake → 1 ICP = 1,000 SVPP.
-        assert_eq!(casino_chips(bob), 1_000);
-        // Tenure doubles SVPP every 6 months (same multiplier as VP).
-        STAKES.with(|m| {
-            m.borrow_mut().insert(
-                StakeKey { tier: 0, user: bob },
-                UserStake {
-                    amount_e8s: ONE_ICP_E8S,
-                    staked_at: now.saturating_sub(VP_TENURE_PERIOD_NANOS),
-                    last_action_at: now,
-                },
-            );
-        });
-        assert_eq!(casino_chips(bob), 2_000, "6 months staked → 2,000 SVPP");
-        STAKES.with(|m| {
-            m.borrow_mut().remove(&StakeKey { tier: 0, user: bob });
-        });
-        CASINO_VP_DELTA.with(|m| {
-            m.borrow_mut().remove(&bob);
-        });
-    }
 
     #[test]
     fn test_neuron_staking_subaccount_deterministic() {
@@ -26933,212 +21843,13 @@ mod tests {
         });
     }
 
-    fn clear_threads() {
-        THREADS.with(|m| { let ks: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-        COMMENTS.with(|m| { let ks: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-        DISCUSSION_QUOTES.with(|m| { let ks: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-        DISCUSSION_VOTES.with(|m| { let ks: Vec<DiscussionVoteKey> = m.borrow().iter().map(|e| e.key().clone()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-        DISCUSSION_REWARDED.with(|m| { let ks: Vec<DiscussionVoteKey> = m.borrow().iter().map(|e| e.key().clone()).collect(); let mut m = m.borrow_mut(); for k in ks { m.remove(&k); } });
-    }
 
     fn ticket_count(user: Principal) -> u64 {
         LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).map(|e| e.count).unwrap_or(0)
     }
 
-    #[tokio::test]
-    async fn test_vote_counts_net_and_toggle() {
-        // Exact semantics: fresh upvote → up 1 / down 0 (net +1); fresh downvote
-        // → up 0 / down 1 (net -1); switching flips both; re-voting the same way
-        // toggles off.
-        install_staking_test_config();
-        clear_threads();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");                                    // author
-        let bob = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");  // voter
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_DISCUSSIONS.to_string(), 1u8); });
-        let now = current_time();
-        let mk = |id: u64| Thread {
-            id, proposal_id: 1, author: alice, title: "t".into(), body: "b".into(),
-            created_at: now, last_activity_at: now, comment_count: 0,
-            upvote_count: 0, downvote_count: 0, tickets_awarded: 0, my_vote: None,
-        };
-        THREADS.with(|m| { let mut m = m.borrow_mut(); m.insert(1, mk(1)); m.insert(2, mk(2)); });
-        let net = |id: u64| { let t = THREADS.with(|m| m.borrow().get(&id)).unwrap(); (t.upvote_count as i128) - (t.downvote_count as i128) };
-        let counts = |id: u64| { let t = THREADS.with(|m| m.borrow().get(&id)).unwrap(); (t.upvote_count, t.downvote_count) };
 
-        set_mock_caller(bob);
-        // fresh UPVOTE on thread 1 → (1, 0), net +1
-        vote_thread(1, VoteDir::Up).unwrap();
-        assert_eq!(counts(1), (1, 0));
-        assert_eq!(net(1), 1);
-        // fresh DOWNVOTE on thread 2 → (0, 1), net -1
-        vote_thread(2, VoteDir::Down).unwrap();
-        assert_eq!(counts(2), (0, 1));
-        assert_eq!(net(2), -1);
 
-        // switch thread 2 Down → Up → (1, 0), net +1
-        vote_thread(2, VoteDir::Up).unwrap();
-        assert_eq!(counts(2), (1, 0));
-        assert_eq!(net(2), 1);
-        // re-upvote thread 1 (was Up) toggles OFF → (0, 0), net 0
-        vote_thread(1, VoteDir::Up).unwrap();
-        assert_eq!(counts(1), (0, 0));
-        assert_eq!(net(1), 0);
-        // my_vote reflects bob's current vote on thread 2
-        assert_eq!(get_thread(2).unwrap().my_vote, Some(VoteDir::Up));
-        // and is cleared on thread 1 after toggle-off
-        assert_eq!(get_thread(1).unwrap().my_vote, None);
-
-        clear_threads();
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_DISCUSSIONS.to_string()); });
-    }
-
-    #[tokio::test]
-    async fn test_discussions_comments_votes_and_reward() {
-        install_staking_test_config();
-        clear_threads();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");                                   // author
-        let bob = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe"); // voter w/ history
-        let carol = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");// voter no history
-        FEATURE_FLAGS.with(|m| { let mut m = m.borrow_mut(); m.insert(FLAG_DISCUSSIONS.to_string(), 1u8); m.insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8); });
-        // bob has participation history; carol does not.
-        USER_AGGREGATES.with(|m| { m.borrow_mut().insert(bob, UserAggregates { total_committed_escrow: 0, total_burned: 0, proposals_joined: 1 }); });
-        open_proposal(700_901, 200_000_000);
-        set_mock_ledger_transfer(Ok(1));
-
-        // alice starts a thread.
-        set_mock_caller(alice);
-        let q = get_thread_quote(ExplorerToken::ICP).await.unwrap();
-        set_mock_ledger_balance(q.amount + 10_000);
-        let tid = start_thread(700_901, "Title".into(), "body".into(), ExplorerToken::ICP).await.unwrap();
-
-        // bob upvotes while alice is NOT staked → counts, but no ticket reward.
-        set_mock_caller(bob);
-        vote_thread(tid, VoteDir::Up).unwrap();
-        assert_eq!(get_thread(tid).unwrap().upvote_count, 1);
-        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 0, "author not staked → no reward");
-        assert_eq!(ticket_count(alice), 0);
-
-        // Stake alice → now she participates in the lottery.
-        STAKES.with(|m| { m.borrow_mut().insert(stake_key(StakeTier::SixMonths, alice), UserStake { amount_e8s: ONE_ICP_E8S, staked_at: 0, last_action_at: 0 }); });
-
-        // bob toggles off then re-upvotes → reward fires once.
-        vote_thread(tid, VoteDir::Up).unwrap(); // toggle off
-        assert_eq!(get_thread(tid).unwrap().upvote_count, 0);
-        vote_thread(tid, VoteDir::Up).unwrap(); // re-up → reward
-        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 1);
-        assert_eq!(ticket_count(alice), 1);
-
-        // bob toggle-farms (off/on) again → already-rewarded marker blocks a 2nd ticket.
-        vote_thread(tid, VoteDir::Up).unwrap(); // off
-        vote_thread(tid, VoteDir::Up).unwrap(); // on
-        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 1, "toggle cannot farm");
-        assert_eq!(ticket_count(alice), 1);
-
-        // carol (no history) upvotes → no reward.
-        set_mock_caller(carol);
-        vote_thread(tid, VoteDir::Up).unwrap();
-        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 1);
-        // alice self-upvote → no reward.
-        set_mock_caller(alice);
-        vote_thread(tid, VoteDir::Up).unwrap();
-        assert_eq!(get_thread(tid).unwrap().tickets_awarded, 1);
-
-        // Comments ($0.25). bob comments; carol replies one level; reply-to-reply rejected.
-        set_mock_caller(bob);
-        let cq = get_comment_quote(ExplorerToken::ICP).await.unwrap();
-        assert_eq!(cq.amount, 5_000_000); // $0.25 / $5 = 0.05 ICP
-        set_mock_ledger_balance(cq.amount + 10_000);
-        let c1 = add_comment(tid, None, "good point".into(), ExplorerToken::ICP).await.unwrap();
-        set_mock_caller(carol);
-        let _ = get_comment_quote(ExplorerToken::ICP).await.unwrap();
-        set_mock_ledger_balance(cq.amount + 10_000);
-        let c2 = add_comment(tid, Some(c1), "reply".into(), ExplorerToken::ICP).await.unwrap();
-        let _ = get_comment_quote(ExplorerToken::ICP).await.unwrap();
-        set_mock_ledger_balance(cq.amount + 10_000);
-        assert_eq!(add_comment(tid, Some(c2), "nope".into(), ExplorerToken::ICP).await.unwrap_err(), "INVALID_PARENT");
-        assert_eq!(list_comments(tid).len(), 2);
-        assert_eq!(get_thread(tid).unwrap().comment_count, 2);
-
-        // Comment vote (no reward).
-        vote_comment(c1, VoteDir::Up).unwrap();
-        assert_eq!(list_comments(tid).iter().find(|c| c.id == c1).unwrap().upvote_count, 1);
-        assert_eq!(ticket_count(alice), 1, "comment votes don't reward");
-
-        // Delete-on-settle: threads + comments gone; earned tickets kept.
-        delete_proposal_discussions(700_901);
-        assert!(get_thread(tid).is_none());
-        assert_eq!(list_comments(tid).len(), 0);
-        assert_eq!(get_thread_count(700_901), 0);
-        assert_eq!(ticket_count(alice), 1, "tickets survive thread deletion");
-
-        clear_threads();
-        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice)); });
-        USER_AGGREGATES.with(|m| { m.borrow_mut().remove(&bob); });
-        FEATURE_FLAGS.with(|m| { let mut m = m.borrow_mut(); m.remove(&FLAG_DISCUSSIONS.to_string()); m.remove(&FLAG_LOSSLESS_LOTTERY.to_string()); });
-    }
-
-    #[tokio::test]
-    async fn test_start_thread_fee_routing() {
-        install_staking_test_config();
-        clear_threads();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(alice);
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_DISCUSSIONS.to_string(), 1u8); });
-        open_proposal(700_900, 200_000_000);
-
-        // No quote → refused.
-        assert_eq!(
-            start_thread(700_900, "T".into(), "body".into(), ExplorerToken::ICP).await.unwrap_err(),
-            "NO_QUOTE"
-        );
-
-        // $1 in ICP at the $5 static rate = 0.2 ICP.
-        let q = get_thread_quote(ExplorerToken::ICP).await.unwrap();
-        assert_eq!(q.amount, 20_000_000);
-        assert_eq!(q.usd_total_e8s, 100_000_000);
-
-        // Underfunded escrow refused.
-        set_mock_ledger_balance(q.amount); // missing the ledger fee
-        assert_eq!(
-            start_thread(700_900, "T".into(), "body".into(), ExplorerToken::ICP).await.unwrap_err(),
-            "INSUFFICIENT_DEPOSIT"
-        );
-
-        // Funded → ICP burn path (CMC top-up; notify is a host-test no-op).
-        set_mock_ledger_balance(q.amount + 10_000);
-        set_mock_ledger_transfer(Ok(7));
-        let id = start_thread(700_900, "Title".into(), "body".into(), ExplorerToken::ICP).await.unwrap();
-        let t = get_thread(id).unwrap();
-        assert_eq!(t.proposal_id, 700_900);
-        assert_eq!(t.author, alice);
-        assert_eq!(list_threads(700_900).len(), 1);
-        assert_eq!(get_thread_count(700_900), 1);
-        assert_eq!(list_my_threads().len(), 1);
-        // Quote consumed → second start needs a fresh quote.
-        assert_eq!(
-            start_thread(700_900, "T".into(), "b".into(), ExplorerToken::ICP).await.unwrap_err(),
-            "NO_QUOTE"
-        );
-
-        // Non-ICP token → treasury path ($1 of USDC = 1 USDC at $1).
-        let q2 = get_thread_quote(ExplorerToken::CkUSDC).await.unwrap();
-        assert_eq!(q2.amount, 1_000_000);
-        set_mock_ledger_balance(q2.amount + 10_000);
-        let id2 = start_thread(700_900, "T2".into(), "body2".into(), ExplorerToken::CkUSDC).await.unwrap();
-        assert!(get_thread(id2).is_some());
-        assert_eq!(get_thread_count(700_900), 2);
-
-        // A settled proposal refuses new threads.
-        PROPOSALS.with(|m| { let mut p = m.borrow().get(&700_900).unwrap(); p.status = "settled".into(); m.borrow_mut().insert(700_900, p); });
-        let _ = get_thread_quote(ExplorerToken::ICP).await.unwrap();
-        assert_eq!(
-            start_thread(700_900, "T".into(), "b".into(), ExplorerToken::ICP).await.unwrap_err(),
-            "PROPOSAL_NOT_OPEN"
-        );
-
-        clear_threads();
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_DISCUSSIONS.to_string()); });
-    }
 
     #[tokio::test]
     async fn test_commit_without_following_succeeds() {
@@ -27917,7 +22628,6 @@ mod tests {
         set_mock_ledger_transfer(Ok(1));
 
         assert!(dev_faucet().await.is_err());
-        assert!(dev_faucet_token(IdeaToken::ICP).await.is_err());
         assert!(dev_seed_pool_neuron(1, 1).is_err());
         assert_eq!(dev_run_staking_sweep().await.unwrap_err(), "DEV_ONLY");
         assert_eq!(dev_fast_forward_dissolve(1).unwrap_err(), "DEV_ONLY");
@@ -27948,14 +22658,16 @@ mod tests {
         // Lottery now defaults ON — turn it OFF to exercise the dark state.
         FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 0u8); });
         // Flag off: dark — no pot reads, nothing enabled.
-        let info = get_lottery_info().await;
+        let info = get_lottery_info();
         assert!(!info.enabled);
         assert_eq!(info.pot_e8s, 0);
         assert!(!info.eligible);
 
-        // Flag on, not staked: eligible=false, grant 0.
+        // Flag on, not staked: eligible=false, grant 0. get_lottery_info is a
+        // QUERY now — warm the pot cache the way the sweep/pot-writers do.
         enable_lottery();
-        let info = get_lottery_info().await;
+        set_cached_lottery_pot_e8s(500_000_000);
+        let info = get_lottery_info();
         assert!(info.enabled);
         assert_eq!(info.pot_e8s, 500_000_000);
         assert!(!info.eligible);
@@ -27964,12 +22676,12 @@ mod tests {
         // Stake-weighted: 1 ICP 6mo (base×1×1) + 1 ICP 2y (base×4×1) = 25/day.
         seed_stake(StakeTier::SixMonths, alice, 100_000_000);
         seed_stake(StakeTier::TwoYears, alice, 100_000_000);
-        let info = get_lottery_info().await;
+        let info = get_lottery_info();
         assert!(info.eligible);
         assert_eq!(info.my_daily_tickets, 25);
         // Bigger stake → proportionally more tickets (500 ICP 2y = base×4×500).
         seed_stake(StakeTier::TwoYears, alice, 50_000_000_000);
-        let info = get_lottery_info().await;
+        let info = get_lottery_info();
         assert_eq!(info.my_daily_tickets, 5 + 5 * 4 * 500);
         // Dynamic odds: the denominator is total_tickets × 13 (min 13).
         assert_eq!(lottery_odds_denominator(0), 13);
@@ -28192,11 +22904,6 @@ mod tests {
         seed_mock_proposals();
         assert_eq!(PROPOSALS.with(|m| m.borrow().len()), n, "seeding is idempotent");
 
-        seed_mock_ideas();
-        let i = IDEAS.with(|m| m.borrow().len());
-        assert!(i > 0);
-        seed_mock_ideas();
-        assert_eq!(IDEAS.with(|m| m.borrow().len()), i);
     }
 
     #[tokio::test]
@@ -28287,40 +22994,7 @@ mod tests {
         admin_trigger_sweep().await.unwrap();
     }
 
-    #[test]
-    fn test_admin_token_ledger_and_min_upvote() {
-        install_staking_test_config();
-        let ledger = p("aaaaa-aa");
 
-        assert_eq!(admin_set_token_ledger(IdeaToken::CkBTC, Principal::anonymous()).unwrap_err(), "INVALID_LEDGER");
-        assert_eq!(admin_set_token_ledger(IdeaToken::ICP, ledger).unwrap_err(), "ICP_LEDGER_FIXED");
-        admin_set_token_ledger(IdeaToken::CkBTC, ledger).unwrap();
-        admin_set_token_ledger(IdeaToken::CkETH, ledger).unwrap();
-        let cfg = CONFIG.with(|c| c.borrow().get().clone());
-        assert_eq!(cfg.ckbtc_ledger_canister_id, Some(ledger));
-        assert_eq!(cfg.cketh_ledger_canister_id, Some(ledger));
-
-        // Mainnet pins the canonical ledgers — overrides rejected.
-        CONFIG.with(|cell| { cell.borrow_mut().set(test_config(false)); });
-        assert_eq!(admin_set_token_ledger(IdeaToken::CkBTC, ledger).unwrap_err(), "MAINNET_LEDGERS_PINNED");
-        let resolved = token_ledger(IdeaToken::CkBTC, &CONFIG.with(|c| c.borrow().get().clone()));
-        assert_eq!(resolved, Principal::from_text(MAINNET_CKBTC_LEDGER).unwrap());
-
-        assert_eq!(admin_set_min_upvote(IdeaToken::ICP, 0).unwrap_err(), "INVALID_MINIMUM");
-        assert_eq!(admin_set_min_upvote(IdeaToken::ICP, MAX_UPVOTE_UNITS + 1).unwrap_err(), "INVALID_MINIMUM");
-        admin_set_min_upvote(IdeaToken::CkETH, 42).unwrap();
-        assert_eq!(CONFIG.with(|c| c.borrow().get().min_upvote_cketh_wei), Some(42));
-    }
-
-    #[tokio::test]
-    async fn test_dev_faucet_token_local_happy_path() {
-        install_staking_test_config();
-        set_mock_caller(p("rrkah-fqaaa-aaaaa-aaaaq-cai"));
-        set_mock_ledger_transfer(Ok(1));
-        for token in [IdeaToken::ICP, IdeaToken::CkBTC, IdeaToken::CkETH] {
-            dev_faucet_token(token).await.unwrap();
-        }
-    }
 
     #[tokio::test]
     async fn test_finalize_pool_registration_rejections() {
@@ -28389,11 +23063,6 @@ mod tests {
         });
         assert!(!list_vote_history().is_empty());
 
-        // Board info reflects local ledger fallbacks.
-        let info = get_idea_board_info();
-        assert!(info.enabled);
-        assert_eq!(info.post_fee_usd_e8s, IDEA_POST_FEE_USD_E8S);
-
         // require_admin: rejected for non-admins, accepted once added.
         assert!(require_admin().is_err());
         CONFIG.with(|cell| {
@@ -28403,10 +23072,6 @@ mod tests {
         });
         assert!(require_admin().is_ok());
 
-        // Per-target deposit addresses are distinct.
-        let a = get_idea_deposit_address(1);
-        let b = get_project_deposit_address(1);
-        assert_ne!(a.subaccount, b.subaccount);
         let id_text = get_caller_principal();
         assert_eq!(id_text, alice);
     }
@@ -28545,7 +23210,7 @@ mod tests {
         assert_eq!(user_daily_tickets(alice), 0);
         assert_eq!(claim_daily_tickets().unwrap_err(), "ADMINS_EXCLUDED");
         set_mock_ledger_balance(0);
-        let info = get_lottery_info().await;
+        let info = get_lottery_info();
         assert!(info.admin_excluded);
         assert!(!info.eligible);
         assert_eq!(info.my_daily_tickets, 0);
@@ -28748,13 +23413,10 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
 
-        // Out legs: a commitment, an idea post and a stake lockup. (Upvotes are
-        // free now and move no money, so they never appear in tx history.)
+        // Out legs: a commitment and a stake lockup.
         let pid = 730_001u64;
         open_proposal(pid, 10_000_000_000);
         commit(pid, Stance::Adopt, 200_000_000).await.unwrap();
-        let _ = get_idea_post_quote(ExplorerToken::ICP).await.unwrap();
-        let _idea = post_idea("Tx history".into(), "d".into(), "".into(), ExplorerToken::ICP).await.unwrap();
         stake(200_000_000, StakeTier::SixMonths).await.unwrap();
 
         // In leg: the commitment refunds when the proposal misses.
@@ -28765,8 +23427,6 @@ mod tests {
         let dep = kind("deposit").expect("commit escrow recorded");
         assert_eq!(dep.direction, TxDirection::Out);
         assert_eq!(dep.amount, 200_000_000);
-        let post = kind("idea_post").expect("idea post fee recorded");
-        assert_eq!(post.amount, 1_000_000); // $0.05 in ICP at the static $5 rate
         let st = kind("stake").expect("stake lockup recorded");
         assert_eq!(st.direction, TxDirection::Out);
         assert_eq!(st.amount, 200_000_000);
@@ -28789,30 +23449,8 @@ mod tests {
 
     // ===== Crash / Casino (Epic J) =====
 
-    /// Independent closed-form oracle (plans/crash/05 Layer 0): P[crash ≥ x],
-    /// x in ×100. Combines the 1/101 instant bust with the curve's tail.
-    fn crash_cdf_oracle(x_x100: u64) -> f64 {
-        if x_x100 <= 100 {
-            return 1.0;
-        }
-        let x = x_x100 as f64 / 100.0;
-        (100.0 / 101.0) * (99.0 / (100.0 * x - 1.0))
-    }
 
-    fn casino_test_reset() {
-        CASINO_VP_DELTA.with(|m| {
-            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
-            let mut map = m.borrow_mut();
-            for k in keys {
-                map.remove(&k);
-            }
-        });
-        set_casino_book(CasinoBook { exposure_cap_vp: CRASH_DEFAULT_EXPOSURE_CAP_VP, ..Default::default() });
-    }
 
-    fn seed_for(n: u64) -> [u8; 32] {
-        sha256(&n.to_le_bytes())
-    }
 
     fn stake_for_test(user: Principal, amount_e8s: u64, staked_at: u64) {
         STAKES.with(|m| {
@@ -28823,309 +23461,20 @@ mod tests {
         });
     }
 
-    #[test]
-    fn crash_point_bounds_and_determinism() {
-        for n in 0..5000u64 {
-            let s = seed_for(n);
-            let x = crash_point_x100(&s);
-            assert!((100..=CRASH_CAP_X100).contains(&x), "x {} out of range", x);
-            assert_eq!(x, crash_point_x100(&s), "deterministic");
-        }
-    }
 
-    #[test]
-    fn crash_instant_bust_maps_to_one() {
-        let mut found = false;
-        for n in 0..2000u64 {
-            let s = seed_for(n);
-            let mut data = s.to_vec();
-            data.extend_from_slice(CRASH_DOMAIN);
-            let h = sha256(&data);
-            let u = u64::from_be_bytes(h[0..8].try_into().unwrap());
-            if u % 101 == 0 {
-                assert_eq!(crash_point_x100(&s), 100);
-                found = true;
-                break;
-            }
-        }
-        assert!(found, "expected at least one instant-bust seed in 2000 samples");
-    }
 
-    #[test]
-    fn crash_distribution_matches_oracle() {
-        let n = 200_000u64;
-        let buckets = [150u64, 200, 300, 500, 1000];
-        let mut counts = [0u64; 5];
-        let mut instant = 0u64;
-        for i in 0..n {
-            let x = crash_point_x100(&seed_for(i));
-            if x == 100 {
-                instant += 1;
-            }
-            for (b, &thr) in buckets.iter().enumerate() {
-                if x >= thr {
-                    counts[b] += 1;
-                }
-            }
-        }
-        // P[crash == 1.00×] = the 1/101 instant bust PLUS the curve mass that
-        // floors into [1.00,1.01) = P[crash < 1.01×] ≈ 2/101.
-        let p_one = instant as f64 / n as f64;
-        let theo_one = 1.0 - crash_cdf_oracle(101);
-        assert!((p_one - theo_one).abs() < 0.003, "p(1.00×)={} theo={}", p_one, theo_one);
-        for (b, &thr) in buckets.iter().enumerate() {
-            let emp = counts[b] as f64 / n as f64;
-            let theo = crash_cdf_oracle(thr);
-            assert!((emp - theo).abs() < 0.01, "bucket {}×100: emp {} theo {}", thr, emp, theo);
-        }
-    }
 
-    #[test]
-    fn crash_house_edge_converges() {
-        let n = 300_000u64;
-        let target = 200u64;
-        let mut paid = 0u64;
-        for i in 0..n {
-            let crash = crash_point_x100(&seed_for(i ^ 0x5151_5151));
-            if target <= crash {
-                paid += 2;
-            }
-        }
-        let ev = paid as f64 / n as f64;
-        assert!((0.96..=1.0).contains(&ev), "house edge EV {}", ev);
-    }
 
-    #[test]
-    fn multiplier_clock_and_inverse() {
-        assert_eq!(crash_multiplier_x100(0), 100);
-        let mut prev = 0;
-        for ms in (0..40_000).step_by(250) {
-            let m = crash_multiplier_x100(ms);
-            assert!(m >= prev);
-            prev = m;
-        }
-        for &x in &[150u64, 200, 500, 1000, 5000, 10000] {
-            let dt_ns = crash_time_offset_nanos(x);
-            let at = crash_multiplier_x100(dt_ns / 1_000_000);
-            assert!(at + 2 >= x && at <= x + 2, "x {} -> reached {}", x, at);
-        }
-    }
 
-    #[test]
-    fn hash_chain_recovers_and_verifies() {
-        let seed = sha256(b"genesis-test");
-        let (terminal, checkpoints) = build_crash_chain(seed, 1000, 100);
-        let chain = CrashChain { initialized: true, chain_seed: seed, terminal, n: 1000, stride: 100, checkpoints };
-        for &i in &[1u64, 50, 99, 100, 101, 250, 999, 1000] {
-            let s = crash_seed_at(&chain, i);
-            let mut h = s;
-            for _ in 0..i {
-                h = sha256(&h);
-            }
-            assert_eq!(h, terminal, "chain link broken at index {}", i);
-        }
-        let naive_h500 = {
-            let mut h = seed;
-            for _ in 0..(1000 - 500) {
-                h = sha256(&h);
-            }
-            h
-        };
-        assert_eq!(crash_seed_at(&chain, 500), naive_h500);
-    }
 
-    #[test]
-    fn settle_bet_cases() {
-        let (d, p) = settle_crash_bet(100, 200, None, 300);
-        assert_eq!(p, 200);
-        assert_eq!(d, 100 * CHIP_E8S as i128);
-        let (d, p) = settle_crash_bet(100, 300, None, 300);
-        assert_eq!(p, 300);
-        assert_eq!(d, 100 * CHIP_E8S as i128 * 2);
-        let (d, p) = settle_crash_bet(100, 500, None, 300);
-        assert_eq!(p, 0);
-        assert_eq!(d, -(100 * CHIP_E8S as i128));
-        let (d, p) = settle_crash_bet(100, 1000, Some(150), 300);
-        assert_eq!(p, 150);
-        assert_eq!(d, 100 * CHIP_E8S as i128 / 2);
-    }
 
-    #[test]
-    fn payout_cap_auto_cashes_big_bets() {
-        // 5,000 VP (5,000,000 chips) with a 10× target is auto-cashed at 2.00×
-        // (5,000 × 2 = the 10,000-VP payout cap).
-        assert_eq!(effective_target_x100(5_000_000, 1000), 200);
-        let (d, p) = settle_crash_bet(5_000_000, 1000, None, 2500); // crashes at 25×
-        assert_eq!(p, 200, "settled at the payout-capped 2.00×");
-        assert_eq!(d, 5_000_000i128 * CHIP_E8S as i128, "profit = +5,000 VP");
-        // Larger bets cap lower; small bets are unaffected.
-        assert_eq!(effective_target_x100(6_000_000, 5000), 166);
-        assert_eq!(effective_target_x100(8_000_000, 5000), 125);
-        assert_eq!(effective_target_x100(100, 200), 200);
-        // A capped bet still loses if the crash is below the capped target.
-        let (d, p) = settle_crash_bet(5_000_000, 1000, None, 150); // crash 1.5× < 2×
-        assert_eq!(p, 0);
-        assert_eq!(d, -(5_000_000i128 * CHIP_E8S as i128));
-    }
 
-    #[test]
-    fn no_auto_target_is_manual_only() {
-        // target 0 = no auto cash-out: rides to the crash → loss unless the
-        // player manually cashed out.
-        let (_, p) = settle_crash_bet(100, 0, None, 300);
-        assert_eq!(p, 0, "no auto target never auto-cashes");
-        let (_, p2) = settle_crash_bet(100, 0, Some(250), 300);
-        assert_eq!(p2, 250, "manual cashout still wins");
-        // The payout cap still bounds a no-auto big bet.
-        assert_eq!(effective_target_x100(5_000_000, 0), 200);
-    }
 
-    #[test]
-    fn ledger_reconciliation_zero_sum() {
-        casino_test_reset();
-        let now = current_time();
-        let a = Principal::from_slice(&[1; 29]);
-        let b = Principal::from_slice(&[2; 29]);
-        stake_for_test(a, 1_000 * ONE_ICP_E8S, now);
-        stake_for_test(b, 1_000 * ONE_ICP_E8S, now);
-        let deltas = [(a, 200_000_000i128), (b, -200_000_000i128)];
-        let mut round_sum = 0i128;
-        for (u, d) in deltas {
-            casino_add_delta(u, d);
-            round_sum += d;
-        }
-        let mut book = casino_book();
-        book.house_e8s -= round_sum;
-        set_casino_book(book);
-        assert_eq!(casino_reconciliation_e8s(), 0, "Σ users + house must be 0");
-    }
 
-    #[test]
-    fn weekly_burn_zeroes_positive_house() {
-        casino_test_reset();
-        let mut book = casino_book();
-        book.house_e8s = 500_000_000;
-        book.last_burn_week = 1;
-        set_casino_book(book);
-        let before = casino_reconciliation_e8s();
-        casino_weekly_burn();
-        let after = casino_book();
-        assert_eq!(after.house_e8s, 0);
-        assert_eq!(after.burned_e8s, 500_000_000);
-        assert_eq!(casino_reconciliation_e8s(), before, "burn preserves reconciliation");
-        let burned = after.burned_e8s;
-        casino_weekly_burn();
-        assert_eq!(casino_book().burned_e8s, burned);
-    }
 
-    #[test]
-    fn validate_strategy_corpus() {
-        let base = CrashStrategy {
-            id: 0,
-            author: Principal::anonymous(),
-            name: "ok".into(),
-            description: String::new(),
-            base_bet_chips: 100,
-            auto_target_x100: 200,
-            on_loss: ProgressionRule { action: BetAction::Multiply, factor_x100: 200 },
-            on_win: ProgressionRule { action: BetAction::Reset, factor_x100: 0 },
-            max_bet_chips: 5000,
-            max_consecutive_losses: 7,
-            skip_rounds_after_loss: 0,
-            stop: StrategyStop { take_profit_vp_x1000: 0, stop_loss_vp_x1000: 0, max_rounds: 500 },
-            version: 1,
-            builtin: false,
-            lifetime_vp_e8s: 0,
-            created_at: 0,
-        };
-        assert!(validate_strategy(&base).is_ok());
-        let mut s = base.clone();
-        s.stop = StrategyStop::default();
-        assert_eq!(validate_strategy(&s), Err("STOP_REQUIRED".into()));
-        let mut s = base.clone();
-        s.on_loss.factor_x100 = 1100;
-        assert_eq!(validate_strategy(&s), Err("BAD_FACTOR".into()));
-        let mut s = base.clone();
-        s.max_bet_chips = 50;
-        assert_eq!(validate_strategy(&s), Err("BAD_MAX_BET".into()));
-        let mut s = base.clone();
-        s.auto_target_x100 = 100;
-        assert_eq!(validate_strategy(&s), Err("BAD_TARGET".into()));
-    }
 
-    #[test]
-    fn place_bet_guards() {
-        casino_test_reset();
-        let now = current_time();
-        let u = Principal::from_slice(&[7; 29]);
-        stake_for_test(u, 5_000 * ONE_ICP_E8S, now);
-        set_crash_state(CrashRound {
-            id: 1,
-            phase: CrashPhase::Betting,
-            phase_deadline: now + CRASH_BETTING_NANOS,
-            ..Default::default()
-        });
-        let chips = casino_chips(u);
-        assert!(chips >= 100, "test stake should yield ≥100 chips, got {}", chips);
-        assert_eq!(crash_place_bet(u, 5, 200, false, None), Err("WAGER_OUT_OF_RANGE".into()));
-        assert_eq!(crash_place_bet(u, 100, 100, false, None), Err("TARGET_OUT_OF_RANGE".into()));
-        assert!(crash_place_bet(u, 100, 200, false, None).is_ok());
-        assert_eq!(crash_place_bet(u, 100, 200, false, None), Err("ALREADY_BET".into()));
-        assert_eq!(casino_available_chips(u), chips - 100);
-        let mut r = crash_state();
-        r.phase = CrashPhase::Running;
-        set_crash_state(r);
-        let u2 = Principal::from_slice(&[8; 29]);
-        stake_for_test(u2, 5_000 * ONE_ICP_E8S, now);
-        assert_eq!(crash_place_bet(u2, 100, 200, false, None), Err("NOT_BETTING".into()));
-    }
 
-    #[test]
-    fn settle_with_strategy_bet_does_not_panic() {
-        // Regression: settling an auto-pilot bet (strategy_id set) must not hit a
-        // RefCell double-borrow when updating the strategy's lifetime-VP total.
-        casino_test_reset();
-        let seed = sha256(b"settle-strat");
-        let (terminal, cps) = build_crash_chain(seed, 100, 10);
-        CRASH_CHAIN.with(|c| {
-            let _ = c.borrow_mut().set(CrashChain { initialized: true, chain_seed: seed, terminal, n: 100, stride: 10, checkpoints: cps });
-        });
-        seed_builtin_strategies();
-        let bot = Principal::from_slice(&[0xB0, 9, 9]);
-        stake_for_test(bot, 1_000 * ONE_ICP_E8S, current_time());
-        let mut r = CrashRound {
-            id: 1,
-            phase: CrashPhase::Running,
-            chain_index: 1,
-            crash_x100: 300,
-            run_started_at: current_time(),
-            ..Default::default()
-        };
-        r.bets.push(CrashBet {
-            user: bot,
-            wager_chips: 100,
-            target_x100: 200,
-            manual_x100: None,
-            outcome: BetOutcome::Pending,
-            payout_x100: 0,
-            delta_e8s: 0,
-            auto_pilot: true,
-            strategy_id: Some(2),
-        });
-        crash_settle_round(&mut r, current_time()); // must not panic
-        assert_eq!(r.bets[0].outcome, BetOutcome::Won, "target 2x ≤ crash 3x pays");
-        let s = CRASH_STRATEGIES.with(|m| m.borrow().get(&2)).unwrap();
-        assert!(s.lifetime_vp_e8s > 0, "strategy leaderboard accrues the win");
-    }
 
-    #[test]
-    fn chat_text_validation() {
-        assert!(valid_chat_text("gl all"));
-        assert!(!valid_chat_text(""));
-        assert!(!valid_chat_text(&"x".repeat(CASINO_CHAT_MAX_LEN + 1)));
-        assert!(!valid_chat_text("bad\u{0007}bell"));
-        assert!(valid_chat_text("spaces are fine"));
-    }
 
     // ===== 20. Course NFT marketplace tests =====
 
@@ -29208,9 +23557,7 @@ mod tests {
 
     fn enable_arcade_minigolf() {
         FEATURE_FLAGS.with(|m| {
-            let mut map = m.borrow_mut();
-            map.insert(FLAG_ARCADE.to_string(), 1);
-            map.insert(FLAG_ARCADE_MINIGOLF.to_string(), 1);
+            m.borrow_mut().insert(FLAG_ARCADE_MINIGOLF.to_string(), 1);
         });
     }
 
@@ -30166,22 +24513,6 @@ mod tests {
 
     // ── Leaderboard removal (PB-309) ─────────────────────────────────────────
 
-    #[test]
-    fn test_minigolf_score_retired_fieldgoal_unaffected() {
-        course_test_setup();
-        let user = make_player();
-        // make_player follows but arcade_access also needs has_stake or voted;
-        // seed a stake so the participation gate passes for the fieldgoal path.
-        seed_stake(StakeTier::SixMonths, user, 100_000_000);
-        set_mock_caller(user);
-        // Mini-golf score writes are retired.
-        assert_eq!(
-            submit_arcade_score("minigolf".to_string(), 60_000, vec![3; 9]).unwrap_err(),
-            "MINIGOLF_RETIRED"
-        );
-        // Mini-golf leaderboard query is always empty.
-        assert!(get_arcade_leaderboard("minigolf".to_string()).is_empty());
-    }
 
     // ── Secondary market: buy saga (PB-307) ──────────────────────────────────
 
@@ -31556,41 +25887,7 @@ mod tests {
     /// The target canister to top up (opaque principal, ends in 0x01).
     fn faucet_canister() -> Principal { p("ryjl3-tyaaa-aaaaa-aaaba-cai") }
 
-    fn faucet_set_flag(state: FlagState) {
-        FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_CYCLES_FAUCET.to_string(), flag_state_code(state));
-        });
-    }
 
-    /// Wipe all faucet state + the gating maps so each test is independent.
-    fn faucet_reset() {
-        set_mock_time(None);
-        set_admins(vec![]);
-        CONFIG.with(|c| { let mut cfg = c.borrow().get().clone(); cfg.is_local = true; let _ = c.borrow_mut().set(cfg); });
-        faucet_set_flag(FlagState::On);
-        // High treasury so the floor passes unless a test lowers it.
-        set_mock_ledger_balance(1_000_000_000_000);
-        set_mock_ledger_transfer(Ok(7));
-        for cid in [faucet_canister(), bob(), alice()] {
-            FAUCET_REGISTRATIONS.with(|m| { m.borrow_mut().remove(&cid); });
-            FAUCET_CANISTER_USAGE.with(|m| { m.borrow_mut().remove(&cid); });
-        }
-        FAUCET_DEV_LAST_CLAIM.with(|m| {
-            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
-            let mut m = m.borrow_mut();
-            for k in keys { m.remove(&k); }
-        });
-        POOL_NEURONS.with(|m| {
-            let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect();
-            let mut m = m.borrow_mut();
-            for k in keys { m.remove(&k); }
-        });
-        COMMITMENTS.with(|m| {
-            let keys: Vec<CommitmentKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
-            let mut m = m.borrow_mut();
-            for k in keys { m.remove(&k); }
-        });
-    }
 
     /// Give `dev` an ACTIVE pool neuron (G2) and a recent burn commitment (G3).
     fn faucet_make_eligible(dev: Principal) {
@@ -31615,205 +25912,15 @@ mod tests {
         });
     }
 
-    /// Register the target canister — any authenticated dev can (no self-call proof).
-    fn faucet_register(canister: Principal) {
-        set_mock_caller(faucet_dev());
-        register_faucet_canister(canister).unwrap();
-    }
 
-    #[test]
-    fn test_faucet_register_by_dev() {
-        faucet_reset();
-        // A dev registers a canister id from the dapp (no proof-of-control).
-        set_mock_caller(faucet_dev());
-        assert!(register_faucet_canister(faucet_canister()).is_ok());
-        assert!(FAUCET_REGISTRATIONS.with(|m| m.borrow().contains_key(&faucet_canister())));
-        // A non-canister (self-authenticating) principal arg is rejected.
-        assert!(register_faucet_canister(faucet_dev()).is_err());
-        // Anonymous caller rejected.
-        set_mock_caller(anon());
-        assert!(register_faucet_canister(faucet_canister()).is_err());
-    }
 
-    #[tokio::test]
-    async fn test_faucet_claim_happy_path() {
-        faucet_reset();
-        faucet_register(faucet_canister());
-        faucet_make_eligible(faucet_dev());
-        set_mock_caller(faucet_dev());
 
-        assert_eq!(
-            faucet_eligibility_sync(faucet_dev(), faucet_canister(), &CONFIG.with(|c| c.borrow().get().clone())),
-            FaucetGate::Eligible
-        );
-        claim_faucet_cycles(faucet_canister()).await.expect("claim should succeed");
 
-        let usage = FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).unwrap());
-        assert_eq!(usage.count, 1);
-        assert!(usage.last_claim_ns > 0);
-        assert!(FAUCET_DEV_LAST_CLAIM.with(|m| m.borrow().get(&faucet_dev()).unwrap()) > 0);
-        let stats = get_faucet_stats();
-        assert_eq!(stats.total_claims, 1);
-        assert!(stats.total_granted_icp_e8s > 0);
-        // No leftover in-flight block (saga finalized).
-        let reg = FAUCET_REGISTRATIONS.with(|m| m.borrow().get(&faucet_canister()).unwrap());
-        assert!(reg.pending_block.is_none());
-    }
 
-    #[tokio::test]
-    async fn test_faucet_reject_non_member() {
-        faucet_reset();
-        faucet_register(faucet_canister());
-        // No pool neuron for the dev → G2 fails.
-        COMMITMENTS.with(|m| {
-            m.borrow_mut().insert(
-                CommitmentKey { proposal_id: 1, principal: faucet_dev() },
-                sample_commitment(1, faucet_dev(), 100_000_000, CommitmentStatus::Burned),
-            );
-        });
-        set_mock_caller(faucet_dev());
-        let cfg = CONFIG.with(|c| c.borrow().get().clone());
-        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::NoPoolNeuron);
-        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "NO_POOL_NEURON");
-    }
 
-    #[tokio::test]
-    async fn test_faucet_reject_no_recent_burn() {
-        faucet_reset();
-        faucet_register(faucet_canister());
-        // Active pool neuron but NO recent commitment → G3 fails.
-        let now = current_time();
-        POOL_NEURONS.with(|m| {
-            m.borrow_mut().insert(7777, PoolNeuron {
-                neuron_id: 7777, registered_by: faucet_dev(), voting_power: 1, status: PoolStatus::Active,
-                created_at: now, activated_at: Some(now), treasury_block: None, backend_cmc_block: None, frontend_cmc_block: None,
-            });
-        });
-        set_mock_caller(faucet_dev());
-        let cfg = CONFIG.with(|c| c.borrow().get().clone());
-        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::NotVotedInWindow);
-        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "NOT_VOTED_IN_WINDOW");
-    }
 
-    #[tokio::test]
-    async fn test_faucet_weekly_cooldown_dev_and_canister() {
-        faucet_reset();
-        faucet_register(faucet_canister());
-        faucet_make_eligible(faucet_dev());
-        set_mock_caller(faucet_dev());
-        let base = 2_000_000_000_000_000_000u64;
-        set_mock_time(Some(base));
-        // make_eligible used current_time(); refresh the commitment to be in-window.
-        faucet_make_eligible(faucet_dev());
-        claim_faucet_cycles(faucet_canister()).await.unwrap();
 
-        // Same dev, immediately again → cooldown.
-        set_mock_time(Some(base + DAY_NANOS));
-        let cfg = CONFIG.with(|c| c.borrow().get().clone());
-        assert!(matches!(
-            faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg),
-            FaucetGate::ClaimedThisWeek { .. }
-        ));
-        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "CLAIMED_THIS_WEEK");
 
-        // A DIFFERENT eligible dev, SAME canister, still inside the week → blocked
-        // by the per-canister cooldown (the "many devs, one canister" guard).
-        let dev2 = mock_principal(43);
-        faucet_make_eligible(dev2); // also adds a recent commitment for dev2
-        set_mock_caller(dev2);
-        assert!(matches!(
-            faucet_eligibility_sync(dev2, faucet_canister(), &cfg),
-            FaucetGate::ClaimedThisWeek { .. }
-        ));
-
-        // After the window elapses, the same dev can claim again.
-        set_mock_time(Some(base + 8 * DAY_NANOS));
-        faucet_make_eligible(faucet_dev()); // refresh recent burn
-        set_mock_caller(faucet_dev());
-        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::Eligible);
-        claim_faucet_cycles(faucet_canister()).await.unwrap();
-        assert_eq!(FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).unwrap().count), 2);
-    }
-
-    #[tokio::test]
-    async fn test_faucet_lifetime_cap() {
-        faucet_reset();
-        faucet_register(faucet_canister());
-        // Pre-seed usage at the cap; last claim long ago so cooldown passes.
-        FAUCET_CANISTER_USAGE.with(|m| {
-            m.borrow_mut().insert(faucet_canister(), FaucetCanisterUsage { last_claim_ns: 1, count: 25 });
-        });
-        faucet_make_eligible(faucet_dev());
-        set_mock_caller(faucet_dev());
-        let cfg = CONFIG.with(|c| c.borrow().get().clone());
-        assert!(matches!(
-            faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg),
-            FaucetGate::CanisterLifetimeReached { count: 25 }
-        ));
-        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "CANISTER_LIFETIME_REACHED");
-    }
-
-    #[tokio::test]
-    async fn test_faucet_treasury_floor_circuit_breaker() {
-        faucet_reset();
-        faucet_register(faucet_canister());
-        faucet_make_eligible(faucet_dev());
-        set_mock_caller(faucet_dev());
-        // Treasury barely above the floor — not enough to cover a grant.
-        let cfg = CONFIG.with(|c| c.borrow().get().clone());
-        set_mock_ledger_balance(cfg.faucet_treasury_floor_e8s + 1);
-        // Sync gates pass; the floor (async) is what blocks the claim.
-        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::Eligible);
-        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "TREASURY_LOW");
-        // Nothing was recorded — the breaker fired before any state change.
-        assert!(FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).is_none()));
-        assert_eq!(get_faucet_stats().total_claims, 0);
-    }
-
-    #[tokio::test]
-    async fn test_faucet_idempotent_cmc_topup() {
-        faucet_reset();
-        faucet_register(faucet_canister());
-        faucet_make_eligible(faucet_dev());
-        set_mock_caller(faucet_dev());
-
-        // First claim succeeds and stamps usage once.
-        claim_faucet_cycles(faucet_canister()).await.unwrap();
-        assert_eq!(FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).unwrap().count), 1);
-
-        // Simulate a partial failure that left a journaled block index, then a
-        // retry: the cooldown would normally block, so advance past it AND inject
-        // a pending block to prove the retry re-notifies the SAME block (no second
-        // transfer) and finalizes to exactly one increment, not two.
-        set_mock_time(Some(current_time() + 8 * DAY_NANOS));
-        faucet_make_eligible(faucet_dev());
-        FAUCET_REGISTRATIONS.with(|m| {
-            let mut reg = m.borrow().get(&faucet_canister()).unwrap();
-            reg.pending_block = Some(999); // pretend a transfer already happened
-            m.borrow_mut().insert(faucet_canister(), reg);
-        });
-        // Force any NEW transfer to fail — so if the saga (incorrectly) re-transfers
-        // it would error; success proves it reused the journaled block.
-        set_mock_ledger_transfer(Err("SHOULD_NOT_TRANSFER".to_string()));
-        claim_faucet_cycles(faucet_canister()).await.unwrap();
-        assert_eq!(FAUCET_CANISTER_USAGE.with(|m| m.borrow().get(&faucet_canister()).unwrap().count), 2);
-        assert!(FAUCET_REGISTRATIONS.with(|m| m.borrow().get(&faucet_canister()).unwrap().pending_block.is_none()));
-    }
-
-    #[tokio::test]
-    async fn test_faucet_flag_gating() {
-        faucet_reset();
-        faucet_register(faucet_canister());
-        faucet_make_eligible(faucet_dev());
-        set_mock_caller(faucet_dev());
-        // Flag OFF → claim rejected even when otherwise fully eligible.
-        faucet_set_flag(FlagState::Off);
-        let cfg = CONFIG.with(|c| c.borrow().get().clone());
-        assert_eq!(faucet_eligibility_sync(faucet_dev(), faucet_canister(), &cfg), FaucetGate::FaucetDisabled);
-        assert_eq!(claim_faucet_cycles(faucet_canister()).await.unwrap_err(), "FAUCET_DISABLED");
-        // get_faucet_status reflects the disabled flag.
-        assert!(!get_faucet_status(Some(faucet_canister())).enabled);
-    }
 
     // ── X-Farm (Stream B) ────────────────────────────────────────────────────
     //
@@ -32409,102 +26516,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_marketplace_seller_amount_no_overflow() {
-        // A $500 ckETH listing ≈ 2e17 small units; the old u64 multiply
-        // (amount * 8000) overflowed and trapped. u128 math must not.
-        let amount = 200_000_000_000_000_000u64;
-        assert_eq!(marketplace_seller_amount(amount, 8_000), amount / 10_000 * 8_000);
-        // Exact splits on round numbers.
-        assert_eq!(marketplace_seller_amount(10_000, 8_000), 8_000);
-        assert_eq!(marketplace_seller_amount(0, 8_000), 0);
-    }
 
-    /// Seed a marketplace listing (seller-authored crash strategy) directly.
-    fn seed_market_listing(seller: Principal, listing_id: u64, strategy_id: u64, price_usd_e8s: u64) {
-        MARKET_LISTINGS.with(|m| {
-            m.borrow_mut().insert(listing_id, Listing {
-                id: listing_id,
-                kind: MarketKind::Crash,
-                seller,
-                item_id: strategy_id,
-                title: "Strat".into(),
-                teaser: "t".into(),
-                price_usd_e8s,
-                sales: 0,
-                created_at: 1,
-                active: true,
-            });
-        });
-    }
 
-    #[tokio::test]
-    async fn test_buy_license_splits_80_20_through_real_ledger_sim() {
-        install_staking_test_config();
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_CRASH.to_string(), 1u8); });
-        acct_reset();
-        let seller = alice();
-        let buyer = bob();
-        seed_market_listing(seller, 1, 77, 100_000_000); // $1 → 0.2 ICP at the $5 test rate
-        acct_set(buyer, None, 100_000_000);
-        set_mock_caller(buyer);
-        set_mock_ledger_transfer(Ok(1));
 
-        let lic = buy_license(1, ExplorerToken::ICP).await.unwrap();
-        assert!(MARKET_LICENSES.with(|m| m.borrow().get(&lic)).is_some());
-        assert_eq!(MARKET_LISTINGS.with(|m| m.borrow().get(&1)).unwrap().sales, 1);
-
-        // $1 = 20_000_000 e8s. Buyer debited once: (amount - fee) + fee.
-        assert_eq!(acct_get(buyer, None), 100_000_000 - 20_000_000);
-        // Seller got 80% minus the two fees the path costs (buyer-debit + payout).
-        let seller_share = marketplace_seller_amount(20_000_000, MARKET_SELLER_BPS) - 10_000;
-        assert_eq!(acct_get(seller, None), seller_share);
-        // The rest sits in the treasury subaccount.
-        let treasury = acct_get(get_canister_id(), Some(TREASURY_SUBACCOUNT));
-        assert_eq!(treasury + seller_share + 2 * 10_000, 20_000_000);
-
-        // Guards: own listing + double-buy.
-        set_mock_caller(seller);
-        assert_eq!(buy_license(1, ExplorerToken::ICP).await.unwrap_err(), "CANNOT_BUY_OWN");
-        set_mock_caller(buyer);
-        assert_eq!(buy_license(1, ExplorerToken::ICP).await.unwrap_err(), "ALREADY_LICENSED");
-
-        acct_disable();
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_CRASH.to_string()); });
-        MARKET_LISTINGS.with(|m| { m.borrow_mut().remove(&1); });
-        MARKET_LICENSES.with(|m| { m.borrow_mut().remove(&lic); });
-    }
-
-    #[tokio::test]
-    async fn test_buy_license_seller_payout_failure_never_hurts_the_buyer() {
-        // The 2026-07-02 partial-payment fix: the buyer's debit is atomic; a
-        // failing SELLER payout leaves the sale standing (license granted) and
-        // the seller's share parked in the treasury — never a charged buyer
-        // with nothing to show for it (the old two-leg version's failure mode).
-        install_staking_test_config();
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_CRASH.to_string(), 1u8); });
-        acct_reset();
-        let seller = alice();
-        let buyer = bob();
-        seed_market_listing(seller, 2, 78, 100_000_000);
-        acct_set(buyer, None, 100_000_000);
-        set_mock_caller(buyer);
-        // transfer_from (buyer debit) succeeds; call_ledger_transfer (payout) fails.
-        set_mock_ledger_transfer(Err("SELLER_LEDGER_DOWN".into()));
-
-        let lic = buy_license(2, ExplorerToken::ICP).await.unwrap();
-        assert!(MARKET_LICENSES.with(|m| m.borrow().get(&lic)).is_some(), "sale stands");
-        assert_eq!(acct_get(buyer, None), 100_000_000 - 20_000_000, "buyer debited exactly once");
-        assert_eq!(acct_get(seller, None), 0, "payout leg failed");
-        // Full proceeds retained in the treasury for manual settlement.
-        assert_eq!(acct_get(get_canister_id(), Some(TREASURY_SUBACCOUNT)), 20_000_000 - 10_000);
-
-        set_mock_ledger_transfer(Ok(1));
-        acct_disable();
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&FLAG_CRASH.to_string()); });
-        MARKET_LISTINGS.with(|m| { m.borrow_mut().remove(&2); });
-        MARKET_LICENSES.with(|m| { m.borrow_mut().remove(&lic); });
-    }
 
     #[tokio::test]
     async fn test_refund_registration_returns_escrow_once() {
@@ -33256,6 +27270,79 @@ mod tests {
     }
 
     #[test]
+    fn test_game_retention_one_day_policy() {
+        // Owner 2026-07-06: game data lives 1 day. Runs are consumed at
+        // completion (covered per-game in the flow tests via RUN_NOT_FOUND);
+        // this test pins the SWEEP: abandoned runs past TTL are reaped, and
+        // daily entries older than yesterday are deleted while today's and
+        // yesterday's survive (yesterday feeds luckproof_daily_award).
+        enable_bullrun();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let now = current_time();
+        let today = epoch_day(now);
+
+        // Abandoned runs: one fresh (kept), one past TTL (reaped) per family.
+        LUCKPROOF_RUNS.with(|m| {
+            let mut m = m.borrow_mut();
+            m.insert(9001, LuckProofRun { id: 9001, player: alice(), gambles: vec![], rolls: vec![], issued_at: now, day: today, completed: false });
+            m.insert(9002, LuckProofRun { id: 9002, player: alice(), gambles: vec![], rolls: vec![], issued_at: now - LUCKPROOF_RUN_TTL_NS - 1, day: today, completed: false });
+        });
+        SKYDIVE_RUNS.with(|m| {
+            let mut m = m.borrow_mut();
+            m.insert(9001, SkydiveRun { id: 9001, player: alice(), issued_at: now - SKYDIVE_RUN_TTL_NS - 1, day: today, completed: false });
+        });
+        BULLRUN_RUNS.with(|m| {
+            let mut m = m.borrow_mut();
+            m.insert(9001, BullRunRun { id: 9001, player: alice(), issued_at: now - BULLRUN_RUN_TTL_NS - 1, day: today, completed: false });
+        });
+
+        // Daily entries at today / yesterday / two days ago per family.
+        for d in [today, today - 1, today - 2] {
+            LUCKPROOF_DAILY.with(|m| {
+                m.borrow_mut().insert(LuckProofDayKey { day: d, player: alice() }, LuckProofDailyEntry {
+                    day: d, player: alice(), ev_bp: 1, correct: 1, millis: 20_000,
+                    submitted_at: now, decisions: vec![true], cash: 0,
+                });
+            });
+            SKYDIVE_DAILY.with(|m| {
+                m.borrow_mut().insert(SkydiveDayKey { day: d, player: alice() }, SkydiveDailyEntry {
+                    day: d, player: alice(), distance_dm: 10, millis: 20_000, safe: true, submitted_at: now,
+                });
+            });
+            BULLRUN_DAILY.with(|m| {
+                m.borrow_mut().insert(BullRunDayKey { day: d, player: alice() }, BullRunDailyEntry {
+                    day: d, player: alice(), coins: 5, millis: 20_000, submitted_at: now,
+                });
+            });
+        }
+
+        sweep_game_retention();
+
+        assert!(LUCKPROOF_RUNS.with(|m| m.borrow().contains_key(&9001)), "fresh run survives");
+        assert!(!LUCKPROOF_RUNS.with(|m| m.borrow().contains_key(&9002)), "expired run reaped");
+        assert!(!SKYDIVE_RUNS.with(|m| m.borrow().contains_key(&9001)), "expired skydive run reaped");
+        assert!(!BULLRUN_RUNS.with(|m| m.borrow().contains_key(&9001)), "expired bullrun run reaped");
+        for (name, kept) in [
+            ("luckproof", LUCKPROOF_DAILY.with(|m| m.borrow().iter().map(|e| e.key().day).collect::<Vec<_>>())),
+            ("skydive", SKYDIVE_DAILY.with(|m| m.borrow().iter().map(|e| e.key().day).collect::<Vec<_>>())),
+            ("bullrun", BULLRUN_DAILY.with(|m| m.borrow().iter().map(|e| e.key().day).collect::<Vec<_>>())),
+        ] {
+            assert!(kept.contains(&today), "{name}: today survives");
+            assert!(kept.contains(&(today - 1)), "{name}: yesterday survives (award not settled yet)");
+            assert!(!kept.contains(&(today - 2)), "{name}: older entries deleted");
+        }
+
+        // Cleanup.
+        LUCKPROOF_RUNS.with(|m| { m.borrow_mut().remove(&9001); });
+        for d in [today, today - 1] {
+            LUCKPROOF_DAILY.with(|m| { m.borrow_mut().remove(&LuckProofDayKey { day: d, player: alice() }); });
+            SKYDIVE_DAILY.with(|m| { m.borrow_mut().remove(&SkydiveDayKey { day: d, player: alice() }); });
+            BULLRUN_DAILY.with(|m| { m.borrow_mut().remove(&BullRunDayKey { day: d, player: alice() }); });
+        }
+        clear_bullrun();
+    }
+
+    #[test]
     fn test_bullrun_daily_flow_and_board_order() {
         enable_bullrun();
         set_mock_time(Some(1_700_000_000_000_000_000));
@@ -33279,7 +27366,8 @@ mod tests {
         assert_eq!(complete_bullrun_daily(run.run_id, 10_000, 90_000).unwrap_err(), "INVALID_COINS");
         assert_eq!(complete_bullrun_daily(run.run_id, 80, 10).unwrap_err(), "INVALID_TIME");
         assert_eq!(complete_bullrun_daily(run.run_id, 95, 92_000).unwrap(), 1);
-        assert_eq!(complete_bullrun_daily(run.run_id, 95, 92_000).unwrap_err(), "ALREADY_COMPLETED");
+        // Completion consumed the run (1-day retention) — a replayed call finds nothing.
+        assert_eq!(complete_bullrun_daily(run.run_id, 95, 92_000).unwrap_err(), "RUN_NOT_FOUND");
 
         // Bob: same coins but slower → rank 2; board orders coins → time.
         set_mock_caller(bob());
@@ -33378,7 +27466,7 @@ mod tests {
         assert_eq!(complete_skydive_daily(run.run_id, 99_999, 21_000, true).unwrap_err(), "INVALID_DISTANCE");
         assert_eq!(complete_skydive_daily(run.run_id, 123, 1, true).unwrap_err(), "INVALID_TIME");
         assert_eq!(complete_skydive_daily(run.run_id, 123, 21_000, true).unwrap(), 1);
-        assert_eq!(complete_skydive_daily(run.run_id, 123, 21_000, true).unwrap_err(), "ALREADY_COMPLETED");
+        assert_eq!(complete_skydive_daily(run.run_id, 123, 21_000, true).unwrap_err(), "RUN_NOT_FOUND"); // run consumed at completion
         assert_eq!(start_skydive_daily().unwrap_err(), "ALREADY_PLAYED_TODAY");
 
         // Bob: closer but SLOWER submission with same distance? — farther
@@ -33528,9 +27616,9 @@ mod tests {
         assert_eq!(res_a.rank, 1);
 
         // Guards.
-        assert_eq!(complete_luckproof_daily(run_a.run_id, optimal.clone(), 300_000).unwrap_err(), "ALREADY_COMPLETED");
+        assert_eq!(complete_luckproof_daily(run_a.run_id, optimal.clone(), 300_000).unwrap_err(), "RUN_NOT_FOUND"); // run consumed at completion
         set_mock_caller(bob());
-        assert_eq!(complete_luckproof_daily(run_a.run_id, optimal.clone(), 300_000).unwrap_err(), "NOT_YOUR_RUN");
+        assert_eq!(complete_luckproof_daily(run_a.run_id, optimal.clone(), 300_000).unwrap_err(), "RUN_NOT_FOUND");
 
         // Bob faces the SAME deal (fair daily), declines everything → EV 0.
         let run_b = start_luckproof_daily().unwrap();
