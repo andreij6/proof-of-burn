@@ -98,7 +98,6 @@ ok "Token ledgers wired (ckBTC=$CKBTC_ID, ckETH=$CKETH_ID, ckUSDC=$CKUSDC_ID, ck
 # arcade_minigolf (the Course Marketplace keys off it) are enabled for local
 # testing; arcade itself is forced OFF explicitly so a re-deploy over prior
 # state (which may have stored arcade=On from an older script) is deterministic.
-icp canister call backend admin_set_feature_flag '("arcade", false)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 icp canister call backend admin_set_feature_flag '("early_adopters", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # The Course Marketplace keys off the arcade_minigolf sub-flag (PB-305 A7).
 icp canister call backend admin_set_feature_flag '("arcade_minigolf", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
@@ -157,7 +156,6 @@ icp canister call backend admin_backfill_course_fingerprints '()' -e "$ENV" --id
 # Casino (Crash) is DISABLED pending the SVPP/points redesign. Force the flag
 # OFF (earlier deploys may have turned it on; flags persist across upgrades) and
 # skip casino seeding. Re-enable here once the new point system lands.
-icp canister call backend admin_set_feature_flag '("crash", false)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 ok "Casino (Crash) disabled (local)"
 
 # ── 5c. X-Farm (Stream B): leave the flag dark + upload the Farmer wasm ────────
@@ -256,16 +254,16 @@ else
   ok "Swap desk already funded ($SWAP_BAL e8s)"
 fi
 
-# ── 7b. Backend default account (dev faucet + faucet treasury preload source) ──
+# ── 7b. Backend default account (dev faucet source) ──
 # On a fresh network the ledger-init pre-funded principal collides with the
 # permuted ICP-ledger id, so the backend's own account starts empty — which
-# breaks dev_faucet_token AND the cycles-faucet treasury-preload button (both
-# dispense from the backend's default account). Seed it from the admin once.
+# breaks dev_faucet (it dispenses from the backend's default account). Seed
+# it from the admin once.
 BE_BAL=$(icp canister call ledger icrc1_balance_of "(record { owner = principal \"$BACKEND_ID\"; subaccount = null })" --query -e "$ENV" | grep -oE '[0-9_]+' | head -1 | tr -d '_')
 if [[ "${BE_BAL:-0}" -lt 10000000000 ]]; then
-  note "Funding backend default account (500 ICP) for dev faucet + treasury preload…"
+  note "Funding backend default account (500 ICP) for dev faucet…"
   icp canister call ledger icrc1_transfer "(record { to = record { owner = principal \"$BACKEND_ID\"; subaccount = null }; amount = 50_000_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-  ok "Backend account funded (dev_faucet_token + faucet treasury-preload now work)"
+  ok "Backend account funded (dev_faucet now works)"
 else
   ok "Backend account already funded ($BE_BAL e8s)"
 fi
@@ -283,6 +281,6 @@ echo "   ckUSDC ledger: $CKUSDC_ID"
 echo "   ckUSDT ledger: $CKUSDT_ID"
 echo "   Feature flags: $(icp canister call backend list_feature_flags '()' --query -e "$ENV" | tr -d '\n' | sed 's/  */ /g')"
 echo "   X-Farm: flag dark (default); Farmer wasm $([ "$XFARM_WASM_UPLOADED" = "yes" ] && echo uploaded || echo NOT-uploaded) — flip flag on to use create_farmer; dev_seed controls in-app"
-echo "   Faucets: in-app tweak panel, or:"
-echo "     icp canister call backend dev_faucet_token '(variant { ICP })' -e local --identity <id>"
+echo "   Faucet: in-app tweak panel, or:"
+echo "     icp canister call backend dev_faucet '()' -e local --identity <id>"
 echo "──────────────────────────────────────────────────────────"
