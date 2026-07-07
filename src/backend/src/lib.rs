@@ -9894,6 +9894,11 @@ async fn run_lottery_draw(forced_winning_ticket: Option<u64>) {
         LOTTERY_DRAWS.with(|m| {
             m.borrow_mut().insert(id, draw);
         });
+
+        // Route the Booster neuron's harvested yield into the (now-reset)
+        // pot immediately — the next round starts pre-seeded instead of
+        // waiting for a monthly settlement (owner, 2026-07-06).
+        early_adopter_settlement_check().await;
     }
 
     // Prune ancient draws so the history map stays bounded.
@@ -15695,8 +15700,12 @@ pub struct EarlyAdopterState {
     pub total_staked_e8s: u64,
     /// Pool e8s carried forward because a month's pot was under 100 ICP.
     pub rollover_e8s: u64,
-    /// Last settled 30-day period index (epoch-based).
+    /// Last settled 30-day period index (epoch-based). LEGACY — settlements
+    /// are draw-keyed since 2026-07-06; kept so pre-change state decodes.
     pub last_processed_month: u64,
+    /// Lottery round already settled — yield routes right after every draw.
+    #[serde(default)]
+    pub last_settled_lottery_round: u64,
     pub total_yield_e8s: u64,
     pub total_distributed_e8s: u64,
     pub total_expired_e8s: u64,
@@ -15815,6 +15824,7 @@ thread_local! {
             total_staked_e8s: 0,
             rollover_e8s: 0,
             last_processed_month: 0,
+            last_settled_lottery_round: 0,
             total_yield_e8s: 0,
             total_distributed_e8s: 0,
             total_expired_e8s: 0,
@@ -15901,7 +15911,9 @@ fn get_early_adopter_info() -> EarlyAdopterInfo {
         share_pool_e8s: state.rollover_e8s.saturating_add(unclaimed),
         total_yield_e8s: state.total_yield_e8s,
         total_distributed_e8s: state.total_distributed_e8s,
-        next_distribution_at: (state.last_processed_month + 1) * EARLY_ADOPTER_PERIOD_NANOS,
+        // Draw-keyed: yield routes right after every drawing, so the "next
+        // distribution" is simply the next draw — signalled as 0 (no date).
+        next_distribution_at: 0,
         my_staked_e8s: me.as_ref().map(|c| c.staked_e8s).unwrap_or(0),
         my_claimable_e8s: me.as_ref().map(|c| c.claimable_e8s).unwrap_or(0),
         fee_e8s: 10_000,
@@ -16192,7 +16204,9 @@ async fn early_adopter_run_settlement(now: u64) -> Result<(), String> {
                 total
             });
             let job = EarlyAdopterJob {
-                month: early_adopter_month(now),
+                // Draw-keyed since 2026-07-06: the journal key is the lottery
+                // round at open (field name kept for stable-state compat).
+                month: lottery_state().round,
                 started_at: now,
                 yield_e8s,
                 expired_e8s: expired,
@@ -16293,7 +16307,8 @@ async fn early_adopter_run_settlement(now: u64) -> Result<(), String> {
     EARLY_ADOPTER_STATE.with(|c| {
         let mut s = c.borrow().get().clone();
         s.rollover_e8s = 0;
-        s.last_processed_month = month.max(s.last_processed_month);
+        s.last_processed_month = early_adopter_month(now).max(s.last_processed_month);
+        s.last_settled_lottery_round = month.max(s.last_settled_lottery_round);
         s.total_yield_e8s = s.total_yield_e8s.saturating_add(yield_e8s);
         s.total_expired_e8s = s.total_expired_e8s.saturating_add(job.expired_e8s);
         s.pending_job = None;
@@ -16332,9 +16347,11 @@ async fn early_adopter_settlement_check() {
     harvest_early_adopter_maturity().await;
     let now = current_time();
     let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
-    // Run when a new period starts, and ALSO whenever a journaled settlement
-    // is mid-flight (a leg failed) so it resumes promptly.
-    if early_adopter_month(now) > state.last_processed_month || state.pending_job.is_some() {
+    // Run right after every lottery draw (the round bump is the signal), and
+    // ALSO whenever a journaled settlement is mid-flight (a leg failed) so it
+    // resumes promptly. First run after upgrade settles the accumulated inbox
+    // immediately (cursor starts at 0).
+    if lottery_state().round > state.last_settled_lottery_round || state.pending_job.is_some() {
         if let Err(e) = early_adopter_run_settlement(now).await {
             canister_print(&format!("early_adopter settlement failed (will retry next sweep): {}", e));
         }
@@ -16384,6 +16401,7 @@ fn dev_set_early_adopter_preset(preset: u8) -> Result<(), String> {
         total_staked_e8s: 0,
         rollover_e8s: 0,
         last_processed_month: month_now,
+        last_settled_lottery_round: lottery_state().round,
         total_yield_e8s: 0,
         total_distributed_e8s: 0,
         total_expired_e8s: 0,
@@ -25041,6 +25059,7 @@ mod tests {
         EARLY_ADOPTER_STATE.with(|c| {
             c.borrow_mut().set(EarlyAdopterState {
                 total_staked_e8s: 0, rollover_e8s: 0, last_processed_month: 0,
+                last_settled_lottery_round: 0,
                 total_yield_e8s: 0, total_distributed_e8s: 0, total_expired_e8s: 0,
                 membership_closed: false, nonce: 0, neuron_id: None,
                 pending_refresh_e8s: 0, bootstrap: 0, total_restaked_e8s: 0,
@@ -25159,7 +25178,9 @@ mod tests {
         assert_eq!(info.early_adopter_count, 1);
         assert_eq!(info.total_staked_e8s, 4 * ICP);
         // The settlement clock anchored to "now" — next run is a month out.
-        assert!(info.next_distribution_at > current_time());
+        // Draw-keyed settlements (2026-07-06): no scheduled date — yield
+        // routes right after every drawing.
+        assert_eq!(info.next_distribution_at, 0);
         clear_early_adopters();
     }
 
@@ -25191,6 +25212,50 @@ mod tests {
         assert_eq!(rounds[0].treasury_e8s, 30 * ICP);
         assert_eq!(rounds[0].distributed_e8s, 0, "no user distribution");
         assert_eq!(rounds[0].restaked_e8s, 0);
+        clear_early_adopters();
+    }
+
+    #[tokio::test]
+    async fn test_early_adopter_settlement_is_draw_keyed() {
+        clear_early_adopters();
+        enable_early_adopters_flag();
+        let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        set_mock_ledger_transfer(Ok(1));
+        set_mock_caller(alice);
+        set_mock_ledger_balance(10 * ICP + 10_000);
+        early_adopter_stake(10 * ICP).await.unwrap();
+
+        // Pin the lottery round and align the cursor: no draw yet → the
+        // sweep check must NOT settle, even deep into a new "month".
+        let mut st = lottery_state();
+        st.round = 7;
+        set_lottery_state(st);
+        EARLY_ADOPTER_STATE.with(|c| {
+            let mut s = c.borrow().get().clone();
+            s.last_settled_lottery_round = 7;
+            c.borrow_mut().set(s);
+        });
+        set_mock_ledger_balance(100 * ICP);
+        early_adopter_settlement_check().await;
+        assert_eq!(list_early_adopter_rounds().len(), 0, "no draw → no settlement");
+
+        // A draw bumps the round → the very next check settles, journals the
+        // record under the ROUND key, and advances the cursor.
+        let mut st = lottery_state();
+        st.round = 8;
+        set_lottery_state(st);
+        early_adopter_settlement_check().await;
+        let rounds = list_early_adopter_rounds();
+        assert_eq!(rounds.len(), 1, "draw → immediate settlement");
+        assert_eq!(rounds[0].month, 8, "journaled under the lottery round");
+        assert_eq!(rounds[0].treasury_e8s, 30 * ICP, "70/30 split unchanged");
+        let ea = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
+        assert_eq!(ea.last_settled_lottery_round, 8);
+
+        // Same round again: idempotent — no second settlement.
+        early_adopter_settlement_check().await;
+        assert_eq!(list_early_adopter_rounds().len(), 1, "once per draw");
         clear_early_adopters();
     }
 
