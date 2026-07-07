@@ -3,7 +3,7 @@ import { Principal } from "@icp-sdk/core/principal";
 import { TxDirection } from "./bindings/backend";
 import { IdeaToken } from "./tokens";
 import type { TransactionRecord } from "./bindings/backend";
-import { fmtTokenAmount } from "./IdeaBoard";
+import { fmtTokenAmount } from "./tokens";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import type { Identity } from "@icp-sdk/core/agent";
 import { ExplorerToken, UnstakeStatus, type Backend, type Config, type FeatureFlag, type PendingUnstake } from "./bindings/backend";

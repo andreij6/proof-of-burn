@@ -352,9 +352,16 @@ describe('pageFromHash (shareable URL routing)', () => {
   it('routes shared proposal deep links to the voting page', () => {
     expect(pageFromHash('#proposal-138512')).toBe('voting');
   });
-  it('routes /dashboard to the hub and /voting to the voting page', () => {
-    expect(pageFromHash('#/dashboard')).toBe('dashboard');
+  it('routes /voting to the voting page and removed pages to null', () => {
     expect(pageFromHash('#/voting')).toBe('voting');
+    // Removed features (2026-07): their paths no longer resolve — App falls
+    // back to the default page instead of a dead route.
+    expect(pageFromHash('#/dashboard')).toBeNull();
+    expect(pageFromHash('#/about')).toBeNull();
+    expect(pageFromHash('#/community')).toBeNull();
+    expect(pageFromHash('#/discussions')).toBeNull();
+    expect(pageFromHash('#/casino')).toBeNull();
+    expect(pageFromHash('#/faucet')).toBeNull();
   });
   it('returns null for unknown hashes', () => {
     expect(pageFromHash('#/nope')).toBeNull();
@@ -367,15 +374,22 @@ describe('pageFromHash (shareable URL routing)', () => {
   it('resolves hub sub-screen paths back to their hub page (so Back works)', () => {
     // useHashScreen keeps the active sub-screen in a trailing segment; the
     // top-level router must still land on the hub page.
-    expect(pageFromHash('#/casino/crash')).toBe('casino');
-    expect(pageFromHash('#/arcade/course-play')).toBe('arcade');
+    expect(pageFromHash('#/mini-golf/course/7')).toBe('minigolf');
+    expect(pageFromHash('#/mini-golf/create-course')).toBe('minigolf');
     // The staking tab moved to its own page — old deep links follow it.
     expect(pageFromHash('#/lottery/staking')).toBe('neuronstake');
     expect(pageFromHash('#/lottery/anything-else')).toBe('lottery');
     expect(pageFromHash('#/lottery/lottery')).toBe('lottery');
     // the bare hub path still resolves to the hub
-    expect(pageFromHash('#/arcade')).toBe('arcade');
+    expect(pageFromHash('#/mini-golf')).toBe('minigolf');
     expect(pageFromHash('#/lottery')).toBe('lottery');
+  });
+  it('resolves legacy #/arcade course links to the Mini Golf page', () => {
+    // The Arcade hub was removed (2026-07); shared course links must keep
+    // opening the course on the Mini Golf page.
+    expect(pageFromHash('#/arcade/course/7')).toBe('minigolf');
+    expect(pageFromHash('#/arcade/spectate/3')).toBe('minigolf');
+    expect(pageFromHash('#/arcade')).toBe('minigolf');
   });
 });
 

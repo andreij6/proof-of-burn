@@ -25,7 +25,7 @@ export function usePageDevControls(enabled: boolean, render: () => ReactNode, de
 
 // ==========================================
 // Shared design-system primitives
-// (consumed by App.tsx and IdeaBoard.tsx)
+// (consumed by App.tsx and feature pages)
 // ==========================================
 
 export const iconPaths: Record<string, React.ReactNode> = {

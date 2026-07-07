@@ -23,33 +23,24 @@ import type {
   PoolNeuron,
   LedgerAccount,
   FeatureFlag,
-  IdeaBoardInfo,
   ExplorerInfo,
-  UserStakeInfo,
   LotteryDraw,
 } from "./bindings/backend";
-import IdeaBoard, { parseTokenAmount, fmtTokenAmount } from "./IdeaBoard";
 import LotteryHub from "./LotteryHub";
 import NeuronStakePage from "./NeuronStakePage";
 import Explorer from "./Explorer";
-import Discussions from "./Discussions";
-import DiscussionsPage from "./DiscussionsPage";
 import XFarm from "./XFarm";
-import Arcade from "./Arcade";
+import MiniGolfPage from "./MiniGolfPage";
 import LuckProofPage from "./LuckProofPage";
 import DropZonePage from "./DropZonePage";
 import BullRunPage from "./BullRunPage";
 import AnsemLp from "./AnsemLp";
 import IcpLp from "./IcpLp";
-import Casino from "./Casino";
-import Faucet from "./Faucet";
 import Payouts from "./Payouts";
 import Landing from "./Landing";
-import Dashboard from "./Dashboard";
-import AboutUs from "./AboutUs";
-// Shared design-system primitives live in ui.tsx (also used by IdeaBoard).
+// Shared design-system primitives live in ui.tsx.
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, BrandMark } from "./ui";
-import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient } from "./tokens";
+import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient, parseTokenAmount, fmtTokenAmount } from "./tokens";
 import { useErrorImpression } from "./analytics";
 import { countdownShort } from "./hubLogic";
 
@@ -58,14 +49,10 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'dashboard' | 'about' | 'voting' | 'discussions' | 'ideas' | 'earn' | 'staking' | 'lottery' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'arcade' | 'minigolf' | 'course_market' | 'casino' | 'faucet' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
-  dashboard: '/dashboard',
-  about: '/about',
   voting: '/voting',
-  discussions: '/discussions',
-  ideas: '/community',
   earn: '/earn',
   staking: '/staking',
   lottery: '/lottery',
@@ -85,17 +72,13 @@ export const PAGE_PATH: Record<AppPage, string> = {
   // Bull Run (encierro lane-runner) — Play to Earn nav, arcade_bullrun flag.
   bullrun: '/bull-run',
   explorer: '/explorer',
-  arcade: '/arcade',
-  // Mini Golf has its own nav page (below Lottery) — same arcade flag gate,
-  // and `#/mini-golf/course/<id>`, `#/mini-golf/spectate/<id>`, `#/mini-golf/play/<id>`
-  // deep links resolve here. The Arcade hub still hosts the Mini Golf + Field
-  // Goal tabs.
+  // Mini Golf — gated on the arcade_minigolf flag; `#/mini-golf/course/<id>`,
+  // `#/mini-golf/spectate/<id>` and `#/mini-golf/play/<id>` deep links resolve
+  // here (as do legacy `#/arcade/...` links from before the hub was removed).
   minigolf: '/mini-golf',
-  // The Course Marketplace is the arcade's mini-golf surface (PB-309); kept as
-  // a deep-linkable alias that redirects to the arcade page (same flag gate).
+  // The Course Marketplace is the Mini Golf lobby (PB-309); kept as a
+  // deep-linkable alias that redirects to the Mini Golf page (same flag gate).
   course_market: '/courses',
-  casino: '/casino',
-  faucet: '/faucet',
   early_adopters: '/early_adopters',
   xfarm: '/xfarm',
   payouts: '/profile',
@@ -115,13 +98,17 @@ const NNS_HOTKEY_DOCS = "https://docs.internetcomputer.org/concepts/governance/#
 // /casino/crash, /arcade/course-play, /lottery/staking — see useHashScreen).
 // Resolve any such deep path back to its hub page so the top-level router stays
 // on the hub while the sub-screen changes.
-const HUB_PATHS = ['/casino', '/arcade', '/mini-golf', '/lottery'] as const;
+const HUB_PATHS = ['/mini-golf', '/lottery'] as const;
 export function pageFromHash(hash: string): AppPage | null {
   const h = hash.replace(/^#/, '');
   if (/^proposal-\d+$/.test(h)) return 'voting'; // shared proposal deep link
   const path = '/' + h.replace(/^\//, '');
   // The staking tab moved out of the Lottery hub — honor old deep links.
   if (path === '/lottery/staking') return 'neuronstake';
+  // The Arcade hub was removed (2026-07) — its shared course deep links
+  // (`#/arcade/course/<id>` et al.) resolve to the Mini Golf page, whose
+  // hash-screen routing reads the same trailing segments.
+  if (path === '/arcade' || path.startsWith('/arcade/')) return 'minigolf';
   const hub = HUB_PATHS.find((p) => path === p || path.startsWith(p + '/'));
   if (hub) return PATH_PAGE[hub];
   return PATH_PAGE[path] ?? null;
@@ -649,11 +636,9 @@ export default function App() {
 
   // Feature flag: the Community R&D page + nav are fully hidden when disabled
   // (the backend also rejects its update methods, so this is belt + braces).
-  const ideaBoardEnabled = featureFlags.find(f => f.key === 'idea_board')?.enabled ?? false;
   const losslessEnabled = featureFlags.find(f => f.key === 'lossless_voting')?.enabled ?? false;
   const lotteryEnabled = featureFlags.find(f => f.key === 'lossless_lottery')?.enabled ?? false;
   const explorerEnabled = featureFlags.find(f => f.key === 'dapp_explorer')?.enabled ?? false;
-  const arcadeEnabled = featureFlags.find(f => f.key === 'arcade')?.enabled ?? false;
   // Mini Golf has its own nav page (below Lottery), gated on its per-game flag
   // so it shows even when the full Arcade hub flag is off.
   const minigolfEnabled = featureFlags.find(f => f.key === 'arcade_minigolf')?.enabled ?? false;
@@ -662,21 +647,12 @@ export default function App() {
   const bullrunEnabled = featureFlags.find(f => f.key === 'arcade_bullrun')?.enabled ?? false;
   const ansemLpEnabled = featureFlags.find(f => f.key === 'solana_lp_rewards')?.enabled ?? false;
   const icpLpEnabled = featureFlags.find(f => f.key === 'icpswap_lp_stake')?.enabled ?? false;
-  const crashEnabled = featureFlags.find(f => f.key === 'crash')?.enabled ?? false;
-  const casinoEnabled = crashEnabled;
-  const faucetEnabled = featureFlags.find(f => f.key === 'cycles_faucet')?.enabled ?? false;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
-  const discussionsEnabled = featureFlags.find(f => f.key === 'discussions')?.enabled ?? false;
   const xFarmEnabled = featureFlags.find(f => f.key === 'x_farm')?.enabled ?? false;
-  const dashboardEnabled = featureFlags.find(f => f.key === 'dashboard')?.enabled ?? false;
-  const missionEnabled = featureFlags.find(f => f.key === 'mission_statement')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (earns lottery tickets only).
-  const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
 
-  // Token-ledger info (drives the multi-token wallet + R&D board).
-  const [boardInfo, setBoardInfo] = useState<IdeaBoardInfo | null>(null);
-  // Explorer info doubles as the wallet's token registry: unlike Config
+  // Explorer info is the wallet's token registry: unlike Config
   // (whose ckUSDC/ckUSDT overrides are local-only), its ledger ids resolve
   // on mainnet too (hard-pinned in the backend) — review 2026-06-11.
   const [explorerInfo, setExplorerInfo] = useState<ExplorerInfo | null>(null);
@@ -689,22 +665,22 @@ export default function App() {
         return {
           label: 'ICP',
           decimals: 8,
-          fee: boardInfo?.fee_icp_e8s ?? 10_000n,
-          ledger: boardInfo?.icp_ledger ?? Principal.fromText(ledgerCanisterId),
+          fee: explorerInfo?.fee_icp_e8s ?? 10_000n,
+          ledger: explorerInfo?.icp_ledger ?? Principal.fromText(ledgerCanisterId),
         };
       case 'ckBTC':
         return {
           label: 'ckBTC',
           decimals: 8,
-          fee: boardInfo?.fee_ckbtc_sats ?? 10n,
-          ledger: boardInfo?.ckbtc_ledger ?? (config?.ckbtc_ledger_canister_id || null),
+          fee: explorerInfo?.fee_ckbtc_sats ?? 10n,
+          ledger: explorerInfo?.ckbtc_ledger ?? (config?.ckbtc_ledger_canister_id || null),
         };
       case 'ckETH':
         return {
           label: 'ckETH',
           decimals: 18,
-          fee: boardInfo?.fee_cketh_wei ?? 2_000_000_000_000n,
-          ledger: boardInfo?.cketh_ledger ?? (config?.cketh_ledger_canister_id || null),
+          fee: explorerInfo?.fee_cketh_wei ?? 2_000_000_000_000n,
+          ledger: explorerInfo?.cketh_ledger ?? (config?.cketh_ledger_canister_id || null),
         };
       case 'ckUSDC':
         return {
@@ -816,19 +792,14 @@ export default function App() {
   const fetchBoardInfo = async (currentActor = actor) => {
     if (!currentActor) return;
     try {
-      const [board, explorer] = await Promise.all([
-        currentActor.get_idea_board_info(),
-        currentActor.get_explorer_info(),
-      ]);
-      setBoardInfo(board);
-      setExplorerInfo(explorer);
+      setExplorerInfo(await currentActor.get_explorer_info());
     } catch (err) {
-      console.error("Failed to fetch board info:", err);
+      console.error("Failed to fetch token-registry info:", err);
     }
   };
 
   // ckBTC/ckETH/ckUSDC balances for the wallet (ICP balance = `holdings`).
-  const fetchTokenBalances = async (info = boardInfo) => {
+  const fetchTokenBalances = async (info = explorerInfo) => {
     if (!info || !identity || !principal || principal.isAnonymous() || !config) {
       setTokenBalances({ ckbtc: null, cketh: null, ckusdc: null, ckusdt: null });
       return;
@@ -898,18 +869,6 @@ export default function App() {
     }
   };
 
-  const fetchMyStake = async (currentActor = actor, currentPrincipal = principal) => {
-    if (!currentActor || !currentPrincipal || currentPrincipal.isAnonymous()) {
-      setMyStake(null);
-      return;
-    }
-    try {
-      // Always a record now; empty `tiers` (total weight 0) = no stake.
-      setMyStake(await currentActor.get_my_stake());
-    } catch (err) {
-      console.error("Failed to fetch my stake:", err);
-    }
-  };
 
   // Withdraw ICP out of the app account to a destination Account ID (legacy ledger transfer).
   const handleWithdraw = async () => {
@@ -1037,7 +996,6 @@ export default function App() {
         fetchPoolInfo(actor),
         fetchMyPoolNeuron(actor),
         fetchFeatureFlags(actor),
-        fetchMyStake(actor),
         actor.list_all_proposals().then((list: Proposal[]) => setProposals(list)),
       ]);
       // Also fetch balance
@@ -1248,63 +1206,48 @@ export default function App() {
     }
   }, [tier, activeTab]);
 
-  // If an admin kills the idea_board flag while someone is on the page,
-  // bounce them back to the dashboard.
+  // If an admin kills a page's feature flag while someone is on it, bounce
+  // them to a safe always-on page.
   useEffect(() => {
-    if (page === 'ideas' && featureFlags.length > 0 && !ideaBoardEnabled) {
-      redirect('dashboard');
-    }
     // Staking moved onto the lottery page — redirect the legacy route alias.
     if (page === 'staking') {
       redirect('lottery');
     }
     if (page === 'lottery' && featureFlags.length > 0 && !lotteryEnabled) {
-      redirect('dashboard');
+      redirect('voting');
     }
     if (page === 'explorer' && featureFlags.length > 0 && !explorerEnabled) {
-      redirect('dashboard');
-    }
-    if (page === 'discussions' && featureFlags.length > 0 && !discussionsEnabled) {
       redirect('voting');
     }
     if (page === 'xfarm' && featureFlags.length > 0 && !xFarmEnabled) {
-      redirect('dashboard');
+      redirect('voting');
     }
-    // The Course Marketplace lives inside the arcade — redirect its alias.
+    // The Course Marketplace is the Mini Golf lobby — redirect its alias.
     if (page === 'course_market') {
-      redirect('arcade');
-    }
-    if (page === 'arcade' && featureFlags.length > 0 && !arcadeEnabled) {
-      redirect('dashboard');
+      redirect('minigolf');
     }
     // Mini Golf is a dedicated page for the arcade's mini-golf surface — gated
     // on its own per-game flag (independent of the full Arcade hub flag).
     if (page === 'minigolf' && featureFlags.length > 0 && !minigolfEnabled) {
-      redirect('dashboard');
+      redirect('voting');
     }
     if (page === 'luckproof' && featureFlags.length > 0 && !luckproofEnabled) {
-      redirect('dashboard');
+      redirect('voting');
     }
     if (page === 'dropzone' && featureFlags.length > 0 && !dropzoneEnabled) {
-      redirect('dashboard');
+      redirect('voting');
     }
     if (page === 'bullrun' && featureFlags.length > 0 && !bullrunEnabled) {
-      redirect('dashboard');
+      redirect('voting');
     }
     if (page === 'ansemlp' && featureFlags.length > 0 && !ansemLpEnabled) {
-      redirect('dashboard');
+      redirect('voting');
     }
     if (page === 'neuronstake' && featureFlags.length > 0 && !(losslessEnabled || earlyAdoptersEnabled)) {
-      redirect('dashboard');
+      redirect('voting');
     }
     if (page === 'icplp' && featureFlags.length > 0 && !icpLpEnabled) {
-      redirect('dashboard');
-    }
-    if (page === 'casino' && featureFlags.length > 0 && !casinoEnabled) {
-      redirect('dashboard');
-    }
-    if (page === 'faucet' && featureFlags.length > 0 && !faucetEnabled) {
-      redirect('dashboard');
+      redirect('voting');
     }
     // Boosters (formerly Early Adopters) moved onto the lottery page —
     // redirect the legacy route alias.
@@ -1316,19 +1259,9 @@ export default function App() {
     // initializing; bouncing then killed #/profile deep links for
     // signed-in users — review 2026-06-11).
     if (page === 'payouts' && principal && principal.isAnonymous()) {
-      redirect('dashboard');
-    }
-    // Dashboard + Mission Statement are flag-gated and ship dark. When either
-    // is disabled, bounce to `voting` (always-on). The Dashboard guard also
-    // catches the many `redirect('dashboard')` fallbacks above, so a dark
-    // Dashboard never leaves a dead-end route.
-    if (page === 'dashboard' && featureFlags.length > 0 && !dashboardEnabled) {
       redirect('voting');
     }
-    if (page === 'about' && featureFlags.length > 0 && !missionEnabled) {
-      redirect('voting');
-    }
-  }, [page, ideaBoardEnabled, losslessEnabled, lotteryEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, icpLpEnabled, explorerEnabled, arcadeEnabled, casinoEnabled, faucetEnabled, earlyAdoptersEnabled, xFarmEnabled, dashboardEnabled, missionEnabled, principal, featureFlags.length]);
+  }, [page, losslessEnabled, lotteryEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, icpLpEnabled, explorerEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1403,7 +1336,6 @@ export default function App() {
     fetchMyPoolNeuron(actor);
     fetchFeatureFlags(actor);
     fetchBoardInfo(actor);
-    fetchMyStake(actor);
     actor.get_lottery_info().then((i: any) => setNextDrawAt(i?.next_draw_at ?? null)).catch(() => {});
   }, [actor]);
 
@@ -1413,7 +1345,7 @@ export default function App() {
     if (isWalletOpen || isConfirming || isAddingMore) {
       fetchTokenBalances();
     }
-  }, [isWalletOpen, isConfirming, isAddingMore, boardInfo, identity, config]);
+  }, [isWalletOpen, isConfirming, isAddingMore, explorerInfo, identity, config]);
 
   // Fetch Ledger Balance
   useEffect(() => {
@@ -1894,7 +1826,7 @@ export default function App() {
   // link survives the cold load for actual admins.
   useEffect(() => {
     if (page === 'admin' && principal && config && !isAdmin) {
-      setPage('dashboard');
+      setPage('voting');
     }
   }, [page, isAdmin, principal, config]);
 
@@ -1908,37 +1840,8 @@ export default function App() {
     const onEarn = (EARN_PAGES as string[]).includes(page);
     return (
       <>
-        {dashboardEnabled && (
-          <Btn variant={page === 'dashboard' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('dashboard')}>
-            <Icon name="list" size={14} stroke={page === 'dashboard' ? 'var(--char-950)' : 'currentColor'} />
-            Dashboard
-          </Btn>
-        )}
-        {missionEnabled && (
-          <Btn variant={page === 'about' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('about')}>
-            <Icon name="info" size={14} stroke={page === 'about' ? 'var(--char-950)' : 'currentColor'} />
-            Mission Statement
-          </Btn>
-        )}
-
-        {(arcadeEnabled || lotteryEnabled || casinoEnabled || ansemLpEnabled || icpLpEnabled) && (
+        {(lotteryEnabled || ansemLpEnabled || icpLpEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Featured</Eyebrow>
-        )}
-        {arcadeEnabled && (
-          <Btn variant={page === 'arcade' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('arcade')}>
-            <Icon name="gamepad" size={14} stroke={page === 'arcade' ? 'var(--char-950)' : 'currentColor'} />
-            Arcade
-          </Btn>
-        )}
-        {casinoEnabled && (
-          <Btn variant={page === 'casino' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => {
-            // Always land on the Casino hub, even from /casino/crash.
-            if (typeof window !== 'undefined' && window.location.hash !== '#/casino') window.location.hash = '#/casino';
-            go('casino');
-          }}>
-            <Icon name="zap" size={14} stroke={page === 'casino' ? 'var(--char-950)' : 'currentColor'} />
-            Casino
-          </Btn>
         )}
         {lotteryEnabled && (
           <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
@@ -2018,31 +1921,13 @@ export default function App() {
           <Icon name="scale" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
           Voting
         </Btn>
-        {discussionsEnabled && (
-          <Btn variant={page === 'discussions' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('discussions')}>
-            <Icon name="list" size={14} stroke={page === 'discussions' ? 'var(--char-950)' : 'currentColor'} />
-            Discussions
-          </Btn>
-        )}
         <Btn variant={onEarn ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('earn')}>
           <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
           Neuron Syndicate
         </Btn>
-        {faucetEnabled && (
-          <Btn variant={page === 'faucet' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('faucet')}>
-            <Icon name="zap" size={14} stroke={page === 'faucet' ? 'var(--char-950)' : 'currentColor'} />
-            Cycles Faucet
-          </Btn>
-        )}
 
-        {(ideaBoardEnabled || explorerEnabled || xFarmEnabled) && (
+        {(explorerEnabled || xFarmEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Community</Eyebrow>
-        )}
-        {ideaBoardEnabled && (
-          <Btn variant={page === 'ideas' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ideas')}>
-            <Icon name="bulb" size={14} stroke={page === 'ideas' ? 'var(--char-950)' : 'currentColor'} />
-            Roadmap &amp; Development
-          </Btn>
         )}
         {explorerEnabled && (
           <Btn variant={page === 'explorer' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('explorer')}>
@@ -2071,13 +1956,6 @@ export default function App() {
   const renderDrawerBody = (onNavigate?: () => void) => (
     <>
       <div className="col" style={{ gap: 8, width: '100%', marginBottom: 32 }}>
-        {/* The only direct children of the "Navigation" header are the
-            Dashboard + Mission Statement links (the rest sit under the
-            Featured / Governance / Community sub-headers below). Hide the
-            header when both are dark so it isn't left orphaned. */}
-        {(dashboardEnabled || missionEnabled) && (
-          <Eyebrow style={{ marginBottom: 6 }}>Navigation</Eyebrow>
-        )}
         {renderNavLinks(onNavigate)}
       </div>
 
@@ -2183,7 +2061,6 @@ export default function App() {
         flags={featureFlags.length > 0 ? {
           staking: losslessEnabled,
           lottery: lotteryEnabled,
-          ideas: ideaBoardEnabled,
           explorer: explorerEnabled,
         } : undefined}
         onEnter={() => {
@@ -2337,23 +2214,7 @@ export default function App() {
             </div>
           )}
           <Reveal key={page} motion={motion} style={{ display: 'block', minHeight: '100%' }}>
-          {page === 'about' ? (
-            <AboutUs
-              signedIn={!!principal && !principal.isAnonymous()}
-              onSignIn={handleLogin}
-              go={(p) => setPage(p)}
-            />
-          ) : page === 'ideas' ? (
-            <IdeaBoard
-              actor={actor}
-              identity={identity}
-              principal={principal}
-              host={host}
-              rootKey={env?.IC_ROOT_KEY}
-              isAdmin={isAdmin}
-              onSignIn={handleLogin}
-            />
-          ) : (EARN_PAGES as string[]).includes(page) ? (
+          {(EARN_PAGES as string[]).includes(page) ? (
             <div className="col" style={{ minHeight: '100%' }}>
               {/* ── Neuron Syndicate (the Earn page is now a single view) ── */}
               {
@@ -2526,20 +2387,6 @@ export default function App() {
               isLocal={isLocal}
               onSignIn={handleLogin}
             />
-          ) : page === 'discussions' && discussionsEnabled ? (
-            <DiscussionsPage
-              actor={actor}
-              identity={identity}
-              principal={principal}
-              host={host}
-              rootKey={env?.IC_ROOT_KEY}
-              explorerInfo={explorerInfo}
-              isAdmin={isAdmin}
-              isLocal={isLocal}
-              proposals={proposals}
-              proposalUrl={(id) => { const pp = proposals.find(x => x.id === id); return pp ? nnsProposalLink(pp) : ''; }}
-              onSignIn={handleLogin}
-            />
           ) : page === 'xfarm' && xFarmEnabled ? (
             <XFarm
               actor={actor}
@@ -2550,19 +2397,6 @@ export default function App() {
               isLocal={isLocal}
               ledgerCanisterId={ledgerCanisterId}
               onSignIn={handleLogin}
-            />
-          ) : page === 'arcade' && arcadeEnabled ? (
-            <Arcade
-              actor={actor}
-              identity={identity}
-              principal={principal}
-              host={host}
-              rootKey={env?.IC_ROOT_KEY}
-              ledgerCanisterId={ledgerCanisterId}
-              backendCanisterId={backendCanisterId}
-              isLocal={config?.is_local ?? false}
-              onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'ansemlp' && ansemLpEnabled ? (
             <AnsemLp
@@ -2602,8 +2436,7 @@ export default function App() {
               isLocal={config?.is_local ?? false}
             />
           ) : page === 'minigolf' && minigolfEnabled ? (
-            <Arcade
-              mode="minigolf"
+            <MiniGolfPage
               actor={actor}
               identity={identity}
               principal={principal}
@@ -2614,23 +2447,6 @@ export default function App() {
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
-            />
-          ) : page === 'casino' && casinoEnabled ? (
-            <Casino
-              actor={actor}
-              principal={principal}
-              isLocal={config?.is_local ?? false}
-              onSignIn={handleLogin}
-              onGoStaking={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
-              crashEnabled={crashEnabled}
-            />
-          ) : page === 'faucet' && faucetEnabled ? (
-            <Faucet
-              actor={actor}
-              principal={principal}
-              isLocal={config?.is_local ?? false}
-              onSignIn={handleLogin}
-              onGoVote={() => setPage('voting')}
             />
           ) : page === 'payouts' || page === 'admin' ? (
             <Payouts
@@ -2650,28 +2466,6 @@ export default function App() {
               featureFlags={featureFlags}
               onChanged={() => { fetchConfig(); fetchFeatureFlags(); }}
               openTreasury={openTreasury}
-            />
-          ) : page === 'dashboard' ? (
-            <Dashboard
-              actor={actor}
-              principal={principal}
-              isAdmin={isAdmin}
-              tier={tier}
-              holdings={holdings}
-              proposals={proposals}
-              myCommitments={myCommitments}
-              myStake={myStake}
-              globalStats={globalStats}
-              flags={{
-                staking: losslessEnabled,
-                lottery: lotteryEnabled,
-                ideas: ideaBoardEnabled,
-                explorer: explorerEnabled,
-                arcade: arcadeEnabled,
-                earlyAdopters: earlyAdoptersEnabled,
-              }}
-              go={(p) => setPage(p)}
-              onSignIn={handleLogin}
             />
           ) : (
           <div className="idea-board-container">
@@ -3108,11 +2902,7 @@ export default function App() {
                               }}>
                                 <Icon name="share" size={12} /> Share
                               </button>
-                              {discussionsEnabled ? (
-                                <Discussions actor={actor} identity={identity} principal={principal} host={host}
-                                  rootKey={env?.IC_ROOT_KEY} explorerInfo={explorerInfo} isAdmin={isAdmin}
-                                  proposalId={p.id} proposalTitle={p.title} proposalUrl={nnsProposalLink(p)} onSignIn={handleLogin} />
-                              ) : <span />}
+                              <span />
                             </div>
                           </div>
                         </Reveal>
@@ -3249,11 +3039,7 @@ export default function App() {
                               }}>
                                 <Icon name="share" size={12} /> Share
                               </button>
-                              {discussionsEnabled ? (
-                                <Discussions actor={actor} identity={identity} principal={principal} host={host}
-                                  rootKey={env?.IC_ROOT_KEY} explorerInfo={explorerInfo} isAdmin={isAdmin}
-                                  proposalId={p.id} proposalTitle={p.title} proposalUrl={nnsProposalLink(p)} onSignIn={handleLogin} />
-                              ) : <span />}
+                              <span />
                             </div>
                           </div>
                         </Reveal>

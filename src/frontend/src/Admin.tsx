@@ -6,7 +6,7 @@ import type { Config, FeatureFlag, GlobalStats, LotteryInfo, EarlyAdopterInfo, S
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import type { ModerationCandidate, UserBalanceRow, SeenUser } from "./bindings/backend";
 import { Principal } from "@icp-sdk/core/principal";
-import { Icon, Eyebrow, Btn, Chip, LiveDot, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
+import { Icon, Eyebrow, Btn, Chip, LiveDot, MoreInfo, fmtICP, formatPrincipal } from "./ui";
 import { useErrorImpression } from "./analytics";
 import CourseEditor from "./arcade/CourseEditor";
 
@@ -413,26 +413,6 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     await refreshHealth();
     return 'Sweep triggered — settlements, retries and timers all ran.';
   });
-
-  const seedCasino = () => run('seedcasino', async () => {
-    const res = await actor.dev_seed_casino_play();
-    if (res.__kind__ === "Err") { setError(res.Err); return null; }
-    return (res.Ok as string) + ' — open Play → Casino.';
-  });
-
-  // Surface the casino local-playtest control in App's Dashboard & Controls panel.
-  usePageDevControls(!!config?.is_local, () => (
-    <div className="col" style={{ gap: 8 }}>
-      <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Casino — local playtest</span>
-      <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-        Grants you 5,000 ICP of dev stake (so you have SVPP) and seeds 6 auto-pilot bots
-        that bet &amp; chat every round. Needs the <span className="mono">crash</span> flag on.
-      </span>
-      <Btn variant="secondary" sm onClick={seedCasino} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-        <Icon name="gamepad" size={12} /> Seed bots &amp; grant me SVPP
-      </Btn>
-    </div>
-  ), [busy, config?.is_local]);
 
   const refreshSplitNeurons = async () => {
     if (!actor) return;
@@ -1319,8 +1299,8 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               </span>
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Every known participant — the union across voting, staking, lottery, ideas,
-              project funding, discussions, pool neurons, X-Farm, and every signed-in
+              Every known participant — the union across voting, staking, lottery,
+              pool neurons, X-Farm, and every signed-in
               principal above — and the balance held in their <b>own wallet</b> on each
               ledger. Includes logged-in users with zero balance. Fetched in batches
               (5 ledger reads per user), so a large user base takes a moment.
@@ -1418,11 +1398,6 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <Li>Prize payouts are journaled and retried until the transfer lands; a win can never be paid twice or lost.</Li>
           </Section>
 
-          <Section icon="bulb" title="Community R&D — ideas and projects">
-            <Li>Posting an idea costs 1 ICP (anti-spam, 100% to treasury). Ideas die after 30 days without an upvote.</Li>
-            <Li>Upvoting is <b>free</b> — no token is collected — and each user may upvote a given idea once. Every upvote resets that idea's 30-day expiry clock.</Li>
-            <Li>Projects are admin-curated with a single <b>USD funding goal</b> and accept any supported token (ICP, ckBTC, ckETH); contributions go 100% to the treasury, which pays for execution.</Li>
-          </Section>
 
           <Section icon="spark" title="Perm tier — the platform's permanent stake">
             <Li>Permanent (no unstake, by design) stake into a platform-controlled 2-year neuron that follows the primary on every topic. Open to everyone, forever — no membership cap or close.</Li>
@@ -1436,7 +1411,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           </Section>
 
           <Section icon="wallet" title="Treasury & cycles — how the lights stay on">
-            <Li>Treasury inflows: 50% of burns, 50% of staking yield, 50% of Perm-neuron yield, idea post fees, project funding, Neuron Syndicate initiation fees, explorer and arcade payments.</Li>
+            <Li>Treasury inflows: 50% of burns, 50% of staking yield, 50% of Perm-neuron yield, Neuron Syndicate initiation fees, explorer and mini-golf payments.</Li>
             <Li>Cycles: 25% of each burn tops up each canister via the CMC. If the backend dips below 5T cycles, the sweep auto-converts treasury ICP into cycles (two-phase, idempotent).</Li>
             <Li>Withdrawals and neuron allocations are guarded by the 15 ICP floor (override available) — below ~10 ICP the cycle top-up silently stops.</Li>
           </Section>

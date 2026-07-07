@@ -171,14 +171,15 @@ export function courseNftTokenUrl(
 }
 
 // ── Course share links — every course has a canonical deep link owners can
-//    advertise. `#/arcade/course/<id>` is resolved by Arcade's hash routing
-//    (useHashScreen keeps the whole trailing segment, and App.pageFromHash
-//    already maps any `#/arcade/...` path to the arcade page), so opening the
-//    link lands straight on that course. ──
+//    advertise. `#/mini-golf/course/<id>` is resolved by the Mini Golf page's
+//    hash routing (useHashScreen keeps the whole trailing segment); legacy
+//    `#/arcade/course/<id>` links from before the Arcade hub was removed
+//    still resolve — App.pageFromHash maps any `#/arcade/...` path to the
+//    Mini Golf page. ──
 
 /** Canonical shareable URL for a course. `origin` = window.location.origin. */
 export function courseShareUrl(tokenId: bigint, origin: string): string {
-  return `${origin}/#/arcade/course/${tokenId}`;
+  return `${origin}/#/mini-golf/course/${tokenId}`;
 }
 
 /** X (Twitter) share-intent URL for advertising a course. */

@@ -61,7 +61,7 @@ export function useErrorImpression(error: string | null | undefined, context: st
   }, [error, context]);
 }
 
-/** Current screen from the hash, e.g. '' → 'landing', '/arcade/course-play'. */
+/** Current screen from the hash, e.g. '' → 'landing', '/mini-golf/course/7'. */
 function screenName(): string {
   const h = (typeof window !== "undefined" ? window.location.hash : "").replace(/^#\/?/, "");
   return h === "" ? "landing" : h;
