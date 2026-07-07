@@ -868,7 +868,7 @@ fn post_upgrade() {
     // stable memory from earlier deploys; no code reads them anymore, but
     // list_feature_flags would still surface them as dead admin toggles.
     for retired in [
-        "poker", "arcade_turborush", "ticker", "fast_lane",
+        "poker", "arcade_turborush", "ticker", "fast_lane", "cofounders",
         // Removed 2026-07-06 (owner): whole features deleted outright.
         "idea_board", "discussions", "crash", "cycles_faucet",
         "arcade", "arcade_fieldgoal", "dashboard", "mission_statement", "fast_lane",

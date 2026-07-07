@@ -1,5 +1,20 @@
 # Log
 
+## 2026-07-07 — Mainnet deploy 7b4a89d (feature removals + cycles overhaul)
+
+The big cut: idea_board/Community R&D, discussions, casino/crash,
+cycles_faucet, Arcade hub, Field Goal, dashboard, mission_statement
+permanently removed (74 endpoints; flags 19→11 after post_upgrade purge);
+mini golf rehomed to #/mini-golf with #/arcade/... link aliases. Cycles:
+get_lottery_info now a QUERY (pot cache, MemoryId 127), sweep throttled
+(proposals 15m; maturity/balances hourly), 1-day game retention, plus the
+draw-keyed EA settlement and Bull Run ink restyle from earlier commits.
+Rollback snapshot …26 (528 MiB; …25 retained, …24 rotated out per the max-2
+policy). Post-deploy: forced sweep DRAINED the EA inbox — 0.97 ICP routed,
+pot 47.7 ICP; removed endpoints reject; minigolf answers. Discovery:
+"cofounders" existed on mainnet only as a stale stable flag row from a
+pre-git era — set Off + queued for the retired purge next deploy.
+
 ## 2026-07-06 — Mainnet deploy ba0b1e1 (mobile playability + 50-hand daily)
 
 Shipped since 4b39efa: Drop Zone mobile control fix (overlay was
