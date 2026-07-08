@@ -39,7 +39,7 @@ import IcpLp from "./IcpLp";
 import Payouts from "./Payouts";
 import Landing from "./Landing";
 // Shared design-system primitives live in ui.tsx.
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, BrandMark } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, BrandMark, OpenChatMark, OPENCHAT_URL } from './ui';
 import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient, parseTokenAmount, fmtTokenAmount } from "./tokens";
 import { useErrorImpression } from "./analytics";
 import { countdownShort } from "./hubLogic";
@@ -1970,6 +1970,16 @@ export default function App() {
           }}
         >
           <DiscordMark size={17} color="#5865F2" /> Join the ICP Dapp Factory
+        </a>
+        <a
+          href={OPENCHAT_URL} target="_blank" rel="noreferrer"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 9, textDecoration: 'none',
+            color: 'var(--fg)', fontSize: 13.5, fontWeight: 500, marginBottom: 8,
+            padding: '0 0 0 2px',
+          }}
+        >
+          <OpenChatMark size={15} color="#FF8541" /> Chat on OpenChat
         </a>
         <a
           href="https://x.com/CalderaICP" target="_blank" rel="noreferrer"

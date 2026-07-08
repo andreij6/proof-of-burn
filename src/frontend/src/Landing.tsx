@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { LiveDot, formatPrincipal, DiscordMark, DISCORD_INVITE, BrandMark } from './ui';
+import { LiveDot, formatPrincipal, DiscordMark, DISCORD_INVITE, BrandMark, OpenChatMark, OPENCHAT_URL } from './ui';
 import type { LotteryInfo, LotteryDraw } from './bindings/backend';
 
 type UsdRate = { token: string; rate_usd_e8s: bigint };
@@ -383,6 +383,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
                 <div style={{ ...COL_HEAD, marginBottom: 12 }}>Community</div>
                 <div style={{ marginBottom: 8 }}><a href={X_URL} target="_blank" rel="noreferrer" style={{ fontSize: 13, color: 'var(--fg-1)', textDecoration: 'none' }}>X</a></div>
                 <div style={{ marginBottom: 8 }}><a href={DISCORD_INVITE} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--fg-1)', textDecoration: 'none' }}><DiscordMark size={13} color="currentColor" /> Discord</a></div>
+                <div style={{ marginBottom: 8 }}><a href={OPENCHAT_URL} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--fg-1)', textDecoration: 'none' }}><OpenChatMark size={13} color="currentColor" /> OpenChat</a></div>
               </div>
             </div>
           </div>

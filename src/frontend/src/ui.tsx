@@ -118,6 +118,24 @@ export function DiscordMark({ size = 16, color = 'currentColor' }: { size?: numb
 
 export const DISCORD_INVITE = 'https://discord.gg/N7K2veuzV';
 
+/** OpenChat (oc.app) chat-bubble mark — simple rounded bubble with dots,
+ *  inline like DiscordMark (CSP forbids remote images). */
+export function OpenChatMark({ size = 16, color = 'currentColor' }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color}
+      strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"
+      style={{ flexShrink: 0, display: 'block' }} aria-hidden="true">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+      <circle cx="8.5" cy="11.5" r="0.5" fill={color} />
+      <circle cx="12" cy="11.5" r="0.5" fill={color} />
+      <circle cx="15.5" cy="11.5" r="0.5" fill={color} />
+    </svg>
+  );
+}
+
+/** The Cycle Burn community channel on OpenChat. */
+export const OPENCHAT_URL = 'https://oc.app/community/q2ybj-4iaaa-aaaac-bflwq-cai/channel/1029853456/?ref=gzgke-daaaa-aaaar-ba7cq-cai';
+
 export function Eyebrow({ children, accent, style }: { children: React.ReactNode; accent?: boolean; style?: React.CSSProperties }) {
   return (
     <span className="mono" style={{
