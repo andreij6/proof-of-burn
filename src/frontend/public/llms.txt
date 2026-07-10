@@ -89,12 +89,21 @@ the marketplace, or takes the instant 15%-discount buyback. Tickets always
 follow the voucher's current owner; buying a voucher grants ITS daily
 tickets to the buyer instantly (once per voucher per UTC day).
 
-## Flow 3 — Unstake (the exit is always open)
-const out = await cycleBurn.unstake(amount, { SixMonths: null });
-- Ok is a pending-unstake id. The ICP pays out AUTOMATICALLY to the user once
-  the tier's neuron finishes dissolving (6mo/1y/2y). Nothing to claim.
-- Tickets void only when the user's LAST stake empties; partial unstakes keep
-  the remainder earning.
+## Flow 3 — Exit (the exit is always open, and it is VOUCHER-NATIVE)
+Since staking auto-issues a voucher, the exit starts from the voucher — NOT
+from unstake(amount, tier), which returns NO_STAKE for voucher-held positions
+(it only drains legacy plain rows).
+1. Find the user's voucher: const m = await cycleBurn.get_voucher_market();
+   const voucher = m.my_vouchers[0]; // Backed, unlisted
+2. Exit one of three ways:
+   - 100% after dissolve: const out = await cycleBurn.redeem_stake_voucher(voucher.id);
+     Ok is a pending-unstake id; the ICP pays the OWNER automatically once the
+     tier's neuron finishes dissolving (6mo/1y/2y). Nothing to claim.
+   - Instant 85%: await cycleBurn.buyback_voucher(voucher.id); // Ok = ICP paid now
+     Refuses with BUYBACK_UNAVAILABLE when the buyback fund can't cover it.
+   - Market price: list_voucher(voucher.id, askE8s) — a buyer takes the position.
+- Tickets void only when the user's LAST position empties; listed vouchers
+  pause earning until sold or delisted.
 
 ## Stake Vouchers (exit liquidity + marketplace)
 Staking AUTO-ISSUES a VOUCHER — an NFT claim on the staked ICP (the stake IS

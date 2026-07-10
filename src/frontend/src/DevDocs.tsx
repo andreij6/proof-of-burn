@@ -99,12 +99,18 @@ info.eligible;         // caller holds an active stake
 info.min_pot_e8s;      // draw gate: pot must reach this
 info.min_unique_holders; // draw gate: distinct players needed`;
 
-const UNSTAKE_SNIPPET = `// Unstake any amount, any time — tickets void only if the LAST tier empties.
-// Ok returns a pending-unstake id: the ICP pays out automatically once the
-// tier's NNS neuron finishes dissolving (6mo / 1y / 2y term).
-const out = await cycleBurn.unstake(100_000_000n, { SixMonths: null });
+const UNSTAKE_SNIPPET = `// Exits are VOUCHER-NATIVE: staking auto-issued a voucher — start there.
+// (unstake(amount, tier) only drains legacy plain-stake rows.)
+const m = await cycleBurn.get_voucher_market();
+const voucher = m.my_vouchers[0];
+
+// 100% after the tier's dissolve — pays the owner automatically:
+const out = await cycleBurn.redeem_stake_voucher(voucher.id);
 if ('Err' in out) throw new Error(out.Err);
-const pendingUnstakeId = out.Ok;`;
+
+// or instant 85% (refuses with BUYBACK_UNAVAILABLE when the fund is short):
+// await cycleBurn.buyback_voucher(voucher.id);
+// or list it at your price: await cycleBurn.list_voucher(voucher.id, askE8s);`;
 
 const VOUCHER_CANDID_SNIPPET = `// Stake Vouchers — an NFT claim on a staked position. Tickets follow the
 // voucher's CURRENT owner; buying one makes the buyer a staker.
