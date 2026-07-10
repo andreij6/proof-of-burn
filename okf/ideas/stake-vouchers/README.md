@@ -126,6 +126,17 @@ Every fee (marketplace fee + realized buyback spread):
   buyback card: "Instant exit: 85% now vs 100% after dissolve"); lottery-
   page copy untouched (no-loss brand: classic unstake remains the headline
   exit; voucher exits are opt-in extras with the discount stated plainly).
+- **Developer docs (required per phase)**: `#/dev-docs` and `/llms.txt` are
+  the public integration contract and MUST ship in the same commit as each
+  phase's endpoints — a partner integrating from stale docs is a support
+  incident. Phase 1 adds a "Voucher buyback" section (wrap_stake_voucher +
+  buyback_voucher + capacity read, with the 85%/15% math stated plainly);
+  phase 2 adds list/buy/cancel + the escrow-funding flow; phase 3 adds the
+  multi-token ask/payment matrix (which ledger to icrc1_transfer per ask
+  token) + fee notes. Each addition extends BOTH the page's candid/idlFactory
+  snippets AND the llms.txt single-source (they import the same file — keep
+  it that way). The caller-keyed identity rule applies to every voucher call
+  and must be restated in the voucher section.
 - **Tests**: registry conservation (sum of voucher amounts + plain stakes ==
   neuron principal per tier), ticket-follow-the-owner across sale/buyback
   (incl. house earns nothing, seller voids on last-stake exit), balance-gate
@@ -135,7 +146,8 @@ Every fee (marketplace fee + realized buyback spread):
 ## 7. Phases
 
 1. **Wrap + house buyback** (no marketplace): smallest slice that produces
-   income and proves demand. ICP-only money paths.
+   income and proves demand. ICP-only money paths. Ships with its dev-docs
+   + llms.txt section (see §6).
 2. **Marketplace, ICP asks only** (course-market saga reuse).
 3. **Multi-token asks** (ckBTC/ckUSDC/ckETH) + fee swap queue.
 4. *(Optional)* house re-lists bought vouchers; auction-style asks.
