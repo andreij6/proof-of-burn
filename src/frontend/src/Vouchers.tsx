@@ -156,6 +156,8 @@ export function VouchersBody({
   // Modals (owner 2026-07-10): each is a voucher id, or null when closed.
   const [redeemModal, setRedeemModal] = useState<bigint | null>(null);
   const [sellModal, setSellModal] = useState<bigint | null>(null);
+  // Sell modal step: pick instant-vs-list first, then the ask form.
+  const [sellStep, setSellStep] = useState<'choose' | 'list'>('choose');
   const [buyModal, setBuyModal] = useState<bigint | null>(null);
   const [priceText, setPriceText] = useState('');
 
@@ -318,7 +320,7 @@ export function VouchersBody({
                             <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>tickets only</span>
                           ) : (
                             <>
-                              <Btn variant="secondary" sm onClick={() => { setSellModal(v.id); setPriceText(''); }} disabled={busy !== null}>
+                              <Btn variant="secondary" sm onClick={() => { setSellModal(v.id); setSellStep('choose'); setPriceText(''); }} disabled={busy !== null}>
                                 <Icon name="coins" size={11} /> Sell…
                               </Btn>
                               <Btn variant="primary" sm onClick={() => setRedeemModal(v.id)} disabled={busy !== null}>
@@ -443,8 +445,6 @@ export function VouchersBody({
       {redeemModal != null && (() => {
         const v = mine.find((x) => x.id === redeemModal);
         if (!v) return null;
-        const quote = buybackQuoteE8s(v.amount_e8s, discountBps);
-        const canBuyback = buybackAvailable(v.amount_e8s, discountBps, info?.buyback_fund_e8s ?? 0n);
         const opt: React.CSSProperties = { border: '1px solid var(--border)', borderRadius: 10, padding: 14, background: 'var(--bg-alt)', width: '100%' };
         return (
           <ModalShell title={`Redeem ${fmtICP(v.amount_e8s)} ICP`} onClose={() => setRedeemModal(null)}>
@@ -463,30 +463,16 @@ export function VouchersBody({
                 {busy === `redeem-${v.id}` ? <LiveDot size={7} /> : <Icon name="clock" size={12} stroke="var(--char-950)" />} Start the dissolve
               </Btn>
             </div>
-            <div className="col" style={{ ...opt, opacity: canBuyback ? 1 : 0.65 }}>
-              <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                <b style={{ fontSize: 13.5 }}>Claim instantly</b>
-                <Chip tone="burn">{payPct}% · {fmtICP(quote)} ICP now</Chip>
-              </span>
-              <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
-                {canBuyback
-                  ? `The house buys your voucher on the spot — an optional express-exit fee of ${(100 - Number(payPct))}%.`
-                  : 'Temporarily unavailable — the buyback fund is replenishing. The other two options always work.'}
-              </span>
-              <Btn variant="secondary" sm onClick={() => buyback(v)} disabled={busy !== null || !canBuyback} style={{ alignSelf: 'flex-start' }}>
-                {busy === `buyback-${v.id}` ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Take {fmtICP(quote)} ICP now
-              </Btn>
-            </div>
             <div className="col" style={opt}>
               <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                <b style={{ fontSize: 13.5 }}>Sell at market value</b>
-                <Chip tone="pending">you set the ask</Chip>
+                <b style={{ fontSize: 13.5 }}>Sell it instead</b>
+                <Chip tone="pending">instant {payPct}% · or your ask</Chip>
               </span>
               <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
-                List it on the marketplace — a buyer takes over the position and you may beat the instant-exit price.
+                Cash out without the wait — sell instantly to the house or list it on the Exchange.
               </span>
-              <Btn variant="secondary" sm onClick={() => { setRedeemModal(null); setSellModal(v.id); setPriceText(''); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-                <Icon name="coins" size={12} /> List it for sale
+              <Btn variant="secondary" sm onClick={() => { setRedeemModal(null); setSellModal(v.id); setSellStep('choose'); setPriceText(''); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                <Icon name="coins" size={12} /> Sell options
               </Btn>
             </div>
           </ModalShell>
@@ -500,28 +486,70 @@ export function VouchersBody({
         const price = parsePriceIcp(priceText);
         const delta = price != null ? listingDeltaPct(price, v.amount_e8s) : null;
         return (
-          <ModalShell title={`Sell your ${TIER_META[v.tier].short} voucher`} onClose={() => { setSellModal(null); setPriceText(''); }}>
+          <ModalShell title={`Sell your ${TIER_META[v.tier].short} voucher`} onClose={() => { setSellModal(null); setSellStep('choose'); setPriceText(''); }}>
             <div className="col" style={{ gap: 3, fontSize: 12.5, border: '1px solid var(--border)', borderRadius: 10, padding: 12, background: 'var(--bg-alt)' }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                 <span style={{ color: 'var(--fg-3)' }}>Value (staked principal)</span>
                 <span className="mono">{fmtICP(v.amount_e8s)} ICP{usd(v.amount_e8s) ? ` · ${usd(v.amount_e8s)}` : ''}</span>
               </div>
             </div>
-            <label style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>Your asking price (ICP)</label>
-            <input className="burn-input" placeholder="e.g. 1.95" value={priceText} inputMode="decimal" autoFocus
-              onChange={(e) => setPriceText(e.target.value)} aria-label="Ask price in ICP" style={{ width: '100%' }} />
-            {delta != null && (
-              <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'danger' : 'pending'} style={{ alignSelf: 'flex-start' }}>
-                {delta < 0 ? `${Math.abs(delta)}% under value — a deal for buyers` : delta > 0 ? `${delta}% over value` : 'at value'}
-              </Chip>
+            {sellStep === 'choose' ? (() => {
+              const quote = buybackQuoteE8s(v.amount_e8s, discountBps);
+              const canBuyback = buybackAvailable(v.amount_e8s, discountBps, info?.buyback_fund_e8s ?? 0n);
+              const opt: React.CSSProperties = { border: '1px solid var(--border)', borderRadius: 10, padding: 14, background: 'var(--bg-alt)', width: '100%' };
+              return (
+                <>
+                  <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>Two ways to sell:</span>
+                  <div className="col" style={{ ...opt, opacity: canBuyback ? 1 : 0.6 }}>
+                    <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                      <b style={{ fontSize: 13.5 }}>Sell instantly to the house</b>
+                      <Chip tone="burn">{payPct}% · {fmtICP(quote)} ICP now</Chip>
+                    </span>
+                    <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
+                      {canBuyback
+                        ? 'Paid to your wallet on the spot — no waiting for a buyer.'
+                        : 'Currently unavailable — the buyback fund can\'t cover this sale right now. Listing on the Exchange still works.'}
+                    </span>
+                    <Btn variant="primary" sm onClick={() => buyback(v)} disabled={busy !== null || !canBuyback} style={{ alignSelf: 'flex-start' }}>
+                      {busy === `buyback-${v.id}` ? <LiveDot size={7} /> : <Icon name="zap" size={12} stroke="var(--char-950)" />} Take {fmtICP(quote)} ICP now
+                    </Btn>
+                  </div>
+                  <div className="col" style={opt}>
+                    <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                      <b style={{ fontSize: 13.5 }}>List on the Voucher Exchange</b>
+                      <Chip tone="pending">you set the ask</Chip>
+                    </span>
+                    <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
+                      Name your price and let a buyer take over the position — you may beat the instant offer.
+                    </span>
+                    <Btn variant="secondary" sm onClick={() => setSellStep('list')} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                      <Icon name="coins" size={12} /> Set an asking price
+                    </Btn>
+                  </div>
+                </>
+              );
+            })() : (
+              <>
+                <label style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>Your asking price (ICP)</label>
+                <input className="burn-input" placeholder="e.g. 1.95" value={priceText} inputMode="decimal" autoFocus
+                  onChange={(e) => setPriceText(e.target.value)} aria-label="Ask price in ICP" style={{ width: '100%' }} />
+                {delta != null && (
+                  <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'danger' : 'pending'} style={{ alignSelf: 'flex-start' }}>
+                    {delta < 0 ? `${Math.abs(delta)}% under value — a deal for buyers` : delta > 0 ? `${delta}% over value` : 'at value'}
+                  </Chip>
+                )}
+                <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                  A {feePct}% marketplace fee is taken from the sale.{' '}
+                  <b>While listed, this voucher stops earning lottery tickets</b> — they resume the moment you cancel or it sells.
+                </span>
+                <span className="row" style={{ gap: 8 }}>
+                  <Btn variant="primary" onClick={() => list(v)} disabled={busy !== null || price == null}>
+                    {busy === `list-${v.id}` ? <LiveDot size={8} /> : <Icon name="check" size={13} stroke="var(--char-950)" />} List for sale
+                  </Btn>
+                  <Btn variant="ghost" sm onClick={() => setSellStep('choose')}>← Back</Btn>
+                </span>
+              </>
             )}
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              A {feePct}% marketplace fee is taken from the sale.{' '}
-              <b>While listed, this voucher stops earning lottery tickets</b> — they resume the moment you cancel or it sells.
-            </span>
-            <Btn variant="primary" onClick={() => list(v)} disabled={busy !== null || price == null} style={{ alignSelf: 'flex-start' }}>
-              {busy === `list-${v.id}` ? <LiveDot size={8} /> : <Icon name="check" size={13} stroke="var(--char-950)" />} List for sale
-            </Btn>
           </ModalShell>
         );
       })()}
