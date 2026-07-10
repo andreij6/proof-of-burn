@@ -348,265 +348,6 @@ export default function Staking({
         </div>
       )}
 
-      <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
-        {/* ── Your stake (with tier selector) ── */}
-        <div className="col" style={{ ...card, gap: 12, flex: '1 1 320px', minWidth: 300 }}>
-          <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-            <Eyebrow>Your stake</Eyebrow>
-            {myStake && myStake.total_staked_e8s > 0n && (
-              <Chip tone="ok">{fmtICP(myStake.total_staked_e8s)} ICP staked</Chip>
-            )}
-          </span>
-
-          {!signedIn ? (
-            <div className="col" style={{ gap: 10, alignItems: 'flex-start' }}>
-              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Sign in to stake and earn daily lottery tickets.
-              </span>
-              <Btn variant="primary" sm onClick={onSignIn}>
-                <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
-              </Btn>
-            </div>
-          ) : (
-            <>
-              <div className="row" style={{ gap: 6 }}>
-                {TIER_ORDER.map(tierTab)}
-                {boostersEnabled && isAdmin && boosterTab}
-              </div>
-
-              {boosterSel && isAdmin ? (
-                <>
-                  <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
-                    <b className="mono" style={{ fontSize: 24 }}>{fmtICP(eaInfo?.my_staked_e8s ?? 0n)}</b>
-                    <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>ICP boosting (permanent)</span>
-                  </div>
-
-                  {/* What makes the Booster neuron special */}
-                  <div className="col" style={{ gap: 6, border: '1px solid var(--burn)', borderRadius: 8, padding: '10px 12px', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
-                    <span className="row" style={{ gap: 6, alignItems: 'center', fontSize: 12.5, color: 'var(--fg)' }}>
-                      <Icon name="spark" size={13} stroke="var(--burn-ink)" /> <b>The 2-year Perm neuron</b>
-                    </span>
-                    <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
-                      Same 2-year neuron as the term tier, with two differences: it is{' '}
-                      <b>permanent — never unstakeable, by anyone</b> — and it earns the highest ticket
-                      rate, <b>40 lottery tickets/day per ICP</b> (vs 5/10/20). Like every neuron here,
-                      its yield funds the lottery and the protocol — you're never paid ICP from it.
-                    </span>
-                  </div>
-
-                  <div className="col" style={{ gap: 8 }}>
-                    <div className="row" style={{ gap: 8 }}>
-                      <div style={{ flex: 1, position: 'relative' }}>
-                        <input
-                          type="number" min="0" step="1" placeholder={`Stake (min ${fmtICP(eaInfo?.min_stake_e8s ?? 100_000_000n)})`}
-                          className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
-                          value={stakeInput} onChange={(e) => setStakeInput(e.target.value)}
-                        />
-                        <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
-                      </div>
-                      <Btn variant="primary" sm onClick={handleBoosterStake} disabled={busy !== null || !stakeInput || !boosterAck}>
-                        {busy === 'booster' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="spark" size={13} stroke="var(--char-950)" />}
-                        {busy === 'booster' ? " Staking…" : " Stake forever"}
-                      </Btn>
-                    </div>
-                    <label className="row" style={{ gap: 8, fontSize: 11.5, color: 'var(--fg-2)', cursor: 'pointer', alignItems: 'flex-start' }}>
-                      <input type="checkbox" checked={boosterAck} style={{ marginTop: 2 }}
-                        onChange={(e) => { setBoosterAck(e.target.checked); setError(null); }} />
-                      <span style={{ flex: 1 }}>
-                        I understand this stake is <b>permanent and irreversible</b> — it can never be
-                        unstaked, and my only return is the daily lottery-ticket boost.
-                      </span>
-                    </label>
-                  </div>
-                </>
-              ) : (
-              <>
-              <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
-                <b className="mono" style={{ fontSize: 24 }}>{fmtICP(selMine?.amount_e8s ?? 0n)}</b>
-                <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-                  ICP in {termLabel}
-                </span>
-              </div>
-
-              <div className="col" style={{ gap: 8 }}>
-                <div className="row" style={{ gap: 8 }}>
-                  <div style={{ flex: 1, position: 'relative' }}>
-                    <input
-                      type="number" min="0" step="0.1" placeholder={`Stake (min ${fmtICP(minStakeE8s)})`}
-                      className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
-                      value={stakeInput} onChange={(e) => setStakeInput(e.target.value)}
-                    />
-                    <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
-                  </div>
-                  <Btn variant="primary" sm onClick={handleStake} disabled={busy !== null || !stakeInput}>
-                    {busy === 'stake' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="flame" size={13} stroke="var(--char-950)" />}
-                    {busy === 'stake' ? " Staking…" : " Stake"}
-                  </Btn>
-                </div>
-                <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                  <Icon name="info" size={12} stroke="var(--fg-3)" />
-                  Zero-loss: the treasury pays every transfer fee — what you stake is exactly what comes back. {firstStake ? `The first ${termLabel} stake creates that tier's neuron (min 1 ICP).` : ""}
-                </span>
-
-                {/* Legacy plain stake in this tier (pre-voucher) → convert. */}
-                {selMine && selMine.amount_e8s >= E8S && (
-                  <>
-                    <div style={{ borderTop: '1px solid var(--border)' }} />
-                    <div className="col" style={{ gap: 6, border: '1px solid var(--haze)', borderRadius: 8, padding: '10px 12px', background: 'color-mix(in srgb, var(--haze) 8%, var(--surface))' }}>
-                      <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
-                        You have <b>{fmtICP(selMine.amount_e8s)} ICP</b> of legacy {termLabel} stake not yet in a voucher.
-                        Exits are voucher-native now — convert it to manage it below (sell, redeem, or instant exit).
-                      </span>
-                      <Btn variant="secondary" sm onClick={() => handleConvert(tier, selMine.amount_e8s)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-                        {busy === `convert-${tier}` ? <LiveDot size={7} /> : <Icon name="star" size={12} stroke="var(--burn-ink)" />} Convert to voucher
-                      </Btn>
-                    </div>
-                  </>
-                )}
-                <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                  <Icon name="star" size={12} stroke="var(--fg-3)" />
-                  Every stake arrives as a Voucher NFT below — redeem it for 100% after the {Math.round(termDays)}-day
-                  dissolve, sell it, or take an instant exit. No separate unstake needed.
-                </span>
-              </div>
-              </>
-              )}
-            </>
-          )}
-        </div>
-
-      </div>
-
-      {/* ── Term pools — one public NNS neuron per term ── */}
-      <div className="col" style={{ ...card, gap: 12 }}>
-        <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <Eyebrow>Term pools</Eyebrow>
-        </span>
-        <div className="row" style={{ gap: 12, alignItems: 'stretch', flexWrap: 'wrap' }}>
-          {TIER_ORDER.map(t => {
-            const tp = tierPool(t);
-            const ready = tp?.bootstrap === StakingBootstrap.Ready;
-            const sel = t === tier && !boosterSel;
-            return (
-              <div key={t}
-                role="button" tabIndex={0}
-                onClick={() => { setTier(t); setBoosterSel(false); }}
-                onKeyDown={(e) => { if (e.key === 'Enter') { setTier(t); setBoosterSel(false); } }}
-                className="col" style={{
-                gap: 10, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
-                flex: '1 1 240px', minWidth: 0,
-                border: `1px solid ${sel ? 'var(--burn)' : 'var(--border)'}`,
-                background: sel ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
-              }}>
-                <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                  <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>{TIER_META[t].label}</b>
-                  {tp ? bootstrapChip(tp.bootstrap) : <Chip tone="muted">…</Chip>}
-                </div>
-                <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                  <Chip tone="gold" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].tickets} tickets / ICP / day</Chip>
-                </div>
-                <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                    <span style={{ color: 'var(--fg-3)' }}>Staked</span>
-                    <span className="mono">{tp ? fmtICP(tp.total_staked_e8s) : '…'} ICP</span>
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                    <span style={{ color: 'var(--fg-3)' }}>Stakers</span>
-                    <span className="mono">{tp ? tp.staker_count.toString() : '…'}</span>
-                  </div>
-                  <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
-                    <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
-                    {tp?.neuron_id != null ? (
-                      isLocal ? (
-                        <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
-                          #{tp.neuron_id.toString()}
-                        </span>
-                      ) : (
-                        <a
-                          className="mono"
-                          href={`https://dashboard.internetcomputer.org/neuron/${tp.neuron_id.toString()}`}
-                          target="_blank" rel="noreferrer"
-                          style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                          title="View this neuron on the NNS dashboard"
-                        >
-                          #{tp.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
-                        </a>
-                      )
-                    ) : (
-                      <span style={{ color: 'var(--fg-3)' }}>created on first stake</span>
-                    )}
-                  </div>
-                </div>
-                {ready && (
-                  <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout-ink)' }}>
-                    <Icon name="eye" size={12} stroke="var(--sprout-ink)" />
-                    Public on the NNS — audit it any time.
-                  </span>
-                )}
-              </div>
-            );
-          })}
-
-          {/* The permanent Booster neuron — same layout, special terms. */}
-          {boostersEnabled && isAdmin && (
-            <div
-              role="button" tabIndex={0}
-              onClick={() => { setBoosterSel(true); setError(null); }}
-              onKeyDown={(e) => { if (e.key === 'Enter') { setBoosterSel(true); setError(null); } }}
-              className="col" style={{
-                gap: 10, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
-                flex: '1 1 240px', minWidth: 0,
-                border: `1px solid ${boosterSel ? 'var(--burn)' : 'var(--border)'}`,
-                background: boosterSel ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
-              }}>
-              <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
-                <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>★ Perm · 2 years</b>
-                {eaInfo?.follows_primary_neuron
-                  ? <Chip tone="ok"><Icon name="checkCircle" size={11} /> Neuron ready</Chip>
-                  : eaInfo?.neuron_id != null
-                    ? <Chip tone="pending"><LiveDot size={6} /> Configuring…</Chip>
-                    : <Chip tone="muted">No neuron yet</Chip>}
-              </div>
-              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                <Chip tone="burn" style={{ height: 18, fontSize: 10.5 }}>permanent · no unstake</Chip>
-                <Chip tone="gold" style={{ height: 18, fontSize: 10.5 }}>40 tickets / ICP / day</Chip>
-              </div>
-              <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
-                <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                  <span style={{ color: 'var(--fg-3)' }}>Staked</span>
-                  <span className="mono">{eaInfo ? fmtICP(eaInfo.total_staked_e8s) : '…'} ICP</span>
-                </div>
-                <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                  <span style={{ color: 'var(--fg-3)' }}>Stakers</span>
-                  <span className="mono">{eaInfo ? eaInfo.early_adopter_count.toString() : '…'}</span>
-                </div>
-                <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
-                  <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
-                  {eaInfo?.neuron_id != null ? (
-                    isLocal ? (
-                      <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>#{eaInfo.neuron_id.toString()}</span>
-                    ) : (
-                      <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${eaInfo.neuron_id.toString()}`}
-                        target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
-                        style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                        title="View this neuron on the NNS dashboard">
-                        #{eaInfo.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
-                      </a>
-                    )
-                  ) : (
-                    <span style={{ color: 'var(--fg-3)' }}>created on first stake</span>
-                  )}
-                </div>
-              </div>
-              <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--burn-ink)' }}>
-                <Icon name="spark" size={12} stroke="var(--burn-ink)" />
-                Permanent — never unstakeable. Tap to stake.
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-
       {/* ── Pending unstakes ── */}
       {signedIn && unstakes.filter(u => u.status !== UnstakeStatus.Merged).length > 0 && (
         <div className="col" style={{ ...card, gap: 10 }}>
@@ -739,7 +480,267 @@ export default function Staking({
         );
       })()}
 
-            {/* ── Yield history ── */}
+      
+      <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
+        {/* ── Your stake (with tier selector) — 50/50 with Term pools ── */}
+        <div className="col" style={{ ...card, gap: 12, flex: '1 1 0', minWidth: 320 }}>
+          <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+            <Eyebrow>Your stake</Eyebrow>
+            {myStake && myStake.total_staked_e8s > 0n && (
+              <Chip tone="ok">{fmtICP(myStake.total_staked_e8s)} ICP staked</Chip>
+            )}
+          </span>
+
+          {!signedIn ? (
+            <div className="col" style={{ gap: 10, alignItems: 'flex-start' }}>
+              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
+                Sign in to stake and earn daily lottery tickets.
+              </span>
+              <Btn variant="primary" sm onClick={onSignIn}>
+                <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
+              </Btn>
+            </div>
+          ) : (
+            <>
+              <div className="row" style={{ gap: 6 }}>
+                {TIER_ORDER.map(tierTab)}
+                {boostersEnabled && isAdmin && boosterTab}
+              </div>
+
+              {boosterSel && isAdmin ? (
+                <>
+                  <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
+                    <b className="mono" style={{ fontSize: 24 }}>{fmtICP(eaInfo?.my_staked_e8s ?? 0n)}</b>
+                    <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>ICP boosting (permanent)</span>
+                  </div>
+
+                  {/* What makes the Booster neuron special */}
+                  <div className="col" style={{ gap: 6, border: '1px solid var(--burn)', borderRadius: 8, padding: '10px 12px', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                    <span className="row" style={{ gap: 6, alignItems: 'center', fontSize: 12.5, color: 'var(--fg)' }}>
+                      <Icon name="spark" size={13} stroke="var(--burn-ink)" /> <b>The 2-year Perm neuron</b>
+                    </span>
+                    <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                      Same 2-year neuron as the term tier, with two differences: it is{' '}
+                      <b>permanent — never unstakeable, by anyone</b> — and it earns the highest ticket
+                      rate, <b>40 lottery tickets/day per ICP</b> (vs 5/10/20). Like every neuron here,
+                      its yield funds the lottery and the protocol — you're never paid ICP from it.
+                    </span>
+                  </div>
+
+                  <div className="col" style={{ gap: 8 }}>
+                    <div className="row" style={{ gap: 8 }}>
+                      <div style={{ flex: 1, position: 'relative' }}>
+                        <input
+                          type="number" min="0" step="1" placeholder={`Stake (min ${fmtICP(eaInfo?.min_stake_e8s ?? 100_000_000n)})`}
+                          className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
+                          value={stakeInput} onChange={(e) => setStakeInput(e.target.value)}
+                        />
+                        <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
+                      </div>
+                      <Btn variant="primary" sm onClick={handleBoosterStake} disabled={busy !== null || !stakeInput || !boosterAck}>
+                        {busy === 'booster' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="spark" size={13} stroke="var(--char-950)" />}
+                        {busy === 'booster' ? " Staking…" : " Stake forever"}
+                      </Btn>
+                    </div>
+                    <label className="row" style={{ gap: 8, fontSize: 11.5, color: 'var(--fg-2)', cursor: 'pointer', alignItems: 'flex-start' }}>
+                      <input type="checkbox" checked={boosterAck} style={{ marginTop: 2 }}
+                        onChange={(e) => { setBoosterAck(e.target.checked); setError(null); }} />
+                      <span style={{ flex: 1 }}>
+                        I understand this stake is <b>permanent and irreversible</b> — it can never be
+                        unstaked, and my only return is the daily lottery-ticket boost.
+                      </span>
+                    </label>
+                  </div>
+                </>
+              ) : (
+              <>
+              <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
+                <b className="mono" style={{ fontSize: 24 }}>{fmtICP(selMine?.amount_e8s ?? 0n)}</b>
+                <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
+                  ICP in {termLabel}
+                </span>
+              </div>
+
+              <div className="col" style={{ gap: 8 }}>
+                <div className="row" style={{ gap: 8 }}>
+                  <div style={{ flex: 1, position: 'relative' }}>
+                    <input
+                      type="number" min="0" step="0.1" placeholder={`Stake (min ${fmtICP(minStakeE8s)})`}
+                      className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
+                      value={stakeInput} onChange={(e) => setStakeInput(e.target.value)}
+                    />
+                    <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
+                  </div>
+                  <Btn variant="primary" sm onClick={handleStake} disabled={busy !== null || !stakeInput}>
+                    {busy === 'stake' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="flame" size={13} stroke="var(--char-950)" />}
+                    {busy === 'stake' ? " Staking…" : " Stake"}
+                  </Btn>
+                </div>
+                <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+                  <Icon name="info" size={12} stroke="var(--fg-3)" />
+                  Zero-loss: the treasury pays every transfer fee — what you stake is exactly what comes back. {firstStake ? `The first ${termLabel} stake creates that tier's neuron (min 1 ICP).` : ""}
+                </span>
+
+                {/* Legacy plain stake in this tier (pre-voucher) → convert. */}
+                {selMine && selMine.amount_e8s >= E8S && (
+                  <>
+                    <div style={{ borderTop: '1px solid var(--border)' }} />
+                    <div className="col" style={{ gap: 6, border: '1px solid var(--haze)', borderRadius: 8, padding: '10px 12px', background: 'color-mix(in srgb, var(--haze) 8%, var(--surface))' }}>
+                      <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                        You have <b>{fmtICP(selMine.amount_e8s)} ICP</b> of legacy {termLabel} stake not yet in a voucher.
+                        Exits are voucher-native now — convert it to manage it below (sell, redeem, or instant exit).
+                      </span>
+                      <Btn variant="secondary" sm onClick={() => handleConvert(tier, selMine.amount_e8s)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                        {busy === `convert-${tier}` ? <LiveDot size={7} /> : <Icon name="star" size={12} stroke="var(--burn-ink)" />} Convert to voucher
+                      </Btn>
+                    </div>
+                  </>
+                )}
+                <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
+                  <Icon name="star" size={12} stroke="var(--fg-3)" />
+                  Every stake arrives as a Voucher NFT below — redeem it for 100% after the {Math.round(termDays)}-day
+                  dissolve, sell it, or take an instant exit. No separate unstake needed.
+                </span>
+              </div>
+              </>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* ── Term pools — one public NNS neuron per term ── */}
+        <div className="col" style={{ ...card, gap: 12, flex: '1 1 0', minWidth: 320 }}>
+        <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <Eyebrow>Term pools</Eyebrow>
+        </span>
+        <div className="row" style={{ gap: 12, alignItems: 'stretch', flexWrap: 'wrap' }}>
+          {TIER_ORDER.map(t => {
+            const tp = tierPool(t);
+            const ready = tp?.bootstrap === StakingBootstrap.Ready;
+            const sel = t === tier && !boosterSel;
+            return (
+              <div key={t}
+                role="button" tabIndex={0}
+                onClick={() => { setTier(t); setBoosterSel(false); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { setTier(t); setBoosterSel(false); } }}
+                className="col" style={{
+                gap: 10, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
+                flex: '1 1 240px', minWidth: 0,
+                border: `1px solid ${sel ? 'var(--burn)' : 'var(--border)'}`,
+                background: sel ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
+              }}>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                  <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>{TIER_META[t].label}</b>
+                  {tp ? bootstrapChip(tp.bootstrap) : <Chip tone="muted">…</Chip>}
+                </div>
+                <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  <Chip tone="gold" style={{ height: 18, fontSize: 10.5 }}>{TIER_META[t].tickets} tickets / ICP / day</Chip>
+                </div>
+                <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Staked</span>
+                    <span className="mono">{tp ? fmtICP(tp.total_staked_e8s) : '…'} ICP</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Stakers</span>
+                    <span className="mono">{tp ? tp.staker_count.toString() : '…'}</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
+                    <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
+                    {tp?.neuron_id != null ? (
+                      isLocal ? (
+                        <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>
+                          #{tp.neuron_id.toString()}
+                        </span>
+                      ) : (
+                        <a
+                          className="mono"
+                          href={`https://dashboard.internetcomputer.org/neuron/${tp.neuron_id.toString()}`}
+                          target="_blank" rel="noreferrer"
+                          style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                          title="View this neuron on the NNS dashboard"
+                        >
+                          #{tp.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
+                        </a>
+                      )
+                    ) : (
+                      <span style={{ color: 'var(--fg-3)' }}>created on first stake</span>
+                    )}
+                  </div>
+                </div>
+                {ready && (
+                  <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--sprout-ink)' }}>
+                    <Icon name="eye" size={12} stroke="var(--sprout-ink)" />
+                    Public on the NNS — audit it any time.
+                  </span>
+                )}
+              </div>
+            );
+          })}
+
+          </div>
+
+      {/* The permanent Booster neuron — same layout, special terms. */}
+          {boostersEnabled && isAdmin && (
+            <div
+              role="button" tabIndex={0}
+              onClick={() => { setBoosterSel(true); setError(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { setBoosterSel(true); setError(null); } }}
+              className="col" style={{
+                gap: 10, padding: '14px 16px', borderRadius: 10, cursor: 'pointer',
+                flex: '1 1 240px', minWidth: 0,
+                border: `1px solid ${boosterSel ? 'var(--burn)' : 'var(--border)'}`,
+                background: boosterSel ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
+              }}>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                <b style={{ fontSize: 14.5, whiteSpace: 'nowrap' }}>★ Perm · 2 years</b>
+                {eaInfo?.follows_primary_neuron
+                  ? <Chip tone="ok"><Icon name="checkCircle" size={11} /> Neuron ready</Chip>
+                  : eaInfo?.neuron_id != null
+                    ? <Chip tone="pending"><LiveDot size={6} /> Configuring…</Chip>
+                    : <Chip tone="muted">No neuron yet</Chip>}
+              </div>
+              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                <Chip tone="burn" style={{ height: 18, fontSize: 10.5 }}>permanent · no unstake</Chip>
+                <Chip tone="gold" style={{ height: 18, fontSize: 10.5 }}>40 tickets / ICP / day</Chip>
+              </div>
+              <div className="col" style={{ gap: 7, fontSize: 12.5, minWidth: 0 }}>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ color: 'var(--fg-3)' }}>Staked</span>
+                  <span className="mono">{eaInfo ? fmtICP(eaInfo.total_staked_e8s) : '…'} ICP</span>
+                </div>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                  <span style={{ color: 'var(--fg-3)' }}>Stakers</span>
+                  <span className="mono">{eaInfo ? eaInfo.early_adopter_count.toString() : '…'}</span>
+                </div>
+                <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
+                  <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
+                  {eaInfo?.neuron_id != null ? (
+                    isLocal ? (
+                      <span className="mono" style={{ overflowWrap: 'anywhere', textAlign: 'right' }}>#{eaInfo.neuron_id.toString()}</span>
+                    ) : (
+                      <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${eaInfo.neuron_id.toString()}`}
+                        target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+                        style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                        title="View this neuron on the NNS dashboard">
+                        #{eaInfo.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
+                      </a>
+                    )
+                  ) : (
+                    <span style={{ color: 'var(--fg-3)' }}>created on first stake</span>
+                  )}
+                </div>
+              </div>
+              <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--burn-ink)' }}>
+                <Icon name="spark" size={12} stroke="var(--burn-ink)" />
+                Permanent — never unstakeable. Tap to stake.
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Yield history ── */}
       {yields.length > 0 && (
         <div className="col" style={{ ...card, gap: 10 }}>
           <Eyebrow>Yield distributions</Eyebrow>
