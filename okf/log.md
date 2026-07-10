@@ -1,5 +1,20 @@
 # Log
 
+## 2026-07-10 late — Mainnet deploy 530ca2b (slot-scheduled yield routing)
+
+Owner correction: EA yield now routes at every SCHEDULED draw slot,
+gates or no gates (draw-keyed design starved the pot while the
+25-player gate is unmet). New admin_route_ea_yield_now force endpoint;
+settlement journal keyed by monotonic seq. DISCOVERIES: (1) the
+early_adopters flag was OFF on prod (silently gating harvest/routing;
+flipped ON); (2) root cause of the $0 LP valuation: ICPSwap ICP/ckUSDC
+getUserPositionWithTokenAmount exceeds the 5B instruction limit
+(pool-side, page 200) — retrying every sweep, staker bjkeo… earns 0 LP
+tickets; FIX PENDING (switch to getUserPositionsByPrincipal + own
+v3 math, or smaller pages + failure backoff). Routed immediately:
+pot 47.75→48.68 ICP (+0.93), treasury +0.4, inbox drained. Snapshot
+…29 rotated out, …31 created (592 MiB).
+
 ## 2026-07-10 pm — Mainnet deploy 13310af (STAKE VOUCHERS LIVE)
 
 The whole voucher feature ships: voucher_nft canister CREATED on ic
