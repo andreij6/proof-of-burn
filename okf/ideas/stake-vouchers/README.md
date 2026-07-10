@@ -152,10 +152,13 @@ Design consequences & recommendations:
   principal. It is a pure ticket stream ("golden ticket"), diluting odds but
   never touching the pot. The stakers-only eligibility rule gets an explicit
   promo carve-out: holding a promo voucher counts as lottery-eligible.
-- **Expiring** (recommended): a promo voucher mints its daily tickets for a
-  fixed window (e.g. 30 days, campaign-configurable), then goes inert — it's
-  an onboarding trial that funnels holders toward real staking, not a
-  perpetual free annuity.
+- **Expiry (owner-locked): 60 days after the individual claim** — each
+  voucher's clock starts at ITS claim, then it goes inert. An onboarding
+  trial that funnels holders toward real staking, not a perpetual annuity.
+- **Rate (owner-locked): 1 ticket per day flat** per promo voucher (not
+  tier-scaled — trivially small next to real stakes at 5-20/ICP/day, so
+  even a fully farmed campaign dilutes odds by at most 5,000 tickets/day
+  for 60 days).
 - **Soulbound** (recommended): non-transferable and non-listable — kills
   sybil resale loops and keeps the marketplace purely for real, backed
   vouchers. (Marketplace listings reject the promo class.)
@@ -222,4 +225,5 @@ Design consequences & recommendations:
    the fund.
 3. Minimum voucherable amount (proposed 1 ICP — matches first-stake min).
 4. House re-listing phase yes/no.
-5. Promo voucher window length (30 days proposed) + soulbound confirmation.
+5. Soulbound confirmation (expiry and rate now owner-locked: 60 days from
+   claim, 1 ticket/day).
