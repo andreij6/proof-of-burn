@@ -135,12 +135,14 @@ interface VouchersBodyProps {
    *  page, above the stake form); 'exchange' = your listings + the
    *  best-deals grid (the Voucher Exchange page). */
   section: 'mine' | 'exchange';
+  /** After a successful listing, jump to the Voucher Exchange. */
+  onGoExchange?: () => void;
 }
 
 const ticketsPerDay = (v: VoucherView) => Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8));
 
 export function VouchersBody({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, section,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, section, onGoExchange,
 }: VouchersBodyProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<VoucherMarketInfo | null>(null);
@@ -191,6 +193,7 @@ export function VouchersBody({
     const res = await actor.list_voucher(v.id, price);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
     setSellModal(null); setPriceText('');
+    onGoExchange?.();
     return `Voucher #${v.id} listed at ${fmtICP(price)} ICP. It won't earn tickets while listed — cancel to resume.`;
   });
 
@@ -241,52 +244,9 @@ export function VouchersBody({
   if (info && !info.enabled) return null;
 
   // ── A voucher card in the "Your vouchers" list (unlisted + promo). ──
-  const voucherCard = (v: VoucherView) => {
-    const promo = isPromo(v.class);
-    return (
-      <div key={String(v.id)} className="col" style={{
-        gap: 8, padding: 12, borderRadius: 10,
-        border: promo ? '1px solid var(--haze)' : '1px solid var(--border)',
-        background: promo ? 'color-mix(in srgb, var(--haze) 10%, var(--surface))' : 'var(--surface)',
-      }}>
-        <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <span className="row" style={{ gap: 8 }}>
-            <Icon name={promo ? 'spark' : 'star'} size={14} stroke={promo ? 'var(--haze-ink)' : 'var(--burn-ink)'} />
-            <b style={{ fontSize: 13.5 }}>{promo ? 'Golden Ticket' : `${fmtICP(v.amount_e8s)} ICP · ${TIER_META[v.tier].short}`}</b>
-            <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>#{String(v.id)}</span>
-          </span>
-          {promo ? (
-            <Chip tone="pending">
-              {v.expires_at != null && promoDaysLeft(v.expires_at, Date.now()) > 0
-                ? `${promoDaysLeft(v.expires_at, Date.now())} days left`
-                : 'expired'}
-            </Chip>
-          ) : (
-            <Chip tone="ok">{ticketsPerDay(v)} tickets/day</Chip>
-          )}
-        </span>
-
-        {promo ? (
-          <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-            1 free lottery ticket a day — tickets only. Not redeemable, not sellable, not transferable;
-            stake real ICP to earn 5–20 tickets per ICP per day.
-          </span>
-        ) : (
-          <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-            <Btn variant="secondary" sm onClick={() => { setSellModal(v.id); setPriceText(''); }} disabled={busy !== null}>
-              <Icon name="coins" size={12} /> Sell…
-            </Btn>
-            <Btn variant="primary" sm onClick={() => setRedeemModal(v.id)} disabled={busy !== null}>
-              <Icon name="coins" size={12} stroke="var(--char-950)" /> Redeem ICP
-            </Btn>
-          </span>
-        )}
-      </div>
-    );
-  };
 
   return (
-    <div className="idea-board-container" style={{ paddingTop: 0 }}>
+    <div className="idea-board-container" style={{ paddingTop: 0, paddingBottom: 0 }}>
       {notice && (
         <div className="row" style={{ gap: 8, border: '1px solid var(--sprout)', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, color: 'var(--sprout-ink)' }}>
           <Icon name="checkCircle" size={14} stroke="var(--sprout-ink)" /> {notice}
@@ -312,8 +272,64 @@ export function VouchersBody({
             No vouchers here yet — stake ICP above and your voucher appears instantly, or claim a Golden Ticket when a campaign is live.
           </span>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10 }}>
-            {myUnlisted.map(voucherCard)}
+          <div style={{ overflowX: 'auto', width: '100%' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+              <thead>
+                <tr className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'left' }}>
+                  <th style={{ padding: '6px 8px', fontWeight: 500 }}>Voucher</th>
+                  <th style={{ padding: '6px 8px', fontWeight: 500 }}>Value</th>
+                  <th style={{ padding: '6px 8px', fontWeight: 500 }}>Term</th>
+                  <th style={{ padding: '6px 8px', fontWeight: 500 }}>Tickets</th>
+                  <th style={{ padding: '6px 8px', fontWeight: 500, textAlign: 'right' }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {myUnlisted.map((v) => {
+                  const promo = isPromo(v.class);
+                  return (
+                    <tr key={String(v.id)} style={{ borderTop: '1px solid var(--border)' }}>
+                      <td style={{ padding: '8px' }}>
+                        <span className="row" style={{ gap: 6 }}>
+                          <Icon name={promo ? 'spark' : 'star'} size={13} stroke={promo ? 'var(--haze-ink)' : 'var(--burn-ink)'} />
+                          <b>{promo ? 'Golden Ticket' : `#${String(v.id)}`}</b>
+                          {!promo && <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}></span>}
+                        </span>
+                      </td>
+                      <td className="mono" style={{ padding: '8px' }}>
+                        {promo ? '—' : `${fmtICP(v.amount_e8s)} ICP${usd(v.amount_e8s)}`}
+                      </td>
+                      <td style={{ padding: '8px', color: 'var(--fg-2)' }}>
+                        {promo
+                          ? (v.expires_at != null && promoDaysLeft(v.expires_at, Date.now()) > 0
+                              ? `${promoDaysLeft(v.expires_at, Date.now())}d left` : 'expired')
+                          : TIER_META[v.tier].short}
+                      </td>
+                      <td className="mono" style={{ padding: '8px', color: 'var(--sprout-ink)' }}>
+                        {promo
+                          ? (v.expires_at != null && promoDaysLeft(v.expires_at, Date.now()) > 0 ? '1/day' : '0')
+                          : `${ticketsPerDay(v)}/day`}
+                      </td>
+                      <td style={{ padding: '8px' }}>
+                        <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                          {promo ? (
+                            <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>tickets only</span>
+                          ) : (
+                            <>
+                              <Btn variant="secondary" sm onClick={() => { setSellModal(v.id); setPriceText(''); }} disabled={busy !== null}>
+                                <Icon name="coins" size={11} /> Sell…
+                              </Btn>
+                              <Btn variant="primary" sm onClick={() => setRedeemModal(v.id)} disabled={busy !== null}>
+                                <Icon name="coins" size={11} stroke="var(--char-950)" /> Redeem ICP
+                              </Btn>
+                            </>
+                          )}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         )}
       </div>

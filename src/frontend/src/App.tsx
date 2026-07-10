@@ -2487,6 +2487,7 @@ export default function App() {
             />
           ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
             <NeuronStakePage
+              onGoExchange={() => setPage('exchange')}
               actor={actor}
               identity={identity}
               principal={principal}

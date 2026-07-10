@@ -23,12 +23,13 @@ interface NeuronStakePageProps {
   isAdmin: boolean;
   treasuryCanFront: boolean;
   onSignIn: () => void;
+  onGoExchange: () => void;
   onActivity: () => void;
 }
 
 export default function NeuronStakePage({
   actor, identity, principal, host, rootKey, ledgerCanisterId,
-  isLocal, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity,
+  isLocal, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity, onGoExchange,
 }: NeuronStakePageProps) {
   return (
     <>
@@ -95,6 +96,7 @@ export default function NeuronStakePage({
         ledgerCanisterId={ledgerCanisterId}
         onSignIn={onSignIn}
         section="mine"
+        onGoExchange={onGoExchange}
       />
 
       <Staking
