@@ -139,15 +139,45 @@ fee subaccount, no ICPSwap dependency in the money path).
   refusal, fee three-way split exactness, escrow reclaim, buyback journal
   resume after mid-flight failure.
 
-## 7. Phases
+## 7. Promo ("claim") vouchers — acquisition variant (owner, 2026-07-10)
+
+A second voucher CLASS for capped claim campaigns ("first N sign-ins claim
+a starter voucher"). Owner spec: **promo vouchers earn tickets ONLY — they
+can NEVER redeem ICP from a neuron and are NEVER buyback-eligible.** Both
+money paths hard-reject the promo class at the endpoint level (not just UI).
+
+Design consequences & recommendations:
+- **No backing required.** Since a promo voucher carries no principal claim,
+  no real ICP needs staking behind it — a campaign of any size costs zero
+  principal. It is a pure ticket stream ("golden ticket"), diluting odds but
+  never touching the pot. The stakers-only eligibility rule gets an explicit
+  promo carve-out: holding a promo voucher counts as lottery-eligible.
+- **Expiring** (recommended): a promo voucher mints its daily tickets for a
+  fixed window (e.g. 30 days, campaign-configurable), then goes inert — it's
+  an onboarding trial that funnels holders toward real staking, not a
+  perpetual free annuity.
+- **Soulbound** (recommended): non-transferable and non-listable — kills
+  sybil resale loops and keeps the marketplace purely for real, backed
+  vouchers. (Marketplace listings reject the promo class.)
+- **Claim gating**: one per principal per campaign, campaign-level cap
+  (budget = tickets, not ICP), flag-gated per campaign, admin endpoints to
+  open/close campaigns. Sybil pressure is real but bounded: a farmed promo
+  voucher yields only diluted lottery odds, never principal.
+- Registry marks class {Backed, Promo}; daily grant treats both the same;
+  buyback_voucher / unstake paths and the marketplace reject Promo.
+
+## 8. Phases
 
 1. **Wrap + house buyback** (no marketplace): smallest slice that produces
    income and proves demand. Ships with its dev-docs + llms.txt section
    (see §6).
 2. **Marketplace** (course-market saga reuse, ICP asks).
-3. *(Optional)* house re-lists bought vouchers; auction-style asks.
+3. **Promo claim campaigns** (§7) — the acquisition lever; can be pulled
+   forward ahead of 2 if growth is the priority (it shares the registry +
+   NFT canister with 1 but none of the money paths).
+4. *(Optional)* house re-lists bought vouchers; auction-style asks.
 
-## 8. Risks & mitigations
+## 9. Risks & mitigations
 
 - **No-loss brand tension**: the 15% haircut must read as an optional
   express-exit FEE, never as principal risk — copy pattern per the IL
@@ -161,10 +191,11 @@ fee subaccount, no ICPSwap dependency in the money path).
 - **Securities optics**: NFT receipt on a specific position (not a fungible
   yield token); no promised return on vouchers; buyback framed as a fee.
 
-## 9. Owner dials still open
+## 10. Owner dials still open
 
 1. Marketplace fee % (2.5% proposed).
 2. Buyback spread: counts as fee (1/3-split, recommended) vs stays whole in
    the fund.
 3. Minimum voucherable amount (proposed 1 ICP — matches first-stake min).
-4. Phase 3 (house re-listing) yes/no.
+4. House re-listing phase yes/no.
+5. Promo voucher window length (30 days proposed) + soulbound confirmation.
