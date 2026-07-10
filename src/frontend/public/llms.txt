@@ -1,0 +1,99 @@
+# Cycle Burn — No-Loss Lottery integration guide (for AI coding agents)
+
+You are integrating the Cycle Burn No-Loss Lottery into an existing Internet
+Computer (ICP) dapp. Everything happens by calling one public canister
+directly — no SDK, no token, no bridge, and the integrating app is never in
+the money path.
+
+## What the feature does
+Users lock ICP into pooled NNS neurons ("staking"). Staking is lossless: the
+principal is never spent and always returns after the term's dissolve. Stakers
+automatically receive free lottery tickets every day (server-side — no visit
+or claim call required). Three times a week, when the pot holds ≥ 25 ICP and
+at least 25 unique players hold tickets, an on-chain drawing pays 65% of the
+pot to one winner (directly to their wallet), rolls 30% into the next pot, and
+burns 5% to cycles.
+
+## Essentials
+- Lottery canister (mainnet): k7dn6-qiaaa-aaaap-qutha-cai
+- ICP ledger: ryjl3-tyaaa-aaaaa-aaaba-cai
+- All amounts are e8s (1 ICP = 100_000_000).
+- CRITICAL TRUST RULE: every call is keyed to the CALLER's principal. Make all
+  calls with the END USER's identity (their wallet / Internet Identity
+  session). Never call from your backend or a proxy identity — a proxy would
+  own every stake it creates.
+- Queries are free and fast. stake/unstake are update calls (~2s consensus).
+
+## Candid interface (the integration surface)
+type StakeTier = variant { SixMonths; OneYear; TwoYears };
+type Result = variant { Ok; Err : text };
+type BalanceResult = variant { Ok : nat64; Err : text };
+type LedgerAccount = record { owner : principal; subaccount : opt blob };
+service : {
+  get_stake_deposit_address : () -> (LedgerAccount) query;
+  stake : (nat64, StakeTier) -> (Result);
+  unstake : (nat64, StakeTier) -> (BalanceResult);
+  get_my_stake : () -> (UserStakeInfo) query;
+  get_lottery_info : () -> (LotteryInfo) query;
+  get_my_ticket_breakdown : () -> (vec TicketSourceRow) query;
+  list_recent_winners : () -> (vec LotteryDraw) query;
+}
+
+## agent-js idlFactory (paste-ready)
+export const idlFactory = ({ IDL }) => {
+  const StakeTier = IDL.Variant({ SixMonths: IDL.Null, OneYear: IDL.Null, TwoYears: IDL.Null });
+  const Result = IDL.Variant({ Ok: IDL.Null, Err: IDL.Text });
+  const BalanceResult = IDL.Variant({ Ok: IDL.Nat64, Err: IDL.Text });
+  const LedgerAccount = IDL.Record({ owner: IDL.Principal, subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)) });
+  const LotteryInfo = IDL.Record({
+    enabled: IDL.Bool, pot_e8s: IDL.Nat64, next_draw_at: IDL.Nat64,
+    min_pot_e8s: IDL.Nat64, min_unique_holders: IDL.Nat64,
+    my_tickets: IDL.Nat64, my_daily_tickets: IDL.Nat64, eligible: IDL.Bool,
+    total_tickets: IDL.Nat64, unique_holders: IDL.Nat64, round: IDL.Nat64,
+    draws_held: IDL.Nat64, total_paid_e8s: IDL.Nat64, tickets_per_day: IDL.Nat64,
+    odds_denominator: IDL.Nat64, claimed_today: IDL.Bool, admin_excluded: IDL.Bool,
+    last_win_at: IDL.Opt(IDL.Nat64), last_winner: IDL.Opt(IDL.Principal),
+  });
+  return IDL.Service({
+    get_stake_deposit_address: IDL.Func([], [LedgerAccount], ['query']),
+    stake: IDL.Func([IDL.Nat64, StakeTier], [Result], []),
+    unstake: IDL.Func([IDL.Nat64, StakeTier], [BalanceResult], []),
+    get_lottery_info: IDL.Func([], [LotteryInfo], ['query']),
+  });
+};
+
+## Flow 1 — Stake (three calls; tickets start the same day)
+1. const acct = await cycleBurn.get_stake_deposit_address();
+2. await ledger.icrc1_transfer({ to: { owner: acct.owner, subaccount: acct.subaccount },
+   amount, fee: [], memo: [], from_subaccount: [], created_at_time: [] });
+   // transfer EXACTLY the amount you will pass to stake(); ledger fees are
+   // covered by the protocol treasury. The transfer must land BEFORE step 3.
+3. const res = await cycleBurn.stake(amount, { SixMonths: null });
+   // Err variants are text codes. Tiers: SixMonths = 5 tickets/ICP/day,
+   // OneYear = 10, TwoYears = 20. Minimum FIRST stake per tier: 1 ICP.
+
+## Flow 2 — Read lottery state (drives your whole UI)
+const info = await cycleBurn.get_lottery_info();
+- info.pot_e8s: current jackpot (÷1e8 for ICP)
+- info.next_draw_at: nanosecond timestamp of the next drawing (0 = unscheduled)
+- info.my_tickets / info.my_daily_tickets / info.eligible: the caller's state
+  (authenticated calls only; anonymous callers get public fields)
+- info.min_pot_e8s / info.min_unique_holders: the two draw gates
+Also: get_my_stake() (per-tier positions), get_my_ticket_breakdown() (ticket
+sources), list_recent_winners() (winners feed).
+
+## Flow 3 — Unstake (the exit is always open)
+const out = await cycleBurn.unstake(amount, { SixMonths: null });
+- Ok is a pending-unstake id. The ICP pays out AUTOMATICALLY to the user once
+  the tier's neuron finishes dissolving (6mo/1y/2y). Nothing to claim.
+- Tickets void only when the user's LAST stake empties; partial unstakes keep
+  the remainder earning.
+
+## Rules your UI should reflect
+- Tickets are stakers-only and land automatically every day — no visit or
+  claim call needed. Show my_daily_tickets as the user's daily earn rate.
+- Winners are paid automatically to their own wallet: 65% winner / 30% next
+  pot / 5% burned. The integrating app never touches prize money.
+- Drawings run Mon/Wed/Sat nights (US Eastern) only when both gates are met;
+  otherwise the pot rolls over and keeps growing.
+- Live docs for humans: https://kyclk-5qaaa-aaaap-quthq-cai.icp0.io/#/dev-docs

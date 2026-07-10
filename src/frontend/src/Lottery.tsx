@@ -399,7 +399,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
               <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
                 {winChance
                   ? <>Your jackpot chance this drawing: <span className="mono">{winChance}</span>.</>
-                  : "Tickets land automatically on your first visit each day."}
+                  : "Tickets land automatically every day while staked."}
                 {info && info.my_daily_tickets > 0n && (
                   <> Your grant: <span className="mono">{Number(info.my_daily_tickets)}</span>/day.</>
                 )}

@@ -1,5 +1,8 @@
 import { useState } from 'react';
 import { Icon, Eyebrow, Chip, MoreInfo } from './ui';
+// The single source of truth for the machine-readable guide — served as-is
+// at /llms.txt and copied whole by the "Copy for your AI agent" button.
+import llmsTxt from '../public/llms.txt?raw';
 
 // ==========================================
 // Developer docs — one page with one purpose: show another dapp's devs how
@@ -103,6 +106,27 @@ const out = await cycleBurn.unstake(100_000_000n, { SixMonths: null });
 if ('Err' in out) throw new Error(out.Err);
 const pendingUnstakeId = out.Ok;`;
 
+function AgentCopyButton() {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(llmsTxt);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch { /* clipboard denied */ }
+  };
+  return (
+    <button onClick={copy} style={{
+      alignSelf: 'flex-start', display: 'inline-flex', alignItems: 'center', gap: 7,
+      background: 'var(--burn)', border: 'none', borderRadius: 999, cursor: 'pointer',
+      color: 'var(--char-950)', fontWeight: 700, fontSize: 13, padding: '10px 20px',
+    }}>
+      <Icon name={copied ? 'check' : 'copy'} size={13} stroke="var(--char-950)" />
+      {copied ? 'Copied — paste it to your agent' : 'Copy docs for your AI agent'}
+    </button>
+  );
+}
+
 function CodeBlock({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
@@ -184,6 +208,17 @@ export default function DevDocs() {
         </span>
       </div>
 
+      {/* ── Hand it to an agent ── */}
+      <div className="col" style={{ border: '1px solid var(--burn)', borderRadius: 10, background: 'color-mix(in srgb, var(--burn) 10%, var(--surface))', padding: 16, gap: 8 }}>
+        <Eyebrow accent>Building with an AI agent?</Eyebrow>
+        <span style={{ fontSize: 12.5, color: 'var(--fg-1)', lineHeight: 1.5 }}>
+          This entire guide fits in one prompt. Copy it below, or point your agent at{' '}
+          <a href="/llms.txt" target="_blank" rel="noreferrer" className="mono" style={{ color: 'var(--burn-ink)' }}>/llms.txt</a>{' '}
+          — it contains the interface, the idlFactory, all three flows, and the trust rules.
+        </span>
+        <AgentCopyButton />
+      </div>
+
       {/* ── Essentials ── */}
       <div className="col" style={{ ...card, gap: 10 }}>
         <Eyebrow>Essentials</Eyebrow>
@@ -253,7 +288,7 @@ export default function DevDocs() {
       <div className="col" style={{ ...card, gap: 8 }}>
         {h('05', 'Rules your UI should reflect')}
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-          <li><b>Tickets are stakers-only</b> and land automatically each day the user visits (any app that triggers an authenticated call works).</li>
+          <li><b>Tickets are stakers-only</b> and land automatically every day, server-side — your users never need to visit anyone's app to earn.</li>
           <li><b>Full unstake voids tickets instantly</b> — partial unstake keeps the rest earning.</li>
           <li><b>The transfer must land before <span className="mono">stake()</span></b> — send exactly the amount you pass to <span className="mono">stake</span>; the treasury covers ledger fees.</li>
           <li><b>Drawings pay winners directly</b> — 65% to the winner, 30% seeds the next pot, 5% burns to cycles. Your app never touches prize money.</li>

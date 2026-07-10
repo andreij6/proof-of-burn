@@ -8339,6 +8339,55 @@ fn user_daily_tickets(user: Principal) -> u64 {
 /// frontend calls this on login / page load; returns the caller's
 /// current-round ticket count.
 #[ic_cdk::update]
+/// Sweep leg (owner 2026-07-10): daily stake tickets land WITHOUT a visit.
+/// Every staker whose last grant predates today gets their per-day grant —
+/// same guards as the on-visit claim (per_day==0 skip, admin-excluded skip,
+/// stale-round reset, last_claim_day idempotence), so the two paths can
+/// coexist and never double-grant.
+fn auto_grant_daily_stake_tickets() {
+    if !feature_enabled(FLAG_LOSSLESS_LOTTERY) {
+        return;
+    }
+    let now = current_time();
+    let today = now / 1_000_000_000 / SECS_PER_DAY;
+    let stakers: std::collections::BTreeSet<Principal> =
+        STAKES.with(|m| m.borrow().iter().map(|e| e.key().user).collect());
+    let mut state = lottery_state();
+    let mut granted_any = false;
+    for user in stakers {
+        if is_admin_principal(user) {
+            continue;
+        }
+        let per_day = user_daily_tickets(user);
+        if per_day == 0 {
+            continue;
+        }
+        let mut entry = LOTTERY_TICKETS
+            .with(|m| m.borrow().get(&user))
+            .unwrap_or(TicketEntry { round: state.round, count: 0, last_claim_day: 0 });
+        if entry.round != state.round {
+            entry = TicketEntry { round: state.round, count: 0, last_claim_day: entry.last_claim_day };
+        }
+        if entry.last_claim_day >= today {
+            continue;
+        }
+        entry.count = entry.count.saturating_add(per_day);
+        entry.last_claim_day = today;
+        state.total_tickets = state.total_tickets.saturating_add(per_day);
+        LOTTERY_TICKETS.with(|m| {
+            m.borrow_mut().insert(user, entry);
+        });
+        note_ticket_source(user, "daily_stake", per_day, state.round);
+        granted_any = true;
+    }
+    if granted_any {
+        if state.next_draw_at == 0 {
+            state.next_draw_at = next_draw_after(now);
+        }
+        set_lottery_state(state);
+    }
+}
+
 fn claim_daily_tickets() -> Result<u64, String> {
     require_authenticated()?;
     require_lottery_enabled()?;
@@ -21632,6 +21681,39 @@ mod tests {
         // Early on a draw day (Tue 02:00) the same day's 03:00 draw is next.
         let tue_2am = (19_675 * SECS_PER_DAY + 2 * 3600) * 1_000_000_000;
         assert_eq!(next_draw_after(tue_2am), (19_675 * SECS_PER_DAY + 3 * 3600) * 1_000_000_000);
+    }
+
+    #[test]
+    fn test_auto_grant_daily_tickets_without_a_visit() {
+        // Owner 2026-07-10: stakers earn daily tickets from the SWEEP — no
+        // login/claim call required.
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        enable_lottery();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        seed_stake(StakeTier::SixMonths, alice(), 200_000_000); // 2 ICP staked
+        let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
+
+        // The sweep leg grants without alice ever calling anything.
+        auto_grant_daily_stake_tickets();
+        let day1 = count(alice());
+        assert!(day1 > 0, "sweep granted alice's daily tickets with no visit");
+        assert_eq!(day1, user_daily_tickets(alice()), "exactly the per-day grant");
+
+        // Same day: idempotent (sweep runs every 5 minutes).
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice()), day1);
+
+        // The on-visit claim also can't double-grant on top of the sweep.
+        set_mock_caller(alice());
+        assert_eq!(claim_daily_tickets().unwrap_err(), "ALREADY_CLAIMED_TODAY");
+
+        // Next UTC day: another grant lands automatically.
+        set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice()), day1 * 2);
+
+        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice())); });
+        LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
     }
 
     #[test]
