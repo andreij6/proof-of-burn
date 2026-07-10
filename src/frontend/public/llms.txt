@@ -96,9 +96,11 @@ const out = await cycleBurn.unstake(amount, { SixMonths: null });
   the remainder earning.
 
 ## Stake Vouchers (exit liquidity + marketplace)
-A staked position can be wrapped into a VOUCHER — an NFT claim on the staked
-ICP. Tickets follow the voucher's current owner (server-side daily grants);
-buying a voucher makes the buyer a staker. All calls are caller-keyed: make
+Staking AUTO-ISSUES a VOUCHER — an NFT claim on the staked ICP (the stake IS
+the voucher; wrap_stake_voucher remains for legacy/remainder rows). Tickets
+follow the voucher's current owner (server-side daily grants); buying a
+voucher makes the buyer a staker. A voucher LISTED FOR SALE earns no tickets
+until delisted. All calls are caller-keyed: make
 them with the END USER's identity, same rule as staking.
 
 Candid additions:
@@ -123,6 +125,7 @@ service additions : {
   buy_voucher : (nat64) -> (variant { Ok; Err : text });
   redeem_stake_voucher : (nat64) -> (BalanceResult); // burn voucher -> dissolve -> 100% to owner
   buyback_voucher : (nat64) -> (variant { Ok : nat64; Err : text });  // Ok = ICP e8s paid
+  transfer_voucher : (nat64, principal) -> (variant { Ok; Err : text }); // send to another wallet (Backed, unlisted); ticket stream follows
   claim_promo_voucher : (opt principal) -> (variant { Ok : nat64; Err : text });
   get_voucher_market : () -> (VoucherMarketInfo) query;
 }

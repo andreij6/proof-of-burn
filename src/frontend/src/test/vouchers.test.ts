@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   friendlyVoucherErr, buybackQuoteE8s, buybackAvailable, listingDeltaPct,
   promoDaysLeft, parseWrapIcp, parsePriceIcp, isPromo,
+  sortListingsBestDeal, type VoucherView,
 } from '../Vouchers';
+import { Principal } from '@icp-sdk/core/principal';
 import { validateClaimPrincipal } from '../ClaimPromo';
 
 describe('friendlyVoucherErr', () => {
@@ -155,5 +157,31 @@ describe('validateClaimPrincipal (paste-a-wallet claims)', () => {
     expect(validateClaimPrincipal('   ').ok).toBe(false);
     expect(validateClaimPrincipal('not-a-principal!!').ok).toBe(false);
     expect(validateClaimPrincipal('a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqX').ok).toBe(false);
+  });
+});
+
+describe('sortListingsBestDeal', () => {
+  const mk = (id: number, amount: bigint, price: bigint): VoucherView => ({
+    id: BigInt(id), class: 'Backed', tier: 0 as any, amount_e8s: amount,
+    owner: Principal.anonymous(), minted_at: 0n, expires_at: null, listed_price_e8s: price,
+  });
+  it('orders discounts before par before premiums (by ask/value ratio)', () => {
+    const premium = mk(1, 100_000_000n, 110_000_000n); // +10%
+    const par = mk(2, 100_000_000n, 100_000_000n);     // par
+    const deal = mk(3, 100_000_000n, 90_000_000n);     // -10%
+    const ids = sortListingsBestDeal([premium, par, deal]).map(v => Number(v.id));
+    expect(ids).toEqual([3, 2, 1]);
+  });
+  it('is stable (id-ascending) for equal ratios', () => {
+    const a = mk(7, 200_000_000n, 180_000_000n); // -10%
+    const b = mk(3, 100_000_000n, 90_000_000n);  // -10% (same ratio)
+    const ids = sortListingsBestDeal([a, b]).map(v => Number(v.id));
+    expect(ids).toEqual([3, 7]);
+  });
+  it('does not mutate the input array', () => {
+    const arr = [mk(1, 100n, 90n), mk(2, 100n, 80n)];
+    const snapshot = arr.map(v => Number(v.id));
+    sortListingsBestDeal(arr);
+    expect(arr.map(v => Number(v.id))).toEqual(snapshot);
   });
 });

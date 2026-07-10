@@ -28,8 +28,9 @@ import type {
 } from "./bindings/backend";
 import LotteryHub from "./LotteryHub";
 import NeuronStakePage from "./NeuronStakePage";
+import { friendlyVoucherErr, isPromo, type VoucherView } from "./Vouchers";
+import { TIER_META } from "./Staking";
 import DevDocs from "./DevDocs";
-import Vouchers from "./Vouchers";
 import ClaimPromo from "./ClaimPromo";
 import Explorer from "./Explorer";
 import XFarm from "./XFarm";
@@ -52,7 +53,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'vouchers' | 'claim' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   voting: '/voting',
@@ -61,8 +62,6 @@ export const PAGE_PATH: Record<AppPage, string> = {
   lottery: '/lottery',
   // Developer docs — how to embed the No-Loss Lottery in another dapp.
   devdocs: '/dev-docs',
-  // Stake Vouchers — wrap stakes into transferable NFTs; Stake 4 Tickets nav.
-  vouchers: '/vouchers',
   // Golden Ticket claim campaign — standalone landing-style page (the link
   // shared on X/OpenChat); reachable signed-out, no nav entry.
   claim: '/claim',
@@ -115,6 +114,8 @@ export function pageFromHash(hash: string): AppPage | null {
   const path = '/' + h.replace(/^\//, '');
   // The staking tab moved out of the Lottery hub — honor old deep links.
   if (path === '/lottery/staking') return 'neuronstake';
+  // Vouchers merged into the Neuron Stake page (2026-07-10).
+  if (path === '/vouchers' || path.startsWith('/vouchers/')) return 'neuronstake';
   // The Arcade hub was removed (2026-07) — its shared course deep links
   // (`#/arcade/course/<id>` et al.) resolve to the Mini Golf page, whose
   // hash-screen routing reads the same trailing segments.
@@ -493,6 +494,44 @@ export default function App() {
   const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
   const [withdrawSuccess, setWithdrawSuccess] = useState(false);
+  // Wallet voucher rail (withdraw a voucher to another wallet principal).
+  const [walletVouchers, setWalletVouchers] = useState<VoucherView[]>([]);
+  const [voucherXferId, setVoucherXferId] = useState<bigint | null>(null);
+  const [voucherXferTo, setVoucherXferTo] = useState("");
+  const [voucherXferBusy, setVoucherXferBusy] = useState(false);
+  const [voucherXferMsg, setVoucherXferMsg] = useState<string | null>(null);
+
+  // Load the caller's vouchers when the wallet opens (best-effort — empty
+  // when the stake_vouchers flag is off).
+  const loadWalletVouchers = async () => {
+    if (!actor) return;
+    try {
+      const info = await actor.get_voucher_market();
+      setWalletVouchers(info?.my_vouchers ?? []);
+    } catch { setWalletVouchers([]); }
+  };
+  useEffect(() => {
+    if (isWalletOpen) loadWalletVouchers();
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [isWalletOpen, actor]);
+
+  const handleVoucherTransfer = async (id: bigint) => {
+    if (voucherXferBusy) return;
+    setVoucherXferBusy(true); setVoucherXferMsg(null);
+    try {
+      let to: Principal;
+      try {
+        to = Principal.fromText(voucherXferTo.trim());
+        if (to.isAnonymous()) throw new Error();
+      } catch { setVoucherXferMsg(friendlyVoucherErr('INVALID_PRINCIPAL')); return; }
+      const res = await actor.transfer_voucher(id, to);
+      if (res.__kind__ === 'Err') { setVoucherXferMsg(friendlyVoucherErr(res.Err)); return; }
+      setVoucherXferId(null); setVoucherXferTo("");
+      setVoucherXferMsg(`Voucher #${id} sent — it now lives in ${voucherXferTo.trim().slice(0, 8)}… and earns tickets there.`);
+      await loadWalletVouchers();
+    } catch (e: any) { setVoucherXferMsg(e?.message || String(e)); }
+    finally { setVoucherXferBusy(false); }
+  };
 
   // Transaction / Modal state
   const [isConfirming, setIsConfirming] = useState(false);
@@ -1267,7 +1306,7 @@ export default function App() {
     if (page === 'icplp' && featureFlags.length > 0 && !icpLpEnabled) {
       redirect('lottery');
     }
-    if ((page === 'vouchers' || page === 'claim') && featureFlags.length > 0 && !vouchersEnabled) {
+    if (page === 'claim' && featureFlags.length > 0 && !vouchersEnabled) {
       redirect('lottery');
     }
     // Boosters (formerly Early Adopters) moved onto the lottery page —
@@ -1895,12 +1934,6 @@ export default function App() {
             Neuron Stake
           </Btn>
         )}
-        {vouchersEnabled && (
-          <Btn variant={page === 'vouchers' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('vouchers')}>
-            <Icon name="star" size={14} stroke={page === 'vouchers' ? 'var(--char-950)' : 'currentColor'} />
-            Vouchers
-          </Btn>
-        )}
         {icpLpEnabled && (
           <Btn variant={page === 'icplp' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('icplp')}>
             <Icon name="stack" size={14} stroke={page === 'icplp' ? 'var(--char-950)' : 'currentColor'} />
@@ -2430,17 +2463,6 @@ export default function App() {
             />
           ) : page === 'devdocs' ? (
             <DevDocs />
-          ) : page === 'vouchers' && vouchersEnabled ? (
-            <Vouchers
-              actor={actor}
-              identity={identity}
-              principal={principal}
-              host={host}
-              rootKey={env?.IC_ROOT_KEY}
-              ledgerCanisterId={ledgerCanisterId}
-              onSignIn={handleLogin}
-              onGoNeuronStake={() => setPage('neuronstake')}
-            />
           ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
             <NeuronStakePage
               actor={actor}
@@ -3628,6 +3650,66 @@ export default function App() {
                   : `${getWalletTokenMeta(walletToken).label} withdraws to a principal (ICRC-1). ${fmtTokenAmount(getWalletTokenMeta(walletToken).fee, getWalletTokenMeta(walletToken).decimals)} ${getWalletTokenMeta(walletToken).label} network fee applies.`}
               </span>
             </div>
+
+            {walletVouchers.length > 0 && (
+              <>
+                <hr />
+                <div className="col" style={{ gap: 8 }}>
+                  <Eyebrow>Vouchers · your staked positions as NFTs</Eyebrow>
+                  {voucherXferMsg && (
+                    <div style={{ padding: 10, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)', color: 'var(--fg-2)', fontSize: 12 }}>
+                      {voucherXferMsg}
+                    </div>
+                  )}
+                  {walletVouchers.map((v) => {
+                    const promo = isPromo(v.class);
+                    const listed = v.listed_price_e8s != null;
+                    return (
+                      <div key={String(v.id)} className="col" style={{ gap: 8, padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg-alt)' }}>
+                        <div className="row" style={{ justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                          <span className="row" style={{ gap: 8 }}>
+                            <Icon name={promo ? 'spark' : 'star'} size={13} stroke={promo ? 'var(--haze-ink)' : 'var(--burn-ink)'} />
+                            <b style={{ fontSize: 12.5 }}>{promo ? 'Golden Ticket' : `${fmtICP(v.amount_e8s)} ICP · ${TIER_META[v.tier].short}`}</b>
+                            <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>#{String(v.id)}</span>
+                          </span>
+                          {promo ? <Chip tone="muted" style={{ height: 17, fontSize: 9.5 }}>non-transferable</Chip>
+                            : listed ? <Chip tone="burn" style={{ height: 17, fontSize: 9.5 }}>listed</Chip>
+                            : voucherXferId === v.id ? null
+                            : (
+                              <Btn variant="secondary" sm onClick={() => { setVoucherXferId(v.id); setVoucherXferTo(""); setVoucherXferMsg(null); }}>
+                                <Icon name="arrowUp" size={11} /> Withdraw
+                              </Btn>
+                            )}
+                        </div>
+                        {!promo && !listed && voucherXferId === v.id && (
+                          <div className="col" style={{ gap: 6 }}>
+                            <span style={{ fontSize: 11, color: 'var(--fg-3)', lineHeight: 1.4 }}>
+                              Send this voucher to another wallet's principal (Plug / OISY / NNS). This moves the
+                              <b> stake and its ticket stream there permanently</b> — double-check the principal.
+                            </span>
+                            <input type="text" placeholder="Destination principal" className="burn-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                              value={voucherXferTo} onChange={(e) => { setVoucherXferTo(e.target.value); setVoucherXferMsg(null); }} />
+                            <div className="row" style={{ gap: 6 }}>
+                              <Btn variant="secondary" sm onClick={() => handleVoucherTransfer(v.id)} disabled={voucherXferBusy || !voucherXferTo}>
+                                {voucherXferBusy ? <LiveDot size={7} /> : <Icon name="arrowUp" size={12} />} Confirm send
+                              </Btn>
+                              <Btn variant="ghost" sm onClick={() => { setVoucherXferId(null); setVoucherXferTo(""); }}>Cancel</Btn>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--fg-3)', lineHeight: 1.4, marginTop: 2 }}>
+                    <Icon name="info" size={11} stroke="var(--fg-3)" style={{ marginTop: 2, flexShrink: 0 }} />
+                    <span>
+                      <b>Deposit a voucher held elsewhere?</b> Sign in as that wallet and withdraw it here targeting your
+                      principal: <span className="mono" style={{ overflowWrap: 'anywhere' }}>{principal.toString()}</span>
+                    </span>
+                  </span>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

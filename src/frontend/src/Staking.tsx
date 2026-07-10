@@ -19,7 +19,6 @@ import { useErrorImpression } from "./analytics";
 // ==========================================
 
 const E8S = 100_000_000n;
-const ICP_FEE = 10_000n;
 
 interface StakingProps {
   actor: any;
@@ -82,6 +81,7 @@ export default function Staking({
   actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity,
 }: StakingProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
+  void treasuryCanFront; // unstake UI removed — exits are voucher-native now
 
   const [pool, setPool] = useState<StakingPoolInfo | null>(null);
   const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
@@ -94,7 +94,6 @@ export default function Staking({
 
   const [tier, setTier] = useState<StakeTier>(StakeTier.SixMonths);
   const [stakeInput, setStakeInput] = useState('');
-  const [unstakeInput, setUnstakeInput] = useState('');
   const [maturityInput, setMaturityInput] = useState('');
   const [maturityTier, setMaturityTier] = useState<StakeTier>(StakeTier.SixMonths);
   const [busy, setBusy] = useState<string | null>(null);
@@ -131,7 +130,6 @@ export default function Staking({
   const selMine = myTier(tier);
   const firstStake = !selPool?.neuron_id;
   const minStakeE8s = firstStake ? E8S : (pool?.min_stake_e8s ?? E8S);
-  const minUnstakeE8s = pool?.min_unstake_e8s ?? (E8S + ICP_FEE);
   const termDays = selPool ? Number(selPool.dissolve_delay_secs) / 86_400 : 183;
   const termLabel = TIER_META[tier].label;
 
@@ -214,31 +212,15 @@ export default function Staking({
     onActivity();
   });
 
-  const handleUnstake = () => run('unstake', async () => {
-    const amount = parseIcp(unstakeInput);
-    if (!amount || amount < minUnstakeE8s) {
-      setError(`Minimum unstake is ${fmtICP(minUnstakeE8s)} ICP (the split neuron must hold ≥ 1 ICP).`);
-      return;
-    }
-    if (selMine && amount > selMine.amount_e8s) {
-      setError(`Amount exceeds your ${termLabel} stake.`);
-      return;
-    }
-    const res = await actor.unstake(amount, tier);
-    if (res.__kind__ === "Err") {
-      setError(
-        res.Err === 'POOL_FLOOR'
-          ? "The pool neuron must keep at least 1 ICP — try a smaller amount (the last share exits when others stake)."
-          : res.Err === 'NO_STAKE'
-            ? `You have no stake in the ${termLabel} tier.`
-            : res.Err === 'TREASURY_DEPLETED'
-              ? "Unstaking is paused — the treasury can't currently cover the network fee. Your stake is safe; try again shortly."
-              : `Unstake failed: ${res.Err}`
-      );
-      return;
-    }
-    setUnstakeInput('');
-    setNotice(`Unstake started — your full ICP lands in your wallet after the ${termLabel} term. The treasury picks up the fees.`);
+  // Legacy plain stakes (pre-voucher, or a sub-ICP remainder) → wrap the whole
+  // whole-ICP part into a voucher so everything is voucher-managed. Exits are
+  // now voucher-native (redeem/sell/buyback on the voucher below).
+  const handleConvert = (t: StakeTier, amountE8s: bigint) => run(`convert-${t}`, async () => {
+    const whole = (amountE8s / E8S) * E8S;
+    if (whole < E8S) { setError('Nothing to convert — under 1 ICP folds into your next stake.'); return; }
+    const res = await actor.wrap_stake_voucher(whole, t);
+    if (res.__kind__ === 'Err') { setError(`Convert failed: ${res.Err}`); return; }
+    setNotice(`Converted ${fmtICP(whole)} ICP of ${TIER_META[t].label} stake into a voucher — manage it below.`);
     await refresh();
     onActivity();
   });
@@ -466,32 +448,25 @@ export default function Staking({
                   Zero-loss: the treasury pays every transfer fee — what you stake is exactly what comes back. {firstStake ? `The first ${termLabel} stake creates that tier's neuron (min 1 ICP).` : ""}
                 </span>
 
-                <div style={{ borderTop: '1px solid var(--border)' }} />
-
-                <div className="row" style={{ gap: 8 }}>
-                  <div style={{ flex: 1, position: 'relative' }}>
-                    <input
-                      type="number" min="0" step="0.1" placeholder={`Unstake (min ${fmtICP(minUnstakeE8s)})`}
-                      className="burn-input" style={{ fontFamily: 'var(--font-mono)' }}
-                      value={unstakeInput} onChange={(e) => setUnstakeInput(e.target.value)}
-                    />
-                    <span className="mono" style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', fontSize: 13, color: 'var(--fg-3)', pointerEvents: 'none' }}>ICP</span>
-                  </div>
-                  <Btn variant="secondary" sm onClick={handleUnstake} disabled={busy !== null || !unstakeInput || !selMine || !treasuryCanFront}>
-                    {busy === 'unstake' ? <LiveDot size={7} /> : <Icon name="undo" size={13} />}
-                    {busy === 'unstake' ? " Splitting…" : " Unstake"}
-                  </Btn>
-                </div>
-                {!treasuryCanFront && (
-                  <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--haze-ink)' }}>
-                    <Icon name="info" size={12} stroke="var(--haze-ink)" />
-                    Unstaking is paused — the treasury can't currently cover the network fee it fronts. Your stake is safe; try again shortly.
-                  </span>
+                {/* Legacy plain stake in this tier (pre-voucher) → convert. */}
+                {selMine && selMine.amount_e8s >= E8S && (
+                  <>
+                    <div style={{ borderTop: '1px solid var(--border)' }} />
+                    <div className="col" style={{ gap: 6, border: '1px solid var(--haze)', borderRadius: 8, padding: '10px 12px', background: 'color-mix(in srgb, var(--haze) 8%, var(--surface))' }}>
+                      <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                        You have <b>{fmtICP(selMine.amount_e8s)} ICP</b> of legacy {termLabel} stake not yet in a voucher.
+                        Exits are voucher-native now — convert it to manage it below (sell, redeem, or instant exit).
+                      </span>
+                      <Btn variant="secondary" sm onClick={() => handleConvert(tier, selMine.amount_e8s)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                        {busy === `convert-${tier}` ? <LiveDot size={7} /> : <Icon name="star" size={12} stroke="var(--burn-ink)" />} Convert to voucher
+                      </Btn>
+                    </div>
+                  </>
                 )}
                 <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
-                  <Icon name="clock" size={12} stroke="var(--fg-3)" />
-                  Splits the {termLabel} neuron and dissolves for the full term (~{Math.round(termDays)} days),
-                  then your full ICP arrives automatically — the treasury reimburses every fee.
+                  <Icon name="star" size={12} stroke="var(--fg-3)" />
+                  Every stake arrives as a Voucher NFT below — redeem it for 100% after the {Math.round(termDays)}-day
+                  dissolve, sell it, or take an instant exit. No separate unstake needed.
                 </span>
               </div>
               </>

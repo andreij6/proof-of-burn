@@ -123,6 +123,8 @@ service additions : {
   get_voucher_sale_account : (nat64) -> (LedgerAccount) query;        // buyer escrow
   buy_voucher : (nat64) -> (variant { Ok; Err : text });
   buyback_voucher : (nat64) -> (variant { Ok : nat64; Err : text });  // Ok = e8s paid
+  redeem_stake_voucher : (nat64) -> (BalanceResult);                  // burn -> dissolve -> 100%
+  transfer_voucher : (nat64, principal) -> (variant { Ok; Err : text }); // send to another wallet
   claim_promo_voucher : (opt principal) -> (variant { Ok : nat64; Err : text });
   get_voucher_market : () -> (VoucherMarketInfo) query;
 }`;
@@ -335,9 +337,12 @@ export default function DevDocs() {
           Wrap a stake into a transferable NFT: sell it on the ICP marketplace,
           take the instant house buyback at <b>85% of principal</b> (the 15%
           discount is an express-exit fee, balance-gated by the buyback fund),
-          or unwrap and classic-unstake for 100%. Same identity rule as
-          everything else: <b>every call is keyed to the caller's principal</b> —
-          integrate with your user's identity, never a proxy.
+          or redeem for 100% after the dissolve. Holders can also{' '}
+          <b>transfer_voucher</b> to another wallet's principal (the ticket
+          stream follows). A voucher <b>listed for sale earns no tickets until
+          delisted</b>. Same identity rule as everything else: <b>every call is
+          keyed to the caller's principal</b> — integrate with your user's
+          identity, never a proxy.
         </span>
         <CodeBlock code={VOUCHER_CANDID_SNIPPET} />
         <CodeBlock code={VOUCHER_FLOW_SNIPPET} />

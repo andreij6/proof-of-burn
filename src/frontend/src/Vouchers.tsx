@@ -2,27 +2,25 @@ import { useEffect, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
 import { StakeTier } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
-import { Btn, Chip, Eyebrow, Icon, LiveDot, MoreInfo, fmtICP } from './ui';
+import { Btn, Chip, Eyebrow, Icon, LiveDot, fmtICP } from './ui';
 import { TIER_META } from './Staking';
 
 // ==========================================
-// Stake Vouchers — a staked position, wrapped as a transferable NFT.
-//
-// okf/ideas/stake-vouchers: wrap any stake position into a voucher (an
-// ICRC-7 NFT minted by the backend); tickets follow whoever holds it. Three
-// exits, best to worst: sell it on the ICP marketplace (market sets the
-// price), instant house buyback at 85% of principal (balance-gated by the
-// buyback fund), or unwrap back to a plain stake and classic-unstake for
-// 100% after the tier's dissolve. Promo ("Golden Ticket") vouchers are a
-// separate tickets-only class: 1 ticket/day for 60 days, never redeemable,
-// never buyback-eligible, soulbound.
+// Stake Vouchers — a staked position as a transferable NFT. Staking
+// AUTO-ISSUES a Backed voucher (the stake IS the voucher). Tickets follow
+// whoever holds it; a voucher LISTED for sale pauses its tickets until
+// delisted. Three exits: sell on the ICP marketplace, instant house buyback
+// at 85% of principal (balance-gated), or redeem → dissolve → 100%. Promo
+// ("Golden Ticket") vouchers are a tickets-only class (1/day, 60 days,
+// soulbound). This module renders the voucher SECTIONS (VouchersBody),
+// mounted inside the Neuron Stake page below the staking UI.
 // ==========================================
 
 /** Friendly copy for voucher endpoint error codes. */
 export function friendlyVoucherErr(code: string): string {
   switch (code) {
     case 'FEATURE_DISABLED': return 'Stake Vouchers aren\'t open yet — check back soon.';
-    case 'BUYBACK_UNAVAILABLE': return 'Instant exit is temporarily unavailable — the buyback fund is replenishing. Sell on the marketplace or unwrap instead.';
+    case 'BUYBACK_UNAVAILABLE': return 'Instant exit is temporarily unavailable — the buyback fund is replenishing. Sell on the marketplace or wait for the dissolve instead.';
     case 'CAMPAIGN_CLOSED': return 'The Golden Ticket campaign isn\'t open right now.';
     case 'CAMPAIGN_EXHAUSTED': return 'All Golden Tickets have been claimed — the campaign is over.';
     case 'DAILY_LIMIT': return 'Today\'s Golden Tickets are gone — more unlock tomorrow. Come back then!';
@@ -30,7 +28,7 @@ export function friendlyVoucherErr(code: string): string {
     case 'INVALID_PRINCIPAL': return 'That doesn\'t look like a wallet principal — paste the principal shown in your wallet (not an account id, not a canister).';
     case 'NOT_YOUR_VOUCHER': return 'Only the voucher\'s current owner can do that.';
     case 'VOUCHER_LISTED': return 'That voucher is listed for sale — cancel the listing first.';
-    case 'PROMO_NOT_ALLOWED': return 'Golden Tickets earn tickets only — they can\'t be sold, redeemed, or bought back.';
+    case 'PROMO_NOT_ALLOWED': return 'Golden Tickets earn tickets only — they can\'t be sold, redeemed, transferred, or bought back.';
     case 'INSUFFICIENT_STAKE': return 'You don\'t have that much unwrapped stake in that tier.';
     case 'BELOW_MINIMUM': return 'The minimum voucher is 1 ICP of staked principal.';
     case 'ESCROW_NOT_FUNDED': return 'The sale escrow hasn\'t received the full ask yet — send the exact ICP amount, then buy.';
@@ -89,7 +87,7 @@ export function isPromo(c: VoucherClass | { Promo?: null } | string): boolean {
   return typeof c === 'object' && c !== null && 'Promo' in c;
 }
 
-interface VoucherView {
+export interface VoucherView {
   id: bigint;
   class: VoucherClass;
   tier: StakeTier;
@@ -100,7 +98,19 @@ interface VoucherView {
   listed_price_e8s: bigint | null;
 }
 
-interface VoucherMarketInfo {
+/** Marketplace listings ordered BEST DEAL FIRST — ascending ask/value ratio,
+ *  so the biggest discount vs principal sits on top. Stable for ties (id
+ *  ascending). Pure; unit-tested. */
+export function sortListingsBestDeal(listings: VoucherView[]): VoucherView[] {
+  return [...listings].sort((a, b) => {
+    const ra = a.amount_e8s > 0n ? Number(a.listed_price_e8s ?? 0n) / Number(a.amount_e8s) : Infinity;
+    const rb = b.amount_e8s > 0n ? Number(b.listed_price_e8s ?? 0n) / Number(b.amount_e8s) : Infinity;
+    if (ra !== rb) return ra - rb;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
+export interface VoucherMarketInfo {
   enabled: boolean;
   min_wrap_e8s: bigint;
   market_fee_bps: number;
@@ -113,7 +123,7 @@ interface VoucherMarketInfo {
   promo_claims_today: number;
 }
 
-interface VouchersProps {
+interface VouchersBodyProps {
   actor: any;
   identity: any;
   principal: Principal | null;
@@ -121,25 +131,24 @@ interface VouchersProps {
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   onSignIn: () => void;
-  onGoNeuronStake: () => void;
 }
 
+const ticketsPerDay = (v: VoucherView) => Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8));
 
-export default function Vouchers({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, onGoNeuronStake,
-}: VouchersProps) {
+export function VouchersBody({
+  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn,
+}: VouchersBodyProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<VoucherMarketInfo | null>(null);
   const [icpUsdE8s, setIcpUsdE8s] = useState<bigint>(0n);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // Redeem-choice modal (owner 2026-07-10): wait 100% / instant 85% / sell.
+  // Modals (owner 2026-07-10): each is a voucher id, or null when closed.
   const [redeemModal, setRedeemModal] = useState<bigint | null>(null);
-  // List form: which voucher id has its price input open.
-  const [listId, setListId] = useState<bigint | null>(null);
+  const [sellModal, setSellModal] = useState<bigint | null>(null);
+  const [buyModal, setBuyModal] = useState<bigint | null>(null);
   const [priceText, setPriceText] = useState('');
-  // Buyback confirm step (danger-style two-tap).
 
   const refresh = async () => {
     if (!actor) return;
@@ -172,20 +181,19 @@ export default function Vouchers({
     return `Redeeming — your ${fmtICP(v.amount_e8s)} ICP pays out automatically after the ${TIER_META[v.tier].label} dissolve.`;
   });
 
-
   const list = (v: VoucherView) => run(`list-${v.id}`, async () => {
     const price = parsePriceIcp(priceText);
     if (!price) throw new Error('Enter an ask in ICP (up to 4 decimals).');
     const res = await actor.list_voucher(v.id, price);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    setListId(null); setPriceText('');
-    return `Voucher #${v.id} listed at ${fmtICP(price)} ICP.`;
+    setSellModal(null); setPriceText('');
+    return `Voucher #${v.id} listed at ${fmtICP(price)} ICP. It won't earn tickets while listed — cancel to resume.`;
   });
 
   const cancelListing = (v: VoucherView) => run(`cancel-${v.id}`, async () => {
     const res = await actor.cancel_voucher_listing(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    return `Listing for voucher #${v.id} cancelled.`;
+    return `Listing for voucher #${v.id} cancelled — it's earning tickets again.`;
   });
 
   const buyback = (v: VoucherView) => run(`buyback-${v.id}`, async () => {
@@ -209,21 +217,28 @@ export default function Vouchers({
     }
     const res = await actor.buy_voucher(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
+    setBuyModal(null);
     return `Voucher #${v.id} is yours — ${fmtICP(v.amount_e8s)} ICP of staked principal, earning tickets from the next daily grant.`;
   });
 
-  const usdHint = (e8s: bigint): string => icpUsdE8s > 0n
-    ? ` · $${((Number(e8s) / 1e8) * (Number(icpUsdE8s) / 1e8)).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+  const usd = (e8s: bigint): string => icpUsdE8s > 0n
+    ? `$${((Number(e8s) / 1e8) * (Number(icpUsdE8s) / 1e8)).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
     : '';
 
   const discountBps = info?.buyback_discount_bps ?? 1500;
   const payPct = ((10_000 - discountBps) / 100).toFixed(0);
   const feePct = ((info?.market_fee_bps ?? 250) / 100).toFixed(1);
 
+  const mine = info?.my_vouchers ?? [];
+  const myUnlisted = mine.filter((v) => v.listed_price_e8s == null);
+  const myListed = mine.filter((v) => v.listed_price_e8s != null && !isPromo(v.class));
+  const listings = sortListingsBestDeal(info?.listings ?? []);
 
-  const voucherCard = (v: VoucherView, mine: boolean) => {
+  if (info && !info.enabled) return null;
+
+  // ── A voucher card in the "Your vouchers" list (unlisted + promo). ──
+  const voucherCard = (v: VoucherView) => {
     const promo = isPromo(v.class);
-    const listed = v.listed_price_e8s != null;
     return (
       <div key={String(v.id)} className="col" style={{
         gap: 8, padding: 12, borderRadius: 10,
@@ -242,106 +257,32 @@ export default function Vouchers({
                 ? `${promoDaysLeft(v.expires_at, Date.now())} days left`
                 : 'expired'}
             </Chip>
-          ) : listed ? (
-            <Chip tone="burn">listed · {fmtICP(v.listed_price_e8s!)} ICP</Chip>
           ) : (
-            <Chip tone="ok">{Number(TIER_META[v.tier].tickets) * Math.round(Number(v.amount_e8s) / 1e8)} tickets/day</Chip>
+            <Chip tone="ok">{ticketsPerDay(v)} tickets/day</Chip>
           )}
         </span>
 
         {promo ? (
           <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-            1 free lottery ticket a day — tickets only. Not redeemable, not sellable;
+            1 free lottery ticket a day — tickets only. Not redeemable, not sellable, not transferable;
             stake real ICP to earn 5–20 tickets per ICP per day.
           </span>
-        ) : mine && (
-          <>
-            {listId === v.id ? (
-              <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                <input className="burn-input" placeholder="Ask (ICP)" value={priceText} inputMode="decimal"
-                  onChange={(e) => setPriceText(e.target.value)} aria-label="Ask price in ICP" style={{ width: 120 }} />
-                <Btn variant="primary" sm onClick={() => list(v)} disabled={busy !== null}>
-                  {busy === `list-${v.id}` ? <LiveDot size={7} /> : <Icon name="check" size={11} stroke="var(--char-950)" />} List
-                </Btn>
-                <Btn variant="ghost" sm onClick={() => { setListId(null); setPriceText(''); }}>Cancel</Btn>
-              </span>
-            ) : (
-              <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                {listed ? (
-                  <Btn variant="secondary" sm onClick={() => cancelListing(v)} disabled={busy !== null}>
-                    {busy === `cancel-${v.id}` ? <LiveDot size={7} /> : null} Cancel listing
-                  </Btn>
-                ) : (
-                  <>
-                    <Btn variant="secondary" sm onClick={() => { setListId(v.id); setPriceText(''); }} disabled={busy !== null}>
-                      <Icon name="coins" size={12} /> Sell…
-                    </Btn>
-                    <Btn variant="primary" sm onClick={() => setRedeemModal(v.id)} disabled={busy !== null}>
-                      <Icon name="coins" size={12} stroke="var(--char-950)" /> Redeem ICP
-                    </Btn>
-                  </>
-                )}
-              </span>
-            )}
-
-          </>
+        ) : (
+          <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+            <Btn variant="secondary" sm onClick={() => { setSellModal(v.id); setPriceText(''); }} disabled={busy !== null}>
+              <Icon name="coins" size={12} /> Sell…
+            </Btn>
+            <Btn variant="primary" sm onClick={() => setRedeemModal(v.id)} disabled={busy !== null}>
+              <Icon name="coins" size={12} stroke="var(--char-950)" /> Redeem ICP
+            </Btn>
+          </span>
         )}
       </div>
     );
   };
 
   return (
-    <div className="idea-board-container">
-      {/* ── Header (lottery-page pattern: one row, one modal) ── */}
-      <div className="col" style={{ gap: 6 }}>
-        <span className="row" style={{ gap: 10, width: '100%', flexWrap: 'wrap' }}>
-          <Icon name="star" size={22} stroke="var(--burn-ink)" />
-          <h4 style={{ margin: 0 }}>Vouchers</h4>
-          <Chip tone="pending"><LiveDot size={6} /> tradeable stakes</Chip>
-          <MoreInfo
-            title="How Stake Vouchers work"
-            style={{
-              marginLeft: 'auto', textDecoration: 'none', fontSize: 12.5, fontWeight: 600,
-              border: '1px solid var(--burn)', borderRadius: 999, padding: '6px 14px',
-              background: 'color-mix(in srgb, var(--burn) 10%, var(--surface))',
-            }}
-          >
-            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
-              <Eyebrow accent>The gist</Eyebrow>
-              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-                <b>Your stake, as an NFT.</b> Wrap a staked position into a voucher and
-                it becomes transferable — the daily tickets follow whoever holds it,
-                and you gain two extra exits on top of the classic unstake.
-              </p>
-            </div>
-            <div className="col" style={{ gap: 6 }}>
-              <Eyebrow accent>Three ways out</Eyebrow>
-              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>Sell it:</b> list at any ask in ICP — the buyer pays, you're out at the market's price ({feePct}% marketplace fee).</li>
-                <li><b>Instant exit:</b> the house buys it back on the spot for <b>{payPct}% of principal</b> — an optional express-exit fee, available whenever the buyback fund covers it.</li>
-                <li><b>Unwrap:</b> turn it back into a plain stake and unstake classically — <b>100% of your principal</b> after the tier's dissolve, exactly as always. Never gated.</li>
-              </ul>
-            </div>
-            <div className="col" style={{ gap: 6 }}>
-              <Eyebrow accent>Tickets follow the holder</Eyebrow>
-              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>Whoever holds the voucher is the staker</b> — daily tickets land server-side, and a jackpot pays their wallet automatically.</li>
-                <li><b>Buying a voucher makes you a staker</b> — no prior stake needed; tickets start at the next daily grant.</li>
-                <li><b>Golden Tickets</b> (promo vouchers) earn 1 ticket/day for 60 days — tickets only, never redeemable for ICP.</li>
-              </ul>
-            </div>
-            <div className="col" style={{ gap: 6 }}>
-              <Eyebrow accent>The fine print</Eyebrow>
-              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li>The instant-exit discount is a fee for skipping the dissolve wait — your principal is never at risk on the classic path.</li>
-                <li>Marketplace purchases escrow the exact ask; an unfinished purchase is always reclaimable.</li>
-                <li>Fees fund the treasury, the buyback fund, and cycle burns — in equal thirds.</li>
-              </ul>
-            </div>
-          </MoreInfo>
-        </span>
-      </div>
-
+    <div className="idea-board-container" style={{ paddingTop: 0 }}>
       {notice && (
         <div className="row" style={{ gap: 8, border: '1px solid var(--sprout)', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, color: 'var(--sprout-ink)' }}>
           <Icon name="checkCircle" size={14} stroke="var(--sprout-ink)" /> {notice}
@@ -353,85 +294,113 @@ export default function Vouchers({
         </div>
       )}
 
-      <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
-        {/* ── Get a voucher = stake (no wrap step; owner 2026-07-10) ── */}
-        <div className="card col" style={{ gap: 10, flex: '1 1 300px', minWidth: 300, border: '1px solid var(--burn)', background: 'color-mix(in srgb, var(--burn) 10%, var(--surface))' }}>
-          <Eyebrow accent>Get a voucher</Eyebrow>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-1)', lineHeight: 1.55 }}>
-            <b>Stake ICP and the voucher NFT arrives instantly</b> — your stake IS the
-            voucher. It earns daily tickets from day one, and you can sell it, take
-            the instant exit, or redeem it whenever you like.
-          </span>
-          <Btn variant="primary" onClick={onGoNeuronStake} style={{ alignSelf: 'flex-start' }}>
-            <Icon name="zap" size={13} stroke="var(--char-950)" /> Stake ICP → get a voucher
-          </Btn>
-          {!signedIn && (
-            <Btn variant="ghost" sm onClick={onSignIn} style={{ alignSelf: 'flex-start' }}>
-              <Icon name="key" size={12} /> Sign in first
-            </Btn>
-          )}
-        </div>
-
-        {/* ── My vouchers ── */}
-        <div className="card col" style={{ gap: 10, flex: '1 1 300px', minWidth: 300 }}>
+      {/* ── Your vouchers (unlisted + promo) ── */}
+      <div className="card col" style={{ gap: 10 }}>
+        <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <Eyebrow>Your vouchers</Eyebrow>
-          {!signedIn ? (
-            <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Sign in to see your vouchers.</span>
-          ) : (info?.my_vouchers?.length ?? 0) === 0 ? (
-            <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
-              No vouchers yet — wrap a stake, buy one below, or claim a Golden Ticket
-              when a campaign is live.
-            </span>
-          ) : (
-            info!.my_vouchers.map((v) => voucherCard(v, true))
-          )}
-        </div>
+          <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>every stake arrives here as an NFT</span>
+        </span>
+        {!signedIn ? (
+          <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Sign in to see your vouchers.</span>
+        ) : myUnlisted.length === 0 ? (
+          <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
+            No vouchers here yet — stake ICP above and your voucher appears instantly, or claim a Golden Ticket when a campaign is live.
+          </span>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 10 }}>
+            {myUnlisted.map(voucherCard)}
+          </div>
+        )}
       </div>
 
-      {/* ── Marketplace ── */}
+      {/* ── Your listings (hidden entirely when none) ── */}
+      {signedIn && myListed.length > 0 && (
+        <div className="card col" style={{ gap: 10 }}>
+          <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+            <Eyebrow accent>Your listings</Eyebrow>
+            <span className="mono" style={{ fontSize: 10.5, color: 'var(--haze-ink)' }}>ticket earning paused while listed</span>
+          </span>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
+            {myListed.map((v) => {
+              const delta = listingDeltaPct(v.listed_price_e8s!, v.amount_e8s);
+              return (
+                <div key={String(v.id)} className="col" style={{ gap: 8, padding: 12, borderRadius: 10, border: '1px solid var(--haze)', background: 'color-mix(in srgb, var(--haze) 8%, var(--surface))' }}>
+                  <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+                    <b style={{ fontSize: 13.5 }}>{TIER_META[v.tier].short} voucher</b>
+                    <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>#{String(v.id)}</span>
+                  </span>
+                  <div className="col" style={{ gap: 3, fontSize: 12 }}>
+                    <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ color: 'var(--fg-3)' }}>Value</span>
+                      <span className="mono">{fmtICP(v.amount_e8s)} ICP{usd(v.amount_e8s) ? ` · ${usd(v.amount_e8s)}` : ''}</span>
+                    </div>
+                    <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ color: 'var(--fg-3)' }}>Asking</span>
+                      <span className="mono" style={{ fontWeight: 700 }}>{fmtICP(v.listed_price_e8s!)} ICP{usd(v.listed_price_e8s!) ? ` · ${usd(v.listed_price_e8s!)}` : ''}</span>
+                    </div>
+                  </div>
+                  <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'muted' : 'pending'} style={{ alignSelf: 'flex-start', height: 17, fontSize: 9.5 }}>
+                    {delta < 0 ? `${Math.abs(delta)}% under value` : delta > 0 ? `${delta}% over value` : 'at value'}
+                  </Chip>
+                  <Btn variant="secondary" sm onClick={() => cancelListing(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                    {busy === `cancel-${v.id}` ? <LiveDot size={7} /> : <Icon name="x" size={11} />} Cancel listing
+                  </Btn>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Marketplace (best deals first) ── */}
       <div className="card col" style={{ gap: 10 }}>
         <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <Eyebrow accent>Marketplace</Eyebrow>
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>
-            asks in ICP · {feePct}% fee · buyer becomes the staker
+            best deals first · {feePct}% fee · buyer becomes the staker
           </span>
         </span>
-        {(info?.listings?.length ?? 0) === 0 ? (
+        {listings.length === 0 ? (
           <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
-            Nothing listed right now. Wrapped vouchers you list appear here for anyone to buy.
+            Nothing listed right now. Vouchers you list appear here for anyone to buy.
           </span>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
-            {info!.listings.map((v) => {
-              const delta = v.listed_price_e8s != null ? listingDeltaPct(v.listed_price_e8s, v.amount_e8s) : 0;
-              const mine = signedIn && principal && v.owner.toString() === principal.toString();
+            {listings.map((v) => {
+              const delta = listingDeltaPct(v.listed_price_e8s ?? 0n, v.amount_e8s);
+              const isMine = signedIn && principal && v.owner.toString() === principal.toString();
               return (
-                <div key={String(v.id)} className="col" style={{ gap: 8, padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)' }}>
+                <div key={String(v.id)} className="col" style={{ gap: 8, padding: 12, borderRadius: 10, border: `1px solid ${delta < 0 ? 'var(--sprout)' : 'var(--border)'}`, background: 'var(--surface)' }}>
                   <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                    <b style={{ fontSize: 13.5 }}>{fmtICP(v.amount_e8s)} ICP · {TIER_META[v.tier].short}</b>
+                    <b style={{ fontSize: 13.5 }}>{TIER_META[v.tier].short} voucher</b>
                     <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>#{String(v.id)}</span>
                   </span>
-                  <span className="row" style={{ gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                    <b className="mono" style={{ fontSize: 16 }}>{fmtICP(v.listed_price_e8s ?? 0n)} ICP</b>
-                    <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>{usdHint(v.listed_price_e8s ?? 0n).replace(' · ', '')}</span>
-                    <Chip tone={delta < 0 ? 'ok' : 'muted'} style={{ height: 17, fontSize: 9.5 }}>
-                      {delta < 0 ? `${Math.abs(delta)}% under principal` : delta > 0 ? `${delta}% over principal` : 'at principal'}
-                    </Chip>
+                  <div className="col" style={{ gap: 3, fontSize: 12 }}>
+                    <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ color: 'var(--fg-3)' }}>Value</span>
+                      <span className="mono">{fmtICP(v.amount_e8s)} ICP{usd(v.amount_e8s) ? ` · ${usd(v.amount_e8s)}` : ''}</span>
+                    </div>
+                    <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ color: 'var(--fg-3)' }}>Asking</span>
+                      <span className="mono" style={{ fontWeight: 700 }}>{fmtICP(v.listed_price_e8s ?? 0n)} ICP{usd(v.listed_price_e8s ?? 0n) ? ` · ${usd(v.listed_price_e8s ?? 0n)}` : ''}</span>
+                    </div>
+                  </div>
+                  <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'muted' : 'pending'} style={{ alignSelf: 'flex-start', height: 17, fontSize: 9.5 }}>
+                    {delta < 0 ? `${Math.abs(delta)}% under value` : delta > 0 ? `${delta}% over value` : 'at value'}
+                  </Chip>
+                  <span style={{ fontSize: 11, color: 'var(--fg-2)' }}>
+                    Earns {ticketsPerDay(v)} tickets/day once you hold it.
                   </span>
-                  <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>
-                    Earns {Number(TIER_META[v.tier].tickets) * Math.round(Number(v.amount_e8s) / 1e8)} tickets/day ·
-                    redeemable for {fmtICP(v.amount_e8s)} ICP after a {TIER_META[v.tier].label} dissolve.
-                  </span>
-                  {mine ? (
-                    <Btn variant="secondary" sm onClick={() => cancelListing(v)} disabled={busy !== null}>
+                  {isMine ? (
+                    <Btn variant="secondary" sm onClick={() => cancelListing(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
                       {busy === `cancel-${v.id}` ? <LiveDot size={7} /> : null} Cancel listing
                     </Btn>
                   ) : signedIn ? (
-                    <Btn variant="primary" sm onClick={() => buy(v)} disabled={busy !== null}>
-                      {busy === `buy-${v.id}` ? <LiveDot size={7} /> : <Icon name="coins" size={12} stroke="var(--char-950)" />} Pay &amp; buy
+                    <Btn variant="primary" sm onClick={() => setBuyModal(v.id)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                      <Icon name="coins" size={12} stroke="var(--char-950)" /> Buy
                     </Btn>
                   ) : (
-                    <Btn variant="secondary" sm onClick={onSignIn}>
+                    <Btn variant="secondary" sm onClick={onSignIn} style={{ alignSelf: 'flex-start' }}>
                       <Icon name="key" size={12} /> Sign in to buy
                     </Btn>
                   )}
@@ -442,88 +411,148 @@ export default function Vouchers({
         )}
       </div>
 
-      <span style={{ fontSize: 11.5, color: 'var(--fg-3)', lineHeight: 1.5 }}>
-        The instant-exit discount is an optional express-exit fee — the classic path
-        (unwrap, then unstake) always returns 100% of your principal after the tier's
-        dissolve. "Pay &amp; buy" escrows the exact ask first; if a purchase is
-        interrupted, the escrow is always reclaimable.
-      </span>
-
-      {/* ── Redeem modal (owner 2026-07-10): the voucher is the claim — the
-            holder picks HOW the ICP comes back ── */}
+      {/* ── Redeem modal: the voucher is the claim — pick how the ICP returns ── */}
       {redeemModal != null && (() => {
-        const v = (info?.my_vouchers ?? []).find((x) => x.id === redeemModal);
+        const v = mine.find((x) => x.id === redeemModal);
         if (!v) return null;
-        const quote = buybackQuoteE8s(v.amount_e8s, info?.buyback_discount_bps ?? 1500);
-        const canBuyback = buybackAvailable(v.amount_e8s, info?.buyback_discount_bps ?? 1500, info?.buyback_fund_e8s ?? 0n);
-        const opt: React.CSSProperties = {
-          border: '1px solid var(--border)', borderRadius: 10, padding: 14,
-          background: 'var(--bg-alt)', width: '100%',
-        };
+        const quote = buybackQuoteE8s(v.amount_e8s, discountBps);
+        const canBuyback = buybackAvailable(v.amount_e8s, discountBps, info?.buyback_fund_e8s ?? 0n);
+        const opt: React.CSSProperties = { border: '1px solid var(--border)', borderRadius: 10, padding: 14, background: 'var(--bg-alt)', width: '100%' };
         return (
-          <div
-            onClick={() => setRedeemModal(null)}
-            style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,0.55)', display: 'grid', placeItems: 'center', padding: 16 }}
-          >
-            <div className="col" onClick={(e) => e.stopPropagation()} style={{
-              gap: 12, maxWidth: 440, width: '100%', background: 'var(--surface)',
-              border: '1px solid var(--border-hi)', borderRadius: 14, padding: 20,
-            }}>
-              <span className="row" style={{ justifyContent: 'space-between' }}>
-                <b style={{ fontSize: 15 }}>Redeem {fmtICP(v.amount_e8s)} ICP</b>
-                <button onClick={() => setRedeemModal(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--fg-2)' }} aria-label="Close">
-                  <Icon name="x" size={14} />
-                </button>
+          <ModalShell title={`Redeem ${fmtICP(v.amount_e8s)} ICP`} onClose={() => setRedeemModal(null)}>
+            <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
+              Your voucher is the claim on this ICP — choose how it comes back to you.
+            </span>
+            <div className="col" style={opt}>
+              <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                <b style={{ fontSize: 13.5 }}>Wait for the dissolve</b>
+                <Chip tone="ok">100% · {fmtICP(v.amount_e8s)} ICP</Chip>
               </span>
-              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Your voucher is the claim on this ICP — choose how it comes back to you.
+              <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
+                The full amount pays your wallet automatically after the {TIER_META[v.tier].label} dissolve. Nothing to claim.
               </span>
-
-              <div className="col" style={{ ...opt }}>
-                <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                  <b style={{ fontSize: 13.5 }}>Wait for the dissolve</b>
-                  <Chip tone="ok">100% · {fmtICP(v.amount_e8s)} ICP</Chip>
-                </span>
-                <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
-                  The full amount pays your wallet automatically after the {TIER_META[v.tier].label} dissolve. Nothing to claim.
-                </span>
-                <Btn variant="primary" sm onClick={() => redeem(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-                  {busy === `redeem-${v.id}` ? <LiveDot size={7} /> : <Icon name="clock" size={12} stroke="var(--char-950)" />} Start the dissolve
-                </Btn>
-              </div>
-
-              <div className="col" style={{ ...opt, opacity: canBuyback ? 1 : 0.65 }}>
-                <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                  <b style={{ fontSize: 13.5 }}>Claim instantly</b>
-                  <Chip tone="burn">85% · {fmtICP(quote)} ICP now</Chip>
-                </span>
-                <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
-                  {canBuyback
-                    ? 'The house buys your voucher on the spot — an optional express-exit fee of 15%.'
-                    : 'Temporarily unavailable — the buyback fund is replenishing. The other two options always work.'}
-                </span>
-                <Btn variant="secondary" sm onClick={() => buyback(v)} disabled={busy !== null || !canBuyback} style={{ alignSelf: 'flex-start' }}>
-                  {busy === `buyback-${v.id}` ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Take {fmtICP(quote)} ICP now
-                </Btn>
-              </div>
-
-              <div className="col" style={{ ...opt }}>
-                <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                  <b style={{ fontSize: 13.5 }}>Sell at market value</b>
-                  <Chip tone="pending">you set the ask</Chip>
-                </span>
-                <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
-                  List it on the marketplace — a buyer takes over the position and
-                  you may beat the instant-exit price.
-                </span>
-                <Btn variant="secondary" sm onClick={() => { setRedeemModal(null); setListId(v.id); setPriceText(''); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-                  <Icon name="coins" size={12} /> List it for sale
-                </Btn>
-              </div>
+              <Btn variant="primary" sm onClick={() => redeem(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                {busy === `redeem-${v.id}` ? <LiveDot size={7} /> : <Icon name="clock" size={12} stroke="var(--char-950)" />} Start the dissolve
+              </Btn>
             </div>
-          </div>
+            <div className="col" style={{ ...opt, opacity: canBuyback ? 1 : 0.65 }}>
+              <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                <b style={{ fontSize: 13.5 }}>Claim instantly</b>
+                <Chip tone="burn">{payPct}% · {fmtICP(quote)} ICP now</Chip>
+              </span>
+              <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
+                {canBuyback
+                  ? `The house buys your voucher on the spot — an optional express-exit fee of ${(100 - Number(payPct))}%.`
+                  : 'Temporarily unavailable — the buyback fund is replenishing. The other two options always work.'}
+              </span>
+              <Btn variant="secondary" sm onClick={() => buyback(v)} disabled={busy !== null || !canBuyback} style={{ alignSelf: 'flex-start' }}>
+                {busy === `buyback-${v.id}` ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Take {fmtICP(quote)} ICP now
+              </Btn>
+            </div>
+            <div className="col" style={opt}>
+              <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                <b style={{ fontSize: 13.5 }}>Sell at market value</b>
+                <Chip tone="pending">you set the ask</Chip>
+              </span>
+              <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
+                List it on the marketplace — a buyer takes over the position and you may beat the instant-exit price.
+              </span>
+              <Btn variant="secondary" sm onClick={() => { setRedeemModal(null); setSellModal(v.id); setPriceText(''); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                <Icon name="coins" size={12} /> List it for sale
+              </Btn>
+            </div>
+          </ModalShell>
         );
       })()}
+
+      {/* ── Sell modal ── */}
+      {sellModal != null && (() => {
+        const v = mine.find((x) => x.id === sellModal);
+        if (!v) return null;
+        const price = parsePriceIcp(priceText);
+        const delta = price != null ? listingDeltaPct(price, v.amount_e8s) : null;
+        return (
+          <ModalShell title={`Sell your ${TIER_META[v.tier].short} voucher`} onClose={() => { setSellModal(null); setPriceText(''); }}>
+            <div className="col" style={{ gap: 3, fontSize: 12.5, border: '1px solid var(--border)', borderRadius: 10, padding: 12, background: 'var(--bg-alt)' }}>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                <span style={{ color: 'var(--fg-3)' }}>Value (staked principal)</span>
+                <span className="mono">{fmtICP(v.amount_e8s)} ICP{usd(v.amount_e8s) ? ` · ${usd(v.amount_e8s)}` : ''}</span>
+              </div>
+            </div>
+            <label style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>Your asking price (ICP)</label>
+            <input className="burn-input" placeholder="e.g. 1.95" value={priceText} inputMode="decimal" autoFocus
+              onChange={(e) => setPriceText(e.target.value)} aria-label="Ask price in ICP" style={{ width: '100%' }} />
+            {delta != null && (
+              <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'muted' : 'pending'} style={{ alignSelf: 'flex-start' }}>
+                {delta < 0 ? `${Math.abs(delta)}% under value — a deal for buyers` : delta > 0 ? `${delta}% over value` : 'at value'}
+              </Chip>
+            )}
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              A {feePct}% marketplace fee is taken from the sale.{' '}
+              <b>While listed, this voucher stops earning lottery tickets</b> — they resume the moment you cancel or it sells.
+            </span>
+            <Btn variant="primary" onClick={() => list(v)} disabled={busy !== null || price == null} style={{ alignSelf: 'flex-start' }}>
+              {busy === `list-${v.id}` ? <LiveDot size={8} /> : <Icon name="check" size={13} stroke="var(--char-950)" />} List for sale
+            </Btn>
+          </ModalShell>
+        );
+      })()}
+
+      {/* ── Buy confirm modal ── */}
+      {buyModal != null && (() => {
+        const v = listings.find((x) => x.id === buyModal);
+        if (!v || v.listed_price_e8s == null) return null;
+        const delta = listingDeltaPct(v.listed_price_e8s, v.amount_e8s);
+        return (
+          <ModalShell title="Confirm purchase" onClose={() => setBuyModal(null)}>
+            <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+              <div className="col" style={{ gap: 2, flex: '1 1 130px', border: '1px solid var(--border)', borderRadius: 10, padding: 12, background: 'var(--bg-alt)' }}>
+                <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Value</span>
+                <b className="mono" style={{ fontSize: 15 }}>{fmtICP(v.amount_e8s)} ICP</b>
+                {usd(v.amount_e8s) && <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>{usd(v.amount_e8s)}</span>}
+              </div>
+              <div className="col" style={{ gap: 2, flex: '1 1 130px', border: '1px solid var(--burn)', borderRadius: 10, padding: 12, background: 'color-mix(in srgb, var(--burn) 8%, var(--surface))' }}>
+                <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Asking</span>
+                <b className="mono" style={{ fontSize: 15 }}>{fmtICP(v.listed_price_e8s)} ICP</b>
+                {usd(v.listed_price_e8s) && <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>{usd(v.listed_price_e8s)}</span>}
+              </div>
+            </div>
+            <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'muted' : 'pending'} style={{ alignSelf: 'flex-start' }}>
+              {delta < 0 ? `${Math.abs(delta)}% under value` : delta > 0 ? `${delta}% over value` : 'at value'}
+            </Chip>
+            <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+              You become the staker of a <b>{fmtICP(v.amount_e8s)} ICP {TIER_META[v.tier].label}</b> position — earning{' '}
+              <b>{ticketsPerDay(v)} tickets/day</b> from the next daily grant, redeemable for its full value after the dissolve.
+            </span>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              Your {fmtICP(v.listed_price_e8s)} ICP goes to a sale escrow, then the purchase settles and the voucher moves to you. An unfinished purchase is always reclaimable.
+            </span>
+            <Btn variant="primary" onClick={() => buy(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+              {busy === `buy-${v.id}` ? <LiveDot size={8} /> : <Icon name="coins" size={13} stroke="var(--char-950)" />} Buy for {fmtICP(v.listed_price_e8s)} ICP
+            </Btn>
+          </ModalShell>
+        );
+      })()}
+    </div>
+  );
+}
+
+/** Shared modal frame — overlay + centered card, closes on backdrop click. */
+function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,0.55)', display: 'grid', placeItems: 'center', padding: 16 }}>
+      <div className="col" onClick={(e) => e.stopPropagation()} style={{
+        gap: 12, maxWidth: 460, width: '100%', maxHeight: '90vh', overflowY: 'auto',
+        background: 'var(--surface)', border: '1px solid var(--border-hi)', borderRadius: 14, padding: 20,
+      }}>
+        <span className="row" style={{ justifyContent: 'space-between' }}>
+          <b style={{ fontSize: 15 }}>{title}</b>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--fg-2)' }} aria-label="Close">
+            <Icon name="x" size={14} />
+          </button>
+        </span>
+        {children}
+      </div>
     </div>
   );
 }
