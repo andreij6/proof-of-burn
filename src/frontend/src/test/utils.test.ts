@@ -676,3 +676,23 @@ describe('PB-144 revenue-split copy assertions', () => {
     expect(percents.reduce((a, b) => a + b, 0)).toBe(100);
   });
 });
+
+// ── Lottery hero countdown blocks ──
+import { countdownParts } from '../Lottery';
+
+describe('countdownParts (lottery hero blocks)', () => {
+  const now = 1_700_000_000_000;
+  const at = (ms: number) => BigInt(now + ms) * 1_000_000n;
+
+  it('splits a future timestamp into zero-padded DD/HH/MM/SS', () => {
+    expect(countdownParts(at(((1 * 86_400 + 23 * 3600 + 46 * 60 + 27) * 1000)), now))
+      .toEqual({ days: '01', hours: '23', mins: '46', secs: '27' });
+    expect(countdownParts(at(59_000), now))
+      .toEqual({ days: '00', hours: '00', mins: '00', secs: '59' });
+  });
+
+  it('returns null once the moment has passed', () => {
+    expect(countdownParts(at(0), now)).toBeNull();
+    expect(countdownParts(at(-1000), now)).toBeNull();
+  });
+});

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Principal } from "@icp-sdk/core/principal";
 import { DrawStatus, ExplorerToken } from "./bindings/backend";
 import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, MoreInfo, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 import { useErrorImpression } from "./analytics";
 
 // ==========================================
@@ -25,16 +25,17 @@ interface LotteryProps {
   onGoStaking: () => void;
 }
 
-/** "2d 14:03:22" countdown to a nanosecond timestamp; null when passed. */
-function countdownLabel(atNs: bigint): string | null {
-  const ms = Number(atNs / 1_000_000n) - Date.now();
+/** Countdown split into DD/HH/MM/SS block values; null when passed. */
+export function countdownParts(atNs: bigint, nowMs: number): { days: string; hours: string; mins: string; secs: string } | null {
+  const ms = Number(atNs / 1_000_000n) - nowMs;
   if (ms <= 0) return null;
   const s = Math.floor(ms / 1000);
-  const days = Math.floor(s / 86_400);
-  const hh = String(Math.floor((s % 86_400) / 3600)).padStart(2, '0');
-  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
-  const ss = String(s % 60).padStart(2, '0');
-  return `${days > 0 ? `${days}d ` : ''}${hh}:${mm}:${ss}`;
+  return {
+    days: String(Math.floor(s / 86_400)).padStart(2, '0'),
+    hours: String(Math.floor((s % 86_400) / 3600)).padStart(2, '0'),
+    mins: String(Math.floor((s % 3600) / 60)).padStart(2, '0'),
+    secs: String(s % 60).padStart(2, '0'),
+  };
 }
 
 function drawDate(atNs: bigint): string {
@@ -237,7 +238,6 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
     background: 'var(--surface)', padding: 16,
   };
 
-  const countdown = info && info.next_draw_at > 0n ? countdownLabel(info.next_draw_at) : null;
   const jackpotUsd = info && icpRateE8s > 0n
     ? Number(info.pot_e8s * icpRateE8s / 100_000_000n) / 1e8
     : null;
@@ -247,51 +247,6 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
 
   return (
     <div className="idea-board-container">
-      {/* ── Header ── */}
-      <div className="col" style={{ gap: 6 }}>
-        <span className="row" style={{ gap: 8 }}>
-          <Icon name="ticket" size={16} stroke="var(--burn-ink)" />
-          <Eyebrow accent>Lossless lottery</Eyebrow>
-        </span>
-        <b style={{ fontSize: 17 }}>Stake to play. Nobody loses.</b>
-        <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
-          Stakers collect free tickets every day — win and the ICP lands straight in your wallet.{' '}
-          <MoreInfo title="How the lossless lottery works">
-            <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
-              <Eyebrow accent>The gist</Eyebrow>
-              <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-                <b>Nobody ever pays in.</b> The prize pool is funded by staking yield — you collect free
-                tickets just for staking, and winnings land straight in your wallet.
-              </p>
-            </div>
-            <div className="col" style={{ gap: 6 }}>
-              <Eyebrow accent>Earning tickets</Eyebrow>
-              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>Stake to qualify:</b> 5 / 10 / 20 tickets a day per ICP for 6-month / 1-year / 2-year terms (tiers add up).</li>
-                <li><b>Scales with your stake:</b> 1 ICP for 6 months → 5 tickets/day; 500 ICP for 2 years → 10,000/day.</li>
-                <li><b>Stay staked:</b> unstake everything and your tickets void on the spot.</li>
-              </ul>
-            </div>
-            <div className="col" style={{ gap: 6 }}>
-              <Eyebrow accent>The odds</Eyebrow>
-              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>Fixed 1-in-13 chance</b> of a winner per drawing, regardless of ticket count.</li>
-                <li>Three drawings a week ≈ <b>one jackpot a month</b> on average (96% chance of one within 3 months).</li>
-                <li>Your tickets are your <b>share of that chance</b>.</li>
-              </ul>
-            </div>
-            <div className="col" style={{ gap: 6 }}>
-              <Eyebrow accent>The payout</Eyebrow>
-              <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>65% to the winner</b> — paid automatically, nothing to claim.</li>
-                <li><b>30% seeds the next round</b>; <b>5% is burned</b> to backend-canister cycles.</li>
-                <li>Everyone's tickets reset and a fresh round begins.</li>
-              </ul>
-            </div>
-          </MoreInfo>
-        </span>
-      </div>
-
       {(error || notice) && (
         <div className="row" style={{
           gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
@@ -317,92 +272,95 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         </div>
       )}
 
-      {/* ── Next drawing + jackpot. A shimmer card stands in while the lottery
-            info is still loading. ── */}
+      {/* ── Hero: pot → no-loss line → countdown blocks → one CTA ── */}
       {loading && !info ? (
-        <div className="col" style={{ ...card, gap: 14, width: '100%', alignItems: 'center' }} aria-busy="true" aria-label="Loading lottery info">
+        <div className="col" style={{ ...card, gap: 14, width: '100%', alignItems: 'center', padding: '40px 16px' }} aria-busy="true" aria-label="Loading lottery info">
           <Skeleton width={90} height={11} />
-          <Skeleton width={180} height={13} />
-          <Skeleton width={160} height={30} radius={8} />
-          <Skeleton width={70} height={11} style={{ marginTop: 6 }} />
-          <Skeleton width={150} height={30} radius={8} />
-          <Skeleton width={100} height={11} style={{ marginTop: 6 }} />
-          <Skeleton width={120} height={22} radius={8} />
-          <Skeleton width={90} height={11} style={{ marginTop: 6 }} />
-          <Skeleton width={60} height={22} radius={8} />
+          <Skeleton width={260} height={64} radius={10} />
+          <Skeleton width={200} height={13} />
+          <Skeleton width={300} height={64} radius={10} style={{ marginTop: 10 }} />
+          <Skeleton width={180} height={40} radius={999} style={{ marginTop: 10 }} />
         </div>
-      ) : (<>
-      <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
-      <div className="col" style={{ ...card, gap: 6, flex: '3 1 0', minWidth: 320, alignItems: 'center', textAlign: 'center' }}>
-        <Eyebrow>Next drawing</Eyebrow>
-        {/* Date */}
-        <span style={{ fontSize: 13, color: 'var(--fg-2)' }}>
-          {info && info.next_draw_at > 0n ? drawDate(info.next_draw_at) : "Scheduled at the first ticket claim."}
+      ) : (
+      <div className="col" style={{ ...card, gap: 0, alignItems: 'center', textAlign: 'center', padding: '44px 20px 36px' }}>
+        <span className="mono" style={{ fontSize: 12, letterSpacing: '0.22em', textTransform: 'uppercase', color: 'var(--burn-ink)', fontWeight: 700 }}>
+          Next draw
         </span>
-        {/* Countdown */}
-        <b className="mono" style={{ fontSize: 30, lineHeight: 1.15 }}>
-          {loading && !info
-            ? <LiveDot size={9} color="var(--burn-ink)" />
-            : countdown ?? (info && info.next_draw_at > 0n ? "any moment" : "—")}
-        </b>
-        {/* Jackpot */}
-        <Eyebrow style={{ marginTop: 8 }}>Jackpot</Eyebrow>
-        <div className="row" style={{ gap: 10, alignItems: 'baseline', justifyContent: 'center' }}>
-          <b className="mono" style={{ fontSize: 30, lineHeight: 1.15, color: 'var(--sprout-ink)' }}>
-            {loading && !info ? <LiveDot size={9} color="var(--sprout-ink)" /> : fmtICP(info?.pot_e8s ?? 0n)}
+        {/* The number IS the page. */}
+        <div className="row" style={{ gap: 12, alignItems: 'baseline', justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
+          <b style={{
+            fontFamily: 'var(--font-display)', fontWeight: 700, lineHeight: 1,
+            fontSize: 'clamp(56px, 14vw, 96px)', letterSpacing: '-0.03em',
+            color: 'var(--burn-ink)', fontVariantNumeric: 'tabular-nums',
+            textShadow: '0 0 44px color-mix(in srgb, var(--burn) 45%, transparent)',
+          }}>
+            {fmtICP(info?.pot_e8s ?? 0n)}
           </b>
-          <span style={{ fontSize: 13, color: 'var(--sprout-ink)' }}>ICP</span>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 'clamp(20px, 4vw, 30px)', fontWeight: 600, color: 'var(--burn-ink)' }}>ICP</span>
         </div>
-        {/* Jackpot in USD */}
-        <Eyebrow style={{ marginTop: 8 }}>Jackpot in USD</Eyebrow>
-        <b className="mono" style={{ fontSize: 22, lineHeight: 1.15, color: 'var(--sprout-ink)' }}>
-          {loading && !info
-            ? <LiveDot size={8} color="var(--sprout-ink)" />
-            : jackpotUsd != null ? `$${jackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}
-        </b>
-        {/* Participants */}
-        <Eyebrow style={{ marginTop: 8 }}>Participants</Eyebrow>
-        <b className="mono" style={{ fontSize: 22, lineHeight: 1.15 }}>
-          {loading && !info
-            ? <LiveDot size={8} color="var(--burn-ink)" />
-            : Number(info?.unique_holders ?? 0n).toLocaleString()}
-        </b>
-        {/* Share — entice new users to join the next drawing */}
-        <button onClick={shareDrawing} title="Share the next drawing" style={{
-          background: 'transparent', border: '1px solid var(--burn)', borderRadius: 8,
-          color: 'var(--burn-ink)', cursor: 'pointer', padding: '8px 14px', fontSize: 12.5,
-          fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 6,
-        }}>
-          <Icon name="share" size={13} stroke="var(--burn-ink)" /> Share this drawing
-        </button>
-      </div>
-
-      {/* ── Draw thresholds — pot & players must both fill for a drawing to run ── */}
-      {info && (
-        <div className="col" style={{ ...card, gap: 12, flex: '2 1 0', minWidth: 220 }}>
-          <Eyebrow>Draw thresholds</Eyebrow>
-          <ThresholdBar
-            label="Jackpot pot"
-            current={Number(info.pot_e8s) / 1e8}
-            target={Number(info.min_pot_e8s) / 1e8}
-            unit="ICP"
-            fill="var(--sprout-ink)"
-          />
-          <ThresholdBar
-            label="Participants"
-            current={Number(info.unique_holders)}
-            target={Number(info.min_unique_holders)}
-            unit="players"
-            fill="var(--burn)"
-          />
-          <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-            A drawing runs only when <b>both</b> bars are full — enough ICP in the pot and enough unique
-            players in the round. Otherwise the round rolls over and the countdown restarts.
+        {jackpotUsd != null && (
+          <span className="mono" style={{ fontSize: 14, color: 'var(--fg-3)', marginTop: 8 }}>
+            ≈ ${jackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}
           </span>
+        )}
+        <p style={{ fontSize: 16, lineHeight: 1.5, color: 'var(--fg-2)', maxWidth: 460, margin: '18px 0 0' }}>
+          Win it all — lose nothing. Your stake is never spent, so the worst
+          that can happen is you keep everything.
+        </p>
+
+        {/* Countdown blocks */}
+        {(() => {
+          const parts = info && info.next_draw_at > 0n ? countdownParts(info.next_draw_at, Date.now()) : null;
+          const block = (v: string, label: string, hot: boolean) => (
+            <div key={label} className="col" style={{
+              alignItems: 'center', gap: 4, padding: '14px 0', width: 'clamp(64px, 18vw, 96px)',
+              border: '1px solid var(--border)', borderRadius: 12, background: 'var(--bg-alt)',
+            }}>
+              <b className="mono" style={{ fontSize: 'clamp(22px, 5vw, 32px)', lineHeight: 1, color: hot ? 'var(--burn-ink)' : 'var(--fg)', fontVariantNumeric: 'tabular-nums' }}>{v}</b>
+              <span className="mono" style={{ fontSize: 9.5, letterSpacing: '0.14em', textTransform: 'uppercase', color: 'var(--fg-3)' }}>{label}</span>
+            </div>
+          );
+          return (
+            <div className="row" style={{ gap: 10, justifyContent: 'center', marginTop: 26, flexWrap: 'wrap' }}>
+              {parts ? (
+                <>
+                  {block(parts.days, 'days', false)}
+                  {block(parts.hours, 'hours', false)}
+                  {block(parts.mins, 'mins', false)}
+                  {block(parts.secs, 'secs', true)}
+                </>
+              ) : (
+                <span style={{ fontSize: 13.5, color: 'var(--fg-2)' }}>
+                  {info && info.next_draw_at > 0n
+                    ? 'Drawing any moment now…'
+                    : 'The countdown starts at the first ticket claim.'}
+                </span>
+              )}
+            </div>
+          );
+        })()}
+        {info && info.next_draw_at > 0n && (
+          <span style={{ fontSize: 12, color: 'var(--fg-3)', marginTop: 10 }}>{drawDate(info.next_draw_at)}</span>
+        )}
+
+        {/* One CTA */}
+        <div className="col" style={{ alignItems: 'center', gap: 10, marginTop: 30 }}>
+          {!signedIn ? (
+            <Btn variant="primary" onClick={onSignIn} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
+              Get your free tickets
+            </Btn>
+          ) : info && !info.eligible && (info.my_tickets ?? 0n) === 0n && !info.admin_excluded ? (
+            <Btn variant="primary" onClick={onGoStaking} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
+              Stake to enter — tickets are free
+            </Btn>
+          ) : (
+            <Btn variant="primary" onClick={shareDrawing} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
+              <Icon name="share" size={15} stroke="var(--char-950)" /> Share this drawing
+            </Btn>
+          )}
         </div>
-      )}
       </div>
-      </>)}
+      )}
 
       <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
         {/* ── Your tickets ── */}
@@ -481,17 +439,6 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
           )}
         </div>
 
-        {/* ── Earn tickets → Staking ── */}
-        <div className="col" style={{ ...card, gap: 10, flex: '1 1 240px', minWidth: 240, border: '1px solid var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
-          <Eyebrow accent>Earn tickets</Eyebrow>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
-            Tickets come from lossless staking — your ICP keeps earning, and every
-            staked day mints new chances to win.
-          </span>
-          <Btn variant="primary" sm style={{ alignSelf: 'flex-start' }} onClick={onGoStaking}>
-            <Icon name="zap" size={13} stroke="var(--char-950)" /> Go to Staking
-          </Btn>
-        </div>
       </div>
 
       {/* ── Recent drawings (last 10) ── */}
@@ -565,31 +512,6 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         )}
       </div>
 
-    </div>
-  );
-}
-
-// Progress bar for a draw threshold (pot or unique players). Theme-token colors;
-// turns green and shows ✓ once the threshold is met. target ≤ 0 = no gate.
-function ThresholdBar({ label, current, target, unit, fill }: {
-  label: string; current: number; target: number; unit: string; fill: string;
-}) {
-  const noGate = target <= 0;
-  const pct = noGate ? 100 : Math.min(100, (current / target) * 100);
-  const met = noGate || current >= target;
-  return (
-    <div className="col" style={{ gap: 5, width: '100%' }}>
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>{label}</span>
-        <span className="mono" style={{ fontSize: 12, color: met ? 'var(--sprout-ink)' : 'var(--fg-2)' }}>
-          {current.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-          {noGate ? '' : ` / ${target.toLocaleString(undefined, { maximumFractionDigits: 2 })}`} {unit}
-          {met ? ' ✓' : ''}
-        </span>
-      </div>
-      <div style={{ height: 9, borderRadius: 999, background: 'var(--bg-alt)', border: '1px solid var(--border)', overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: met ? 'var(--sprout-ink)' : fill, borderRadius: 999, transition: 'width 300ms ease' }} />
-      </div>
     </div>
   );
 }
