@@ -7,8 +7,9 @@ import { friendlyVoucherErr } from './Vouchers';
 // Golden Ticket claim — the standalone campaign page (#/claim).
 //
 // Landing-style full-bleed dark page, reachable signed-out; it IS the link
-// shared on X/OpenChat. Two claim paths: sign in with II, or paste an ICP
-// wallet principal (Plug/OISY/NNS) — the paste path needs no sign-in at all,
+// shared on X/OpenChat. ONE claim path for now (owner 2026-07-10): sign in
+// and claim. (The paste-a-principal path is built backend-side and can be
+// re-enabled in the UI later;
 // because ticket earning is server-side and jackpots pay the winner's wallet
 // automatically. A Golden Ticket earns 1 lottery ticket per day for 60 days;
 // tickets only — it can never redeem ICP and is never buyback-eligible.
@@ -53,7 +54,6 @@ const EYEBROW: React.CSSProperties = { fontFamily: MONO, fontSize: 11, fontWeigh
 export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: ClaimPromoProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<ClaimInfo | null>(null);
-  const [pasteText, setPasteText] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [claimed, setClaimed] = useState<{ id: bigint; to: string } | null>(null);
@@ -83,11 +83,6 @@ export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: Clai
   };
 
   const claimSignedIn = () => claim(null, 'signin-claim');
-  const claimPasted = () => {
-    const v = validateClaimPrincipal(pasteText);
-    if (!v.ok) { setErr(v.err); return; }
-    claim(v.principal, 'paste-claim');
-  };
 
   const primaryBtn: React.CSSProperties = {
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, cursor: 'pointer',
@@ -200,14 +195,12 @@ export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: Clai
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
               {/* Path A: sign in */}
               <div style={cardStyle}>
-                <div style={{ ...EYEBROW, color: 'var(--fg-3)' }}>option one</div>
                 <h3 style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 24, letterSpacing: '-.02em', color: 'var(--fg)', margin: 0 }}>
                   Sign in &amp; claim
                 </h3>
                 <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, flex: 1 }}>
-                  A passkey sign-in (FaceID / fingerprint, ~30 seconds) creates your
-                  account and the ticket lands on it — you can watch your entries and
-                  winnings in the app.
+                  Sign in (~30 seconds) to create your account and the ticket lands on
+                  it — you can watch your entries and winnings in the app.
                 </p>
                 {signedIn ? (
                   <button onClick={claimSignedIn} disabled={busy !== null} style={{ ...primaryBtn, opacity: busy ? 0.7 : 1 }}>
@@ -221,32 +214,6 @@ export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: Clai
                 )}
               </div>
 
-              {/* Path B: paste a principal — no sign-in at all */}
-              <div style={cardStyle}>
-                <div style={{ ...EYEBROW, color: 'var(--fg-3)' }}>option two · no sign-in</div>
-                <h3 style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 24, letterSpacing: '-.02em', color: 'var(--fg)', margin: 0 }}>
-                  Paste your wallet principal
-                </h3>
-                <p style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--fg-2)', margin: 0, flex: 1 }}>
-                  Use any ICP wallet (Plug, OISY, NNS). Paste its principal and the
-                  ticket attaches to that wallet — tickets earn on their own, and a
-                  jackpot pays it directly. You never need to log in anywhere.
-                </p>
-                <input
-                  value={pasteText}
-                  onChange={(e) => { setPasteText(e.target.value); setErr(null); }}
-                  placeholder="e.g. w3gef-eqllq-zz2qh-…"
-                  aria-label="Your ICP wallet principal"
-                  style={{
-                    fontFamily: MONO, fontSize: 13, color: 'var(--fg)', background: 'var(--char-925)',
-                    border: '1px solid var(--char-800)', borderRadius: 8, padding: '12px 14px', outline: 'none', width: '100%',
-                  }}
-                />
-                <button onClick={claimPasted} disabled={busy !== null} style={{ ...primaryBtn, opacity: busy ? 0.7 : 1 }}>
-                  {busy === 'paste-claim' ? <LiveDot size={8} color="var(--char-950)" /> : <Icon name="spark" size={15} stroke="var(--char-950)" />}
-                  Claim to this wallet
-                </button>
-              </div>
             </div>
 
             {/* The honest fine print. */}
