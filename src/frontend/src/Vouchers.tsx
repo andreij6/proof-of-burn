@@ -80,8 +80,14 @@ export function parsePriceIcp(text: string): bigint | null {
   return v > 0 ? BigInt(v) : null;
 }
 
-type VoucherClass = { Backed: null } | { Promo: null };
-export function isPromo(c: VoucherClass): boolean { return 'Promo' in c; }
+type VoucherClass = 'Backed' | 'Promo' | { Backed: null } | { Promo: null };
+/** The wrapper bindings decode unit variants as enum STRINGS ("Promo"), not
+ *  raw candid objects ({Promo:null}) — handle both so the helper survives
+ *  either layer (the 'in'-on-string crash shipped once; never again). */
+export function isPromo(c: VoucherClass | { Promo?: null } | string): boolean {
+  if (typeof c === 'string') return c === 'Promo';
+  return typeof c === 'object' && c !== null && 'Promo' in c;
+}
 
 interface VoucherView {
   id: bigint;

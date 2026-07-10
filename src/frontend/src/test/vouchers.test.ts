@@ -117,6 +117,13 @@ describe('parsePriceIcp (listing asks, up to 4 decimals)', () => {
   });
 });
 
+describe('isPromo — string-decoded bindings (the prod crash)', () => {
+  it('handles wrapper enum strings, not just raw variants', () => {
+    expect(isPromo('Promo')).toBe(true);
+    expect(isPromo('Backed')).toBe(false);
+  });
+});
+
 describe('isPromo (voucher class discriminant)', () => {
   it('distinguishes the two classes', () => {
     expect(isPromo({ Promo: null })).toBe(true);
