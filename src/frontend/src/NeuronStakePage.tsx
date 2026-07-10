@@ -75,6 +75,10 @@ export default function NeuronStakePage({
               </div>
             </MoreInfo>
           </span>
+          <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
+            Every stake is issued as a <b>Voucher NFT</b> — sell it, redeem it, or
+            take an instant exit on the Vouchers page.
+          </span>
         </div>
       </div>
 

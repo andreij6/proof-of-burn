@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
 import { StakeTier } from './bindings/backend';
-import type { UserStakeInfo } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
 import { Btn, Chip, Eyebrow, Icon, LiveDot, MoreInfo, fmtICP } from './ui';
 import { TIER_META } from './Staking';
@@ -119,37 +118,31 @@ interface VouchersProps {
   onGoNeuronStake: () => void;
 }
 
-const TIER_ORDER: StakeTier[] = [StakeTier.SixMonths, StakeTier.OneYear, StakeTier.TwoYears];
 
 export default function Vouchers({
   actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, onGoNeuronStake,
 }: VouchersProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<VoucherMarketInfo | null>(null);
-  const [myStake, setMyStake] = useState<UserStakeInfo | null>(null);
   const [icpUsdE8s, setIcpUsdE8s] = useState<bigint>(0n);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // Wrap form.
-  const [wrapTier, setWrapTier] = useState<StakeTier>(StakeTier.SixMonths);
-  const [wrapAmount, setWrapAmount] = useState('');
+  // Redeem-choice modal (owner 2026-07-10): wait 100% / instant 85% / sell.
+  const [redeemModal, setRedeemModal] = useState<bigint | null>(null);
   // List form: which voucher id has its price input open.
   const [listId, setListId] = useState<bigint | null>(null);
   const [priceText, setPriceText] = useState('');
   // Buyback confirm step (danger-style two-tap).
-  const [buybackConfirm, setBuybackConfirm] = useState<bigint | null>(null);
 
   const refresh = async () => {
     if (!actor) return;
     try {
-      const [i, stake, rates] = await Promise.all([
+      const [i, rates] = await Promise.all([
         actor.get_voucher_market(),
-        signedIn ? actor.get_my_stake().catch(() => null) : Promise.resolve(null),
         actor.get_usd_rates().catch(() => [] as { token: string; rate_usd_e8s: bigint }[]),
       ]);
       setInfo(i);
-      setMyStake(stake);
       const icp = (rates ?? []).find((r: { token: string }) => r.token === 'ICP');
       setIcpUsdE8s(icp?.rate_usd_e8s ?? 0n);
     } catch { /* best-effort */ }
@@ -166,21 +159,13 @@ export default function Vouchers({
     finally { setBusy(null); }
   };
 
-  const wrap = () => run('wrap', async () => {
-    const amount = parseWrapIcp(wrapAmount);
-    if (!amount) throw new Error('Enter a whole-ICP amount (minimum 1 ICP).');
-    if (amount < (info?.min_wrap_e8s ?? 100_000_000n)) throw new Error(friendlyVoucherErr('BELOW_MINIMUM'));
-    const res = await actor.wrap_stake_voucher(amount, wrapTier);
+  const redeem = (v: VoucherView) => run(`redeem-${v.id}`, async () => {
+    const res = await actor.redeem_stake_voucher(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    setWrapAmount('');
-    return `Voucher #${res.Ok} minted — ${fmtICP(amount)} ICP of your ${TIER_META[wrapTier].label} stake is now a transferable NFT. Tickets keep flowing to whoever holds it.`;
+    setRedeemModal(null);
+    return `Redeeming — your ${fmtICP(v.amount_e8s)} ICP pays out automatically after the ${TIER_META[v.tier].label} dissolve.`;
   });
 
-  const unwrap = (v: VoucherView) => run(`unwrap-${v.id}`, async () => {
-    const res = await actor.unwrap_stake_voucher(v.id);
-    if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    return `Voucher #${v.id} unwrapped — it's a plain ${TIER_META[v.tier].label} stake again (classic unstake available on the Neuron Stake page).`;
-  });
 
   const list = (v: VoucherView) => run(`list-${v.id}`, async () => {
     const price = parsePriceIcp(priceText);
@@ -200,7 +185,7 @@ export default function Vouchers({
   const buyback = (v: VoucherView) => run(`buyback-${v.id}`, async () => {
     const res = await actor.buyback_voucher(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    setBuybackConfirm(null);
+    setRedeemModal(null);
     return `Instant exit complete — ${fmtICP(res.Ok)} ICP paid to your wallet. The voucher is burned.`;
   });
 
@@ -229,13 +214,9 @@ export default function Vouchers({
   const payPct = ((10_000 - discountBps) / 100).toFixed(0);
   const feePct = ((info?.market_fee_bps ?? 250) / 100).toFixed(1);
 
-  const tierStaked = (t: StakeTier): bigint =>
-    myStake?.tiers.find((row) => row.tier === t)?.amount_e8s ?? 0n;
 
   const voucherCard = (v: VoucherView, mine: boolean) => {
     const promo = isPromo(v.class);
-    const quote = buybackQuoteE8s(v.amount_e8s, discountBps);
-    const canBuyback = info ? buybackAvailable(v.amount_e8s, discountBps, info.buyback_fund_e8s) : false;
     const listed = v.listed_price_e8s != null;
     return (
       <div key={String(v.id)} className="col" style={{
@@ -286,35 +267,17 @@ export default function Vouchers({
                   </Btn>
                 ) : (
                   <>
-                    <Btn variant="secondary" sm onClick={() => { setListId(v.id); setPriceText(''); setBuybackConfirm(null); }} disabled={busy !== null}>
+                    <Btn variant="secondary" sm onClick={() => { setListId(v.id); setPriceText(''); }} disabled={busy !== null}>
                       <Icon name="coins" size={12} /> Sell…
                     </Btn>
-                    {buybackConfirm === v.id ? (
-                      <>
-                        <Btn variant="danger" sm onClick={() => buyback(v)} disabled={busy !== null || !canBuyback}>
-                          {busy === `buyback-${v.id}` ? <LiveDot size={7} /> : null} Confirm: take {fmtICP(quote)} ICP now
-                        </Btn>
-                        <Btn variant="ghost" sm onClick={() => setBuybackConfirm(null)}>Keep it</Btn>
-                      </>
-                    ) : (
-                      <Btn variant="secondary" sm onClick={() => setBuybackConfirm(v.id)} disabled={busy !== null || !canBuyback}
-                        title={canBuyback ? undefined : 'Buyback fund is replenishing'}>
-                        <Icon name="zap" size={12} /> Instant exit · {fmtICP(quote)} ICP ({payPct}%)
-                      </Btn>
-                    )}
-                    <Btn variant="ghost" sm onClick={() => unwrap(v)} disabled={busy !== null}>
-                      {busy === `unwrap-${v.id}` ? <LiveDot size={7} /> : null} Unwrap
+                    <Btn variant="primary" sm onClick={() => setRedeemModal(v.id)} disabled={busy !== null}>
+                      <Icon name="coins" size={12} stroke="var(--char-950)" /> Redeem ICP
                     </Btn>
                   </>
                 )}
               </span>
             )}
-            {!canBuyback && !listed && (
-              <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-                Instant exit temporarily unavailable — the buyback fund is replenishing.
-                Sell on the marketplace or unwrap and unstake classically (100% after dissolve).
-              </span>
-            )}
+
           </>
         )}
       </div>
@@ -385,48 +348,21 @@ export default function Vouchers({
       )}
 
       <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
-        {/* ── Wrap a position ── */}
-        <div className="card col" style={{ gap: 10, flex: '1 1 300px', minWidth: 300 }}>
-          <Eyebrow accent>Wrap a stake into a voucher</Eyebrow>
-          {!signedIn ? (
-            <div className="col" style={{ gap: 10, alignItems: 'flex-start' }}>
-              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Sign in to wrap a staked position into a transferable NFT.
-              </span>
-              <Btn variant="primary" sm onClick={onSignIn}>
-                <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
-              </Btn>
-            </div>
-          ) : (
-            <>
-              <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
-                A voucher is your stake as an NFT — same tickets, same principal, plus
-                the option to sell it or take the instant exit. Minimum {fmtICP(info?.min_wrap_e8s ?? 100_000_000n)} ICP.
-              </span>
-              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                {TIER_ORDER.map((t) => (
-                  <Btn key={t} variant={wrapTier === t ? 'primary' : 'secondary'} sm onClick={() => setWrapTier(t)}>
-                    {TIER_META[t].short}
-                  </Btn>
-                ))}
-              </div>
-              <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-                unwrapped in {TIER_META[wrapTier].label}: {fmtICP(tierStaked(wrapTier))} ICP
-              </span>
-              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                <input className="burn-input" placeholder="Amount (whole ICP)" value={wrapAmount} inputMode="numeric"
-                  onChange={(e) => setWrapAmount(e.target.value)} aria-label="Amount to wrap (whole ICP)" style={{ width: 160 }} />
-                <Btn variant="primary" onClick={wrap} disabled={busy !== null || tierStaked(wrapTier) === 0n}>
-                  {busy === 'wrap' ? <LiveDot size={8} /> : <Icon name="star" size={13} stroke="var(--char-950)" />} Wrap
-                </Btn>
-              </div>
-              {tierStaked(wrapTier) === 0n && (
-                <span className="row" style={{ gap: 6, fontSize: 12, color: 'var(--fg-3)', flexWrap: 'wrap' }}>
-                  Nothing staked in this tier yet.
-                  <Btn variant="ghost" sm onClick={onGoNeuronStake}>Stake ICP →</Btn>
-                </span>
-              )}
-            </>
+        {/* ── Get a voucher = stake (no wrap step; owner 2026-07-10) ── */}
+        <div className="card col" style={{ gap: 10, flex: '1 1 300px', minWidth: 300, border: '1px solid var(--burn)', background: 'color-mix(in srgb, var(--burn) 10%, var(--surface))' }}>
+          <Eyebrow accent>Get a voucher</Eyebrow>
+          <span style={{ fontSize: 12.5, color: 'var(--fg-1)', lineHeight: 1.55 }}>
+            <b>Stake ICP and the voucher NFT arrives instantly</b> — your stake IS the
+            voucher. It earns daily tickets from day one, and you can sell it, take
+            the instant exit, or redeem it whenever you like.
+          </span>
+          <Btn variant="primary" onClick={onGoNeuronStake} style={{ alignSelf: 'flex-start' }}>
+            <Icon name="zap" size={13} stroke="var(--char-950)" /> Stake ICP → get a voucher
+          </Btn>
+          {!signedIn && (
+            <Btn variant="ghost" sm onClick={onSignIn} style={{ alignSelf: 'flex-start' }}>
+              <Icon name="key" size={12} /> Sign in first
+            </Btn>
           )}
         </div>
 
@@ -506,6 +442,82 @@ export default function Vouchers({
         dissolve. "Pay &amp; buy" escrows the exact ask first; if a purchase is
         interrupted, the escrow is always reclaimable.
       </span>
+
+      {/* ── Redeem modal (owner 2026-07-10): the voucher is the claim — the
+            holder picks HOW the ICP comes back ── */}
+      {redeemModal != null && (() => {
+        const v = (info?.my_vouchers ?? []).find((x) => x.id === redeemModal);
+        if (!v) return null;
+        const quote = buybackQuoteE8s(v.amount_e8s, info?.buyback_discount_bps ?? 1500);
+        const canBuyback = buybackAvailable(v.amount_e8s, info?.buyback_discount_bps ?? 1500, info?.buyback_fund_e8s ?? 0n);
+        const opt: React.CSSProperties = {
+          border: '1px solid var(--border)', borderRadius: 10, padding: 14,
+          background: 'var(--bg-alt)', width: '100%',
+        };
+        return (
+          <div
+            onClick={() => setRedeemModal(null)}
+            style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,0.55)', display: 'grid', placeItems: 'center', padding: 16 }}
+          >
+            <div className="col" onClick={(e) => e.stopPropagation()} style={{
+              gap: 12, maxWidth: 440, width: '100%', background: 'var(--surface)',
+              border: '1px solid var(--border-hi)', borderRadius: 14, padding: 20,
+            }}>
+              <span className="row" style={{ justifyContent: 'space-between' }}>
+                <b style={{ fontSize: 15 }}>Redeem {fmtICP(v.amount_e8s)} ICP</b>
+                <button onClick={() => setRedeemModal(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--fg-2)' }} aria-label="Close">
+                  <Icon name="x" size={14} />
+                </button>
+              </span>
+              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
+                Your voucher is the claim on this ICP — choose how it comes back to you.
+              </span>
+
+              <div className="col" style={{ ...opt }}>
+                <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                  <b style={{ fontSize: 13.5 }}>Wait for the dissolve</b>
+                  <Chip tone="ok">100% · {fmtICP(v.amount_e8s)} ICP</Chip>
+                </span>
+                <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
+                  The full amount pays your wallet automatically after the {TIER_META[v.tier].label} dissolve. Nothing to claim.
+                </span>
+                <Btn variant="primary" sm onClick={() => redeem(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                  {busy === `redeem-${v.id}` ? <LiveDot size={7} /> : <Icon name="clock" size={12} stroke="var(--char-950)" />} Start the dissolve
+                </Btn>
+              </div>
+
+              <div className="col" style={{ ...opt, opacity: canBuyback ? 1 : 0.65 }}>
+                <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                  <b style={{ fontSize: 13.5 }}>Claim instantly</b>
+                  <Chip tone="burn">85% · {fmtICP(quote)} ICP now</Chip>
+                </span>
+                <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
+                  {canBuyback
+                    ? 'The house buys your voucher on the spot — an optional express-exit fee of 15%.'
+                    : 'Temporarily unavailable — the buyback fund is replenishing. The other two options always work.'}
+                </span>
+                <Btn variant="secondary" sm onClick={() => buyback(v)} disabled={busy !== null || !canBuyback} style={{ alignSelf: 'flex-start' }}>
+                  {busy === `buyback-${v.id}` ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Take {fmtICP(quote)} ICP now
+                </Btn>
+              </div>
+
+              <div className="col" style={{ ...opt }}>
+                <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                  <b style={{ fontSize: 13.5 }}>Sell at market value</b>
+                  <Chip tone="pending">you set the ask</Chip>
+                </span>
+                <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
+                  List it on the marketplace — a buyer takes over the position and
+                  you may beat the instant-exit price.
+                </span>
+                <Btn variant="secondary" sm onClick={() => { setRedeemModal(null); setListId(v.id); setPriceText(''); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                  <Icon name="coins" size={12} /> List it for sale
+                </Btn>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

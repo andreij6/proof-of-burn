@@ -1851,6 +1851,10 @@ service : (InitPayload) -> {
   wrap_stake_voucher : (nat64, StakeTier) -> (BalanceResult);
   // Unwrap back to a plain stake (burns the NFT). Never flag-gated.
   unwrap_stake_voucher : (nat64) -> (Result);
+  // Voucher-native classic unstake: burn the voucher, dissolve, pay the
+  // owner 100% after the tier's term. Never flag-gated.
+  redeem_stake_voucher : (nat64) -> (BalanceResult);
+  dev_seed_mock_vouchers : (nat32) -> (variant { Ok : nat32; Err : text });
   // List / cancel a marketplace ask in ICP e8s.
   list_voucher : (nat64, nat64) -> (Result);
   cancel_voucher_listing : (nat64) -> (Result);

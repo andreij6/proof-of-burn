@@ -6836,6 +6836,10 @@ async fn stake(amount_e8s: u64, tier: StakeTier) -> Result<(), String> {
     if let Err(e) = advance_staking_bootstrap().await {
         canister_print(&format!("stake: bootstrap deferred to sweep: {}", e));
     }
+    // Owner 2026-07-10: staking issues the voucher NFT immediately — no
+    // manual wrap step (best-effort; plain stake stands if minting can't).
+    let _ = auto_issue_voucher(caller, tier).await;
+
     Ok(())
 }
 
@@ -18927,6 +18931,132 @@ fn get_voucher_market() -> VoucherMarketInfo {
 /// buyback's neuron split stays valid. EA/Booster stakes are NOT wrappable
 /// (separate map, permanent by design).
 #[ic_cdk::update]
+/// Auto-issue a voucher for a freshly landed stake (owner 2026-07-10: no
+/// manual wrap — staking IS receiving the NFT). Converts the WHOLE-ICP part
+/// of the caller's plain stake row into a Backed voucher; any sub-ICP
+/// remainder stays a plain row. Best-effort: if the NFT canister is not
+/// configured or the mint fails, the plain stake stands untouched (mainnet-
+/// safe until voucher_nft is wired).
+async fn auto_issue_voucher(user: Principal, tier: StakeTier) -> Option<u64> {
+    if !feature_enabled(FLAG_STAKE_VOUCHERS) || voucher_nft_cid().is_err() {
+        return None;
+    }
+    let key = stake_key(tier, user);
+    let stake = STAKES.with(|m| m.borrow().get(&key))?;
+    let cfg = voucher_config();
+    let whole = (stake.amount_e8s / ONE_ICP_E8S) * ONE_ICP_E8S;
+    if whole < cfg.min_wrap_e8s {
+        return None;
+    }
+    let now = current_time();
+    let id = NEXT_VOUCHER_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    // Same debit-then-mint-then-revert dance as the manual path.
+    let stake_backup = Some(stake.clone());
+    let mut debited = stake.clone();
+    debited.amount_e8s -= whole;
+    debited.last_action_at = now;
+    if debited.amount_e8s == 0 {
+        STAKES.with(|m| { m.borrow_mut().remove(&key); });
+    } else {
+        STAKES.with(|m| { m.borrow_mut().insert(key.clone(), debited); });
+    }
+    if let Err(e) = voucher_nft_mint(id, user, VoucherClass::Backed, tier.idx(), whole, None).await {
+        canister_print(&format!("auto_issue_voucher: mint failed, stake stays plain: {}", e));
+        if let Some(orig) = stake_backup {
+            STAKES.with(|m| { m.borrow_mut().insert(key, orig); });
+        }
+        return None;
+    }
+    VOUCHERS.with(|m| {
+        m.borrow_mut().insert(id, VoucherRecord {
+            id,
+            class: VoucherClass::Backed,
+            tier: tier.idx(),
+            amount_e8s: whole,
+            owner: user,
+            minted_at: now,
+            expires_at: None,
+            listed_price_e8s: None,
+        });
+    });
+    staking_audit("voucher_auto_issue", user, whole, id);
+    Some(id)
+}
+
+/// Local-dev: populate the marketplace with N mock listed vouchers owned by
+/// synthetic principals so the grid is visualizable. NOT pool-backed — local
+/// nets only (hard is_local guard), admin-gated.
+#[ic_cdk::update]
+async fn dev_seed_mock_vouchers(n: u32) -> Result<u32, String> {
+    require_admin()?;
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    if !config.is_local {
+        return Err("LOCAL_ONLY".to_string());
+    }
+    let now = current_time();
+    let mut made = 0u32;
+    for i in 0..n.min(24) {
+        let id = NEXT_VOUCHER_ID.with(|c| {
+            let id = *c.borrow().get();
+            c.borrow_mut().set(id + 1);
+            id
+        });
+        // Synthetic self-auth-shaped owners (derived, stable per index).
+        let mut bytes = [0u8; 10];
+        bytes[0..8].copy_from_slice(&(9_100_000u64 + i as u64).to_be_bytes());
+        bytes[9] = 0x02;
+        let owner = Principal::from_slice(&bytes);
+        let tier_idx = (i % 3) as u8;
+        let amount = ONE_ICP_E8S * [2u64, 5, 10, 25, 3, 7][i as usize % 6];
+        // Asks scatter around principal: some discounted, some premium.
+        let ask = amount * [88u64, 95, 100, 104, 92, 110][i as usize % 6] / 100;
+        if voucher_nft_mint(id, owner, VoucherClass::Backed, tier_idx, amount, None).await.is_err() {
+            continue;
+        }
+        VOUCHERS.with(|m| {
+            m.borrow_mut().insert(id, VoucherRecord {
+                id, class: VoucherClass::Backed, tier: tier_idx, amount_e8s: amount,
+                owner, minted_at: now, expires_at: None, listed_price_e8s: Some(ask),
+            });
+        });
+        made += 1;
+    }
+    Ok(made)
+}
+
+/// Redeem = the voucher-native classic unstake (owner 2026-07-10 modal:
+/// "wait for dissolve" choice). Burns the voucher, restores the claim to a
+/// plain stake row, and immediately starts the standard unstake — the FULL
+/// amount pays the owner after the tier's dissolve. Never flag-gated (exit).
+#[ic_cdk::update]
+async fn redeem_stake_voucher(id: u64) -> Result<u64, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let v = VOUCHERS.with(|m| m.borrow().get(&id)).ok_or("NOT_YOUR_VOUCHER")?;
+    if v.owner != caller {
+        return Err("NOT_YOUR_VOUCHER".to_string());
+    }
+    if matches!(v.class, VoucherClass::Promo) {
+        return Err("PROMO_NOT_ALLOWED".to_string());
+    }
+    if v.listed_price_e8s.is_some() {
+        return Err("VOUCHER_LISTED".to_string());
+    }
+    let tier = tier_from_idx(v.tier);
+    let amount = v.amount_e8s;
+    // Leg 1: voucher → plain row (burn NFT; restore STAKES). Same-caller
+    // call into the unwrap endpoint fn keeps registry/NFT in lockstep.
+    unwrap_stake_voucher(id).await?;
+    // Leg 2: the classic unstake (split + dissolve, pays the owner 100%).
+    // If this leg fails (pool constraints), the claim safely REMAINS a plain
+    // stake row — the user can retry or restake; nothing is lost.
+    unstake(amount, tier).await.map_err(|e| format!("UNSTAKE_AFTER_REDEEM: {}", e))
+}
+
 async fn wrap_stake_voucher(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     require_authenticated()?;
     if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
@@ -29210,19 +29340,27 @@ mod tests {
         set_mock_caller(alice);
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
-        stake(500_000_000, StakeTier::SixMonths).await.unwrap(); // 5 ICP
+        // Owner model (2026-07-10): staking AUTO-ISSUES the voucher — the
+        // whole 5-ICP stake becomes a voucher; no plain row remains (stake
+        // itself enforces whole-ICP amounts).
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap();
         assert!(conservation_holds(StakeTier::SixMonths));
         let before = user_daily_tickets(alice);
         assert!(before > 0);
+        let auto_id = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).expect("stake auto-issued a voucher");
+        assert_eq!(VOUCHERS.with(|m| m.borrow().get(&auto_id).unwrap().amount_e8s), 500_000_000);
+        assert!(STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).is_none()),
+            "whole stake moved into the voucher");
 
-        // Guard gauntlet.
+        // Unwrap back to a plain row (legacy path), then the manual-wrap
+        // guard gauntlet still holds, then re-wrap 3 of the 5 ICP.
+        unwrap_stake_voucher(auto_id).await.unwrap();
+        assert!(conservation_holds(StakeTier::SixMonths));
+        assert_eq!(user_daily_tickets(alice), before, "unwrap is grant-neutral");
         assert_eq!(wrap_stake_voucher(50_000_000, StakeTier::SixMonths).await.unwrap_err(), "BELOW_MINIMUM");
         assert_eq!(wrap_stake_voucher(150_000_000, StakeTier::SixMonths).await.unwrap_err(), "WHOLE_ICP_ONLY");
         assert_eq!(wrap_stake_voucher(600_000_000, StakeTier::SixMonths).await.unwrap_err(), "INSUFFICIENT_STAKE");
         assert_eq!(wrap_stake_voucher(100_000_000, StakeTier::TwoYears).await.unwrap_err(), "NO_STAKE");
-
-        // Wrap 3 of 5 ICP: stake row shrinks, claim moves to the registry,
-        // pool principal unchanged, tickets IDENTICAL (wrapped == staked).
         let id = wrap_stake_voucher(300_000_000, StakeTier::SixMonths).await.unwrap();
         assert_eq!(
             STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
@@ -29339,6 +29477,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stake_auto_issues_voucher_and_redeem_dissolves_to_owner() {
+        enable_vouchers();
+        clear_vouchers();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        set_mock_time(Some(1_700_000_000_000_000_000));
+
+        // A second staker thickens the pool so alice's full redeem clears
+        // the NNS 1-ICP pool floor (production pools have many stakers).
+        let dave = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(dave);
+        stake(200_000_000, StakeTier::OneYear).await.unwrap();
+        set_mock_caller(alice);
+
+        // Owner model: staking IS receiving the NFT — no wrap step.
+        stake(400_000_000, StakeTier::OneYear).await.unwrap();
+        let vid = VOUCHERS.with(|m| m.borrow().iter().filter(|e| e.value().owner == alice).map(|e| *e.key()).max())
+            .expect("voucher issued at stake time");
+        let v = VOUCHERS.with(|m| m.borrow().get(&vid)).unwrap();
+        assert_eq!(v.amount_e8s, 400_000_000);
+        assert!(STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::OneYear, alice)).is_none()));
+        assert!(user_daily_tickets(alice) > 0, "voucher earns like the stake it is");
+        assert!(conservation_holds(StakeTier::OneYear));
+
+        // Redeem (the modal's "wait for dissolve" path): voucher burns, a
+        // pending unstake for the FULL amount pays the OWNER.
+        let pid = redeem_stake_voucher(vid).await.unwrap();
+        assert!(VOUCHERS.with(|m| m.borrow().get(&vid).is_none()), "voucher consumed");
+        let pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(pending.user, alice);
+        assert_eq!(pending.amount_e8s, 400_000_000);
+        assert_eq!(pending.payout_subaccount, None, "pays the owner, not the fund");
+        assert_eq!(user_daily_tickets(alice), 0, "last stake gone → grants stop");
+
+        // Redeeming a promo voucher is impossible.
+        set_mock_caller(carol());
+        admin_set_promo_campaign(true).unwrap();
+        set_mock_caller(alice);
+        let promo_id = claim_promo_voucher(None).await.unwrap();
+        assert_eq!(redeem_stake_voucher(promo_id).await.unwrap_err(), "PROMO_NOT_ALLOWED");
+        clear_vouchers();
+    }
+
+    #[tokio::test]
     async fn test_voucher_buyback_full_saga_and_balance_gate() {
         enable_vouchers();
         clear_vouchers();
@@ -29348,6 +29532,9 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
         stake(500_000_000, StakeTier::SixMonths).await.unwrap(); // 5 ICP, pool Ready
+        // stake auto-issues a 5-ICP voucher; unwrap it and re-wrap a 2-ICP slice.
+        let auto = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
+        unwrap_stake_voucher(auto).await.unwrap();
         let id = wrap_stake_voucher(200_000_000, StakeTier::SixMonths).await.unwrap(); // 2 ICP claim
 
         // Money sim on: fund the buyback wallet + treasury (front + refills).
@@ -29418,6 +29605,11 @@ mod tests {
         // (the acct sim is live now — fund alice's stake deposit escrow)
         acct_set(self_id, Some(derive_subaccount(&alice, STAKE_SEED)), 300_000_000 + 2 * ICP_FEE_E8S);
         stake(300_000_000, StakeTier::SixMonths).await.unwrap();
+        // auto-issue swept the ENTIRE row (fresh 3 + part-1's plain 3 = 6 ICP
+        // voucher); unwrap it and wrap the original scenario's 3-ICP slice so
+        // the pool-floor arithmetic matches (6-ICP buyback would floor out).
+        let auto2 = VOUCHERS.with(|m| m.borrow().iter().filter(|e| e.value().owner == alice).map(|e| *e.key()).max()).unwrap();
+        unwrap_stake_voucher(auto2).await.unwrap();
         let id2 = wrap_stake_voucher(300_000_000, StakeTier::SixMonths).await.unwrap();
         acct_set(self_id, Some(BUYBACK_SUBACCOUNT), 1_000_000); // 0.01 ICP
         assert_eq!(buyback_voucher(id2).await.unwrap_err(), "BUYBACK_UNAVAILABLE");
@@ -29435,6 +29627,8 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
         stake(300_000_000, StakeTier::SixMonths).await.unwrap();
+        let auto_j = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
+        unwrap_stake_voucher(auto_j).await.unwrap();
         let id = wrap_stake_voucher(200_000_000, StakeTier::SixMonths).await.unwrap();
 
         acct_reset();

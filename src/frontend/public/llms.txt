@@ -31,7 +31,7 @@ type BalanceResult = variant { Ok : nat64; Err : text };
 type LedgerAccount = record { owner : principal; subaccount : opt blob };
 service : {
   get_stake_deposit_address : () -> (LedgerAccount) query;
-  stake : (nat64, StakeTier) -> (Result);
+  stake : (nat64, StakeTier) -> (Result); // ALSO auto-issues a Stake Voucher NFT
   unstake : (nat64, StakeTier) -> (BalanceResult);
   get_my_stake : () -> (UserStakeInfo) query;
   get_lottery_info : () -> (LotteryInfo) query;
@@ -82,6 +82,12 @@ const info = await cycleBurn.get_lottery_info();
 Also: get_my_stake() (per-tier positions), get_my_ticket_breakdown() (ticket
 sources), list_recent_winners() (winners feed).
 
+## Voucher note (2026-07-10)
+Staking AUTO-ISSUES a Stake Voucher NFT — the voucher IS the stake. The
+holder redeems via redeem_stake_voucher (100% after dissolve), sells it on
+the marketplace, or takes the instant 15%-discount buyback. Tickets always
+follow the voucher's current owner.
+
 ## Flow 3 — Unstake (the exit is always open)
 const out = await cycleBurn.unstake(amount, { SixMonths: null });
 - Ok is a pending-unstake id. The ICP pays out AUTOMATICALLY to the user once
@@ -115,6 +121,7 @@ service additions : {
   cancel_voucher_listing : (nat64) -> (variant { Ok; Err : text });
   get_voucher_sale_account : (nat64) -> (LedgerAccount) query;        // buyer escrow
   buy_voucher : (nat64) -> (variant { Ok; Err : text });
+  redeem_stake_voucher : (nat64) -> (BalanceResult); // burn voucher -> dissolve -> 100% to owner
   buyback_voucher : (nat64) -> (variant { Ok : nat64; Err : text });  // Ok = ICP e8s paid
   claim_promo_voucher : (opt principal) -> (variant { Ok : nat64; Err : text });
   get_voucher_market : () -> (VoucherMarketInfo) query;
