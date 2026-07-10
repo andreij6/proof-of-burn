@@ -52,10 +52,13 @@ export default function MoneyBall({ fill, width = 210, height = 260 }: MoneyBall
     canvas.height = height * dpr;
 
     const slots = coinSlots(COIN_R, MAX_COINS);
-    // Deterministic per-coin jitter so the pile looks organic, not gridded.
+    // Deterministic per-coin jitter + tilt so the pile reads as tossed coins.
     const jitter = slots.map((_, i) => ({
       dx: Math.sin(i * 12.9898) * 0.018,
       dy: Math.cos(i * 78.233) * 0.012,
+      // Face squash: 1 = face-on disc, low = nearly edge-on coin.
+      squash: 0.42 + ((Math.sin(i * 7.13) + 1) / 2) * 0.5,
+      rot: Math.sin(i * 5.31) * 0.7, // resting rotation, ±40°
       spin: (Math.sin(i * 3.7) + 1) / 2,
     }));
 
@@ -108,38 +111,67 @@ export default function MoneyBall({ fill, width = 210, height = 260 }: MoneyBall
       ctx.save();
       ctx.beginPath(); ctx.arc(0, cy, R * 0.985, 0, Math.PI * 2); ctx.clip();
       const rc = COIN_R * R;
-      const coin = (px: number, py: number, spin: number, glintPhase: number) => {
-        // ICP-orange token with a rim and a tiny ∞ mark.
-        const g = ctx.createRadialGradient(px - rc * 0.35, py - rc * 0.35, rc * 0.15, px, py, rc);
-        g.addColorStop(0, '#FF9A5C');
-        g.addColorStop(1, '#E85A10');
+      /** A GOLD coin: tilted disc with visible edge thickness, rim ring and
+       *  a glint that sweeps with time — reads as a coin, never a ball. */
+      const coin = (px: number, py: number, squash: number, rot: number, glintPhase: number) => {
+        const thick = rc * 0.34 * (1 - squash + 0.25); // edge shows more when tilted
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(rot);
+        // Edge (the coin's thickness): darker gold band under the face.
+        ctx.fillStyle = '#8f6a12';
+        ctx.beginPath();
+        ctx.ellipse(0, thick * 0.5, rc, rc * squash, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Face: bright gold with an off-center sheen.
+        const g = ctx.createRadialGradient(-rc * 0.3, -rc * 0.3 * squash, rc * 0.1, 0, 0, rc);
+        g.addColorStop(0, '#ffe08a');
+        g.addColorStop(0.55, '#f3c53d');
+        g.addColorStop(1, '#c9931a');
         ctx.fillStyle = g;
-        ctx.beginPath(); ctx.arc(px, py, rc, 0, Math.PI * 2); ctx.fill();
-        ctx.strokeStyle = 'rgba(120,45,5,0.55)';
+        ctx.beginPath();
+        ctx.ellipse(0, 0, rc, rc * squash, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(122,88,10,0.7)';
         ctx.lineWidth = 1;
         ctx.stroke();
-        // ∞ mark (two small loops), scale x by spin for a lazy shimmer.
-        const sx = 0.55 + 0.45 * Math.abs(Math.sin(glintPhase));
-        ctx.strokeStyle = 'rgba(58,20,2,0.8)';
-        ctx.lineWidth = Math.max(1, rc * 0.18);
+        // Inner rim ring (milled edge look).
+        ctx.strokeStyle = 'rgba(146,106,14,0.75)';
+        ctx.lineWidth = Math.max(0.8, rc * 0.1);
         ctx.beginPath();
-        ctx.ellipse(px - rc * 0.28 * sx, py, rc * 0.24 * sx, rc * 0.24, 0, 0, Math.PI * 2);
-        ctx.ellipse(px + rc * 0.28 * sx, py, rc * 0.24 * sx, rc * 0.24, 0, 0, Math.PI * 2);
+        ctx.ellipse(0, 0, rc * 0.72, rc * 0.72 * squash, 0, 0, Math.PI * 2);
         ctx.stroke();
-        void spin;
+        // ∞ mark on the face.
+        ctx.strokeStyle = 'rgba(122,88,10,0.9)';
+        ctx.lineWidth = Math.max(1, rc * 0.16);
+        ctx.beginPath();
+        ctx.ellipse(-rc * 0.24, 0, rc * 0.2, rc * 0.2 * squash, 0, 0, Math.PI * 2);
+        ctx.ellipse(rc * 0.24, 0, rc * 0.2, rc * 0.2 * squash, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        // Sweeping glint.
+        const gl = Math.sin(glintPhase);
+        if (gl > 0.82) {
+          ctx.strokeStyle = `rgba(255,246,214,${(gl - 0.82) * 4})`;
+          ctx.lineWidth = rc * 0.14;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, rc * 0.86, rc * 0.86 * squash, 0, -2.1, -1.5);
+          ctx.stroke();
+        }
+        ctx.restore();
       };
       for (let i = 0; i < shown; i++) {
         const p = slots[i], j = jitter[i];
-        coin((p.x + j.dx) * R, cy - (p.y + j.dy) * R, j.spin, t * 0.6 + i * 1.7);
+        coin((p.x + j.dx) * R, cy - (p.y + j.dy) * R, j.squash, j.rot, t * 0.6 + i * 1.7);
       }
-      // The falling coin.
+      // The falling coin — tumbles edge-over-face on the way down.
       if (dropProgress < 1 && shown < slots.length) {
         const p = slots[shown], j = jitter[shown];
         const fromY = cy - R - 16;
         const toY = cy - (p.y + j.dy) * R;
         const eased = dropProgress * dropProgress; // accelerate down
         const bounce = dropProgress > 0.92 ? Math.sin((dropProgress - 0.92) / 0.08 * Math.PI) * rc * 0.35 : 0;
-        coin((p.x + j.dx) * R * Math.min(1, dropProgress * 1.6), fromY + (toY - fromY) * eased - bounce, j.spin, t);
+        const tumble = Math.abs(Math.sin(dropProgress * Math.PI * 2.5)) * 0.85 + 0.15;
+        coin((p.x + j.dx) * R * Math.min(1, dropProgress * 1.6), fromY + (toY - fromY) * eased - bounce, tumble, dropProgress * 5, t);
       }
       ctx.restore();
 
