@@ -375,7 +375,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
             <div style={{ display: 'flex', gap: 56, flexWrap: 'wrap' }}>
               <div>
                 <div style={{ ...COL_HEAD, marginBottom: 12 }}>Protocol</div>
-                {[['How it works', '#how'], ['Odds', '#odds'], ['Winners', '#winners']].map(([t, href]) => (
+                {[['How it works', '#how'], ['Odds', '#odds'], ['Winners', '#winners'], ['Developer docs', '#/dev-docs']].map(([t, href]) => (
                   <div key={t} style={{ marginBottom: 8 }}><a href={href} style={{ fontSize: 13, color: 'var(--fg-1)', textDecoration: 'none' }}>{t}</a></div>
                 ))}
               </div>

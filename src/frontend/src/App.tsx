@@ -28,6 +28,7 @@ import type {
 } from "./bindings/backend";
 import LotteryHub from "./LotteryHub";
 import NeuronStakePage from "./NeuronStakePage";
+import DevDocs from "./DevDocs";
 import Explorer from "./Explorer";
 import XFarm from "./XFarm";
 import MiniGolfPage from "./MiniGolfPage";
@@ -49,13 +50,15 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   voting: '/voting',
   earn: '/earn',
   staking: '/staking',
   lottery: '/lottery',
+  // Developer docs — how to embed the No-Loss Lottery in another dapp.
+  devdocs: '/dev-docs',
   // Neuron Stake — the pooled-neuron staking page (was the Lottery hub's
   // "Stake to Earn Tickets" tab); Stake to Earn nav section.
   neuronstake: '/neuron-stake',
@@ -1982,6 +1985,17 @@ export default function App() {
         >
           <DiscordMark size={17} color="#5865F2" /> Join the ICP Dapp Factory
         </a>
+        <button
+          onClick={() => setPage('devdocs')}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 9, background: 'transparent',
+            border: 'none', cursor: 'pointer', textAlign: 'left',
+            color: 'var(--fg)', fontSize: 13.5, fontWeight: 500, marginBottom: 8,
+            padding: '0 0 0 2px',
+          }}
+        >
+          <Icon name="edit" size={15} stroke="var(--fg-2)" /> Developer docs
+        </button>
         <a
           href={OPENCHAT_URL} target="_blank" rel="noreferrer"
           style={{
@@ -2384,6 +2398,8 @@ export default function App() {
               onSignIn={handleLogin}
               onGoNeuronStake={() => setPage('neuronstake')}
             />
+          ) : page === 'devdocs' ? (
+            <DevDocs />
           ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
             <NeuronStakePage
               actor={actor}
