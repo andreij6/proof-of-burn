@@ -1854,6 +1854,8 @@ service : (InitPayload) -> {
   // Voucher-native classic unstake: burn the voucher, dissolve, pay the
   // owner 100% after the tier's term. Never flag-gated.
   redeem_stake_voucher : (nat64) -> (BalanceResult);
+  // Wallet rail: send a voucher to any principal (Plug/OISY and back).
+  transfer_voucher : (nat64, principal) -> (Result);
   dev_seed_mock_vouchers : (nat32) -> (variant { Ok : nat32; Err : text });
   // List / cancel a marketplace ask in ICP e8s.
   list_voucher : (nat64, nat64) -> (Result);

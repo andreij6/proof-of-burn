@@ -18693,7 +18693,10 @@ fn voucher_backed_e8s(user: Principal, tier: StakeTier) -> u64 {
             .iter()
             .filter(|e| {
                 let v = e.value();
+                // Owner rule (2026-07-10): a voucher LISTED FOR SALE is not
+                // lottery-eligible — its ticket stream pauses until delisted.
                 v.class == VoucherClass::Backed && v.owner == user && v.tier == tier.idx()
+                    && v.listed_price_e8s.is_none()
             })
             .map(|e| e.value().amount_e8s)
             .sum()
@@ -19026,6 +19029,40 @@ async fn dev_seed_mock_vouchers(n: u32) -> Result<u32, String> {
         made += 1;
     }
     Ok(made)
+}
+
+/// Transfer a voucher to any principal (the wallet's withdraw/deposit rail —
+/// send to your Plug/OISY principal, or back again from there). Owner-only,
+/// Backed + unlisted only; the recipient's ticket stream starts at the next
+/// daily grant. Never flag-gated (custody exit).
+#[ic_cdk::update]
+async fn transfer_voucher(id: u64, to: Principal) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    if to == Principal::anonymous() || to == get_canister_id() {
+        return Err("INVALID_PRINCIPAL".to_string());
+    }
+    let v = VOUCHERS.with(|m| m.borrow().get(&id)).ok_or("NOT_YOUR_VOUCHER")?;
+    if v.owner != caller {
+        return Err("NOT_YOUR_VOUCHER".to_string());
+    }
+    if matches!(v.class, VoucherClass::Promo) {
+        return Err("PROMO_NOT_ALLOWED".to_string());
+    }
+    if v.listed_price_e8s.is_some() {
+        return Err("VOUCHER_LISTED".to_string());
+    }
+    voucher_nft_transfer(caller, to, id).await?;
+    VOUCHERS.with(|m| {
+        let mut reg = m.borrow_mut();
+        if let Some(mut rec) = reg.get(&id) {
+            rec.owner = to;
+            reg.insert(id, rec);
+        }
+    });
+    staking_audit("voucher_transfer", caller, v.amount_e8s, id);
+    Ok(())
 }
 
 /// Redeem = the voucher-native classic unstake (owner 2026-07-10 modal:
@@ -29473,6 +29510,40 @@ mod tests {
         set_mock_caller(bob());
         let reclaimed = reclaim_escrow(EscrowKind::StakeVoucher, ExplorerToken::ICP, Some(id)).await.unwrap();
         assert_eq!(reclaimed, 55_000 - ICP_FEE_E8S, "leftover escrow minus the reclaim fee");
+        clear_vouchers();
+    }
+
+    #[tokio::test]
+    async fn test_listed_vouchers_pause_tickets_and_transfer_moves_the_stream() {
+        enable_vouchers();
+        clear_vouchers();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let dave = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(300_000_000, StakeTier::SixMonths).await.unwrap();
+        let vid = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
+        let earning = user_daily_tickets(alice);
+        assert!(earning > 0);
+
+        // Owner rule: LISTED ⇒ not lottery-eligible until delisted.
+        list_voucher(vid, 250_000_000).unwrap();
+        assert_eq!(user_daily_tickets(alice), 0, "listed voucher earns nothing");
+        cancel_voucher_listing(vid).unwrap();
+        assert_eq!(user_daily_tickets(alice), earning, "delisting resumes the stream");
+
+        // Wallet rail: transfer moves the claim AND the ticket stream.
+        assert_eq!(transfer_voucher(vid, Principal::anonymous()).await.unwrap_err(), "INVALID_PRINCIPAL");
+        list_voucher(vid, 250_000_000).unwrap();
+        assert_eq!(transfer_voucher(vid, dave).await.unwrap_err(), "VOUCHER_LISTED");
+        cancel_voucher_listing(vid).unwrap();
+        transfer_voucher(vid, dave).await.unwrap();
+        assert_eq!(VOUCHERS.with(|m| m.borrow().get(&vid).unwrap().owner), dave);
+        assert_eq!(user_daily_tickets(alice), 0);
+        assert_eq!(user_daily_tickets(dave), earning, "stream follows the voucher");
+        // Only the new owner can send it onward.
+        assert_eq!(transfer_voucher(vid, alice).await.unwrap_err(), "NOT_YOUR_VOUCHER");
         clear_vouchers();
     }
 
