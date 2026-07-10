@@ -1,5 +1,16 @@
 # Log
 
+## 2026-07-10 pm — Mainnet deploy 1fd90ee (lottery-first nav + mobile chrome)
+
+Governance (Voting + Neuron Syndicate) and Community (Explorer + X-Farm)
+nav groups now behind nav_governance/nav_community flags, BOTH OFF on
+prod — the nav is lottery-first (verified Off post-deploy); the app's
+universal fallback page is now the lottery (was voting). Mobile: no app
+name/logo (hamburger-only top bar, drawer header is just the ✕). Neuron
+Stake page decluttered to the lottery pattern (one title row + one
+how-it-works pill; embedded Staking header removed). Snapshot rotation:
+…26 deleted, …28 created (575 MiB; …27 retained).
+
 ## 2026-07-10 — Mainnet deploy 819f0a7 (No-Loss Lottery redesign)
 
 Frontend: lottery page rebuilt Lumina-style — giant glowing pot,
