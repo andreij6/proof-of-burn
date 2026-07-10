@@ -1,7 +1,6 @@
 import { Principal } from "@icp-sdk/core/principal";
 import { Icon, Eyebrow, MoreInfo, Chip, LiveDot } from "./ui";
 import Staking from "./Staking";
-import { VouchersBody } from "./Vouchers";
 
 // ==========================================
 // Neuron Stake — the single staking home (nav: Stake 4 Tickets). Staking
@@ -23,13 +22,12 @@ interface NeuronStakePageProps {
   isAdmin: boolean;
   treasuryCanFront: boolean;
   onSignIn: () => void;
-  onGoExchange: () => void;
   onActivity: () => void;
 }
 
 export default function NeuronStakePage({
   actor, identity, principal, host, rootKey, ledgerCanisterId,
-  isLocal, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity, onGoExchange,
+  isLocal, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity,
 }: NeuronStakePageProps) {
   return (
     <>
@@ -87,17 +85,7 @@ export default function NeuronStakePage({
         </div>
       </div>
 
-      <VouchersBody
-        actor={actor}
-        identity={identity}
-        principal={principal}
-        host={host}
-        rootKey={rootKey}
-        ledgerCanisterId={ledgerCanisterId}
-        onSignIn={onSignIn}
-        section="mine"
-        onGoExchange={onGoExchange}
-      />
+
 
       <Staking
         actor={actor}

@@ -137,12 +137,15 @@ interface VouchersBodyProps {
   section: 'mine' | 'exchange';
   /** After a successful listing, jump to the Voucher Exchange. */
   onGoExchange?: () => void;
+  /** Bare mode: no page container — render as a plain card column for
+   *  embedding inside another page's row (the lottery page). */
+  bare?: boolean;
 }
 
 const ticketsPerDay = (v: VoucherView) => Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8));
 
 export function VouchersBody({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, section, onGoExchange,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, section, onGoExchange, bare,
 }: VouchersBodyProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<VoucherMarketInfo | null>(null);
@@ -246,7 +249,7 @@ export function VouchersBody({
   // ── A voucher card in the "Your vouchers" list (unlisted + promo). ──
 
   return (
-    <div className="idea-board-container" style={{ paddingTop: 0, paddingBottom: 0 }}>
+    <div className={bare ? "col" : "idea-board-container"} style={bare ? { gap: 14, flex: '1 1 0', minWidth: 300 } : { paddingTop: 0, paddingBottom: 0 }}>
       {notice && (
         <div className="row" style={{ gap: 8, border: '1px solid var(--sprout)', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, color: 'var(--sprout-ink)' }}>
           <Icon name="checkCircle" size={14} stroke="var(--sprout-ink)" /> {notice}
@@ -272,7 +275,7 @@ export function VouchersBody({
             No vouchers here yet — stake ICP above and your voucher appears instantly, or claim a Golden Ticket when a campaign is live.
           </span>
         ) : (
-          <div style={{ overflowX: 'auto', width: '100%' }}>
+          <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 300, width: '100%' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
               <thead>
                 <tr className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'left' }}>

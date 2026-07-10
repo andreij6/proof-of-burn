@@ -2468,10 +2468,15 @@ export default function App() {
           ) : page === 'lottery' ? (
             <LotteryHub
               actor={actor}
+              identity={identity}
               principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
               onGoNeuronStake={() => setPage('neuronstake')}
+              onGoExchange={() => setPage('exchange')}
             />
           ) : page === 'devdocs' ? (
             <DevDocs />
@@ -2487,7 +2492,6 @@ export default function App() {
             />
           ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
             <NeuronStakePage
-              onGoExchange={() => setPage('exchange')}
               actor={actor}
               identity={identity}
               principal={principal}

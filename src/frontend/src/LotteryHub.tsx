@@ -10,15 +10,20 @@ import Lottery from "./Lottery";
 
 interface LotteryHubProps {
   actor: any;
+  identity: any;
   principal: Principal | null;
+  host: string;
+  rootKey?: Uint8Array;
+  ledgerCanisterId: string;
   isLocal: boolean;
   onSignIn: () => void;
   /** Stake CTAs navigate to the Neuron Stake page. */
   onGoNeuronStake: () => void;
+  onGoExchange: () => void;
 }
 
 export default function LotteryHub({
-  actor, principal, isLocal, onSignIn, onGoNeuronStake,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onGoNeuronStake, onGoExchange,
 }: LotteryHubProps) {
   return (
     <>
@@ -74,10 +79,15 @@ export default function LotteryHub({
 
       <Lottery
         actor={actor}
+        identity={identity}
         principal={principal}
+        host={host}
+        rootKey={rootKey}
+        ledgerCanisterId={ledgerCanisterId}
         isLocal={isLocal}
         onSignIn={onSignIn}
         onGoStaking={onGoNeuronStake}
+        onGoExchange={onGoExchange}
       />
     </>
   );

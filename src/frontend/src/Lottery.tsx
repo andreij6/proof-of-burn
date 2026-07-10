@@ -3,6 +3,7 @@ import { Principal } from "@icp-sdk/core/principal";
 import { DrawStatus, ExplorerToken } from "./bindings/backend";
 import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
+import { VouchersBody } from "./Vouchers";
 import { useErrorImpression } from "./analytics";
 
 // ==========================================
@@ -18,11 +19,17 @@ import { useErrorImpression } from "./analytics";
 
 interface LotteryProps {
   actor: any;
+  identity: any;
   principal: Principal | null;
+  host: string;
+  rootKey?: Uint8Array;
+  ledgerCanisterId: string;
   isLocal: boolean;
   onSignIn: () => void;
   /** Jump to the Staking tab of the Earn page — where tickets come from. */
   onGoStaking: () => void;
+  /** After listing a voucher, jump to the Voucher Exchange. */
+  onGoExchange: () => void;
 }
 
 /** Countdown split into DD/HH/MM/SS block values; null when passed. */
@@ -58,7 +65,7 @@ const TICKET_SOURCE_LABELS: Record<string, string> = {
   test: 'Test grants',
 };
 
-export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaking }: LotteryProps) {
+export default function Lottery({ actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onGoStaking, onGoExchange }: LotteryProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [info, setInfo] = useState<LotteryInfo | null>(null);
@@ -354,9 +361,9 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
       </div>
       )}
 
-      <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
-        {/* ── Your tickets ── */}
-        <div className="col" style={{ ...card, gap: 10, flex: '1 1 240px', minWidth: 240 }}>
+      <div className="row" style={{ gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        {/* ── Your tickets (50/50 with Your vouchers) ── */}
+        <div className="col" style={{ ...card, gap: 10, flex: '1 1 0', minWidth: 280 }}>
           <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
             <Eyebrow>Your tickets</Eyebrow>
             {info?.claimed_today && <Chip tone="ok"><Icon name="check" size={11} /> Claimed today</Chip>}
@@ -431,6 +438,20 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
           )}
         </div>
 
+        {/* ── Your vouchers — manage stake positions right where the tickets
+              are; scrolls when taller than the tickets card ── */}
+        <VouchersBody
+          actor={actor}
+          identity={identity}
+          principal={principal}
+          host={host}
+          rootKey={rootKey}
+          ledgerCanisterId={ledgerCanisterId}
+          onSignIn={onSignIn}
+          section="mine"
+          onGoExchange={onGoExchange}
+          bare
+        />
       </div>
 
       {info?.last_winner != null && (
