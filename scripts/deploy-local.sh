@@ -61,9 +61,9 @@ for L in ledger ckbtc-ledger cketh-ledger ckusdc-ledger ckusdt-ledger; do
 done
 
 # ── 3. Backend + course_nft + frontend (upgrade in place, asset sync) ───────
-note "Deploying backend + course_nft + frontend…"
-icp deploy backend course_nft frontend -e "$ENV" --identity "$DEPLOY_IDENTITY" --yes
-ok "backend + course_nft + frontend deployed"
+note "Deploying backend + course_nft + voucher_nft + frontend…"
+icp deploy backend course_nft voucher_nft frontend -e "$ENV" --identity "$DEPLOY_IDENTITY" --yes
+ok "backend + course_nft + voucher_nft + frontend deployed"
 
 BACKEND_ID=$(canister_id backend)
 COURSE_NFT_ID=$(canister_id course_nft)
@@ -121,6 +121,24 @@ ok "Early Adopters + arcade_minigolf flags enabled (local); arcade forced OFF (d
 # course_nft canister id. Both calls are idempotent.
 icp canister call course_nft set_minter "(principal \"$BACKEND_ID\")" -e "$ENV" --identity "$DEPLOY_IDENTITY" >/dev/null
 icp canister call backend admin_set_course_nft_canister "(principal \"$COURSE_NFT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+# Stake vouchers: same wiring dance for voucher_nft (minter + backend config +
+# controller so the cycle guard can read its balance), then enable the flag,
+# open the promo claim campaign and seed the buyback fund so the 85% instant
+# exit is live-testable out of the box.
+VOUCHER_NFT_ID=$(canister_id voucher_nft)
+icp canister call voucher_nft set_minter "(principal \"$BACKEND_ID\")" -e "$ENV" --identity "$DEPLOY_IDENTITY" >/dev/null
+icp canister call backend admin_set_voucher_nft_canister "(principal \"$VOUCHER_NFT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+icp canister settings update voucher_nft --add-controller "$BACKEND_ID" -e "$ENV" --identity "$DEPLOY_IDENTITY" >/dev/null \
+  && ok "backend added as voucher_nft controller" \
+  || note "voucher_nft controller add failed (cycle guard will no-op)"
+icp canister call backend admin_set_feature_flag '("stake_vouchers", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+icp canister call backend admin_set_promo_campaign '(true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+# Seed the buyback fund with 10 ICP from the minting identity (the fund lives
+# on the backend's [10u8;32] subaccount).
+BUYBACK_SUB="\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a\\0a"
+icp canister call ledger icrc1_transfer "(record { to = record { owner = principal \"$BACKEND_ID\"; subaccount = opt blob \"$BUYBACK_SUB\" }; amount = 1_000_000_000 : nat; fee = null; memo = null; from_subaccount = null; created_at_time = null })" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null \
+  && ok "buyback fund seeded with 10 ICP" \
+  || note "buyback fund seed failed (buyback disabled until funded)"
 # Backend must CONTROL course_nft so admin_get_course_nft_cycles / the sweep's
 # cycle guard can read its balance (deposit_cycles itself needs no control).
 # Mirrors the mainnet ops step for the frontend canister. Idempotent.

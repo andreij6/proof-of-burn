@@ -2,6 +2,7 @@
 members = [
     "src/backend",
     "src/course_nft",
+    "src/voucher_nft",
     "src/xfarm_farmer"
 ]
 resolver = "2"

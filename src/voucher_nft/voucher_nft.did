@@ -1,0 +1,68 @@
+// Stake Voucher NFT (ICRC-7) — hand-maintained, mirrors src/voucher_nft/src/lib.rs.
+// The backend canister is the sole minter/burner/transfer authority; holders
+// interact through the backend's marketplace/buyback endpoints, never here.
+
+type Value = variant {
+  Blob : blob;
+  Text : text;
+  Nat : nat;
+  Int : int;
+  Array : vec Value;
+  Map : vec record { text; Value };
+};
+
+type Account = record { owner : principal; subaccount : opt blob };
+
+type VoucherClass = variant { Backed; Promo };
+
+type NftConfig = record {
+  minter : principal;
+  admin : principal;
+  symbol : text;
+  name : text;
+  description : text;
+};
+
+type InitArgs = record {
+  minter : principal;
+  admin : principal;
+  symbol : opt text;
+  name : opt text;
+};
+
+type MintArgs = record {
+  token_id : nat64;
+  to : principal;
+  class : VoucherClass;
+  tier : nat8;
+  amount_e8s : nat64;
+  expires_at : opt nat64;
+};
+
+type Result = variant { Ok; Err : text };
+type MintResult = variant { Ok : nat64; Err : text };
+
+service : (InitArgs) -> {
+  // Admin
+  set_minter : (principal) -> (Result);
+  set_admin : (principal) -> (Result);
+  get_nft_config : () -> (NftConfig) query;
+
+  // Minter (backend) custodial surface
+  mint : (MintArgs) -> (MintResult);
+  custodial_transfer : (principal, principal, nat64) -> (Result);
+  burn : (nat64) -> (Result);
+
+  // ICRC-7
+  icrc7_symbol : () -> (text) query;
+  icrc7_name : () -> (text) query;
+  icrc7_description : () -> (opt text) query;
+  icrc7_total_supply : () -> (nat) query;
+  icrc7_supply_cap : () -> (opt nat) query;
+  icrc7_collection_metadata : () -> (vec record { text; Value }) query;
+  icrc7_owner_of : (vec nat) -> (vec opt Account) query;
+  icrc7_balance_of : (vec Account) -> (vec nat) query;
+  icrc7_tokens : (opt nat, opt nat) -> (vec nat) query;
+  icrc7_tokens_of : (Account, opt nat, opt nat) -> (vec nat) query;
+  icrc7_token_metadata : (vec nat) -> (vec opt vec record { text; Value }) query;
+}
