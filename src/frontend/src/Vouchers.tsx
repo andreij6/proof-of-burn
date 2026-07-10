@@ -365,7 +365,7 @@ export function VouchersBody({
                       <span className="mono" style={{ fontWeight: 700 }}>{fmtICP(v.listed_price_e8s!)} ICP{usd(v.listed_price_e8s!) ? ` · ${usd(v.listed_price_e8s!)}` : ''}</span>
                     </div>
                   </div>
-                  <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'muted' : 'pending'} style={{ alignSelf: 'flex-start', height: 17, fontSize: 9.5 }}>
+                  <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'danger' : 'pending'} style={{ alignSelf: 'flex-start', height: 17, fontSize: 9.5 }}>
                     {delta < 0 ? `${Math.abs(delta)}% under value` : delta > 0 ? `${delta}% over value` : 'at value'}
                   </Chip>
                   <Btn variant="secondary" sm onClick={() => cancelListing(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
@@ -396,7 +396,7 @@ export function VouchersBody({
               const delta = listingDeltaPct(v.listed_price_e8s ?? 0n, v.amount_e8s);
               const isMine = signedIn && principal && v.owner.toString() === principal.toString();
               return (
-                <div key={String(v.id)} className="col" style={{ gap: 8, padding: 12, borderRadius: 10, border: `1px solid ${delta < 0 ? 'var(--sprout)' : 'var(--border)'}`, background: 'var(--surface)' }}>
+                <div key={String(v.id)} className="col" style={{ gap: 8, padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)' }}>
                   <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
                     <b style={{ fontSize: 13.5 }}>{TIER_META[v.tier].short} voucher</b>
                     <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>#{String(v.id)}</span>
@@ -411,7 +411,7 @@ export function VouchersBody({
                       <span className="mono" style={{ fontWeight: 700 }}>{fmtICP(v.listed_price_e8s ?? 0n)} ICP{usd(v.listed_price_e8s ?? 0n) ? ` · ${usd(v.listed_price_e8s ?? 0n)}` : ''}</span>
                     </div>
                   </div>
-                  <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'muted' : 'pending'} style={{ alignSelf: 'flex-start', height: 17, fontSize: 9.5 }}>
+                  <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'danger' : 'pending'} style={{ alignSelf: 'flex-start', height: 17, fontSize: 9.5 }}>
                     {delta < 0 ? `${Math.abs(delta)}% under value` : delta > 0 ? `${delta}% over value` : 'at value'}
                   </Chip>
                   <span style={{ fontSize: 11, color: 'var(--fg-2)' }}>
@@ -511,7 +511,7 @@ export function VouchersBody({
             <input className="burn-input" placeholder="e.g. 1.95" value={priceText} inputMode="decimal" autoFocus
               onChange={(e) => setPriceText(e.target.value)} aria-label="Ask price in ICP" style={{ width: '100%' }} />
             {delta != null && (
-              <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'muted' : 'pending'} style={{ alignSelf: 'flex-start' }}>
+              <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'danger' : 'pending'} style={{ alignSelf: 'flex-start' }}>
                 {delta < 0 ? `${Math.abs(delta)}% under value — a deal for buyers` : delta > 0 ? `${delta}% over value` : 'at value'}
               </Chip>
             )}
@@ -545,7 +545,7 @@ export function VouchersBody({
                 {usd(v.listed_price_e8s) && <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>{usd(v.listed_price_e8s)}</span>}
               </div>
             </div>
-            <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'muted' : 'pending'} style={{ alignSelf: 'flex-start' }}>
+            <Chip tone={delta < 0 ? 'ok' : delta > 0 ? 'danger' : 'pending'} style={{ alignSelf: 'flex-start' }}>
               {delta < 0 ? `${Math.abs(delta)}% under value` : delta > 0 ? `${delta}% over value` : 'at value'}
             </Chip>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
