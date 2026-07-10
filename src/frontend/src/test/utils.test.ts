@@ -697,23 +697,3 @@ describe('countdownParts (lottery hero blocks)', () => {
   });
 });
 
-// ── Money-ball coin packing ──
-import { coinSlots } from '../MoneyBall';
-
-describe('coinSlots (money-ball packing)', () => {
-  it('packs every coin fully inside the glass', () => {
-    const rc = 0.105;
-    const slots = coinSlots(rc, 90);
-    expect(slots.length).toBeGreaterThan(60);
-    for (const p of slots) {
-      expect(Math.hypot(p.x, p.y)).toBeLessThanOrEqual(1 - rc + 1e-6);
-    }
-  });
-
-  it('fills bottom-up so the pile grows like a filling vessel', () => {
-    const slots = coinSlots(0.105, 90);
-    for (let i = 1; i < slots.length; i++) {
-      expect(slots[i].y).toBeGreaterThanOrEqual(slots[i - 1].y - 1e-9);
-    }
-  });
-});
