@@ -166,6 +166,30 @@ Design consequences & recommendations:
 - Registry marks class {Backed, Promo}; daily grant treats both the same;
   buyback_voucher / unstake paths and the marketplace reject Promo.
 
+### The claim screen (owner spec, 2026-07-10)
+
+- **Standalone page with its own path** (`#/claim`), landing-style full-bleed
+  — it IS the campaign link you share on X/OpenChat; reachable signed-out,
+  not tied to the app nav.
+- **Two claim methods**:
+  1. **Sign in** (II) → voucher mints to the session principal.
+  2. **Paste an ICP wallet principal** (Plug/OISY/NNS users) → voucher mints
+     to the pasted principal, NO sign-in required. Earning is server-side and
+     jackpots pay automatically, so a pasted-principal holder participates
+     fully without ever logging in. Validation: must parse as a principal,
+     must be self-authenticating (reject anonymous, reject canister ids),
+     one voucher per principal per campaign.
+- **Cap: 5,000 promo vouchers** for the campaign (owner-locked). Counter
+  shows "N remaining" ONLY — never "claimed so far" (hide-scale-signals
+  rule: scarcity reads strong, small claim counts read empty).
+- **Anti-drain recommendations** (the paste path is anonymously callable, so
+  a scripted farmer could otherwise eat the cap in minutes): a **daily drip
+  cap** (e.g. 500 claims/day — a bot can't take the whole 5,000 before an
+  admin reacts) + admin pause/close kill-switch + the existing
+  one-per-principal rule. Accepted residual risk: sock-puppet principals
+  can still farm within the drip — bounded to odds dilution (never
+  principal) by the tickets-only class.
+
 ## 8. Phases
 
 1. **Wrap + house buyback** (no marketplace): smallest slice that produces
