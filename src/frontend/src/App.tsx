@@ -2112,10 +2112,12 @@ export default function App() {
           >
             <Icon name="list" size={20} />
           </button>
-          <BrandMark size={26} style={{ flexShrink: 0 }} />
-          <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Cycle Burn
-          </b>
+          <span className="hide-mobile row" style={{ gap: 10, minWidth: 0 }}>
+            <BrandMark size={26} style={{ flexShrink: 0 }} />
+            <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              Cycle Burn
+            </b>
+          </span>
 
         </div>
 
@@ -4425,18 +4427,7 @@ export default function App() {
       {/* ── Mobile Menu Drawer ── */}
       <div className={`mobile-drawer ${mobileMenuOpen ? 'open' : ''}`}>
         {/* Drawer Header */}
-        <div className="row" style={{ justifyContent: 'space-between', marginBottom: 24, width: '100%' }}>
-          <span className="row" style={{ gap: 8 }}>
-            <span style={{
-              width: 28, height: 28, display: 'grid', placeItems: 'center',
-              border: '1px solid var(--burn)', borderRadius: 6, background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))'
-            }}>
-              <Icon name="flame" size={15} stroke="var(--burn-ink)" />
-            </span>
-            <b style={{ fontSize: 16, color: 'var(--fg)', fontFamily: 'var(--font-display)', letterSpacing: '-0.01em' }}>
-              Cycle Burn
-            </b>
-          </span>
+        <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 16, width: '100%' }}>
           <button
             onClick={() => setMobileMenuOpen(false)}
             style={{
