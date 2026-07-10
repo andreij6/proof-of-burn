@@ -6,7 +6,7 @@ import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, fmtICP, formatPrincipal, u
 import { useErrorImpression } from "./analytics";
 
 // ==========================================
-// Lossless Lottery — stake-weighted tickets, dynamic odds (one winner a month
+// No-Loss Lottery — stake-weighted tickets, dynamic odds (one winner a month
 // in expectation) over the staking-yield pot.
 // Stakers only: the daily ticket grant scales with the staked term
 // (6mo = 5, 1y = 10, 2y = 20, summed across tiers). Each ticket has the
@@ -149,7 +149,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
     const pot = info ? fmtICP(info.pot_e8s) : '—';
     const when = info && info.next_draw_at > 0n ? drawDate(info.next_draw_at) : 'soon';
     const usd = jackpotUsd != null ? ` (≈ $${jackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })})` : '';
-    const text = `🔥 Cycle Burn's lossless lottery jackpot is ${pot} ICP${usd} — next drawing ${when}. Stake ICP for free daily tickets; nobody loses. 🔥 $ICP`;
+    const text = `🔥 Cycle Burn's No-Loss Lottery jackpot is ${pot} ICP${usd} — next drawing ${when}. Stake ICP for free daily tickets; nobody loses. 🔥 $ICP`;
     const url = `${window.location.origin}/#/lottery`;
     if (typeof navigator !== 'undefined' && navigator.share) {
       try { await navigator.share({ title: 'Cycle Burn lottery', text, url }); return; } catch { /* cancelled */ }
@@ -272,6 +272,7 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         </div>
       )}
 
+
       {/* ── Hero: pot → no-loss line → countdown blocks → one CTA ── */}
       {loading && !info ? (
         <div className="col" style={{ ...card, gap: 14, width: '100%', alignItems: 'center', padding: '40px 16px' }} aria-busy="true" aria-label="Loading lottery info">
@@ -347,16 +348,24 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         <div className="col" style={{ alignItems: 'center', gap: 10, marginTop: 30 }}>
           {!signedIn ? (
             <Btn variant="primary" onClick={onSignIn} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
-              Get your free tickets
+              Get tickets
             </Btn>
           ) : info && !info.eligible && (info.my_tickets ?? 0n) === 0n && !info.admin_excluded ? (
             <Btn variant="primary" onClick={onGoStaking} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
-              Stake to enter — tickets are free
+              Get tickets
             </Btn>
           ) : (
-            <Btn variant="primary" onClick={shareDrawing} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
-              <Icon name="share" size={15} stroke="var(--char-950)" /> Share this drawing
-            </Btn>
+            <>
+              <Btn variant="primary" onClick={onGoStaking} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
+                <Icon name="zap" size={15} stroke="var(--char-950)" /> Stake more · earn more tickets
+              </Btn>
+              <button onClick={shareDrawing} style={{
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                color: 'var(--fg-2)', fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 6,
+              }}>
+                <Icon name="share" size={13} stroke="currentColor" /> Share this drawing
+              </button>
+            </>
           )}
         </div>
       </div>

@@ -1390,7 +1390,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <Li>Staking is also the lottery's eligibility gate (below).</Li>
           </Section>
 
-          <Section icon="spark" title="Lossless lottery — dynamic odds, funded by yield">
+          <Section icon="spark" title="No-Loss Lottery — dynamic odds, funded by yield">
             <Li>Stakers only — and eligibility is live: daily grant = base ({base}) × term multiplier × whole ICP staked, claimed automatically on login. Fully unstake and any tickets already held void immediately; the same happens on promotion to admin.</Li>
             <Li>Drawings 3× a week (Mon/Wed/Sat nights US Eastern), but a drawing only runs when the pot holds at least 25 ICP — below that it rolls over and the pot keeps growing. Odds are dynamic: every drawing that runs has a 1-in-13 chance of paying out regardless of ticket supply (≈ one winner a month, 96% chance within 3 months), decided by on-chain randomness (raw_rand). A user's win chance is their share of all tickets.</Li>
             <Li>Tickets accumulate round over round until someone hits. The winner takes 65% of the prize pot; 30% seeds the next round; 5% is burned to backend-canister cycles; all tickets reset.</Li>

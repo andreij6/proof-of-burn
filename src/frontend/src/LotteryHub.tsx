@@ -25,16 +25,16 @@ export default function LotteryHub({
       <div className="idea-board-container" style={{ paddingBottom: 0 }}>
         {/* ── Page header (eyebrow · title · how it works) ── */}
         <div className="col" style={{ gap: 6 }}>
-          <Eyebrow accent>Lossless lottery</Eyebrow>
+          <Eyebrow accent>No-Loss Lottery</Eyebrow>
           <span className="row" style={{ gap: 10 }}>
             <Icon name="ticket" size={22} stroke="var(--burn-ink)" />
-            <h4 style={{ margin: 0 }}>Lottery</h4>
+            <h4 style={{ margin: 0 }}>No-Loss Lottery</h4>
             <Chip tone="pending"><LiveDot size={6} /> 3× weekly</Chip>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
-            The no-loss lottery: tickets are free, the prize is pure staking yield,
+            The No-Loss Lottery: tickets are free, the prize is pure staking yield,
             and your ICP is never at risk — win or lose, you keep every token.{' '}
-            <MoreInfo title="How the lossless lottery works">
+            <MoreInfo title="How the No-Loss Lottery works">
               <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
                 <Eyebrow accent>The gist</Eyebrow>
                 <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>

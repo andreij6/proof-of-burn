@@ -1846,7 +1846,7 @@ export default function App() {
         {lotteryEnabled && (
           <Btn variant={page === 'lottery' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('lottery')}>
             <Icon name="ticket" size={14} stroke={page === 'lottery' ? 'var(--char-950)' : 'currentColor'} />
-            Lottery
+            No-Loss Lottery
             {drawCountdown && (
               <Chip tone="muted" style={{
                 marginLeft: 'auto', height: 18, fontSize: 10,
