@@ -1,5 +1,17 @@
 # Log
 
+## 2026-07-10 — Stake Vouchers built (all 3 phases, LOCAL)
+
+2-fork fanout (b0dc01f): voucher_nft ICRC-7 canister + backend registry/
+wrap/unwrap + 15% balance-gated house buyback (burn + immediate dissolve,
+spread 1/3/1/3/1/3) + ICP marketplace (escrow saga, 2.5% fee) + promo
+campaign engine (5,000 cap, 500/day drip, 60d expiry, 1 ticket/day,
+paste-principal claims) + Vouchers page + standalone #/claim Golden
+Ticket page + dev docs/llms.txt sections. 290+3+356 tests; full live
+loop smoked on local incl. exact 85% buyback and fee-third-to-fund.
+Dark on mainnet; mainnet activation needs voucher_nft creation + wiring
++ flag + fund seed.
+
 ## 2026-07-10 night — Mainnet deploy 66c54a1 (server-side tickets + dev docs)
 
 Daily stake tickets now land SERVER-SIDE every UTC day (sweep leg
