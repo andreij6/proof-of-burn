@@ -11,17 +11,17 @@ import { useErrorImpression } from "./analytics";
 import CourseEditor from "./arcade/CourseEditor";
 
 // ==========================================
-// Admin console — six job-based sections (owner reorg 2026-07-10):
-//   Overview  — view-only dashboard (MONEY / PROTOCOL / USERS tiles, each
-//               linking to the section that manages it)
-//   Funds     — EVERYTHING that moves money: treasury, buyback wallet,
-//               lottery pot, neuron allocations, cycle top-ups
-//   Lottery & Staking — economics dials, voucher/promo config, LP custody
-//               stats, platform neurons + split-neuron diagnostics
-//   Features  — flag kill switches
-//   Users     — seen principals, wallet balances, course moderation
-//   System    — sweep trigger, audit log, canister wiring, course editor,
-//               how-it-works reference
+// Admin console — four tabs, money first (owner redo 2026-07-10):
+//   Money        — every fund as ONE card: balance big on top, its
+//                  controls directly beneath (treasury, buyback, pot,
+//                  cycles). Opens with a one-line summary strip.
+//   Economics    — every dial with its live value beside the input
+//                  (lottery, vouchers, Golden Ticket, staking, LP stats).
+//   Pools & Users— neurons, term pools, unstakes; then principals,
+//                  wallet balances, course moderation.
+//   System       — kill switches, wiring, sweep, audit, reference.
+// EVERYTHING auto-loads on mount (Promise.allSettled — one failure never
+// blanks the page); the ONLY refresh button is "Refresh all" in the header.
 // ==========================================
 
 interface AdminProps {
@@ -37,17 +37,12 @@ interface AdminProps {
   openTreasury: () => void;
 }
 
-// Six job-based tabs (owner reorg): view data on Overview, move money on
-// Funds, tune economics on Lottery & Staking, flip Features, inspect Users,
-// operate on System.
-type AdminSection = 'overview' | 'funds' | 'lottery' | 'features' | 'users' | 'system';
+type AdminSection = 'money' | 'economics' | 'pools' | 'system';
 
 const SECTIONS: { key: AdminSection; label: string; icon: string }[] = [
-  { key: 'overview', label: 'Overview', icon: 'eye' },
-  { key: 'funds', label: 'Funds', icon: 'wallet' },
-  { key: 'lottery', label: 'Lottery & Staking', icon: 'zap' },
-  { key: 'features', label: 'Features', icon: 'spark' },
-  { key: 'users', label: 'Users', icon: 'list' },
+  { key: 'money', label: 'Money', icon: 'wallet' },
+  { key: 'economics', label: 'Economics', icon: 'scale' },
+  { key: 'pools', label: 'Pools & Users', icon: 'list' },
   { key: 'system', label: 'System', icon: 'info' },
 ];
 
@@ -127,33 +122,8 @@ const Li = ({ children }: { children: React.ReactNode }) => (
   </span>
 );
 
-function StatCard({ label, value, sub, tone, onManage, manageLabel }: {
-  label: string; value: React.ReactNode; sub?: React.ReactNode; tone?: 'ok' | 'warn' | 'bad';
-  /** Overview is view-only — numbers link to the section that manages them. */
-  onManage?: () => void; manageLabel?: string;
-}) {
-  const color = tone === 'bad' ? 'var(--ember)' : tone === 'warn' ? 'var(--haze)' : 'var(--fg)';
-  return (
-    <div className="col" style={{
-      gap: 4, padding: '12px 14px', borderRadius: 10, flex: '1 1 170px', minWidth: 150,
-      border: '1px solid var(--border)', background: 'var(--surface)',
-    }}>
-      <span className="row" style={{ justifyContent: 'space-between', gap: 6 }}>
-        <span style={{ fontSize: 10.5, letterSpacing: '0.07em', textTransform: 'uppercase', color: 'var(--fg-3)' }}>{label}</span>
-        {onManage && (
-          <button onClick={onManage} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--burn-ink)', fontSize: 10, padding: 0 }}>
-            {manageLabel ?? 'manage →'}
-          </button>
-        )}
-      </span>
-      <b className="mono" style={{ fontSize: 17, color }}>{value}</b>
-      {sub && <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>{sub}</span>}
-    </div>
-  );
-}
-
 export default function Admin({ actor, config, featureFlags, identity, host, rootKey, ledgerCanisterId, onChanged, openTreasury }: AdminProps) {
-  const [section, setSection] = useState<AdminSection>('overview');
+  const [section, setSection] = useState<AdminSection>('money');
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -362,13 +332,53 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     } catch { /* transient */ }
   };
 
+  // Silent (no busy/notice) variants for the auto-load path — the owner's
+  // rule: every number loads itself; no Load buttons anywhere.
+  const refreshFollowing = async () => {
+    if (!actor) return;
+    try { setFollowStatus(await actor.admin_check_neuron_following()); } catch { /* transient */ }
+  };
+  const loadSeenUsersSilent = async () => {
+    if (!actor) return;
+    try { setSeenUsers(await actor.admin_list_seen_users()); } catch { /* transient */ }
+  };
+  const loadUserBalancesSilent = async () => {
+    if (!actor) return;
+    try {
+      const principals: Principal[] = await actor.admin_list_user_principals();
+      setUserProgress({ done: 0, total: principals.length });
+      const CHUNK = 8;
+      const rows: UserBalanceRow[] = [];
+      for (let i = 0; i < principals.length; i += CHUNK) {
+        const part = await actor.admin_user_balances(principals.slice(i, i + CHUNK));
+        rows.push(...part);
+        setUserRows([...rows]);
+        setUserProgress({ done: Math.min(i + CHUNK, principals.length), total: principals.length });
+      }
+      setUserRows(rows);
+      setUserProgress(null);
+    } catch { /* transient */ }
+  };
+
+  // ONE loader for the whole console — fired on mount and by "Refresh all".
+  // allSettled: a single failing fetch can never blank the page.
+  const loadEverything = () => {
+    if (!actor) return;
+    void Promise.allSettled([
+      refreshHealth(),
+      refreshBalances(),
+      loadVoucherMarket(),
+      loadLpPoolStats(),
+      refreshSplitNeurons(),
+      refreshAudit(),
+      refreshModeration(),
+      refreshFollowing(),
+      loadSeenUsersSilent(),
+      loadUserBalancesSilent(),
+    ]);
+  };
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      if (!actor || cancelled) return;
-      await Promise.all([refreshHealth(), refreshBalances()]);
-    })();
-    return () => { cancelled = true; };
+    loadEverything();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [actor]);
 
@@ -509,14 +519,6 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     } catch { /* transient */ }
   };
 
-  const checkFollowing = () => run('follow', async () => {
-    const res: NeuronFollowStatus[] = await actor.admin_check_neuron_following();
-    setFollowStatus(res);
-    const bad = res.filter(r => !r.follows_primary);
-    return bad.length === 0
-      ? `All ${res.length} platform neurons follow the primary on every topic.`
-      : `⚠ ${bad.length} neuron(s) NOT fully following — see the table.`;
-  });
 
   // ── course moderation ────────────────────────────────────────────────────
   // Worst-first list of low-rated courses (avg < 2.0★ with ≥5 ratings); the
@@ -543,44 +545,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   // the heavier per-wallet breakdown.
   const [seenUsers, setSeenUsers] = useState<[Principal, SeenUser][] | null>(null);
 
-  const loadSeenUsers = async () => {
-    if (!actor) return;
-    setBusy('users'); setError(null); setNotice(null);
-    setSeenUsers(null);
-    try {
-      const rows = await actor.admin_list_seen_users();
-      setSeenUsers(rows);
-      setNotice(`Loaded ${rows.length} logged-in principal${rows.length === 1 ? '' : 's'}.`);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
 
-  const loadUserBalances = async () => {
-    if (!actor) return;
-    setBusy('users'); setError(null); setNotice(null);
-    setUserRows(null); setUserProgress(null);
-    try {
-      const principals: Principal[] = await actor.admin_list_user_principals();
-      setUserProgress({ done: 0, total: principals.length });
-      const CHUNK = 8;
-      const rows: UserBalanceRow[] = [];
-      for (let i = 0; i < principals.length; i += CHUNK) {
-        const part = await actor.admin_user_balances(principals.slice(i, i + CHUNK));
-        rows.push(...part);
-        setUserRows([...rows]);
-        setUserProgress({ done: Math.min(i + CHUNK, principals.length), total: principals.length });
-      }
-      setUserRows(rows);
-      setNotice(`Loaded ${rows.length} user${rows.length === 1 ? '' : 's'}.`);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
 
   // Local dev only: populate the table with fabricated rows so the layout/totals
   // can be eyeballed without real participants or funded wallets. Uses real,
@@ -628,27 +593,24 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
   return (
     <div className="dashboard-container">
-      {/* ── Header ── */}
+      {/* ── Header — one Refresh-all for the whole console ── */}
       <div className="col" style={{ gap: 6 }}>
-        <span className="row" style={{ gap: 8 }}>
+        <span className="row" style={{ gap: 8, width: '100%', flexWrap: 'wrap' }}>
           <Icon name="key" size={16} stroke="var(--burn-ink)" />
           <Eyebrow accent>Admin console</Eyebrow>
+          <Btn variant="secondary" sm onClick={loadEverything} disabled={busy !== null} style={{ marginLeft: 'auto' }}>
+            <Icon name="refresh" size={12} /> Refresh all
+          </Btn>
         </span>
-        <b style={{ fontSize: 17 }}>Every protocol dial, grouped by job.</b>
+        <b style={{ fontSize: 17 }}>Money first. Everything loads itself.</b>
       </div>
 
-      {/* ── Section tabs (underline style, matches Roadmap & Development) ── */}
+      {/* ── Section tabs ── */}
       <div className="row" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 6, gap: 18, width: '100%', overflowX: 'auto', scrollbarWidth: 'thin' }}>
         {SECTIONS.map(s => (
           <button
             key={s.key}
-            onClick={() => {
-              setSection(s.key); setError(null); setNotice(null);
-              if (s.key === 'funds') { refreshBalances(); loadVoucherMarket(); }
-              if (s.key === 'lottery') { refreshSplitNeurons(); loadVoucherMarket(); }
-              if (s.key === 'users') refreshModeration();
-              if (s.key === 'system') refreshAudit();
-            }}
+            onClick={() => { setSection(s.key); setError(null); setNotice(null); }}
             style={{
               background: 'transparent', border: 'none', flexShrink: 0,
               color: section === s.key ? 'var(--burn-ink)' : 'var(--fg-3)',
@@ -679,142 +641,67 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
         </div>
       )}
 
-      {/* ════ OVERVIEW — view-only dashboard; numbers link to their manager ════ */}
-      {section === 'overview' && (
-        <>
-          <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-            <Eyebrow accent>Money</Eyebrow>
-            <Btn variant="ghost" sm onClick={() => { refreshHealth(); refreshBalances(); loadVoucherMarket(); }} disabled={busy !== null}>
-              <Icon name="undo" size={13} /> Refresh all
-            </Btn>
-          </span>
-          <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'stretch' }}>
-            <StatCard label="Treasury (ICP)" tone={floorTone}
-              value={treasuryIcp !== null ? fmtICP(treasuryIcp) : '…'}
-              sub={treasuryIcp !== null && treasuryIcp < TREASURY_FLOOR ? 'BELOW the 15 ICP floor — cycle top-ups at risk' : 'floor: 15 ICP'}
-              onManage={() => setSection('funds')} />
-            <StatCard label="Buyback fund"
-              value={buybackFundE8s !== null ? `${fmtICP(buybackFundE8s)}` : '—'}
-              sub={buybackFundE8s === null
-                ? <button onClick={loadVoucherMarket} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--burn-ink)', fontSize: 11, padding: 0, textDecoration: 'underline' }}>load balance</button>
-                : 'pays instant voucher exits'}
-              onManage={() => setSection('funds')} />
-            <StatCard label="Lottery pot" value={lottery ? fmtICP(lottery.pot_e8s) : '…'}
-              tone={lottery && lottery.pot_e8s < lottery.min_pot_e8s ? 'warn' : undefined}
-              sub={lottery ? (lottery.pot_e8s < lottery.min_pot_e8s ? `below ${fmtICP(lottery.min_pot_e8s)} minimum — draws roll over` : `${lottery.total_tickets.toString()} tickets in round`) : undefined}
-              onManage={() => setSection('funds')} />
-            <StatCard label="Paid out (lifetime)" value={lottery ? fmtICP(lottery.total_paid_e8s) : '…'} sub="jackpots, all time" />
-          </div>
-
-          <Eyebrow accent>Protocol</Eyebrow>
-          <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'stretch' }}>
-            <StatCard label="Staking TVL" value={staking ? fmtICP(staking.total_staked_e8s) : '…'}
-              sub={staking ? staking.pools.map(p => fmtICP(p.total_staked_e8s)).join(' / ') + ' by tier' : undefined}
-              onManage={() => setSection('lottery')} />
-            <StatCard label="LP custody"
-              value={lpPoolStats ? `$${(lpPoolStats.reduce((a, r) => a + Number(r.usd_e8s), 0) / 1e8).toFixed(2)}` : '—'}
-              sub={lpPoolStats === null
-                ? <button onClick={loadLpPoolStats} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--burn-ink)', fontSize: 11, padding: 0, textDecoration: 'underline' }}>{lpStatsBusy ? 'loading…' : 'load value'}</button>
-                : `${lpPoolStats.reduce((a, r) => a + Number(r.positions), 0)} positions`}
-              onManage={() => setSection('lottery')} />
-            <StatCard label="ICP burned" value={stats ? fmtICP(stats.total_burned_e8s) : '…'} sub={stats ? `${stats.votes_cast.toString()} NNS votes cast` : undefined} />
-            <StatCard label="Voting TVL" value={stats ? `${fmtICP(stats.tvl_e8s)}` : '…'} sub={stats ? `pending burn ${fmtICP(stats.pending_burn_e8s)}` : undefined} />
-          </div>
-          <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'stretch' }}>
-            <StatCard label="Backend cycles" value={cycles !== null ? `${(Number(cycles) / 1e12).toFixed(2)} T` : '…'}
-              tone={cycles !== null && Number(cycles) < 5e12 ? 'bad' : undefined} sub="auto top-up below 5 T" onManage={() => setSection('funds')} />
-            <StatCard label="Frontend cycles"
-              value={feCycles === null ? '…' : feCycles === 'unavailable' ? 'n/a' : `${(Number(feCycles) / 1e12).toFixed(2)} T`}
-              tone={typeof feCycles === 'bigint' && Number(feCycles) < 1e12 ? 'bad' : undefined}
-              sub={feCycles === 'unavailable' ? 'backend must control the frontend canister' : 'topped up by burn shares'} onManage={() => setSection('funds')} />
-            <StatCard label="Course NFT cycles"
-              value={nftCycles === null ? '…' : nftCycles === 'unavailable' ? 'n/a' : `${(Number(nftCycles) / 1e12).toFixed(2)} T`}
-              tone={typeof nftCycles === 'bigint' && Number(nftCycles) < 1e12 ? 'bad' : undefined}
-              sub={nftCycles === 'unavailable' ? 'backend must control the course_nft canister' : 'sweep auto-forwards below 1 T'} onManage={() => setSection('funds')} />
-            <StatCard label="Perm neuron" value={ea ? fmtICP(ea.total_staked_e8s) : '…'}
-              sub={ea ? `${ea.early_adopter_count.toString()} members · ${ea.membership_closed ? 'CLOSED' : 'open'}` : undefined}
-              onManage={() => setSection('lottery')} />
-            <StatCard label="Pool neurons" value={pool ? pool.active_count.toString() : '…'} sub="active in the top-25 race" onManage={() => setSection('lottery')} />
-          </div>
-
-          <Eyebrow accent>Users</Eyebrow>
-          <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'stretch' }}>
-            <StatCard label="Lottery players" value={lottery ? lottery.unique_holders.toString() : '…'} sub="distinct ticket holders this round" onManage={() => setSection('users')} />
-            <StatCard label="Perm members" value={ea ? ea.early_adopter_count.toString() : '…'} sub={ea ? (ea.membership_closed ? 'membership closed' : 'membership open') : undefined} onManage={() => setSection('users')} />
-            <StatCard label="Tickets in round" value={lottery ? lottery.total_tickets.toString() : '…'} sub="across all sources" onManage={() => setSection('lottery')} />
-          </div>
-          <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-            View-only. Move money on <b>Funds</b>, tune economics on <b>Lottery &amp; Staking</b>, operate on <b>System</b>.
-          </span>
-        </>
-      )}
-
-      {/* ════ FUNDS — everything that moves money ════ */}
-      {section === 'funds' && (
-        <>
-          {/* Balances */}
-          <div className="col" style={{ ...card, gap: 10 }}>
-            <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-              <Eyebrow>Treasury balances — all supported tokens</Eyebrow>
-              <Btn variant="ghost" sm onClick={refreshBalances} disabled={busy !== null}><Icon name="undo" size={12} /> Refresh</Btn>
+      {/* ════ MONEY — every fund, one card, balance big + controls beneath ════ */}
+      {section === 'money' && (() => {
+        const pot = lottery?.pot_e8s ?? null;
+        const underMgmt = treasuryIcp !== null && buybackFundE8s !== null && pot !== null
+          ? treasuryIcp + buybackFundE8s + pot : null;
+        const big: React.CSSProperties = { fontSize: 22, lineHeight: 1.1 };
+        const pending = <LiveDot size={8} color="var(--burn-ink)" />;
+        return (
+          <>
+            {/* One-line summary strip — plain text, no tiles, no links. */}
+            <span className="mono" style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.6 }}>
+              Under management: <b style={{ color: 'var(--fg)' }}>{underMgmt !== null ? fmtICP(underMgmt) : '…'} ICP</b>
+              {' '}(treasury {treasuryIcp !== null ? fmtICP(treasuryIcp) : '…'} · buyback {buybackFundE8s !== null ? fmtICP(buybackFundE8s) : '…'} · pot {pot !== null ? fmtICP(pot) : '…'})
+              {' '}— staking TVL <b style={{ color: 'var(--fg)' }}>{staking ? fmtICP(staking.total_staked_e8s) : '…'} ICP</b>
+              {' '}— {lottery ? lottery.unique_holders.toString() : '…'} players
+              {' '}— {stats ? fmtICP(stats.total_burned_e8s) : '…'} ICP burned lifetime
             </span>
-            <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-              {TOKEN_META.map(({ token, label, decimals }) => (
-                <div key={token} className="col" style={{ gap: 2, padding: '8px 14px', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface)', minWidth: 120 }}>
-                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>{label}</span>
-                  <b className="mono" style={{ fontSize: 14, color: token === ExplorerToken.ICP && floorTone === 'bad' ? 'var(--ember)' : 'var(--fg)' }}>
-                    {balances[token] !== undefined && balances[token] !== null ? fmtUnits(balances[token]!, decimals) : '…'}
-                  </b>
-                </div>
-              ))}
-            </div>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              One treasury account, five ledgers — upvote shares, explorer listings and arcade fees
-              accumulate in their paid token. ICP is the operational reserve: it funds cycle top-ups
-              and fee fronting, so it carries the 15 ICP floor.
-            </span>
-          </div>
 
-          {/* Deposit + withdraw — two separate cards. */}
-          <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
-            {/* Deposit */}
-            <div className="col" style={{ ...card, gap: 10, flex: '1 1 300px', minWidth: 280 }}>
-              <span className="row" style={{ gap: 8 }}>
-                <Icon name="arrowUp" size={14} stroke="var(--sprout-ink)" />
-                <Eyebrow>Deposit to treasury</Eyebrow>
+            {/* ── Treasury: balance big, every treasury action beneath ── */}
+            <div className="col" style={{ ...card, gap: 12 }}>
+              <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                <Eyebrow>Treasury</Eyebrow>
+                {treasuryIcp !== null && treasuryIcp < TREASURY_FLOOR && (
+                  <Chip tone="danger">BELOW the 15 ICP floor — cycle top-ups at risk</Chip>
+                )}
               </span>
-              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <span className="row" style={{ gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <b className="mono" style={{ ...big, color: floorTone === 'bad' ? 'var(--ember)' : 'var(--fg)' }}>
+                  {treasuryIcp !== null ? fmtICP(treasuryIcp) : pending} ICP
+                </b>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-3)' }}>
+                  {TOKEN_META.filter(t => t.token !== ExplorerToken.ICP).map(({ token, label, decimals }) =>
+                    `${balances[token] !== undefined && balances[token] !== null ? fmtUnits(balances[token]!, decimals) : '…'} ${label}`
+                  ).join(' · ')}
+                </span>
+              </span>
+
+              {/* Deposit */}
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                <span style={{ fontSize: 11.5, color: 'var(--fg-3)', minWidth: 72 }}>Deposit</span>
                 {TOKEN_META.map(({ token, label }) => (
                   <Btn key={token} variant={depToken === token ? 'primary' : 'ghost'} sm onClick={() => setDepToken(token)}>{label}</Btn>
                 ))}
+                <input type="text" placeholder={`Amount (${depMeta.label})`} className="burn-input" style={{ ...inputStyle, maxWidth: 160 }}
+                  value={depAmount} onChange={e => setDepAmount(e.target.value)} />
+                <Btn variant="secondary" sm onClick={depositToken} disabled={busy !== null || !depAmount}>
+                  {busy === 't-deposit' ? <LiveDot size={7} /> : <Icon name="arrowUp" size={13} stroke="var(--burn-ink)" />} From my wallet
+                </Btn>
               </div>
-              <input type="text" placeholder={`Amount (${depMeta.label})`} className="burn-input" style={{ ...inputStyle, maxWidth: 220 }}
-                value={depAmount} onChange={e => setDepAmount(e.target.value)} />
-              <Btn variant="secondary" sm onClick={depositToken} disabled={busy !== null || !depAmount} style={{ alignSelf: 'flex-start' }}>
-                {busy === 't-deposit' ? <LiveDot size={7} /> : <Icon name="arrowUp" size={13} stroke="var(--burn-ink)" />} Deposit from my wallet
-              </Btn>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Comes straight from your signed-in wallet on the selected token's ledger.
-              </span>
-            </div>
 
-            {/* Withdraw */}
-            <div className="col" style={{ ...card, gap: 10, flex: '1 1 300px', minWidth: 280 }}>
-              <span className="row" style={{ gap: 8 }}>
-                <Icon name="wallet" size={14} stroke="var(--burn-ink)" />
-                <Eyebrow>Withdraw from treasury</Eyebrow>
-              </span>
-              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+              {/* Withdraw */}
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                <span style={{ fontSize: 11.5, color: 'var(--fg-3)', minWidth: 72 }}>Withdraw</span>
                 {TOKEN_META.map(({ token, label }) => (
                   <Btn key={token} variant={txToken === token ? 'primary' : 'ghost'} sm onClick={() => setTxToken(token)}>{label}</Btn>
                 ))}
-              </div>
-              <input type="text" placeholder={`Amount (${meta.label})`} className="burn-input" style={{ ...inputStyle, maxWidth: 220 }}
-                value={txAmount} onChange={e => setTxAmount(e.target.value)} />
-              <input type="text" placeholder="Destination principal (empty = your wallet)" className="burn-input" style={{ ...inputStyle, minWidth: 240 }}
-                value={txDest} onChange={e => setTxDest(e.target.value)} />
-              <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-                <Btn variant="primary" sm onClick={withdrawToken} disabled={busy !== null || !txAmount} style={{ alignSelf: 'flex-start' }}>
+                <input type="text" placeholder={`Amount (${meta.label})`} className="burn-input" style={{ ...inputStyle, maxWidth: 140 }}
+                  value={txAmount} onChange={e => setTxAmount(e.target.value)} />
+                <input type="text" placeholder="Destination (empty = you)" className="burn-input" style={{ ...inputStyle, minWidth: 190 }}
+                  value={txDest} onChange={e => setTxDest(e.target.value)} />
+                <Btn variant="primary" sm onClick={withdrawToken} disabled={busy !== null || !txAmount}>
                   {busy === 't-withdraw' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="wallet" size={13} stroke="var(--char-950)" />} Withdraw
                 </Btn>
                 <label className="row" style={{ gap: 6, fontSize: 12, color: overrideFloor ? 'var(--ember)' : 'var(--fg-3)', cursor: 'pointer' }}>
@@ -822,182 +709,248 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                   Override 15 ICP floor
                 </label>
               </div>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Withdrawals that would leave the ICP treasury under 15 ICP are refused unless you
-                override — below ~10 ICP the cycle top-up silently stops and the canisters eventually
-                go dark. <a onClick={openTreasury} style={{ cursor: 'pointer', textDecoration: 'underline' }}>Legacy ICP dialog…</a>
-              </span>
-            </div>
-          </div>
 
-          {/* Allocate to neurons */}
-          <div className="col" style={{ ...card, gap: 10 }}>
-            <Eyebrow>Allocate ICP to a platform neuron</Eyebrow>
-            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-              {[['SixMonths', '6-month pool'], ['OneYear', '1-year pool'], ['TwoYears', '2-year pool'], ['EarlyAdopters', 'Perm neuron']].map(([key, label]) => (
-                <Btn key={key} variant={allocTarget === key ? 'primary' : 'ghost'} sm onClick={() => setAllocTarget(key)}>{label}</Btn>
-              ))}
-            </div>
-            <div className="row" style={{ gap: 8 }}>
-              <input type="text" placeholder="Amount (ICP)" className="burn-input" style={{ ...inputStyle, maxWidth: 200 }}
-                value={allocAmount} onChange={e => setAllocAmount(e.target.value)} />
-              <Btn variant="primary" sm onClick={allocateToNeuron} disabled={busy !== null || !allocAmount}>
-                {busy === 't-allocate' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="zap" size={13} stroke="var(--char-950)" />} Allocate
-              </Btn>
-            </div>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Moves treasury ICP into the neuron's stake (transfer + refresh). Tier allocations boost
-              that neuron's yield — and therefore the lottery pot — without belonging to any staker;
-              Perm-tier allocations compound the Perm neuron's yield (split 30/70 treasury/lottery). The 15 ICP floor and
-              override apply here too. Allocations are one-way: getting ICP back out means a neuron
-              dissolve, so treat them as permanent.
-            </span>
-          </div>
-
-          {/* ── Voucher buyback wallet ── */}
-          <div className="col" style={{ ...card, gap: 10 }}>
-            <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-              <span className="row" style={{ gap: 8 }}>
-                <Icon name="coins" size={13} stroke="var(--burn-ink)" />
-                <Eyebrow>Voucher buyback wallet</Eyebrow>
-              </span>
-              <span className="row" style={{ gap: 8 }}>
-                {buybackFundE8s != null && (
-                  <Chip tone={buybackFundE8s > 0n ? 'ok' : 'muted'}>
-                    <span className="mono">{fmtICP(buybackFundE8s)} ICP</span>
-                  </Chip>
-                )}
-                <Btn variant="secondary" sm onClick={loadBuybackFund} disabled={busy !== null}>
-                  <Icon name="refresh" size={11} /> {buybackFundE8s == null ? 'Load balance' : 'Refresh'}
+              {/* Allocate to neurons */}
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                <span style={{ fontSize: 11.5, color: 'var(--fg-3)', minWidth: 72 }}>Allocate</span>
+                {[['SixMonths', '6-mo pool'], ['OneYear', '1-yr pool'], ['TwoYears', '2-yr pool'], ['EarlyAdopters', 'Perm']].map(([key, label]) => (
+                  <Btn key={key} variant={allocTarget === key ? 'primary' : 'ghost'} sm onClick={() => setAllocTarget(key)}>{label}</Btn>
+                ))}
+                <input type="text" placeholder="Amount (ICP)" className="burn-input" style={{ ...inputStyle, maxWidth: 140 }}
+                  value={allocAmount} onChange={e => setAllocAmount(e.target.value)} />
+                <Btn variant="primary" sm onClick={allocateToNeuron} disabled={busy !== null || !allocAmount}>
+                  {busy === 't-allocate' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="zap" size={13} stroke="var(--char-950)" />} Allocate
                 </Btn>
+              </div>
+              <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                ICP is the operational reserve (cycle top-ups + fee fronting) — withdrawals and
+                allocations below the 15 ICP floor are refused unless overridden. Allocations move
+                treasury ICP into a neuron's stake permanently (getting it back means a dissolve);
+                tier allocations boost that pool's yield → the lottery pot.{' '}
+                <a onClick={openTreasury} style={{ cursor: 'pointer', textDecoration: 'underline' }}>Legacy ICP dialog…</a>
               </span>
-            </span>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Pays instant-exit buybacks (85% of principal). The option auto-disables
-              for users whenever this balance can't cover a buyback; dissolved
-              principals and the fund's third of fees replenish it automatically.
-            </span>
-            <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <input type="number" min="0" step="0.1" placeholder="ICP from treasury" className="burn-input" style={inputStyle}
-                value={buybackFundAmt} onChange={(e) => setBuybackFundAmt(e.target.value)} />
-              <Btn variant="primary" sm onClick={fundBuyback} disabled={busy !== null || !buybackFundAmt}>
-                {busy === 'buybackfund' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="zap" size={12} stroke="var(--char-950)" />} Fund from treasury
-              </Btn>
-              <input type="number" min="0" step="0.1" placeholder="ICP to withdraw" className="burn-input" style={inputStyle}
-                value={buybackWithdrawAmt} onChange={(e) => setBuybackWithdrawAmt(e.target.value)} />
-              <Btn variant="secondary" sm onClick={withdrawBuyback} disabled={busy !== null || !buybackWithdrawAmt}>
-                {busy === 'buybackwithdraw' ? <LiveDot size={7} /> : <Icon name="wallet" size={12} />} Withdraw to my wallet
-              </Btn>
             </div>
-            <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-              External top-ups also work: send ICP to the backend canister with subaccount
-              <span className="mono"> 0x0a×32</span> (the dedicated buyback subaccount).
-            </span>
-          </div>
 
-          {/* ── Lottery pot ── */}
-          <div className="col" style={{ ...card, gap: 10 }}>
-            <Eyebrow>Sweeten the lottery pot</Eyebrow>
-            <div className="row" style={{ gap: 8 }}>
-              <input type="number" min="0" step="1" placeholder="Amount (ICP)" className="burn-input" style={{ ...inputStyle, maxWidth: 200 }}
-                value={sweetenInput} onChange={(e) => setSweetenInput(e.target.value)} />
-              <Btn variant="primary" sm onClick={sweetenPot} disabled={busy !== null || !sweetenInput}>
-                {busy === 'sweeten' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="spark" size={13} stroke="var(--char-950)" />} Add to pot
-              </Btn>
+            {/* ── Buyback wallet ── */}
+            <div className="col" style={{ ...card, gap: 12 }}>
+              <Eyebrow>Voucher buyback wallet</Eyebrow>
+              <b className="mono" style={big}>{buybackFundE8s !== null ? fmtICP(buybackFundE8s) : pending} ICP</b>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                <input type="number" min="0" step="0.1" placeholder="ICP from treasury" className="burn-input" style={{ ...inputStyle, maxWidth: 170 }}
+                  value={buybackFundAmt} onChange={(e) => setBuybackFundAmt(e.target.value)} />
+                <Btn variant="primary" sm onClick={fundBuyback} disabled={busy !== null || !buybackFundAmt}>
+                  {busy === 'buybackfund' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="zap" size={12} stroke="var(--char-950)" />} Fund from treasury
+                </Btn>
+                <input type="number" min="0" step="0.1" placeholder="ICP to withdraw" className="burn-input" style={{ ...inputStyle, maxWidth: 170 }}
+                  value={buybackWithdrawAmt} onChange={(e) => setBuybackWithdrawAmt(e.target.value)} />
+                <Btn variant="secondary" sm onClick={withdrawBuyback} disabled={busy !== null || !buybackWithdrawAmt}>
+                  {busy === 'buybackwithdraw' ? <LiveDot size={7} /> : <Icon name="wallet" size={12} />} Withdraw to my wallet
+                </Btn>
+              </div>
+              <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                Pays instant voucher exits (85% of principal); the option auto-disables for users when
+                this can't cover a sale. Replenished by dissolved principals + the fund's third of
+                fees. External top-ups: backend canister, subaccount <span className="mono">0x0a×32</span>.
+              </span>
             </div>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Transfers ICP from YOUR wallet straight into the prize pot. Players just see a bigger
-              jackpot. (Admins hold no tickets, so you can never win your own deposit back.)
-            </span>
-          </div>
-          {/* ── Cycle top-ups: backend balance → sibling canisters ── */}
-          <div className="col" style={{ ...card, gap: 10 }}>
-            <span className="row" style={{ gap: 8 }}>
-              <Icon name="zap" size={13} stroke="var(--burn-ink)" />
-              <Eyebrow>Cycle top-ups</Eyebrow>
-            </span>
-            <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              <input
-                className="burn-input"
-                value={topupAmount}
-                onChange={(e) => setTopupAmount(e.target.value)}
-                style={{ width: 70, textAlign: 'right' }}
-                inputMode="decimal"
-              />
-              <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>T cycles →</span>
-              <Btn variant="secondary" sm onClick={() => sendCycles('frontend')} disabled={busy !== null}>
-                {busy === 'cycles-frontend' ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Frontend
-              </Btn>
-              <Btn variant="secondary" sm onClick={() => sendCycles('course_nft')} disabled={busy !== null}>
-                {busy === 'cycles-course_nft' ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Course NFT
-              </Btn>
-            </div>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Sends from the backend's cycle balance (the hub — it refills itself from treasury ICP
-              automatically). The sweep also auto-forwards 0.5 T to the course NFT canister whenever
-              it dips below 1 T.
-            </span>
-          </div>
-        </>
-      )}
 
-      {/* ════ SYSTEM: sweep + audit ════ */}
-      {section === 'system' && (
+            {/* ── Lottery pot ── */}
+            <div className="col" style={{ ...card, gap: 12 }}>
+              <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                <Eyebrow>Lottery pot</Eyebrow>
+                {lottery && lottery.pot_e8s < lottery.min_pot_e8s && (
+                  <Chip tone="pending">below the {fmtICP(lottery.min_pot_e8s)} ICP draw minimum — rolls over</Chip>
+                )}
+              </span>
+              <span className="row" style={{ gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <b className="mono" style={big}>{lottery ? fmtICP(lottery.pot_e8s) : pending} ICP</b>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-3)' }}>
+                  {lottery ? `${lottery.total_tickets.toString()} tickets · ${lottery.unique_holders.toString()} players · ${fmtICP(lottery.total_paid_e8s)} ICP paid lifetime` : ''}
+                </span>
+              </span>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                <input type="number" min="0" step="1" placeholder="Amount (ICP)" className="burn-input" style={{ ...inputStyle, maxWidth: 170 }}
+                  value={sweetenInput} onChange={(e) => setSweetenInput(e.target.value)} />
+                <Btn variant="primary" sm onClick={sweetenPot} disabled={busy !== null || !sweetenInput}>
+                  {busy === 'sweeten' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="spark" size={13} stroke="var(--char-950)" />} Sweeten from my wallet
+                </Btn>
+                <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                  Straight into the jackpot (admins hold no tickets — you can never win it back).
+                </span>
+              </div>
+            </div>
+
+            {/* ── Cycles: every canister's tank + its top-up ── */}
+            <div className="col" style={{ ...card, gap: 12 }}>
+              <Eyebrow>Cycles</Eyebrow>
+              <div className="row" style={{ gap: 14, flexWrap: 'wrap', alignItems: 'stretch' }}>
+                <div className="col" style={{ gap: 4, flex: '1 1 150px', minWidth: 140 }}>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>Backend</span>
+                  <b className="mono" style={{ ...big, fontSize: 18, color: cycles !== null && Number(cycles) < 5e12 ? 'var(--ember)' : 'var(--fg)' }}>
+                    {cycles !== null ? `${(Number(cycles) / 1e12).toFixed(2)} T` : pending}
+                  </b>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>auto-refills from treasury below 5 T</span>
+                </div>
+                <div className="col" style={{ gap: 4, flex: '1 1 150px', minWidth: 140 }}>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>Frontend</span>
+                  <b className="mono" style={{ ...big, fontSize: 18, color: typeof feCycles === 'bigint' && Number(feCycles) < 1e12 ? 'var(--ember)' : 'var(--fg)' }}>
+                    {feCycles === null ? pending : feCycles === 'unavailable' ? 'n/a' : `${(Number(feCycles) / 1e12).toFixed(2)} T`}
+                  </b>
+                  <Btn variant="secondary" sm onClick={() => sendCycles('frontend')} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                    {busy === 'cycles-frontend' ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Top up
+                  </Btn>
+                </div>
+                <div className="col" style={{ gap: 4, flex: '1 1 150px', minWidth: 140 }}>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>Course NFT</span>
+                  <b className="mono" style={{ ...big, fontSize: 18, color: typeof nftCycles === 'bigint' && Number(nftCycles) < 1e12 ? 'var(--ember)' : 'var(--fg)' }}>
+                    {nftCycles === null ? pending : nftCycles === 'unavailable' ? 'n/a' : `${(Number(nftCycles) / 1e12).toFixed(2)} T`}
+                  </b>
+                  <Btn variant="secondary" sm onClick={() => sendCycles('course_nft')} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                    {busy === 'cycles-course_nft' ? <LiveDot size={7} /> : <Icon name="zap" size={12} />} Top up
+                  </Btn>
+                </div>
+                <div className="col" style={{ gap: 4, flex: '1 1 150px', minWidth: 140 }}>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>Voucher NFT</span>
+                  <b className="mono" style={{ ...big, fontSize: 18 }}>auto</b>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>sweep-guarded + fee-third burns</span>
+                </div>
+              </div>
+              <div className="row" style={{ gap: 8, alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>Top-up amount</span>
+                <input className="burn-input" value={topupAmount} onChange={(e) => setTopupAmount(e.target.value)}
+                  style={{ width: 70, textAlign: 'right' }} inputMode="decimal" />
+                <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>T cycles, sent from the backend's balance</span>
+              </div>
+            </div>
+          </>
+        );
+      })()}
+
+      {/* ════ ECONOMICS — every dial, live value beside the input ════ */}
+      {section === 'economics' && (
         <>
           <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
             <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
-              <Eyebrow>Settlement</Eyebrow>
-              <Btn variant="secondary" sm onClick={triggerSweep} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-                {busy === 'sweep' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} stroke="var(--burn-ink)" />} Trigger sweep now
+              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+                <Eyebrow>Lottery ticket grant</Eyebrow>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+                  {base}/{base * 2}/{base * 4} per ICP/day
+                </span>
+              </span>
+              <div className="row" style={{ gap: 8 }}>
+                <input type="number" min="1" step="1" placeholder="Base (6-month tier)" className="burn-input" style={inputStyle}
+                  value={ticketsInput} onChange={(e) => setTicketsInput(e.target.value)} />
+                <Btn variant="primary" sm onClick={setTickets} disabled={busy !== null || !ticketsInput}>
+                  {busy === 'tickets' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
+                </Btn>
+              </div>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                Tickets scale with staked ICP automatically; this sets the base per whole ICP.
+                Draw gates (read-only): pot ≥ {lottery ? fmtICP(lottery.min_pot_e8s) : '…'} ICP,
+                ≥ {lottery ? lottery.min_unique_holders.toString() : '…'} players.
+              </span>
+            </div>
+
+            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
+              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+                <Eyebrow>Voting threshold</Eyebrow>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+                  {config
+                    ? (config.default_threshold_usd_e8s !== undefined && config.default_threshold_usd_e8s !== null
+                      ? `$${(Number(config.default_threshold_usd_e8s) / 1e8).toFixed(2)}`
+                      : `${fmtICP(config.default_threshold)} ICP (legacy)`)
+                    : '…'}
+                </span>
+              </span>
+              <div className="row" style={{ gap: 8 }}>
+                <input type="number" min="0.1" step="0.5" placeholder="New threshold (USD)" className="burn-input" style={inputStyle}
+                  value={thresholdInput} onChange={(e) => setThresholdInput(e.target.value)} />
+                <Btn variant="primary" sm onClick={setThreshold} disabled={busy !== null || !thresholdInput}>
+                  {busy === 'threshold' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
+                </Btn>
+              </div>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                Dollar-denominated; re-thresholds every open proposal at the live ICP/USD rate.
+              </span>
+            </div>
+
+            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
+              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+                <Eyebrow>Staking</Eyebrow>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+                  min {config ? `${fmtICP(config.min_stake_e8s)} / ${fmtICP(config.min_unstake_e8s)}` : '…'} · pool fee {config ? fmtICP(config.pool_initiation_fee_e8s) : '…'} ICP
+                </span>
+              </span>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <input type="text" placeholder="Min stake" className="burn-input" style={inputStyle}
+                  value={minStakeInput} onChange={(e) => setMinStakeInput(e.target.value)} />
+                <input type="text" placeholder="Min unstake" className="burn-input" style={inputStyle}
+                  value={minUnstakeInput} onChange={(e) => setMinUnstakeInput(e.target.value)} />
+                <Btn variant="primary" sm onClick={setStakingConfig} disabled={busy !== null || (!minStakeInput && !minUnstakeInput)}>
+                  {busy === 'stakingcfg' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
+                </Btn>
+              </div>
+              <div className="row" style={{ gap: 8 }}>
+                <input type="number" min="0" step="1" placeholder="Pool initiation fee (ICP)" className="burn-input" style={inputStyle}
+                  value={poolFeeInput} onChange={(e) => setPoolFeeInput(e.target.value)} />
+                <Btn variant="primary" sm onClick={setPoolFee} disabled={busy !== null || !poolFeeInput}>
+                  {busy === 'poolfee' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
+                </Btn>
+              </div>
+            </div>
+
+            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
+              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+                <Eyebrow>Voucher economics</Eyebrow>
+                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+                  {voucherMkt ? `${(voucherMkt.market_fee_bps / 100).toFixed(1)}% fee · min ${fmtICP(voucherMkt.min_wrap_e8s)} ICP · buyback 15%` : '…'}
+                </span>
+              </span>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <input type="number" min="0" max="100" step="0.1" placeholder="Market fee %" className="burn-input" style={inputStyle}
+                  value={vFeeInput} onChange={(e) => setVFeeInput(e.target.value)} />
+                <input type="text" placeholder="Min wrap (ICP)" className="burn-input" style={inputStyle}
+                  value={vMinWrapInput} onChange={(e) => setVMinWrapInput(e.target.value)} />
+                <Btn variant="primary" sm onClick={setVoucherConfig} disabled={busy !== null || (!vFeeInput && !vMinWrapInput)}>
+                  {busy === 'vconfig' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
+                </Btn>
+              </div>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                Fees split 1/3 treasury · 1/3 buyback fund · 1/3 voucher-canister cycles burn.
+              </span>
+            </div>
+
+            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
+              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+                <Eyebrow>Golden Ticket campaign</Eyebrow>
+                {voucherMkt ? (
+                  <Chip tone={voucherMkt.promo_open ? 'ok' : 'muted'}>
+                    {voucherMkt.promo_open ? 'OPEN' : 'closed'}
+                  </Chip>
+                ) : <LiveDot size={8} color="var(--burn-ink)" />}
+              </span>
+              <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+                {voucherMkt ? `${voucherMkt.promo_remaining.toLocaleString()} remaining · ${voucherMkt.promo_claims_today}/500 claimed today` : ' '}
+              </span>
+              <Btn variant={voucherMkt?.promo_open ? 'secondary' : 'primary'} sm onClick={() => setPromoCampaign(!(voucherMkt?.promo_open ?? false))} disabled={busy !== null || !voucherMkt} style={{ alignSelf: 'flex-start' }}>
+                {busy === 'promo' ? <LiveDot size={7} /> : <Icon name={voucherMkt?.promo_open ? 'x' : 'spark'} size={13} stroke={voucherMkt?.promo_open ? 'currentColor' : 'var(--char-950)'} />}
+                {voucherMkt?.promo_open ? 'Close campaign' : 'Open campaign'}
               </Btn>
               <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Proposals sitting in "met" settle on the next sweep — run it manually instead of
-                waiting up to 5 minutes when you want a settlement to land immediately.
+                The #/claim page kill switch: 5,000 cap, 500/day drip, 1 ticket/day for 60 days,
+                tickets-only.
               </span>
             </div>
           </div>
 
-          <div className="col" style={{ ...card, gap: 10 }}>
-            <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-              <Eyebrow>Audit log — latest 25 events</Eyebrow>
-              <Btn variant="ghost" sm onClick={refreshAudit} disabled={busy !== null}><Icon name="undo" size={12} /> Refresh</Btn>
-            </span>
-            <div className="col" style={{ gap: 4, maxHeight: 360, overflowY: 'auto' }}>
-              {auditTail.length === 0 && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No events yet (or still loading).</span>}
-              {auditTail.map((e, i) => (
-                <div key={i} className="row" style={{ gap: 10, fontSize: 11.5, padding: '5px 8px', borderRadius: 6, background: i % 2 ? 'transparent' : 'var(--surface)', flexWrap: 'wrap' }}>
-                  <span className="mono" style={{ color: 'var(--fg-3)', minWidth: 118 }}>
-                    {new Date(Number(e.timestamp / 1_000_000n)).toISOString().slice(0, 16).replace('T', ' ')}
-                  </span>
-                  <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>{e.event_type}</Chip>
-                  <span className="mono">{fmtICP(e.amount_e8s)} ICP</span>
-                  <span className="mono" style={{ color: 'var(--fg-3)' }}>{formatPrincipal(e.user)}</span>
-                  <span className="mono" style={{ color: 'var(--fg-3)' }}>ref #{e.proposal_id.toString()}</span>
-                </div>
-              ))}
-            </div>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Append-only on-chain record of every money-moving event. The newest events are at the top.
-            </span>
-          </div>
-        </>
-      )}
-
-      {/* ════ LOTTERY & STAKING — economics ════ */}
-      {section === 'lottery' && (
-        <>
-          {/* ── ICP LP custody: staked value per approved pool ── */}
+          {/* ── ICP LP custody — auto-loaded ── */}
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
               <Eyebrow>ICP LP staked per pool</Eyebrow>
-              <Btn variant="secondary" sm onClick={loadLpPoolStats} disabled={lpStatsBusy}>
-                {lpStatsBusy ? <LiveDot size={7} /> : <Icon name="refresh" size={12} />} {lpPoolStats ? 'Refresh' : 'Load'}
-              </Btn>
+              {lpStatsBusy && <LiveDot size={8} color="var(--burn-ink)" />}
             </span>
             {!lpPoolStats ? (
-              <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-                Reads each approved pool live (positions in custody, token totals, USD value).
-              </span>
+              <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Reading each approved pool…</span>
             ) : lpPoolStats.length === 0 ? (
               <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>No pools configured.</span>
             ) : (
@@ -1028,151 +981,45 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               </div>
             )}
           </div>
-
-          <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
-            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
-              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                <Eyebrow>Voting threshold</Eyebrow>
-                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                  {config
-                    ? (config.default_threshold_usd_e8s !== undefined && config.default_threshold_usd_e8s !== null
-                      ? `$${(Number(config.default_threshold_usd_e8s) / 1e8).toFixed(2)}`
-                      : `${fmtICP(config.default_threshold)} ICP (legacy)`)
-                    : '…'}
-                </span>
-              </span>
-              <div className="row" style={{ gap: 8 }}>
-                <input type="number" min="0.1" step="0.5" placeholder="New threshold (USD)" className="burn-input" style={inputStyle}
-                  value={thresholdInput} onChange={(e) => setThresholdInput(e.target.value)} />
-                <Btn variant="primary" sm onClick={setThreshold} disabled={busy !== null || !thresholdInput}>
-                  {busy === 'threshold' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
-                </Btn>
-              </div>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Dollar-denominated: pots are valued at the live ICP/USD rate, so the bar to settle
-                stays constant as the ICP price moves. Applies to new proposals and re-thresholds
-                every open one.
-              </span>
-            </div>
-            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
-              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                <Eyebrow>Lottery ticket grant</Eyebrow>
-                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                  {base}/{base * 2}/{base * 4} per ICP/day
-                </span>
-              </span>
-              <div className="row" style={{ gap: 8 }}>
-                <input type="number" min="1" step="1" placeholder="Base (6-month tier)" className="burn-input" style={inputStyle}
-                  value={ticketsInput} onChange={(e) => setTicketsInput(e.target.value)} />
-                <Btn variant="primary" sm onClick={setTickets} disabled={busy !== null || !ticketsInput}>
-                  {busy === 'tickets' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
-                </Btn>
-              </div>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Tickets scale with staked ICP automatically; this sets the base per whole ICP.
-              </span>
-            </div>
-
-            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
-              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                <Eyebrow>Pool initiation fee</Eyebrow>
-                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                  {config ? fmtICP(config.pool_initiation_fee_e8s) : '…'} ICP
-                </span>
-              </span>
-              <div className="row" style={{ gap: 8 }}>
-                <input type="number" min="0" step="1" placeholder="New fee (ICP)" className="burn-input" style={inputStyle}
-                  value={poolFeeInput} onChange={(e) => setPoolFeeInput(e.target.value)} />
-                <Btn variant="primary" sm onClick={setPoolFee} disabled={busy !== null || !poolFeeInput}>
-                  {busy === 'poolfee' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
-                </Btn>
-              </div>
-            </div>
-
-            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
-              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                <Eyebrow>Staking minimums</Eyebrow>
-                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                  {config ? `${fmtICP(config.min_stake_e8s)} / ${fmtICP(config.min_unstake_e8s)}` : '…'} ICP
-                </span>
-              </span>
-              <div className="row" style={{ gap: 8 }}>
-                <input type="text" placeholder="Min stake" className="burn-input" style={inputStyle}
-                  value={minStakeInput} onChange={(e) => setMinStakeInput(e.target.value)} />
-                <input type="text" placeholder="Min unstake" className="burn-input" style={inputStyle}
-                  value={minUnstakeInput} onChange={(e) => setMinUnstakeInput(e.target.value)} />
-                <Btn variant="primary" sm onClick={setStakingConfig} disabled={busy !== null || (!minStakeInput && !minUnstakeInput)}>
-                  {busy === 'stakingcfg' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
-                </Btn>
-              </div>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Min unstake floor is 1 ICP (whole-ICP rule). Leave a field empty to keep it.
-              </span>
-            </div>
-          </div>
-
-
-          {/* ── Voucher economics + Golden Ticket campaign ── */}
-          <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
-            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
-              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                <Eyebrow>Voucher economics</Eyebrow>
-                <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                  {voucherMkt ? `${(voucherMkt.market_fee_bps / 100).toFixed(1)}% fee · min ${fmtICP(voucherMkt.min_wrap_e8s)} ICP` : '…'}
-                </span>
-              </span>
-              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-                <input type="number" min="0" max="100" step="0.1" placeholder="Market fee %" className="burn-input" style={inputStyle}
-                  value={vFeeInput} onChange={(e) => setVFeeInput(e.target.value)} />
-                <input type="text" placeholder="Min wrap (ICP)" className="burn-input" style={inputStyle}
-                  value={vMinWrapInput} onChange={(e) => setVMinWrapInput(e.target.value)} />
-                <Btn variant="primary" sm onClick={setVoucherConfig} disabled={busy !== null || (!vFeeInput && !vMinWrapInput)}>
-                  {busy === 'vconfig' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="check" size={13} stroke="var(--char-950)" />} Set
-                </Btn>
-              </div>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                The marketplace fee splits 1/3 treasury · 1/3 buyback fund · 1/3 voucher-canister
-                cycles burn. Leave a field empty to keep it. Buyback discount is fixed at 15%.
-              </span>
-            </div>
-
-            <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
-              <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                <Eyebrow>Golden Ticket campaign</Eyebrow>
-                {voucherMkt && (
-                  <Chip tone={voucherMkt.promo_open ? 'ok' : 'muted'}>
-                    {voucherMkt.promo_open ? 'OPEN' : 'closed'}
-                  </Chip>
-                )}
-              </span>
-              <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
-                {voucherMkt ? `${voucherMkt.promo_remaining.toLocaleString()} remaining · ${voucherMkt.promo_claims_today}/500 claimed today` : 'Load on the Funds tab or Refresh the Overview.'}
-              </span>
-              <div className="row" style={{ gap: 8 }}>
-                <Btn variant={voucherMkt?.promo_open ? 'secondary' : 'primary'} sm onClick={() => setPromoCampaign(!(voucherMkt?.promo_open ?? false))} disabled={busy !== null || !voucherMkt}>
-                  {busy === 'promo' ? <LiveDot size={7} /> : <Icon name={voucherMkt?.promo_open ? 'x' : 'spark'} size={13} stroke={voucherMkt?.promo_open ? 'currentColor' : 'var(--char-950)'} />}
-                  {voucherMkt?.promo_open ? 'Close campaign' : 'Open campaign'}
-                </Btn>
-                <Btn variant="ghost" sm onClick={loadVoucherMarket} disabled={busy !== null}><Icon name="undo" size={12} /> Refresh</Btn>
-              </div>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                The kill switch for the #/claim page: 5,000-voucher cap, 500/day drip, 1 ticket/day
-                for 60 days per claim, tickets-only (never redeemable).
-              </span>
-            </div>
-          </div>
         </>
       )}
 
-      {/* ── Platform neurons + split-neuron diagnostics ── */}
-      {section === 'lottery' && (
+      {/* ════ POOLS & USERS ════ */}
+      {section === 'pools' && (
         <>
+          {/* Term pools at a glance */}
+          <div className="col" style={{ ...card, gap: 10 }}>
+            <Eyebrow>Term pools</Eyebrow>
+            <div className="row" style={{ gap: 14, flexWrap: 'wrap' }}>
+              {staking ? staking.pools.map(p => (
+                <div key={p.tier} className="col" style={{ gap: 2, flex: '1 1 150px', minWidth: 140 }}>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>{p.tier} · {p.daily_tickets.toString()} tickets/ICP/day</span>
+                  <b className="mono" style={{ fontSize: 18 }}>{fmtICP(p.total_staked_e8s)} ICP</b>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>{p.staker_count.toString()} stakers{p.neuron_id !== undefined && p.neuron_id !== null ? ` · neuron #${p.neuron_id}` : ''}</span>
+                </div>
+              )) : <LiveDot size={8} color="var(--burn-ink)" />}
+              {ea && (
+                <div className="col" style={{ gap: 2, flex: '1 1 150px', minWidth: 140 }}>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>Perm · 40 tickets/ICP/day</span>
+                  <b className="mono" style={{ fontSize: 18 }}>{fmtICP(ea.total_staked_e8s)} ICP</b>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>{ea.early_adopter_count.toString()} members · {ea.membership_closed ? 'closed' : 'open'}</span>
+                </div>
+              )}
+              {pool && (
+                <div className="col" style={{ gap: 2, flex: '1 1 150px', minWidth: 140 }}>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>Neuron Syndicate</span>
+                  <b className="mono" style={{ fontSize: 18 }}>{pool.active_count.toString()}</b>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>active in the top-100 race</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Platform neurons — auto-checked against NNS */}
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
               <Eyebrow>Platform neurons — live from NNS governance</Eyebrow>
-              <Btn variant="secondary" sm onClick={checkFollowing} disabled={busy !== null}>
-                {busy === 'follow' ? <LiveDot size={7} /> : <Icon name="eye" size={13} stroke="var(--burn-ink)" />} Check live (NNS)
-              </Btn>
+              {followStatus === null && <LiveDot size={8} color="var(--burn-ink)" />}
             </span>
             {followStatus && (
               <div className="col" style={{ gap: 4 }}>
@@ -1194,32 +1041,24 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               </div>
             )}
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Reads followees, stake and uncollected maturity straight from NNS governance (bypasses
-              dashboard cache). Every platform neuron should follow the primary on topics 0
-              (catch-all), 4 (Governance) and 14 (SNS). Tier-neuron yield harvests automatically once
-              it crosses {config ? fmtICP(config.maturity_threshold_e8s) : '1.05'} ICP (then splits
-              70/30 lottery/treasury); the Perm neuron settles its yield on the same cadence. "Run
-              sweep now" on the Overview forces a harvest check immediately.
+              Read straight from NNS governance. Every platform neuron should follow the primary on
+              topics 0/4/14. Yield harvests automatically past {config ? fmtICP(config.maturity_threshold_e8s) : '1.05'} ICP
+              (70/30 lottery/treasury); "Trigger sweep" on System forces a harvest check now.
             </span>
           </div>
 
+          {/* Split neurons */}
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
               <Eyebrow>Split neurons — user unstakes the canister manages</Eyebrow>
-              <Btn variant="ghost" sm onClick={refreshSplitNeurons} disabled={busy !== null}><Icon name="undo" size={12} /> Refresh</Btn>
+              {splitNeurons === null && <LiveDot size={8} color="var(--burn-ink)" />}
             </span>
-            {splitNeurons === null && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Loading…</span>}
             {splitNeurons !== null && splitNeurons.filter(u => u.status !== UnstakeStatus.Merged).length === 0 && (
               <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No unstakes yet — nothing is dissolving.</span>
             )}
             {splitNeurons !== null && splitNeurons.filter(u => u.status !== UnstakeStatus.Merged).length > 0 && (
               <div className="col" style={{ gap: 4, maxHeight: 380, overflowY: 'auto' }}>
                 {[...splitNeurons]
-                  // Restaked (Merged) rows are 0-stake husks the NNS leaves behind
-                  // after a merge — the stake is already back in the pool. Hide
-                  // them (matches the user-facing Payouts/Staking lists) so the
-                  // admin view only shows neurons the canister is actively
-                  // managing: splitting / dissolving / disbursed-history.
                   .filter(u => u.status !== UnstakeStatus.Merged)
                   .sort((a, b) => {
                     const live = (u: PendingUnstake) => u.status === UnstakeStatus.Dissolving || u.status === UnstakeStatus.SplitDone ? 0 : 1;
@@ -1228,7 +1067,6 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                   .map(u => (
                     <div key={u.id.toString()} className="row" style={{ gap: 10, fontSize: 12, flexWrap: 'wrap', alignItems: 'center', padding: '5px 8px', borderRadius: 6, background: 'var(--surface)' }}>
                       {u.status === UnstakeStatus.Disbursed ? <Chip tone="ok" style={{ height: 17, fontSize: 10 }}>disbursed</Chip>
-                        : u.status === UnstakeStatus.Merged ? <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>restaked{u.merged_into !== undefined && u.merged_into !== null ? ` · ${u.merged_into}` : ''}</Chip>
                         : u.status === UnstakeStatus.Dissolving ? <Chip tone="pending" style={{ height: 17, fontSize: 10 }}>dissolving</Chip>
                         : <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>splitting</Chip>}
                       <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${u.split_neuron_id.toString()}`}
@@ -1248,111 +1086,25 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               </div>
             )}
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Every unstake splits its own neuron, dissolving for the tier's full term, then
-              auto-disburses to the owner. Restaked unstakes (the "changed my mind" path) are
-              hidden — their stake is already back in a pool, and the NNS leaves a 0-stake husk
-              behind that cannot be deleted. Disbursed rows are history. These neurons never earn
-              maturity for the protocol — their dissolve belongs entirely to the user.
+              Every unstake splits its own neuron, dissolves for the tier's term, then auto-disburses.
+              Restaked rows are hidden (0-stake NNS husks); disbursed rows are history.
             </span>
           </div>
-        </>
-      )}
 
-      {/* ════ FEATURES — kill switches ════ */}
-      {section === 'features' && (
-        <>
-          <div className="col" style={{ ...card, gap: 10 }}>
-            <span className="row" style={{ gap: 8 }}>
-              <Icon name="zap" size={13} stroke="var(--burn-ink)" />
-              <Eyebrow>Feature kill switches</Eyebrow>
-            </span>
-            <div className="col" style={{ gap: 0 }}>
-              {/* Header row */}
-              <div className="row" style={{ gap: 10, padding: '6px 8px', borderBottom: '1px solid var(--border-hi)', color: 'var(--fg-3)', fontSize: 11 }}>
-                <span style={{ flex: '1 1 0' }}>Feature</span>
-                <span style={{ flex: '0 0 70px' }}>State</span>
-                <span style={{ flex: '0 0 96px', textAlign: 'right' }}>Toggle</span>
-              </div>
-              {featureFlags.map((f, i) => {
-                const label = f.state === FlagState.On ? 'On' : f.state === FlagState.AdminOn ? 'Admin' : 'Off';
-                const variant = f.state === FlagState.On ? 'primary' : f.state === FlagState.AdminOn ? 'secondary' : 'ghost';
-                const tone = f.state === FlagState.On ? 'ok' : f.state === FlagState.AdminOn ? 'pending' : 'muted';
-                return (
-                  <div key={f.key} className="row" style={{
-                    gap: 10, padding: '6px 8px', alignItems: 'center',
-                    borderBottom: '1px solid var(--border)',
-                    background: i % 2 ? 'transparent' : 'var(--surface)',
-                  }}>
-                    <span className="mono" style={{ flex: '1 1 0', fontSize: 12.5 }}>{f.key}</span>
-                    <span style={{ flex: '0 0 70px' }}><Chip tone={tone} style={{ height: 18, fontSize: 10.5 }}>{label}</Chip></span>
-                    <span style={{ flex: '0 0 96px', display: 'flex', justifyContent: 'flex-end' }}>
-                      <Btn
-                        variant={variant} sm
-                        onClick={() => cycleFlag(f.key, f.state)}
-                        disabled={busy === `flag-${f.key}`}
-                      >
-                        {busy === `flag-${f.key}`
-                          ? <LiveDot size={7} color="var(--fg)" />
-                          : <Icon name={f.state === FlagState.On ? 'check' : f.state === FlagState.AdminOn ? 'key' : 'x'} size={12} stroke={f.state === FlagState.On ? 'var(--char-950)' : 'currentColor'} />}
-                        {' '}{label}
-                      </Btn>
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Click to cycle <b>Off</b> → <b>On</b> (everyone) → <b>Admin</b> (admins only — live preview/playtest). Instant, reversible.
-            </span>
-          </div>
-        </>
-      )}
-
-      {section === 'system' && (
-        <>
-          <div className="col" style={{ ...card, gap: 10 }}>
-            <span className="row" style={{ gap: 8 }}>
-              <Icon name="gamepad" size={13} stroke="var(--burn-ink)" />
-              <Eyebrow>Mini Golf — course editor</Eyebrow>
-            </span>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Repaint any hole's voxel layout cell by cell. Saving stores the layout on-chain and
-              replaces the built-in hole for every player immediately; Reset reverts to the built-in.
-            </span>
-            <CourseEditor actor={actor} />
-          </div>
-
-        </>
-      )}
-
-      {/* ════ USERS ════ */}
-      {section === 'users' && (
-        <>
+          {/* Logged-in principals — auto-loaded */}
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
               <span className="row" style={{ gap: 8 }}>
                 <Icon name="list" size={13} stroke="var(--burn-ink)" />
                 <Eyebrow>Logged-in principals</Eyebrow>
               </span>
-              <span className="row" style={{ gap: 8 }}>
-                <Btn variant="ghost" sm onClick={loadSeenUsers} disabled={busy !== null}>
-                  <Icon name="undo" size={12} /> {seenUsers === null ? 'Load' : 'Reload'}
-                </Btn>
-              </span>
+              {seenUsers === null && <LiveDot size={8} color="var(--burn-ink)" />}
             </span>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Every principal that has ever signed in — recorded on the first
-              authenticated call (the login ping), regardless of balance or whether
-              they took any on-chain action. Sorted by most recent login. Zero ledger
-              reads, so it loads instantly.
-            </span>
-
-            {seenUsers !== null && seenUsers.length === 0 && busy !== 'users' && (
+            {seenUsers !== null && seenUsers.length === 0 && (
               <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No signed-in principals yet.</span>
             )}
-
             {seenUsers !== null && seenUsers.length > 0 && (
-              <div style={{ overflowX: 'auto' }}>
+              <div style={{ overflowX: 'auto', maxHeight: 320, overflowY: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
                     <tr style={{ color: 'var(--fg-3)' }}>
@@ -1387,42 +1139,32 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             )}
           </div>
 
+          {/* Wallet balances — auto-loaded (chunked) */}
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
               <span className="row" style={{ gap: 8 }}>
-                <Icon name="list" size={13} stroke="var(--burn-ink)" />
+                <Icon name="wallet" size={13} stroke="var(--burn-ink)" />
                 <Eyebrow>User wallet balances</Eyebrow>
               </span>
               <span className="row" style={{ gap: 8 }}>
+                {userProgress && (
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                    {userProgress.done}/{userProgress.total}
+                  </span>
+                )}
+                {userRows === null && <LiveDot size={8} color="var(--burn-ink)" />}
                 {config?.is_local && (
                   <Btn variant="secondary" sm onClick={loadMockUsers} disabled={busy !== null}>
                     <Icon name="gamepad" size={12} /> Mock users
                   </Btn>
                 )}
-                <Btn variant="ghost" sm onClick={loadUserBalances} disabled={busy !== null}>
-                  <Icon name="undo" size={12} /> {userRows === null ? 'Load' : 'Reload'}
-                </Btn>
               </span>
             </span>
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Every known participant — the union across voting, staking, lottery,
-              pool neurons, X-Farm, and every signed-in
-              principal above — and the balance held in their <b>own wallet</b> on each
-              ledger. Includes logged-in users with zero balance. Fetched in batches
-              (5 ledger reads per user), so a large user base takes a moment.
-            </span>
-
-            {userProgress && busy === 'users' && (
-              <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-                Loading balances… {userProgress.done}/{userProgress.total}
-              </span>
-            )}
-            {userRows !== null && userRows.length === 0 && busy !== 'users' && (
+            {userRows !== null && userRows.length === 0 && (
               <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No participants yet.</span>
             )}
-
             {userRows !== null && userRows.length > 0 && (
-              <div style={{ overflowX: 'auto' }}>
+              <div style={{ overflowX: 'auto', maxHeight: 360, overflowY: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead>
                     <tr style={{ color: 'var(--fg-3)' }}>
@@ -1460,19 +1202,15 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               </div>
             )}
           </div>
-        </>
-      )}
 
-      {/* ════ COURSE MODERATION (Users) ════ */}
-      {section === 'users' && (
-        <>
+          {/* Course moderation — auto-loaded */}
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
               <span className="row" style={{ gap: 8 }}>
                 <Icon name="eye" size={13} stroke="var(--burn-ink)" />
                 <Eyebrow>Low-rated courses — moderation candidates</Eyebrow>
               </span>
-              <Btn variant="ghost" sm onClick={refreshModeration} disabled={busy !== null}><Icon name="undo" size={12} /> Refresh</Btn>
+              {modCandidates === null && <LiveDot size={8} color="var(--burn-ink)" />}
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Courses rated below 2.0★ with at least 5 ratings, worst first.{' '}
@@ -1493,14 +1231,11 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                 </div>
               </MoreInfo>
             </span>
-
-            {modCandidates === null && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>Loading…</span>}
             {modCandidates !== null && modCandidates.length === 0 && (
               <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No low-rated courses — nothing to moderate.</span>
             )}
             {modCandidates !== null && modCandidates.length > 0 && (
               <div className="col" style={{ gap: 0 }}>
-                {/* Header row */}
                 <div className="row" style={{ gap: 10, padding: '6px 8px', borderBottom: '1px solid var(--border-hi)', color: 'var(--fg-3)', fontSize: 11 }}>
                   <span style={{ flex: '0 0 70px' }}>Token</span>
                   <span style={{ flex: '1 1 0' }}>Owner</span>
@@ -1542,34 +1277,129 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
         </>
       )}
 
-
-      {/* ════ SYSTEM: canister wiring + reference ════ */}
+      {/* ════ SYSTEM ════ */}
       {section === 'system' && (
         <>
+          {/* Kill switches */}
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8 }}>
-              <Icon name="key" size={13} stroke="var(--burn-ink)" />
-              <Eyebrow>Canister wiring</Eyebrow>
+              <Icon name="zap" size={13} stroke="var(--burn-ink)" />
+              <Eyebrow>Feature kill switches</Eyebrow>
             </span>
+            <div className="col" style={{ gap: 0 }}>
+              <div className="row" style={{ gap: 10, padding: '6px 8px', borderBottom: '1px solid var(--border-hi)', color: 'var(--fg-3)', fontSize: 11 }}>
+                <span style={{ flex: '1 1 0' }}>Feature</span>
+                <span style={{ flex: '0 0 70px' }}>State</span>
+                <span style={{ flex: '0 0 96px', textAlign: 'right' }}>Toggle</span>
+              </div>
+              {featureFlags.map((f, i) => {
+                const label = f.state === FlagState.On ? 'On' : f.state === FlagState.AdminOn ? 'Admin' : 'Off';
+                const variant = f.state === FlagState.On ? 'primary' : f.state === FlagState.AdminOn ? 'secondary' : 'ghost';
+                const tone = f.state === FlagState.On ? 'ok' : f.state === FlagState.AdminOn ? 'pending' : 'muted';
+                return (
+                  <div key={f.key} className="row" style={{
+                    gap: 10, padding: '6px 8px', alignItems: 'center',
+                    borderBottom: '1px solid var(--border)',
+                    background: i % 2 ? 'transparent' : 'var(--surface)',
+                  }}>
+                    <span className="mono" style={{ flex: '1 1 0', fontSize: 12.5 }}>{f.key}</span>
+                    <span style={{ flex: '0 0 70px' }}><Chip tone={tone} style={{ height: 18, fontSize: 10.5 }}>{label}</Chip></span>
+                    <span style={{ flex: '0 0 96px', display: 'flex', justifyContent: 'flex-end' }}>
+                      <Btn
+                        variant={variant} sm
+                        onClick={() => cycleFlag(f.key, f.state)}
+                        disabled={busy === `flag-${f.key}`}
+                      >
+                        {busy === `flag-${f.key}`
+                          ? <LiveDot size={7} color="var(--fg)" />
+                          : <Icon name={f.state === FlagState.On ? 'check' : f.state === FlagState.AdminOn ? 'key' : 'x'} size={12} stroke={f.state === FlagState.On ? 'var(--char-950)' : 'currentColor'} />}
+                        {' '}{label}
+                      </Btn>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Point the backend at its NFT canisters (one-time after creating them on a network).
-              Current: voucher_nft {config?.voucher_nft_canister ? <span className="mono">{formatPrincipal(config.voucher_nft_canister)}</span> : '— not wired'} ·
-              course_nft {config?.course_nft_canister ? <span className="mono">{formatPrincipal(config.course_nft_canister)}</span> : '— not wired'}
+              Click to cycle <b>Off</b> → <b>On</b> (everyone) → <b>Admin</b> (admins only — live preview/playtest). Instant, reversible.
             </span>
-            <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-              <input type="text" placeholder="voucher_nft canister id" className="burn-input" style={{ ...inputStyle, minWidth: 220 }}
-                value={wireVoucherInput} onChange={(e) => setWireVoucherInput(e.target.value)} />
-              <Btn variant="secondary" sm onClick={() => wireCanister('voucher')} disabled={busy !== null || !wireVoucherInput}>
-                {busy === 'wire-voucher' ? <LiveDot size={7} /> : <Icon name="key" size={12} />} Wire voucher_nft
+          </div>
+
+          {/* Sweep + wiring on one row */}
+          <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
+            <div className="col" style={{ ...card, gap: 10, flex: '1 1 260px', minWidth: 240 }}>
+              <Eyebrow>Settlement</Eyebrow>
+              <Btn variant="secondary" sm onClick={triggerSweep} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                {busy === 'sweep' ? <LiveDot size={7} /> : <Icon name="refresh" size={13} stroke="var(--burn-ink)" />} Trigger sweep now
               </Btn>
-              <input type="text" placeholder="course_nft canister id" className="burn-input" style={{ ...inputStyle, minWidth: 220 }}
-                value={wireCourseInput} onChange={(e) => setWireCourseInput(e.target.value)} />
-              <Btn variant="secondary" sm onClick={() => wireCanister('course')} disabled={busy !== null || !wireCourseInput}>
-                {busy === 'wire-course' ? <LiveDot size={7} /> : <Icon name="key" size={12} />} Wire course_nft
-              </Btn>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                Runs settlements, retries, harvest checks and cache refreshes immediately instead of
+                waiting up to 5 minutes.
+              </span>
+            </div>
+            <div className="col" style={{ ...card, gap: 10, flex: '2 1 320px', minWidth: 280 }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="key" size={13} stroke="var(--burn-ink)" />
+                <Eyebrow>Canister wiring</Eyebrow>
+              </span>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+                voucher_nft {config?.voucher_nft_canister ? <span className="mono">{formatPrincipal(config.voucher_nft_canister)}</span> : '— not wired'} ·
+                course_nft {config?.course_nft_canister ? <span className="mono">{formatPrincipal(config.course_nft_canister)}</span> : '— not wired'}
+              </span>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <input type="text" placeholder="voucher_nft canister id" className="burn-input" style={{ ...inputStyle, minWidth: 200 }}
+                  value={wireVoucherInput} onChange={(e) => setWireVoucherInput(e.target.value)} />
+                <Btn variant="secondary" sm onClick={() => wireCanister('voucher')} disabled={busy !== null || !wireVoucherInput}>
+                  {busy === 'wire-voucher' ? <LiveDot size={7} /> : <Icon name="key" size={12} />} Wire
+                </Btn>
+                <input type="text" placeholder="course_nft canister id" className="burn-input" style={{ ...inputStyle, minWidth: 200 }}
+                  value={wireCourseInput} onChange={(e) => setWireCourseInput(e.target.value)} />
+                <Btn variant="secondary" sm onClick={() => wireCanister('course')} disabled={busy !== null || !wireCourseInput}>
+                  {busy === 'wire-course' ? <LiveDot size={7} /> : <Icon name="key" size={12} />} Wire
+                </Btn>
+              </div>
             </div>
           </div>
 
+          {/* Audit log — auto-loaded */}
+          <div className="col" style={{ ...card, gap: 10 }}>
+            <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
+              <Eyebrow>Audit log — latest 25 events</Eyebrow>
+              {auditTail.length === 0 && <LiveDot size={8} color="var(--burn-ink)" />}
+            </span>
+            <div className="col" style={{ gap: 4, maxHeight: 360, overflowY: 'auto' }}>
+              {auditTail.length === 0 && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No events yet (or still loading).</span>}
+              {auditTail.map((e, i) => (
+                <div key={i} className="row" style={{ gap: 10, fontSize: 11.5, padding: '5px 8px', borderRadius: 6, background: i % 2 ? 'transparent' : 'var(--surface)', flexWrap: 'wrap' }}>
+                  <span className="mono" style={{ color: 'var(--fg-3)', minWidth: 118 }}>
+                    {new Date(Number(e.timestamp / 1_000_000n)).toISOString().slice(0, 16).replace('T', ' ')}
+                  </span>
+                  <Chip tone="muted" style={{ height: 17, fontSize: 10 }}>{e.event_type}</Chip>
+                  <span className="mono">{fmtICP(e.amount_e8s)} ICP</span>
+                  <span className="mono" style={{ color: 'var(--fg-3)' }}>{formatPrincipal(e.user)}</span>
+                  <span className="mono" style={{ color: 'var(--fg-3)' }}>ref #{e.proposal_id.toString()}</span>
+                </div>
+              ))}
+            </div>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              Append-only on-chain record of every money-moving event, newest first.
+            </span>
+          </div>
+
+          {/* Course editor */}
+          <div className="col" style={{ ...card, gap: 10 }}>
+            <span className="row" style={{ gap: 8 }}>
+              <Icon name="gamepad" size={13} stroke="var(--burn-ink)" />
+              <Eyebrow>Mini Golf — course editor</Eyebrow>
+            </span>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              Repaint any hole's voxel layout cell by cell. Saving stores the layout on-chain and
+              replaces the built-in hole for every player immediately; Reset reverts to the built-in.
+            </span>
+            <CourseEditor actor={actor} />
+          </div>
+
+          {/* Reference */}
           <div className="col" style={{ gap: 6 }}>
             <Eyebrow accent>How each feature works</Eyebrow>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
@@ -1595,24 +1425,28 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           <Section icon="zap" title="Lossless staking — three terms, one principal, zero loss">
             <Li>Three pooled NNS neurons, one per term: 6 months, 1 year, 2 years. Your ICP joins the term's neuron; your principal is never spent. Every neuron is made PUBLIC on the NNS the moment it's configured — anyone can audit it on the dashboard.</Li>
             <Li>Staking grants <b>no voting power</b> — voting is burn-only. Staking's sole reward is lottery eligibility: the term length scales the daily ticket grant (6mo / 1y / 2y → 5 / 10 / 20 tickets per ICP per day).</Li>
-            <Li>Whole-ICP amounts only. Unstake any time: the tier's neuron splits, the split dissolves for the full term, then the FULL amount lands back in your wallet automatically — the treasury fronts every neuron fee. Zero-loss means zero: commit X, get X back. A dissolving unstake can also be RESTAKED into any tier (merge; treasury fronts that fee too).</Li>
+            <Li>Whole-ICP amounts only. Every stake is issued as a Voucher NFT; exits are voucher-native (sell, instant 85% buyback, or redeem = dissolve for 100%). The treasury fronts every neuron fee.</Li>
             <Li>Neuron maturity harvests once it crosses ~1.05 ICP and is split <b>70% lottery prize pot / 30% treasury</b> — all the staking neurons feed the same pot.</Li>
-            <Li>Staking is also the lottery's eligibility gate (below).</Li>
           </Section>
 
           <Section icon="spark" title="No-Loss Lottery — dynamic odds, funded by yield">
-            <Li>Stakers only — and eligibility is live: daily grant = base ({base}) × term multiplier × whole ICP staked, claimed automatically on login. Fully unstake and any tickets already held void immediately; the same happens on promotion to admin.</Li>
-            <Li>Drawings 3× a week (Mon/Wed/Sat nights US Eastern), but a drawing only runs when the pot holds at least 25 ICP — below that it rolls over and the pot keeps growing. Odds are dynamic: every drawing that runs has a 1-in-13 chance of paying out regardless of ticket supply (≈ one winner a month, 96% chance within 3 months), decided by on-chain randomness (raw_rand). A user's win chance is their share of all tickets.</Li>
-            <Li>Tickets accumulate round over round until someone hits. The winner takes 65% of the prize pot; 30% seeds the next round; 5% is burned to backend-canister cycles; all tickets reset.</Li>
+            <Li>Stakers only — daily grant = base ({base}) × term multiplier × whole ICP staked, granted server-side every UTC day (no visit needed). Fully unstake and any tickets already held void immediately; the same happens on promotion to admin. Listed vouchers pause their ticket stream until delisted; buying a voucher grants its daily rate instantly (once per voucher per day).</Li>
+            <Li>Drawings 3× a week (Mon/Wed/Sat nights US Eastern), but a drawing only runs when the pot holds at least 25 ICP AND enough unique players hold tickets — below that it rolls over. Odds are dynamic: every drawing that runs has a 1-in-13 chance of paying out regardless of ticket supply, decided by on-chain randomness (raw_rand).</Li>
+            <Li>The winner takes 65% of the prize pot; 30% seeds the next round; 5% is burned to backend-canister cycles; all tickets reset.</Li>
             <Li>The pot is funded purely by staking yield — players never pay in, so nobody can lose money.</Li>
             <Li>Prize payouts are journaled and retried until the transfer lands; a win can never be paid twice or lost.</Li>
           </Section>
-
 
           <Section icon="spark" title="Perm tier — the platform's permanent stake">
             <Li>Permanent (no unstake, by design) stake into a platform-controlled 2-year neuron that follows the primary on every topic. Open to everyone, forever — no membership cap or close.</Li>
             <Li>Perm stakes earn <b>lottery tickets only</b>: a flat 40 tickets/day per whole ICP staked. No ICP yield is ever paid to Perm stakers.</Li>
             <Li>The Perm neuron's harvested yield is split <b>30% treasury / 70% lottery prize pot</b> — never distributed to users.</Li>
+          </Section>
+
+          <Section icon="star" title="Stake Vouchers — the stake as an NFT">
+            <Li>Staking auto-issues a Backed voucher NFT for the position; tickets follow the voucher's current owner (day-keyed grants — wash-trading earns nothing).</Li>
+            <Li>Exits: sell on the Voucher Exchange (fee splits 1/3 treasury · 1/3 buyback fund · 1/3 voucher-canister cycles burn), instant 85% house buyback (balance-gated by the buyback wallet; burns the NFT and dissolves the claim back to the fund), or redeem (dissolve for 100%).</Li>
+            <Li>Golden Tickets (promo class) are tickets-only: 1/day for 60 days, soulbound, never redeemable, never buyback-eligible.</Li>
           </Section>
 
           <Section icon="coins" title="Payout history — every satoshi accounted for">
@@ -1621,7 +1455,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           </Section>
 
           <Section icon="wallet" title="Treasury & cycles — how the lights stay on">
-            <Li>Treasury inflows: 50% of burns, 50% of staking yield, 50% of Perm-neuron yield, Neuron Syndicate initiation fees, explorer and mini-golf payments.</Li>
+            <Li>Treasury inflows: 50% of burns, 30% of staking + Perm yield, voucher-fee thirds, Neuron Syndicate initiation fees, explorer and mini-golf payments.</Li>
             <Li>Cycles: 25% of each burn tops up each canister via the CMC. If the backend dips below 5T cycles, the sweep auto-converts treasury ICP into cycles (two-phase, idempotent).</Li>
             <Li>Withdrawals and neuron allocations are guarded by the 15 ICP floor (override available) — below ~10 ICP the cycle top-up silently stops.</Li>
           </Section>
