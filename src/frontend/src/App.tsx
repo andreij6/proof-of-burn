@@ -664,6 +664,10 @@ export default function App() {
       return pageFromHash(window.location.hash) ?? 'landing';
     }
   );
+  // Every navigation lands at the TOP of the new page (the app shell owns
+  // the scroll — <main> is the scroller, not the window).
+  const mainScrollRef = useRef<HTMLElement | null>(null);
+  useEffect(() => { mainScrollRef.current?.scrollTo({ top: 0 }); }, [page]);
   // User navigations push a history entry (Back works); a redirect/alias/bounce
   // calls `redirect()` so the hash is *replaced* — Back then skips the page that
   // would only bounce forward again.
@@ -2304,7 +2308,7 @@ export default function App() {
 
         {/* Content column. Keyed by page so every page fades/blurs in with the
             expressive transition on navigation. */}
-        <main style={{ flex: 1, minWidth: 320, overflowY: 'auto' }}>
+        <main ref={mainScrollRef} style={{ flex: 1, minWidth: 320, overflowY: 'auto' }}>
           {winBanner && (
             <div role="status" style={{
               display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between',
