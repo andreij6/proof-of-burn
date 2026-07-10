@@ -19773,6 +19773,24 @@ async fn claim_promo_voucher(target: Option<Principal>) -> Result<u64, String> {
 
 // ── Admin ───────────────────────────────────────────────────────────────────
 
+/// Admin: fund the buyback wallet from the TREASURY (the natural source —
+/// no external wallet dance). Plain internal ledger transfer [1;32] → [10;32].
+#[ic_cdk::update]
+async fn admin_fund_buyback_from_treasury(amount_e8s: u64) -> Result<(), String> {
+    require_admin()?;
+    if amount_e8s <= ICP_FEE_E8S {
+        return Err("AMOUNT_TOO_SMALL".to_string());
+    }
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(BUYBACK_SUBACCOUNT) };
+    call_ledger_transfer(config.ledger_canister_id, Some(TREASURY_SUBACCOUNT), dest, amount_e8s - ICP_FEE_E8S, Some(ICP_FEE_E8S))
+        .await
+        .map_err(|e| format!("TREASURY_TRANSFER_FAILED: {}", e))?;
+    let _ = refresh_buyback_fund_cache().await;
+    staking_audit("buyback_fund_from_treasury", get_caller(), amount_e8s, 0);
+    Ok(())
+}
+
 #[ic_cdk::update]
 async fn admin_withdraw_buyback(to: Principal, amount_e8s: u64) -> Result<(), String> {
     require_admin()?;

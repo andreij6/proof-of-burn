@@ -1873,6 +1873,7 @@ service : (InitPayload) -> {
   claim_promo_voucher : (opt principal) -> (BalanceResult);
   get_voucher_market : () -> (VoucherMarketInfo) query;
   admin_withdraw_buyback : (principal, nat64) -> (Result);
+  admin_fund_buyback_from_treasury : (nat64) -> (Result);
   admin_set_voucher_config : (opt nat16, opt nat64) -> (Result);
   admin_set_promo_campaign : (bool) -> (Result);
   admin_set_voucher_nft_canister : (principal) -> (Result);

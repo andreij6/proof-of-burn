@@ -170,6 +170,31 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   const [lottery, setLottery] = useState<LotteryInfo | null>(null);
   const [ea, setEa] = useState<EarlyAdopterInfo | null>(null);
   const [staking, setStaking] = useState<StakingPoolInfo | null>(null);
+  const [buybackFundE8s, setBuybackFundE8s] = useState<bigint | null>(null);
+  const [buybackFundAmt, setBuybackFundAmt] = useState('');
+  const [buybackWithdrawAmt, setBuybackWithdrawAmt] = useState('');
+  const loadBuybackFund = async () => {
+    if (!actor) return;
+    try { setBuybackFundE8s((await actor.get_voucher_market()).buyback_fund_e8s); } catch { /* surfaced by dash */ }
+  };
+  const fundBuyback = () => run('buybackfund', async () => {
+    const icp = parseFloat(buybackFundAmt);
+    if (!isFinite(icp) || icp <= 0) throw new Error('Enter a positive ICP amount.');
+    const res = await actor.admin_fund_buyback_from_treasury(BigInt(Math.round(icp * 1e8)));
+    if (res.__kind__ === 'Err') throw new Error(res.Err);
+    setBuybackFundAmt('');
+    await loadBuybackFund();
+    return `Moved ${icp} ICP from the treasury into the buyback fund.`;
+  });
+  const withdrawBuyback = () => run('buybackwithdraw', async () => {
+    const icp = parseFloat(buybackWithdrawAmt);
+    if (!isFinite(icp) || icp <= 0) throw new Error('Enter a positive ICP amount.');
+    const res = await actor.admin_withdraw_buyback(identity.getPrincipal(), BigInt(Math.round(icp * 1e8)));
+    if (res.__kind__ === 'Err') throw new Error(res.Err);
+    setBuybackWithdrawAmt('');
+    await loadBuybackFund();
+    return `Withdrew ${icp} ICP from the buyback fund to your wallet.`;
+  });
   const [lpPoolStats, setLpPoolStats] = useState<{ pool: any; name: string; positions: bigint; token0_symbol: string; token0_amount: bigint; token1_symbol: string; token1_amount: bigint; usd_e8s: bigint; error?: string | null }[] | null>(null);
   const [lpStatsBusy, setLpStatsBusy] = useState(false);
   const loadLpPoolStats = async () => {
@@ -1075,6 +1100,47 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       {/* Feature flags — folded into Settings */}
       {section === 'settings' && (
         <>
+          {/* ── Voucher buyback wallet ── */}
+          <div className="col" style={{ ...card, gap: 10 }}>
+            <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+              <span className="row" style={{ gap: 8 }}>
+                <Icon name="coins" size={13} stroke="var(--burn-ink)" />
+                <Eyebrow>Voucher buyback wallet</Eyebrow>
+              </span>
+              <span className="row" style={{ gap: 8 }}>
+                {buybackFundE8s != null && (
+                  <Chip tone={buybackFundE8s > 0n ? 'ok' : 'muted'}>
+                    <span className="mono">{fmtICP(buybackFundE8s)} ICP</span>
+                  </Chip>
+                )}
+                <Btn variant="secondary" sm onClick={loadBuybackFund} disabled={busy !== null}>
+                  <Icon name="refresh" size={11} /> {buybackFundE8s == null ? 'Load balance' : 'Refresh'}
+                </Btn>
+              </span>
+            </span>
+            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
+              Pays instant-exit buybacks (85% of principal). The option auto-disables
+              for users whenever this balance can't cover a buyback; dissolved
+              principals and the fund's third of fees replenish it automatically.
+            </span>
+            <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <input type="number" min="0" step="0.1" placeholder="ICP from treasury" className="burn-input" style={inputStyle}
+                value={buybackFundAmt} onChange={(e) => setBuybackFundAmt(e.target.value)} />
+              <Btn variant="primary" sm onClick={fundBuyback} disabled={busy !== null || !buybackFundAmt}>
+                {busy === 'buybackfund' ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="zap" size={12} stroke="var(--char-950)" />} Fund from treasury
+              </Btn>
+              <input type="number" min="0" step="0.1" placeholder="ICP to withdraw" className="burn-input" style={inputStyle}
+                value={buybackWithdrawAmt} onChange={(e) => setBuybackWithdrawAmt(e.target.value)} />
+              <Btn variant="secondary" sm onClick={withdrawBuyback} disabled={busy !== null || !buybackWithdrawAmt}>
+                {busy === 'buybackwithdraw' ? <LiveDot size={7} /> : <Icon name="wallet" size={12} />} Withdraw to my wallet
+              </Btn>
+            </div>
+            <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+              External top-ups also work: send ICP to the backend canister with subaccount
+              <span className="mono"> 0x0a×32</span> (the dedicated buyback subaccount).
+            </span>
+          </div>
+
           <div className="col" style={{ ...card, gap: 10 }}>
             <span className="row" style={{ gap: 8 }}>
               <Icon name="zap" size={13} stroke="var(--burn-ink)" />
