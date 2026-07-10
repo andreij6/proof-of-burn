@@ -29,6 +29,8 @@ import type {
 import LotteryHub from "./LotteryHub";
 import NeuronStakePage from "./NeuronStakePage";
 import DevDocs from "./DevDocs";
+import Vouchers from "./Vouchers";
+import ClaimPromo from "./ClaimPromo";
 import Explorer from "./Explorer";
 import XFarm from "./XFarm";
 import MiniGolfPage from "./MiniGolfPage";
@@ -50,7 +52,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'vouchers' | 'claim' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   voting: '/voting',
@@ -59,6 +61,11 @@ export const PAGE_PATH: Record<AppPage, string> = {
   lottery: '/lottery',
   // Developer docs — how to embed the No-Loss Lottery in another dapp.
   devdocs: '/dev-docs',
+  // Stake Vouchers — wrap stakes into transferable NFTs; Stake 4 Tickets nav.
+  vouchers: '/vouchers',
+  // Golden Ticket claim campaign — standalone landing-style page (the link
+  // shared on X/OpenChat); reachable signed-out, no nav entry.
+  claim: '/claim',
   // Neuron Stake — the pooled-neuron staking page (was the Lottery hub's
   // "Stake to Earn Tickets" tab); Stake to Earn nav section.
   neuronstake: '/neuron-stake',
@@ -654,6 +661,7 @@ export default function App() {
   const bullrunEnabled = featureFlags.find(f => f.key === 'arcade_bullrun')?.enabled ?? false;
   const ansemLpEnabled = featureFlags.find(f => f.key === 'solana_lp_rewards')?.enabled ?? false;
   const icpLpEnabled = featureFlags.find(f => f.key === 'icpswap_lp_stake')?.enabled ?? false;
+  const vouchersEnabled = featureFlags.find(f => f.key === 'stake_vouchers')?.enabled ?? false;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
   const xFarmEnabled = featureFlags.find(f => f.key === 'x_farm')?.enabled ?? false;
 
@@ -1259,6 +1267,9 @@ export default function App() {
     if (page === 'icplp' && featureFlags.length > 0 && !icpLpEnabled) {
       redirect('lottery');
     }
+    if ((page === 'vouchers' || page === 'claim') && featureFlags.length > 0 && !vouchersEnabled) {
+      redirect('lottery');
+    }
     // Boosters (formerly Early Adopters) moved onto the lottery page —
     // redirect the legacy route alias.
     if (page === 'early_adopters') {
@@ -1271,7 +1282,7 @@ export default function App() {
     if (page === 'payouts' && principal && principal.isAnonymous()) {
       redirect('lottery');
     }
-  }, [page, losslessEnabled, lotteryEnabled, govNavEnabled, communityNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, icpLpEnabled, explorerEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
+  }, [page, losslessEnabled, lotteryEnabled, govNavEnabled, communityNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, icpLpEnabled, vouchersEnabled, explorerEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1875,13 +1886,19 @@ export default function App() {
         )}
 
         {/* ── Stake 4 Tickets: staking + LP rewards ── */}
-        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled || ansemLpEnabled) && (
+        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled || ansemLpEnabled || vouchersEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Stake 4 Tickets</Eyebrow>
         )}
         {(losslessEnabled || earlyAdoptersEnabled) && (
           <Btn variant={page === 'neuronstake' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('neuronstake')}>
             <Icon name="zap" size={14} stroke={page === 'neuronstake' ? 'var(--char-950)' : 'currentColor'} />
             Neuron Stake
+          </Btn>
+        )}
+        {vouchersEnabled && (
+          <Btn variant={page === 'vouchers' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('vouchers')}>
+            <Icon name="star" size={14} stroke={page === 'vouchers' ? 'var(--char-950)' : 'currentColor'} />
+            Vouchers
           </Btn>
         )}
         {icpLpEnabled && (
@@ -2102,6 +2119,19 @@ export default function App() {
           window.scrollTo(0, 0);
           setPage('lottery');
         }}
+      />
+    );
+  }
+
+  // The Golden Ticket claim page is a standalone campaign surface (like the
+  // landing): full-bleed, reachable signed-out, no app chrome.
+  if (page === 'claim') {
+    return (
+      <ClaimPromo
+        actor={actor}
+        principal={principal}
+        onSignIn={handleLogin}
+        onEnter={() => { window.scrollTo(0, 0); setPage('lottery'); }}
       />
     );
   }
@@ -2400,6 +2430,17 @@ export default function App() {
             />
           ) : page === 'devdocs' ? (
             <DevDocs />
+          ) : page === 'vouchers' && vouchersEnabled ? (
+            <Vouchers
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
+              onSignIn={handleLogin}
+              onGoNeuronStake={() => setPage('neuronstake')}
+            />
           ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
             <NeuronStakePage
               actor={actor}

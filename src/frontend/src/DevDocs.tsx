@@ -106,6 +106,50 @@ const out = await cycleBurn.unstake(100_000_000n, { SixMonths: null });
 if ('Err' in out) throw new Error(out.Err);
 const pendingUnstakeId = out.Ok;`;
 
+const VOUCHER_CANDID_SNIPPET = `// Stake Vouchers — an NFT claim on a staked position. Tickets follow the
+// voucher's CURRENT owner; buying one makes the buyer a staker.
+type VoucherClass = variant { Backed; Promo };
+type VoucherView = record {
+  id : nat64; class : VoucherClass; tier : StakeTier; amount_e8s : nat64;
+  owner : principal; minted_at : nat64; expires_at : opt nat64;
+  listed_price_e8s : opt nat64;
+};
+
+service additions : {
+  wrap_stake_voucher : (nat64, StakeTier) -> (variant { Ok : nat64; Err : text });
+  unwrap_stake_voucher : (nat64) -> (variant { Ok; Err : text });
+  list_voucher : (nat64, nat64) -> (variant { Ok; Err : text });      // (id, ask e8s)
+  cancel_voucher_listing : (nat64) -> (variant { Ok; Err : text });
+  get_voucher_sale_account : (nat64) -> (LedgerAccount) query;        // buyer escrow
+  buy_voucher : (nat64) -> (variant { Ok; Err : text });
+  buyback_voucher : (nat64) -> (variant { Ok : nat64; Err : text });  // Ok = e8s paid
+  claim_promo_voucher : (opt principal) -> (variant { Ok : nat64; Err : text });
+  get_voucher_market : () -> (VoucherMarketInfo) query;
+}`;
+
+const VOUCHER_FLOW_SNIPPET = `// Instant exit (house buyback): 85% now instead of 100% after dissolve.
+// The 15% discount is an express-exit FEE — principal is never at risk on
+// the classic path (unwrap → unstake → 100%).
+const id = (await cycleBurn.wrap_stake_voucher(100_000_000n, { SixMonths: null })).Ok;
+
+const market = await cycleBurn.get_voucher_market();
+const quote = 100_000_000n * BigInt(10_000 - market.buyback_discount_bps) / 10_000n;
+if (market.buyback_fund_e8s >= quote) {           // balance-gated: refuses when
+  const paid = await cycleBurn.buyback_voucher(id); // the fund can't cover it
+}
+
+// Marketplace (asks in ICP only): escrow the EXACT ask, then settle.
+await cycleBurn.list_voucher(id, 90_000_000n);      // seller lists at 0.9 ICP
+const escrow = await cycleBurn.get_voucher_sale_account(id);
+await ledger.icrc1_transfer({ to: escrow, amount: 90_000_000n, fee: [], memo: [], from_subaccount: [], created_at_time: [] });
+await cycleBurn.buy_voucher(id);                    // buyer becomes the staker
+
+// Golden Ticket claim (promo class — tickets ONLY, 1/day for 60 days):
+// null → mints to the caller; a principal → mints to that wallet and works
+// ANONYMOUSLY (paste-a-wallet flow on /#/claim). Promo vouchers can never
+// redeem ICP, never sell, never buy back — they only earn tickets.
+await cycleBurn.claim_promo_voucher(null);`;
+
 function AgentCopyButton() {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
@@ -284,9 +328,31 @@ export default function DevDocs() {
         <CodeBlock code={UNSTAKE_SNIPPET} />
       </div>
 
+      {/* ── Stake Vouchers ── */}
+      <div className="col" style={{ ...card, gap: 10 }}>
+        {h('05', 'Stake Vouchers — exit liquidity your app can offer')}
+        <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
+          Wrap a stake into a transferable NFT: sell it on the ICP marketplace,
+          take the instant house buyback at <b>85% of principal</b> (the 15%
+          discount is an express-exit fee, balance-gated by the buyback fund),
+          or unwrap and classic-unstake for 100%. Same identity rule as
+          everything else: <b>every call is keyed to the caller's principal</b> —
+          integrate with your user's identity, never a proxy.
+        </span>
+        <CodeBlock code={VOUCHER_CANDID_SNIPPET} />
+        <CodeBlock code={VOUCHER_FLOW_SNIPPET} />
+        <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
+          Promo ("Golden Ticket") vouchers are a separate tickets-only class: 1
+          ticket/day for 60 days, soulbound, never redeemable — both money paths
+          reject them at the endpoint level. Voucher actions (wrap/list/buyback)
+          currently require signing in with Internet Identity on our app; the
+          promo claim's paste-a-principal path is the exception (works anonymously).
+        </span>
+      </div>
+
       {/* ── Rules ── */}
       <div className="col" style={{ ...card, gap: 8 }}>
-        {h('05', 'Rules your UI should reflect')}
+        {h('06', 'Rules your UI should reflect')}
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, lineHeight: 1.55, color: 'var(--fg-1)' }}>
           <li><b>Tickets are stakers-only</b> and land automatically every day, server-side — your users never need to visit anyone's app to earn.</li>
           <li><b>Full unstake voids tickets instantly</b> — partial unstake keeps the rest earning.</li>

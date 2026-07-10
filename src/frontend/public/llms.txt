@@ -89,6 +89,71 @@ const out = await cycleBurn.unstake(amount, { SixMonths: null });
 - Tickets void only when the user's LAST stake empties; partial unstakes keep
   the remainder earning.
 
+## Stake Vouchers (exit liquidity + marketplace)
+A staked position can be wrapped into a VOUCHER — an NFT claim on the staked
+ICP. Tickets follow the voucher's current owner (server-side daily grants);
+buying a voucher makes the buyer a staker. All calls are caller-keyed: make
+them with the END USER's identity, same rule as staking.
+
+Candid additions:
+type VoucherClass = variant { Backed; Promo };
+type VoucherView = record {
+  id : nat64; class : VoucherClass; tier : StakeTier; amount_e8s : nat64;
+  owner : principal; minted_at : nat64; expires_at : opt nat64;
+  listed_price_e8s : opt nat64;
+};
+type VoucherMarketInfo = record {
+  enabled : bool; min_wrap_e8s : nat64; market_fee_bps : nat16;
+  buyback_discount_bps : nat16; buyback_fund_e8s : nat64;
+  my_vouchers : vec VoucherView; listings : vec VoucherView;
+  promo_open : bool; promo_remaining : nat32; promo_claims_today : nat32;
+};
+service additions : {
+  wrap_stake_voucher : (nat64, StakeTier) -> (variant { Ok : nat64; Err : text });
+  unwrap_stake_voucher : (nat64) -> (variant { Ok; Err : text });
+  list_voucher : (nat64, nat64) -> (variant { Ok; Err : text });      // (id, ask e8s)
+  cancel_voucher_listing : (nat64) -> (variant { Ok; Err : text });
+  get_voucher_sale_account : (nat64) -> (LedgerAccount) query;        // buyer escrow
+  buy_voucher : (nat64) -> (variant { Ok; Err : text });
+  buyback_voucher : (nat64) -> (variant { Ok : nat64; Err : text });  // Ok = ICP e8s paid
+  claim_promo_voucher : (opt principal) -> (variant { Ok : nat64; Err : text });
+  get_voucher_market : () -> (VoucherMarketInfo) query;
+}
+
+Flow A — wrap + instant exit (house buyback):
+1. await cycleBurn.wrap_stake_voucher(100_000_000n, { SixMonths: null });
+   // Wraps 1 ICP of the caller's existing 6-month stake into voucher NFT.
+   // Minimum wrap: min_wrap_e8s (1 ICP). Tickets keep flowing to the holder.
+2. await cycleBurn.buyback_voucher(voucherId);
+   // Pays the owner 85% of principal in ICP IMMEDIATELY (the 15% discount is
+   // an express-exit fee — the buyback_discount_bps field), burns the NFT,
+   // and the canister dissolves the underlying stake. Refuses with
+   // BUYBACK_UNAVAILABLE when the buyback fund can't cover the quote — check
+   // buyback_fund_e8s >= amount_e8s * 85% first.
+   // Alternative: unwrap_stake_voucher(id) turns it back into a plain stake;
+   // classic unstake then returns 100% after the tier's dissolve.
+
+Flow B — marketplace (asks in ICP only):
+1. Seller: await cycleBurn.list_voucher(voucherId, askE8s); (cancel anytime
+   with cancel_voucher_listing.)
+2. Buyer: const escrow = await cycleBurn.get_voucher_sale_account(voucherId);
+   await ledger.icrc1_transfer({ to: escrow, amount: askE8s, ... }); // EXACT ask
+   await cycleBurn.buy_voucher(voucherId);
+   // Seller receives ask minus the market_fee_bps fee; the NFT + claim move
+   // to the buyer; the buyer starts earning tickets at the next daily grant.
+   // An unfinished purchase's escrow is always reclaimable.
+
+Flow C — promo "Golden Ticket" claim (campaign page: /#/claim):
+await cycleBurn.claim_promo_voucher(destOrNull);
+// null → mints to the CALLER (signed-in claim). Some(principal) → mints to
+// that principal and works ANONYMOUSLY (paste-a-wallet flow; must be a
+// self-authenticating user principal — not anonymous, not a canister id).
+// Promo vouchers earn 1 ticket/day for 60 days, then expire. They are
+// tickets-only: never redeemable for ICP, never buyback-eligible, not
+// listable, not transferable (soulbound). One per principal per campaign;
+// campaign-capped with a daily claim limit (errors: CAMPAIGN_CLOSED,
+// CAMPAIGN_EXHAUSTED, DAILY_LIMIT, ALREADY_CLAIMED, INVALID_PRINCIPAL).
+
 ## Rules your UI should reflect
 - Tickets are stakers-only and land automatically every day — no visit or
   claim call needed. Show my_daily_tickets as the user's daily earn rate.
@@ -96,4 +161,7 @@ const out = await cycleBurn.unstake(amount, { SixMonths: null });
   pot / 5% burned. The integrating app never touches prize money.
 - Drawings run Mon/Wed/Sat nights (US Eastern) only when both gates are met;
   otherwise the pot rolls over and keeps growing.
+- Voucher rules: Backed vouchers are receipts on real staked ICP (wrap is
+  reversible via unwrap; the 15% instant-exit discount is an optional fee,
+  never principal risk). Promo vouchers are tickets-only golden tickets.
 - Live docs for humans: https://kyclk-5qaaa-aaaap-quthq-cai.icp0.io/#/dev-docs

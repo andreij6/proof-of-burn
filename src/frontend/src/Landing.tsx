@@ -81,6 +81,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
   const [info, setInfo] = useState<LotteryInfo | null>(null);
   const [winners, setWinners] = useState<LotteryDraw[]>([]);
   const [icpUsdE8s, setIcpUsdE8s] = useState<bigint>(0n);
+  const [promoOpen, setPromoOpen] = useState(false);
   const [nowMs, setNowMs] = useState<number>(Date.now());
 
   // Live reads (all anonymous-allowlisted). Best-effort: a failure leaves the
@@ -89,14 +90,16 @@ export default function Landing({ onEnter, actor }: LandingProps) {
     if (!actor) return;
     let cancelled = false;
     (async () => {
-      const [i, w, rates] = await Promise.all([
+      const [i, w, rates, market] = await Promise.all([
         actor.get_lottery_info().catch(() => null),
         actor.list_recent_winners().catch(() => [] as LotteryDraw[]),
         actor.get_usd_rates().catch(() => [] as UsdRate[]),
+        actor.get_voucher_market().catch(() => null),
       ]);
       if (cancelled) return;
       setInfo(i);
       setWinners(w ?? []);
+      setPromoOpen(!!market?.promo_open);
       const icp = (rates ?? []).find((r: UsdRate) => r.token === 'ICP');
       setIcpUsdE8s(icp?.rate_usd_e8s ?? 0n);
     })();
@@ -192,6 +195,11 @@ export default function Landing({ onEnter, actor }: LandingProps) {
               <button onClick={onEnter} style={primaryBtn}>Stake ICP →</button>
               <a href="#odds" style={{ ...ghostBtn, textDecoration: 'none' }}>Read the odds</a>
             </div>
+            {promoOpen && (
+              <a href="#/claim" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginTop: 16, fontSize: 14, fontWeight: 600, color: 'var(--haze)', textDecoration: 'none' }}>
+                <span aria-hidden>🎟</span> Claim a free Golden Ticket →
+              </a>
+            )}
             {/* Value facts, not live counts — scale numbers stay off the
                 landing until there's scale worth showing. */}
             <div style={{ display: 'flex', gap: 28, marginTop: 38, flexWrap: 'wrap' }}>

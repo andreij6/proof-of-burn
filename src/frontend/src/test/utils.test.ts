@@ -388,6 +388,9 @@ describe('pageFromHash (shareable URL routing)', () => {
     // The Arcade hub was removed (2026-07); shared course links must keep
     // opening the course on the Mini Golf page.
     expect(pageFromHash('#/arcade/course/7')).toBe('minigolf');
+    // Stake Vouchers page + the standalone Golden Ticket claim campaign page.
+    expect(pageFromHash('#/vouchers')).toBe('vouchers');
+    expect(pageFromHash('#/claim')).toBe('claim');
     expect(pageFromHash('#/arcade/spectate/3')).toBe('minigolf');
     expect(pageFromHash('#/arcade')).toBe('minigolf');
   });
