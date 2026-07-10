@@ -106,6 +106,9 @@ icp canister call backend admin_set_feature_flag '("arcade_luckproof", true)' -e
 icp canister call backend admin_set_feature_flag '("arcade_skydive", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # Bull Run (arcade game 5) — enabled locally for testing; ships dark on mainnet.
 icp canister call backend admin_set_feature_flag '("arcade_bullrun", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+# Nav sections (Governance/Community) — enabled locally; dark on mainnet.
+icp canister call backend admin_set_feature_flag '("nav_governance", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+icp canister call backend admin_set_feature_flag '("nav_community", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # ANSEM LP rewards — enabled locally for testing; ships dark on mainnet.
 icp canister call backend admin_set_feature_flag '("solana_lp_rewards", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # ICPSwap LP staking — enabled locally for testing; ships dark on mainnet.

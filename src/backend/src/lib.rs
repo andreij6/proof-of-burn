@@ -5306,14 +5306,19 @@ pub const FLAG_ARCADE_SKYDIVE: &str = "arcade_skydive";
 pub const FLAG_ARCADE_BULLRUN: &str = "arcade_bullrun";
 pub const FLAG_SOLANA_LP: &str = "solana_lp_rewards";
 pub const FLAG_ICPSWAP_LP: &str = "icpswap_lp_stake";
+/// Nav-section flags (owner 2026-07-10): the app's core is the No-Loss
+/// Lottery — Governance (Voting + Neuron Syndicate) and Community
+/// (Explorer + X-Farm) nav groups ship dark until turned on.
+pub const FLAG_NAV_GOVERNANCE: &str = "nav_governance";
+pub const FLAG_NAV_COMMUNITY: &str = "nav_community";
 /// X-Farm: autonomous per-user Farmer canisters burn ICP→cycles to run Gemini
 /// (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X. Ships
 /// dark (default OFF) until the owner enables it after a playtest.
 pub const FLAG_X_FARM: &str = "x_farm";
-const KNOWN_FEATURE_FLAGS: [&str; 11] = [
+const KNOWN_FEATURE_FLAGS: [&str; 13] = [
     FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN,
-    FLAG_SOLANA_LP, FLAG_ICPSWAP_LP, FLAG_X_FARM,
+    FLAG_SOLANA_LP, FLAG_ICPSWAP_LP, FLAG_X_FARM, FLAG_NAV_GOVERNANCE, FLAG_NAV_COMMUNITY,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -5426,6 +5431,8 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE_BULLRUN => false,
         FLAG_SOLANA_LP => false,
         FLAG_ICPSWAP_LP => false,
+        FLAG_NAV_GOVERNANCE => false,
+        FLAG_NAV_COMMUNITY => false,
         FLAG_X_FARM => false,
         // Every other SHIPPED feature (Lossless Voting/Lottery, Explorer,
         // Early Adopters) defaults ON; unknown keys stay OFF.

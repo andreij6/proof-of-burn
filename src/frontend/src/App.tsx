@@ -638,6 +638,10 @@ export default function App() {
   // (the backend also rejects its update methods, so this is belt + braces).
   const losslessEnabled = featureFlags.find(f => f.key === 'lossless_voting')?.enabled ?? false;
   const lotteryEnabled = featureFlags.find(f => f.key === 'lossless_lottery')?.enabled ?? false;
+  // Nav-section flags: the core of the app is the No-Loss Lottery — the
+  // Governance and Community nav groups ship dark.
+  const govNavEnabled = featureFlags.find(f => f.key === 'nav_governance')?.enabled ?? false;
+  const communityNavEnabled = featureFlags.find(f => f.key === 'nav_community')?.enabled ?? false;
   const explorerEnabled = featureFlags.find(f => f.key === 'dapp_explorer')?.enabled ?? false;
   // Mini Golf has its own nav page (below Lottery), gated on its per-game flag
   // so it shows even when the full Arcade hub flag is off.
@@ -1214,13 +1218,16 @@ export default function App() {
       redirect('lottery');
     }
     if (page === 'lottery' && featureFlags.length > 0 && !lotteryEnabled) {
-      redirect('voting');
+      redirect('lottery');
     }
-    if (page === 'explorer' && featureFlags.length > 0 && !explorerEnabled) {
-      redirect('voting');
+    if ((page === 'voting' || page === 'earn') && featureFlags.length > 0 && !govNavEnabled) {
+      redirect('lottery');
     }
-    if (page === 'xfarm' && featureFlags.length > 0 && !xFarmEnabled) {
-      redirect('voting');
+    if (page === 'explorer' && featureFlags.length > 0 && !(explorerEnabled && communityNavEnabled)) {
+      redirect('lottery');
+    }
+    if (page === 'xfarm' && featureFlags.length > 0 && !(xFarmEnabled && communityNavEnabled)) {
+      redirect('lottery');
     }
     // The Course Marketplace is the Mini Golf lobby — redirect its alias.
     if (page === 'course_market') {
@@ -1229,25 +1236,25 @@ export default function App() {
     // Mini Golf is a dedicated page for the arcade's mini-golf surface — gated
     // on its own per-game flag (independent of the full Arcade hub flag).
     if (page === 'minigolf' && featureFlags.length > 0 && !minigolfEnabled) {
-      redirect('voting');
+      redirect('lottery');
     }
     if (page === 'luckproof' && featureFlags.length > 0 && !luckproofEnabled) {
-      redirect('voting');
+      redirect('lottery');
     }
     if (page === 'dropzone' && featureFlags.length > 0 && !dropzoneEnabled) {
-      redirect('voting');
+      redirect('lottery');
     }
     if (page === 'bullrun' && featureFlags.length > 0 && !bullrunEnabled) {
-      redirect('voting');
+      redirect('lottery');
     }
     if (page === 'ansemlp' && featureFlags.length > 0 && !ansemLpEnabled) {
-      redirect('voting');
+      redirect('lottery');
     }
     if (page === 'neuronstake' && featureFlags.length > 0 && !(losslessEnabled || earlyAdoptersEnabled)) {
-      redirect('voting');
+      redirect('lottery');
     }
     if (page === 'icplp' && featureFlags.length > 0 && !icpLpEnabled) {
-      redirect('voting');
+      redirect('lottery');
     }
     // Boosters (formerly Early Adopters) moved onto the lottery page —
     // redirect the legacy route alias.
@@ -1259,9 +1266,9 @@ export default function App() {
     // initializing; bouncing then killed #/profile deep links for
     // signed-in users — review 2026-06-11).
     if (page === 'payouts' && principal && principal.isAnonymous()) {
-      redirect('voting');
+      redirect('lottery');
     }
-  }, [page, losslessEnabled, lotteryEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, icpLpEnabled, explorerEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
+  }, [page, losslessEnabled, lotteryEnabled, govNavEnabled, communityNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, icpLpEnabled, explorerEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1916,26 +1923,30 @@ export default function App() {
           </Btn>
         )}
 
-        <Eyebrow style={{ margin: '14px 0 4px' }}>Governance</Eyebrow>
-        <Btn variant={page === 'voting' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('voting')}>
-          <Icon name="scale" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
-          Voting
-        </Btn>
-        <Btn variant={onEarn ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('earn')}>
-          <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
-          Neuron Syndicate
-        </Btn>
+        {govNavEnabled && (
+          <>
+            <Eyebrow style={{ margin: '14px 0 4px' }}>Governance</Eyebrow>
+            <Btn variant={page === 'voting' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('voting')}>
+              <Icon name="scale" size={14} stroke={page === 'voting' ? 'var(--char-950)' : 'currentColor'} />
+              Voting
+            </Btn>
+            <Btn variant={onEarn ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('earn')}>
+              <Icon name="coins" size={14} stroke={onEarn ? 'var(--char-950)' : 'currentColor'} />
+              Neuron Syndicate
+            </Btn>
+          </>
+        )}
 
-        {(explorerEnabled || xFarmEnabled) && (
+        {communityNavEnabled && (explorerEnabled || xFarmEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Community</Eyebrow>
         )}
-        {explorerEnabled && (
+        {communityNavEnabled && explorerEnabled && (
           <Btn variant={page === 'explorer' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('explorer')}>
             <Icon name="compass" size={14} stroke={page === 'explorer' ? 'var(--char-950)' : 'currentColor'} />
             Explorer
           </Btn>
         )}
-        {xFarmEnabled && (
+        {communityNavEnabled && xFarmEnabled && (
           <Btn variant={page === 'xfarm' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('xfarm')}>
             <Icon name="spark" size={14} stroke={page === 'xfarm' ? 'var(--char-950)' : 'currentColor'} />
             X-Farm
