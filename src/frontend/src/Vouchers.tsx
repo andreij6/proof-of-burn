@@ -301,7 +301,7 @@ export function VouchersBody({
                         </span>
                       </td>
                       <td className="mono" style={{ padding: '8px' }}>
-                        {promo ? '—' : `${fmtICP(v.amount_e8s)} ICP${usd(v.amount_e8s)}`}
+                        {promo ? '—' : `${fmtICP(v.amount_e8s)} ICP`}
                       </td>
                       <td style={{ padding: '8px', color: 'var(--fg-2)' }}>
                         {promo
@@ -360,7 +360,7 @@ export function VouchersBody({
                   <div className="col" style={{ gap: 3, fontSize: 12 }}>
                     <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                       <span style={{ color: 'var(--fg-3)' }}>Value</span>
-                      <span className="mono">{fmtICP(v.amount_e8s)} ICP{usd(v.amount_e8s) ? ` · ${usd(v.amount_e8s)}` : ''}</span>
+                      <span className="mono">{fmtICP(v.amount_e8s)} ICP</span>
                     </div>
                     <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                       <span style={{ color: 'var(--fg-3)' }}>Asking</span>
@@ -406,7 +406,7 @@ export function VouchersBody({
                   <div className="col" style={{ gap: 3, fontSize: 12 }}>
                     <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                       <span style={{ color: 'var(--fg-3)' }}>Value</span>
-                      <span className="mono">{fmtICP(v.amount_e8s)} ICP{usd(v.amount_e8s) ? ` · ${usd(v.amount_e8s)}` : ''}</span>
+                      <span className="mono">{fmtICP(v.amount_e8s)} ICP</span>
                     </div>
                     <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                       <span style={{ color: 'var(--fg-3)' }}>Asking</span>
