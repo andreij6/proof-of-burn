@@ -44,8 +44,9 @@ Three exits, from best to worst for the user:
   last stake leaves voids tickets instantly (existing rule); a buyer starts
   earning at the next daily grant. No snapshot gaming: transferring twice a
   day cannot double-earn because grants are keyed `last_claim_day`.
-- **House-held positions earn NOTHING**: registry rows owned by the buyback
-  fund are excluded from the daily grant (same spirit as admin exclusion).
+- **Bought-back positions never earn**: buyback burns the NFT and deletes
+  the registry row in the same call, so no house-held state exists to earn
+  tickets; the residual pending-unstake is not a stake row.
 - **EA/Booster stakes are NOT voucherable** (permanent, admin-only).
 - NFT canister is minter-restricted to the backend (course_nft precedent);
   metadata is the claim tuple + provenance. Transfers happen ONLY through
@@ -56,10 +57,13 @@ Three exits, from best to worst for the user:
 
 - New **BUYBACK_SUBACCOUNT** `[10u8;32]` (verified free) — the "house
   wallet". Admin endpoints: fund, withdraw, view. The owner seeds it.
-- `buyback_voucher(voucher_id)`: pays the CURRENT owner `85% of amount_e8s`
-  in ICP from the buyback subaccount, transfers the claim to the house, then
-  starts the classic unstake (split + dissolve) with the payout targeted BACK
-  to the buyback subaccount.
+- `buyback_voucher(voucher_id)` (owner-locked flow, 2026-07-10): pays the
+  CURRENT owner `85% of amount_e8s` in ICP from the buyback subaccount,
+  **BURNS the NFT immediately**, deletes the registry row, and **immediately
+  starts the unstake** (split + start dissolving) with the payout targeted
+  back to the buyback subaccount. No house-held vouchers, no re-listing —
+  bought-back claims always convert straight to a dissolving neuron whose
+  principal redeems to the fund.
 - **Balance gate**: the endpoint refuses (and the UI hides/disables the
   button) whenever `buyback_balance < 85% + fees` for that voucher. Info
   endpoint exposes live capacity so the frontend can show "buyback available
@@ -72,9 +76,9 @@ Three exits, from best to worst for the user:
 - Capital note: the fund's capital is locked per buyback for the tier's
   dissolve length. Effective APR on deployed capital ≈ 17.6% over the
   dissolve term (100/85) — ~35% annualized on 6-month vouchers, ~8.8% on
-  2-year. Phase-4 option (house re-LISTS bought vouchers instead of
-  dissolving) recycles capital instantly and is strictly better when the
-  market bid > 85%.
+  2-year. (House re-listing was considered and REJECTED by the owner —
+  burn-and-dissolve keeps the fund's book trivially auditable: cash out,
+  one pending unstake in, nothing in inventory.)
 
 ## 4. Marketplace
 
@@ -202,7 +206,9 @@ Design consequences & recommendations:
 3. **Promo claim campaigns** (§7) — the acquisition lever; can be pulled
    forward ahead of 2 if growth is the priority (it shares the registry +
    NFT canister with 1 but none of the money paths).
-4. *(Optional)* house re-lists bought vouchers; auction-style asks.
+
+(Former phase 4 — house re-listing — REJECTED: buyback burns the NFT and
+immediately dissolves; see §3.)
 
 ## 9. Risks & mitigations
 
@@ -224,6 +230,5 @@ Design consequences & recommendations:
 2. Buyback spread: counts as fee (1/3-split, recommended) vs stays whole in
    the fund.
 3. Minimum voucherable amount (proposed 1 ICP — matches first-stake min).
-4. House re-listing phase yes/no.
-5. Soulbound confirmation (expiry and rate now owner-locked: 60 days from
+4. Soulbound confirmation (expiry and rate now owner-locked: 60 days from
    claim, 1 ticket/day).
