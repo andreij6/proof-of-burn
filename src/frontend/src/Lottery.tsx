@@ -304,11 +304,6 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
             ≈ ${jackpotUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })}
           </span>
         )}
-        <p style={{ fontSize: 16, lineHeight: 1.5, color: 'var(--fg-2)', maxWidth: 460, margin: '18px 0 0' }}>
-          Win it all — lose nothing. Your stake is never spent, so the worst
-          that can happen is you keep everything.
-        </p>
-
         {/* Countdown blocks */}
         {(() => {
           const parts = info && info.next_draw_at > 0n ? countdownParts(info.next_draw_at, Date.now()) : null;
