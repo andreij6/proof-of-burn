@@ -1,7 +1,7 @@
 ---
 type: idea
 title: "Stake Vouchers — NFT exit liquidity + marketplace + house buyback"
-description: "Option 2 from the exit-liquidity debate (owner, 2026-07-10): staked positions become transferable ICRC-7 voucher NFTs; multi-token marketplace (ICP/ckBTC/ckUSDC/ckETH); house buyback at 15% discount from a dedicated, balance-gated buyback fund; fees split 1/3 treasury / 1/3 buyback fund / 1/3 voucher-canister cycles burn."
+description: "Option 2 from the exit-liquidity debate (owner, 2026-07-10): staked positions become transferable ICRC-7 voucher NFTs; ICP-only marketplace (owner revision 2026-07-10 — was multi-token); house buyback at 15% discount from a dedicated, balance-gated buyback fund; fees split 1/3 treasury / 1/3 buyback fund / 1/3 voucher-canister cycles burn."
 tags: [ideas, stake-vouchers, marketplace, exit-liquidity]
 timestamp: 2026-07-10T00:00:00Z
 ---
@@ -9,11 +9,12 @@ timestamp: 2026-07-10T00:00:00Z
 # Stake Vouchers
 
 **Owner decisions locked (2026-07-10):** voucher = NFT (not fungible token);
-marketplace accepts ICP, ckBTC, ckUSDC, ckETH; house buyback at a **15%
-discount** (seller receives 85% of principal instantly); buybacks pay from a
-**dedicated buyback wallet** and the option is **disabled whenever the wallet
-can't cover a buyback**; **fees split 1/3 treasury · 1/3 buyback fund · 1/3
-voucher-canister cycles burn**.
+marketplace accepts **ICP only** (owner revision same day — ckBTC/ckUSDC/
+ckETH dropped); house buyback at a **15% discount** (seller receives 85% of
+principal instantly); buybacks pay from a **dedicated buyback wallet** and
+the option is **disabled whenever the wallet can't cover a buyback**;
+**fees split 1/3 treasury · 1/3 buyback fund · 1/3 voucher-canister cycles
+burn**.
 
 ## 1. The product
 
@@ -79,11 +80,9 @@ Three exits, from best to worst for the user:
 
 - Reuses the course-marketplace saga (escrow subaccount per sale, journaled
   legs, reclaim_escrow on abandonment) — the app's proven money path.
-- **Listing**: voucher owner sets an ask as `{token, amount}` where token ∈
-  {ICP, ckBTC, ckUSDC, ckETH} (ledgers already configured app-wide). One
-  price, one token per listing (no oracle dependency at settle time; USD
-  hinting in the UI via the existing XRC cache).
-- **Purchase**: buyer funds the sale escrow subaccount in the ask token →
+- **Listing**: voucher owner sets an ask in **ICP** (USD hinting in the UI
+  via the existing XRC cache).
+- **Purchase**: buyer funds the sale escrow subaccount in ICP →
   `buy_voucher(id)` settles: seller paid (ask − fee), claim + NFT move to
   buyer, fee routed per §5. Buyer needs no prior stake; owning the claim IS
   a stake (tickets begin next day — stakers-only holds because they are now
@@ -96,16 +95,15 @@ Three exits, from best to worst for the user:
 
 ## 5. Fee routing — 1/3 · 1/3 · 1/3
 
-Every fee (marketplace fee + realized buyback spread):
-- **1/3 → treasury** `[1;32]` (in the fee's own token — ck-fees accrue in
-  kind, consistent with "other tokens → treasury, owner decides later").
-- **1/3 → buyback fund** — the fund is ICP-denominated, so non-ICP thirds
-  are swapped ck→ICP via our existing ICPSwap pool integrations (threshold-
-  batched by the sweep; below-threshold amounts queue in a fee subaccount).
+Every fee (marketplace fee + realized buyback spread) is ICP, split:
+- **1/3 → treasury** `[1;32]`.
+- **1/3 → buyback fund** `[10;32]` (self-reinforcing exit liquidity).
 - **1/3 → voucher-canister cycles burn** — the exact
   `settle_burn_split_with_target` precedent from course_nft: ICP → CMC →
   cycles for the voucher_nft canister (its operating budget is literally
-  burned ICP). Non-ICP thirds join the same swap queue first.
+  burned ICP).
+ICP-only removes the whole ck→ICP fee-conversion problem (no swap queue, no
+fee subaccount, no ICPSwap dependency in the money path).
 
 ## 6. New surface (implementer's map)
 
@@ -113,9 +111,8 @@ Every fee (marketplace fee + realized buyback spread):
   is minter + controller; cycle-guard like course_nft's).
 - **Backend**: voucher registry + next-id + listings + sale escrow journal +
   buyback journal + fund stats — **MemoryIds 128–134** (next free; 127 is
-  the pot cache). Subaccounts: buyback `[10;32]`, fee-conversion queue
-  `[12;32]` (`[11;32]` left spare), per-sale escrow via the domain-separated
-  escrow-seed pattern.
+  the pot cache). Subaccounts: buyback `[10;32]`; per-sale escrow via the
+  domain-separated escrow-seed pattern. (No fee-conversion queue — ICP-only.)
 - **Endpoints** (flag `stake_vouchers`, dark): wrap_stake_voucher /
   unwrap_stake_voucher / list_voucher / cancel_listing / buy_voucher /
   buyback_voucher / get_voucher_market (incl. buyback capacity + my
@@ -131,26 +128,24 @@ Every fee (marketplace fee + realized buyback spread):
   phase's endpoints — a partner integrating from stale docs is a support
   incident. Phase 1 adds a "Voucher buyback" section (wrap_stake_voucher +
   buyback_voucher + capacity read, with the 85%/15% math stated plainly);
-  phase 2 adds list/buy/cancel + the escrow-funding flow; phase 3 adds the
-  multi-token ask/payment matrix (which ledger to icrc1_transfer per ask
-  token) + fee notes. Each addition extends BOTH the page's candid/idlFactory
+  phase 2 adds list/buy/cancel + the escrow-funding flow (ICP only). Each
+  addition extends BOTH the page's candid/idlFactory
   snippets AND the llms.txt single-source (they import the same file — keep
   it that way). The caller-keyed identity rule applies to every voucher call
   and must be restated in the voucher section.
 - **Tests**: registry conservation (sum of voucher amounts + plain stakes ==
   neuron principal per tier), ticket-follow-the-owner across sale/buyback
   (incl. house earns nothing, seller voids on last-stake exit), balance-gate
-  refusal, fee three-way split exactness incl. swap-queue path, escrow
-  reclaim, buyback journal resume after mid-flight failure.
+  refusal, fee three-way split exactness, escrow reclaim, buyback journal
+  resume after mid-flight failure.
 
 ## 7. Phases
 
 1. **Wrap + house buyback** (no marketplace): smallest slice that produces
-   income and proves demand. ICP-only money paths. Ships with its dev-docs
-   + llms.txt section (see §6).
-2. **Marketplace, ICP asks only** (course-market saga reuse).
-3. **Multi-token asks** (ckBTC/ckUSDC/ckETH) + fee swap queue.
-4. *(Optional)* house re-lists bought vouchers; auction-style asks.
+   income and proves demand. Ships with its dev-docs + llms.txt section
+   (see §6).
+2. **Marketplace** (course-market saga reuse, ICP asks).
+3. *(Optional)* house re-lists bought vouchers; auction-style asks.
 
 ## 8. Risks & mitigations
 
@@ -165,8 +160,6 @@ Every fee (marketplace fee + realized buyback spread):
   journal resumes half-paid flows (escrow-journal precedent).
 - **Securities optics**: NFT receipt on a specific position (not a fungible
   yield token); no promised return on vouchers; buyback framed as a fee.
-- **Sale-time price risk on ck-asks**: seller's choice of ask token bears
-  it; UI shows XRC USD hint at listing time.
 
 ## 9. Owner dials still open
 
@@ -174,4 +167,4 @@ Every fee (marketplace fee + realized buyback spread):
 2. Buyback spread: counts as fee (1/3-split, recommended) vs stays whole in
    the fund.
 3. Minimum voucherable amount (proposed 1 ICP — matches first-stake min).
-4. Phase 4 (house re-listing) yes/no.
+4. Phase 3 (house re-listing) yes/no.
