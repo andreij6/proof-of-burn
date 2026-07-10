@@ -7539,12 +7539,27 @@ fn get_staking_pool_info() -> StakingPoolInfo {
     let mut total_yield = 0u64;
     for tier in StakeTier::all() {
         let pool = tier_pool(tier);
-        let staker_count = STAKES.with(|m| {
-            m.borrow()
-                .iter()
-                .filter(|e| e.key().tier == tier.idx())
-                .count() as u64
-        });
+        // Distinct stakers = plain rows PLUS Backed-voucher owners (staking
+        // auto-issues vouchers, which consume the plain row — counting rows
+        // alone undercounted every voucher-era staker to zero).
+        let staker_count = {
+            let mut who: std::collections::BTreeSet<Principal> = STAKES.with(|m| {
+                m.borrow()
+                    .iter()
+                    .filter(|e| e.key().tier == tier.idx())
+                    .map(|e| e.key().user)
+                    .collect()
+            });
+            VOUCHERS.with(|m| {
+                for e in m.borrow().iter() {
+                    let v = e.value();
+                    if v.class == VoucherClass::Backed && v.tier == tier.idx() {
+                        who.insert(v.owner);
+                    }
+                }
+            });
+            who.len() as u64
+        };
         total_staked = total_staked.saturating_add(pool.total_staked_e8s);
         total_yield = total_yield.saturating_add(pool.total_yield_e8s);
         pools.push(TierPoolInfo {
@@ -29573,6 +29588,12 @@ mod tests {
         assert!(STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::OneYear, alice)).is_none()));
         assert!(user_daily_tickets(alice) > 0, "voucher earns like the stake it is");
         assert!(conservation_holds(StakeTier::OneYear));
+        // Pool stats must count voucher holders as stakers (the plain row is
+        // consumed by auto-issue; row-counting undercounted to zero).
+        set_mock_caller(alice);
+        let pool_info = get_staking_pool_info();
+        let one_year = pool_info.pools.iter().find(|t| t.tier == StakeTier::OneYear).unwrap();
+        assert_eq!(one_year.staker_count, 2, "alice (voucher) + dave (voucher) both count");
 
         // Redeem (the modal's "wait for dissolve" path): voucher burns, a
         // pending unstake for the FULL amount pays the OWNER.
