@@ -1,5 +1,16 @@
 # Log
 
+## 2026-07-10 night — Mainnet deploy 66c54a1 (server-side tickets + dev docs)
+
+Daily stake tickets now land SERVER-SIDE every UTC day (sweep leg
+auto_grant_daily_stake_tickets — no visit required; forced first sweep
+post-deploy granted the day's tickets, round total 65). New Developer
+Docs page #/dev-docs (embed the No-Loss Lottery via direct canister
+calls: candid + idlFactory + 3 flows + caller-keyed trust rule) with an
+AI-agent handoff: /llms.txt served verbatim (verified on prod) + a
+"Copy docs for your AI agent" one-prompt button. Snapshot rotation: …27
+deleted, …29 created (575 MiB; …28 retained).
+
 ## 2026-07-10 pm — Mainnet deploy 1fd90ee (lottery-first nav + mobile chrome)
 
 Governance (Voting + Neuron Syndicate) and Community (Explorer + X-Farm)
