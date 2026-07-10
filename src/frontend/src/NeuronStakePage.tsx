@@ -32,17 +32,18 @@ export default function NeuronStakePage({
       <div className="idea-board-container" style={{ paddingBottom: 0 }}>
         {/* ── Page header ── */}
         <div className="col" style={{ gap: 6 }}>
-          <Eyebrow accent>Stake 4 tickets</Eyebrow>
-          <span className="row" style={{ gap: 10 }}>
+          <span className="row" style={{ gap: 10, width: '100%', flexWrap: 'wrap' }}>
             <Icon name="zap" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>Neuron Stake</h4>
             <Chip tone="pending"><LiveDot size={6} /> daily tickets</Chip>
-          </span>
-          <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 600 }}>
-            Lock ICP into a pooled neuron and mint free lottery tickets every day —
-            your ICP is never at risk, and staking is the key that activates every
-            other reward on the platform.{' '}
-            <MoreInfo title="How neuron staking works">
+            <MoreInfo
+              title="How neuron staking works"
+              style={{
+                marginLeft: 'auto', textDecoration: 'none', fontSize: 12.5, fontWeight: 600,
+                border: '1px solid var(--burn)', borderRadius: 999, padding: '6px 14px',
+                background: 'color-mix(in srgb, var(--burn) 10%, var(--surface))',
+              }}
+            >
               <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
                 <Eyebrow accent>The gist</Eyebrow>
                 <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
@@ -73,7 +74,7 @@ export default function NeuronStakePage({
                 </ul>
               </div>
             </MoreInfo>
-          </p>
+          </span>
         </div>
       </div>
 
