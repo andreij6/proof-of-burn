@@ -8121,6 +8121,10 @@ async fn lottery_draw_check() {
     if now < state.next_draw_at {
         return;
     }
+    // A scheduled draw SLOT has arrived: route the harvested yield into the
+    // pot NOW, whether or not the draw's gates let it fire (owner 2026-07-10)
+    // — the freshly routed 70% is then part of any prize this slot pays.
+    early_adopter_route_yield_now().await;
     run_lottery_draw(None).await;
 }
 
@@ -13894,9 +13898,14 @@ pub struct EarlyAdopterState {
     /// Last settled 30-day period index (epoch-based). LEGACY — settlements
     /// are draw-keyed since 2026-07-06; kept so pre-change state decodes.
     pub last_processed_month: u64,
-    /// Lottery round already settled — yield routes right after every draw.
+    /// Lottery round already settled — LEGACY cursor from the draw-keyed era
+    /// (2026-07-06..10); no longer gates settlements.
     #[serde(default)]
     pub last_settled_lottery_round: u64,
+    /// Monotonic settlement journal counter (slot-scheduled settlements can
+    /// repeat within one lottery round, so rounds can't key the journal).
+    #[serde(default)]
+    pub settlement_seq: u64,
     pub total_yield_e8s: u64,
     pub total_distributed_e8s: u64,
     pub total_expired_e8s: u64,
@@ -14016,6 +14025,7 @@ thread_local! {
             rollover_e8s: 0,
             last_processed_month: 0,
             last_settled_lottery_round: 0,
+            settlement_seq: 0,
             total_yield_e8s: 0,
             total_distributed_e8s: 0,
             total_expired_e8s: 0,
@@ -14395,9 +14405,16 @@ async fn early_adopter_run_settlement(now: u64) -> Result<(), String> {
                 total
             });
             let job = EarlyAdopterJob {
-                // Draw-keyed since 2026-07-06: the journal key is the lottery
-                // round at open (field name kept for stable-state compat).
-                month: lottery_state().round,
+                // Slot-scheduled since 2026-07-10: the journal key is a
+                // monotonic settlement sequence (field name kept for
+                // stable-state compat).
+                month: EARLY_ADOPTER_STATE.with(|c| {
+                    let mut st = c.borrow().get().clone();
+                    st.settlement_seq += 1;
+                    let seq = st.settlement_seq;
+                    c.borrow_mut().set(st);
+                    seq + 1_000_000 // clear of historical round/month keys
+                }),
                 started_at: now,
                 yield_e8s,
                 expired_e8s: expired,
@@ -14541,15 +14558,41 @@ async fn early_adopter_settlement_check() {
     }
     let now = current_time();
     let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
-    // Run right after every lottery draw (the round bump is the signal), and
-    // ALSO whenever a journaled settlement is mid-flight (a leg failed) so it
-    // resumes promptly. First run after upgrade settles the accumulated inbox
-    // immediately (cursor starts at 0).
-    if lottery_state().round > state.last_settled_lottery_round || state.pending_job.is_some() {
+    // Owner (2026-07-10): yield routes on the DRAW SCHEDULE (see
+    // lottery_draw_check), whether or not a drawing actually fires. The sweep
+    // only RESUMES a mid-flight journaled settlement here.
+    if state.pending_job.is_some() {
         if let Err(e) = early_adopter_run_settlement(now).await {
             canister_print(&format!("early_adopter settlement failed (will retry next sweep): {}", e));
         }
     }
+}
+
+/// Route the EA inbox NOW (70% pot / 30% treasury) if it holds anything
+/// meaningful. Called at every scheduled draw SLOT — gates or no gates — and
+/// by the admin force endpoint.
+async fn early_adopter_route_yield_now() {
+    if !feature_enabled(FLAG_EARLY_ADOPTERS) {
+        return;
+    }
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let inbox = LedgerAccount { owner: get_canister_id(), subaccount: Some(EARLY_ADOPTER_YIELD_SUBACCOUNT) };
+    let balance = call_ledger_balance(config.ledger_canister_id, inbox).await.unwrap_or(0);
+    let has_pending = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().pending_job.is_some());
+    if balance < YIELD_MIN_DISTRIBUTION_E8S && !has_pending {
+        return; // dust — skip an empty journal record
+    }
+    if let Err(e) = early_adopter_run_settlement(current_time()).await {
+        canister_print(&format!("ea slot settlement failed (sweep will resume): {}", e));
+    }
+}
+
+/// Admin: route any idle EA yield to pot/treasury immediately.
+#[ic_cdk::update]
+async fn admin_route_ea_yield_now() -> Result<(), String> {
+    require_admin()?;
+    early_adopter_route_yield_now().await;
+    Ok(())
 }
 
 /// Local-dev: where to send mock yield (the neuron's maturity inbox).
@@ -14596,6 +14639,7 @@ fn dev_set_early_adopter_preset(preset: u8) -> Result<(), String> {
         rollover_e8s: 0,
         last_processed_month: month_now,
         last_settled_lottery_round: lottery_state().round,
+        settlement_seq: 0,
         total_yield_e8s: 0,
         total_distributed_e8s: 0,
         total_expired_e8s: 0,
@@ -21996,6 +22040,7 @@ mod tests {
             c.borrow_mut().set(EarlyAdopterState {
                 total_staked_e8s: 0, rollover_e8s: 0, last_processed_month: 0,
                 last_settled_lottery_round: 0,
+                settlement_seq: 0,
                 total_yield_e8s: 0, total_distributed_e8s: 0, total_expired_e8s: 0,
                 membership_closed: false, nonce: 0, neuron_id: None,
                 pending_refresh_e8s: 0, bootstrap: 0, total_restaked_e8s: 0,
@@ -22152,7 +22197,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_early_adopter_settlement_is_draw_keyed() {
+    async fn test_early_adopter_settlement_is_slot_scheduled() {
+        // Owner (2026-07-10): yield routes whenever a drawing is SUPPOSED to
+        // happen — gates or no gates. The sweep only resumes mid-flight jobs.
         clear_early_adopters();
         enable_early_adopters_flag();
         let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
@@ -22161,40 +22208,31 @@ mod tests {
         set_mock_caller(alice);
         set_mock_ledger_balance(10 * ICP + 10_000);
         early_adopter_stake(10 * ICP).await.unwrap();
+        set_mock_ledger_balance(100 * ICP); // inbox reads 100 ICP
 
-        // Pin the lottery round and align the cursor: no draw yet → the
-        // sweep check must NOT settle, even deep into a new "month".
-        let mut st = lottery_state();
-        st.round = 7;
-        set_lottery_state(st);
-        EARLY_ADOPTER_STATE.with(|c| {
-            let mut s = c.borrow().get().clone();
-            s.last_settled_lottery_round = 7;
-            c.borrow_mut().set(s);
-        });
-        set_mock_ledger_balance(100 * ICP);
+        // The sweep check alone must NOT settle (no pending job, no slot).
         early_adopter_settlement_check().await;
-        assert_eq!(list_early_adopter_rounds().len(), 0, "no draw → no settlement");
+        assert_eq!(list_early_adopter_rounds().len(), 0, "sweep never opens settlements");
 
-        // A draw bumps the round → the very next check settles, journals the
-        // record under the ROUND key, and advances the cursor.
-        let mut st = lottery_state();
-        st.round = 8;
-        set_lottery_state(st);
-        early_adopter_settlement_check().await;
+        // The slot router DOES — with no draw and no players, gates unmet.
+        early_adopter_route_yield_now().await;
         let rounds = list_early_adopter_rounds();
-        assert_eq!(rounds.len(), 1, "draw → immediate settlement");
-        assert_eq!(rounds[0].month, 8, "journaled under the lottery round");
+        assert_eq!(rounds.len(), 1, "slot routes yield regardless of draw gates");
         assert_eq!(rounds[0].treasury_e8s, 30 * ICP, "70/30 split unchanged");
-        let ea = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
-        assert_eq!(ea.last_settled_lottery_round, 8);
+        assert!(rounds[0].month > 1_000_000, "journal keyed by settlement seq");
 
-        // Same round again: idempotent — no second settlement.
-        early_adopter_settlement_check().await;
-        assert_eq!(list_early_adopter_rounds().len(), 1, "once per draw");
+        // Dust: an empty inbox slot writes NO journal record.
+        set_mock_ledger_balance(0);
+        early_adopter_route_yield_now().await;
+        assert_eq!(list_early_adopter_rounds().len(), 1, "dust slots skip");
+
+        // Two meaningful settlements never collide on the journal key.
+        set_mock_ledger_balance(50 * ICP);
+        early_adopter_route_yield_now().await;
+        let rounds = list_early_adopter_rounds();
+        assert_eq!(rounds.len(), 2, "unique journal keys per settlement");
         clear_early_adopters();
     }
-
     #[tokio::test]
     async fn test_early_adopter_settlement_resumes_journal_without_rerouting() {
         clear_early_adopters();
