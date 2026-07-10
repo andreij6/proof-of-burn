@@ -3,6 +3,7 @@ import { Principal } from "@icp-sdk/core/principal";
 import { DrawStatus, ExplorerToken } from "./bindings/backend";
 import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
+import MoneyBall from "./MoneyBall";
 import { useErrorImpression } from "./analytics";
 
 // ==========================================
@@ -271,7 +272,8 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
           <Skeleton width={180} height={40} radius={999} style={{ marginTop: 10 }} />
         </div>
       ) : (
-      <div className="col" style={{ ...card, gap: 0, alignItems: 'center', textAlign: 'center', padding: '44px 20px 36px' }}>
+      <div className="row" style={{ ...card, gap: 8, alignItems: 'center', padding: '36px 20px 32px', flexWrap: 'wrap', justifyContent: 'center' }}>
+      <div className="col" style={{ gap: 0, alignItems: 'center', textAlign: 'center', flex: '1 1 340px', minWidth: 300 }}>
         <span className="mono" style={{ fontSize: 12, letterSpacing: '0.22em', textTransform: 'uppercase', color: 'var(--burn-ink)', fontWeight: 700 }}>
           Next draw
         </span>
@@ -351,6 +353,16 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
             </>
           )}
         </div>
+      </div>
+
+      {/* ── The money ball: a glass orb (Squid-Game style) that fills with
+            ICP tokens as the pot approaches the draw threshold ── */}
+      <div className="col" style={{ alignItems: 'center', gap: 2, flex: '0 0 auto' }}>
+        <MoneyBall fill={info && info.min_pot_e8s > 0n ? Number(info.pot_e8s) / Number(info.min_pot_e8s) : 0} />
+        <span className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--fg-3)' }}>
+          full ball = draw ready
+        </span>
+      </div>
       </div>
       )}
 
