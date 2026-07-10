@@ -1,5 +1,18 @@
 # Log
 
+## 2026-07-10 — Mainnet deploy 819f0a7 (No-Loss Lottery redesign)
+
+Frontend: lottery page rebuilt Lumina-style — giant glowing pot,
+DD/HH/MM/SS countdown blocks, one adaptive pill CTA ("Get tickets" /
+"Stake more · earn more tickets"), single how-it-works pill in the
+header (thresholds named: ≥25 ICP + 25 unique players), "No-Loss
+Lottery" branding everywhere, Last-jackpot banner below the tickets
+card; OpenChat community link in footer + sidebar; landing scale-hiding
+already live. (A money-ball graphic was built and removed same-day —
+recoverable at 175d73a.) Backend: cofounders stale flag row purged by
+post_upgrade (flags = 11 exactly). Snapshot rotation: …25 deleted, …27
+created (575 MiB; …26 retained).
+
 ## 2026-07-07 — Mainnet deploy 7b4a89d (feature removals + cycles overhaul)
 
 The big cut: idea_board/Community R&D, discussions, casino/crash,
