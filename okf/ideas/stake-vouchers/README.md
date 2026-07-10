@@ -8,6 +8,14 @@ timestamp: 2026-07-10T00:00:00Z
 
 # Stake Vouchers
 
+> **REVISION (owner, 2026-07-10, post-build):** the wrap step is GONE —
+> `stake()` auto-issues the voucher NFT in the same call (the stake IS the
+> voucher). Redemption is voucher-native via a three-choice modal: wait for
+> the dissolve (100%, `redeem_stake_voucher`), claim instantly (85%
+> buyback), or sell at market. wrap/unwrap remain as internal/legacy paths.
+> Mock marketplace seeding for visualization: `dev_seed_mock_vouchers`
+> (local-only). Implemented in 1525c0c.
+
 **Owner decisions locked (2026-07-10):** voucher = NFT (not fungible token);
 marketplace accepts **ICP only** (owner revision same day — ckBTC/ckUSDC/
 ckETH dropped); house buyback at a **15% discount** (seller receives 85% of
