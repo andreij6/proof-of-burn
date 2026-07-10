@@ -466,7 +466,6 @@ export function VouchersBody({
             <div className="col" style={opt}>
               <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                 <b style={{ fontSize: 13.5 }}>Sell it instead</b>
-                <Chip tone="pending">instant {payPct}% · or your ask</Chip>
               </span>
               <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
                 Cash out without the wait — sell instantly to the house or list it on the Exchange.
