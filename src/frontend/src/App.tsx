@@ -28,6 +28,7 @@ import type {
 } from "./bindings/backend";
 import LotteryHub from "./LotteryHub";
 import NeuronStakePage from "./NeuronStakePage";
+import VoucherExchange from "./VoucherExchange";
 import { friendlyVoucherErr, isPromo, type VoucherView } from "./Vouchers";
 import { TIER_META } from "./Staking";
 import DevDocs from "./DevDocs";
@@ -53,7 +54,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   voting: '/voting',
@@ -68,6 +69,8 @@ export const PAGE_PATH: Record<AppPage, string> = {
   // Neuron Stake — the pooled-neuron staking page (was the Lottery hub's
   // "Stake to Earn Tickets" tab); Stake to Earn nav section.
   neuronstake: '/neuron-stake',
+  // Voucher Exchange — the stake-voucher secondary market.
+  exchange: '/exchange',
   // ANSEM LP rewards (Solana chain fusion) — Stake to Earn nav section.
   ansemlp: '/ansem-lp',
   // ICPSwap LP staking — Featured nav, below ANSEM LP.
@@ -1303,6 +1306,9 @@ export default function App() {
     if (page === 'neuronstake' && featureFlags.length > 0 && !(losslessEnabled || earlyAdoptersEnabled)) {
       redirect('lottery');
     }
+    if (page === 'exchange' && featureFlags.length > 0 && !vouchersEnabled) {
+      redirect('lottery');
+    }
     if (page === 'icplp' && featureFlags.length > 0 && !icpLpEnabled) {
       redirect('lottery');
     }
@@ -1321,7 +1327,7 @@ export default function App() {
     if (page === 'payouts' && principal && principal.isAnonymous()) {
       redirect('lottery');
     }
-  }, [page, losslessEnabled, lotteryEnabled, govNavEnabled, communityNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, icpLpEnabled, vouchersEnabled, explorerEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
+  }, [page, losslessEnabled, lotteryEnabled, vouchersEnabled, govNavEnabled, communityNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, icpLpEnabled, vouchersEnabled, explorerEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1940,6 +1946,12 @@ export default function App() {
             ICP LP
           </Btn>
         )}
+        {vouchersEnabled && (
+          <Btn variant={page === 'exchange' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('exchange')}>
+            <Icon name="scale" size={14} stroke={page === 'exchange' ? 'var(--char-950)' : 'currentColor'} />
+            Voucher Exchange
+          </Btn>
+        )}
         {ansemLpEnabled && (
           <Btn variant={page === 'ansemlp' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ansemlp')}>
             <Icon name="droplet" size={14} stroke={page === 'ansemlp' ? 'var(--char-950)' : 'currentColor'} />
@@ -2463,6 +2475,16 @@ export default function App() {
             />
           ) : page === 'devdocs' ? (
             <DevDocs />
+          ) : page === 'exchange' && vouchersEnabled ? (
+            <VoucherExchange
+              actor={actor}
+              identity={identity}
+              principal={principal}
+              host={host}
+              rootKey={env?.IC_ROOT_KEY}
+              ledgerCanisterId={ledgerCanisterId}
+              onSignIn={handleLogin}
+            />
           ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
             <NeuronStakePage
               actor={actor}

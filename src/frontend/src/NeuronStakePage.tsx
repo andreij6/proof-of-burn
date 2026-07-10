@@ -86,6 +86,17 @@ export default function NeuronStakePage({
         </div>
       </div>
 
+      <VouchersBody
+        actor={actor}
+        identity={identity}
+        principal={principal}
+        host={host}
+        rootKey={rootKey}
+        ledgerCanisterId={ledgerCanisterId}
+        onSignIn={onSignIn}
+        section="mine"
+      />
+
       <Staking
         actor={actor}
         identity={identity}
@@ -101,15 +112,7 @@ export default function NeuronStakePage({
         onActivity={onActivity}
       />
 
-      <VouchersBody
-        actor={actor}
-        identity={identity}
-        principal={principal}
-        host={host}
-        rootKey={rootKey}
-        ledgerCanisterId={ledgerCanisterId}
-        onSignIn={onSignIn}
-      />
+
     </>
   );
 }

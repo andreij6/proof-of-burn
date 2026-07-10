@@ -131,12 +131,16 @@ interface VouchersBodyProps {
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   onSignIn: () => void;
+  /** Which sections render: 'mine' = the holder's vouchers (Neuron Stake
+   *  page, above the stake form); 'exchange' = your listings + the
+   *  best-deals grid (the Voucher Exchange page). */
+  section: 'mine' | 'exchange';
 }
 
 const ticketsPerDay = (v: VoucherView) => Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8));
 
 export function VouchersBody({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, section,
 }: VouchersBodyProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<VoucherMarketInfo | null>(null);
@@ -294,6 +298,7 @@ export function VouchersBody({
         </div>
       )}
 
+      {section === 'mine' && (<>
       {/* ── Your vouchers (unlisted + promo) ── */}
       <div className="card col" style={{ gap: 10 }}>
         <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
@@ -313,6 +318,8 @@ export function VouchersBody({
         )}
       </div>
 
+      </>)}
+      {section === 'exchange' && (<>
       {/* ── Your listings (hidden entirely when none) ── */}
       {signedIn && myListed.length > 0 && (
         <div className="card col" style={{ gap: 10 }}>
@@ -389,7 +396,7 @@ export function VouchersBody({
                     {delta < 0 ? `${Math.abs(delta)}% under value` : delta > 0 ? `${delta}% over value` : 'at value'}
                   </Chip>
                   <span style={{ fontSize: 11, color: 'var(--fg-2)' }}>
-                    Earns {ticketsPerDay(v)} tickets/day once you hold it.
+                    Earns {ticketsPerDay(v)} tickets/day.
                   </span>
                   {isMine ? (
                     <Btn variant="secondary" sm onClick={() => cancelListing(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
@@ -410,6 +417,8 @@ export function VouchersBody({
           </div>
         )}
       </div>
+
+      </>)}
 
       {/* ── Redeem modal: the voucher is the claim — pick how the ICP returns ── */}
       {redeemModal != null && (() => {
