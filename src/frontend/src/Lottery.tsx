@@ -259,18 +259,6 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         </div>
       )}
 
-      {info?.last_winner != null && (
-        <div className="row" style={{
-          gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
-          border: '1px solid var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))',
-        }}>
-          <Icon name="spark" size={13} stroke="var(--burn-ink)" />
-          <span>
-            Last jackpot: <b className="mono">{formatPrincipal(info.last_winner)}</b> won
-            — lifetime paid out <b className="mono">{fmtICP(info.total_paid_e8s)} ICP</b>. Round {Number(info.round)} is live.
-          </span>
-        </div>
-      )}
 
 
       {/* ── Hero: pot → no-loss line → countdown blocks → one CTA ── */}
@@ -444,6 +432,19 @@ export default function Lottery({ actor, principal, isLocal, onSignIn, onGoStaki
         </div>
 
       </div>
+
+      {info?.last_winner != null && (
+        <div className="row" style={{
+          gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
+          border: '1px solid var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))',
+        }}>
+          <Icon name="spark" size={13} stroke="var(--burn-ink)" />
+          <span>
+            Last jackpot: <b className="mono">{formatPrincipal(info.last_winner)}</b> won
+            — lifetime paid out <b className="mono">{fmtICP(info.total_paid_e8s)} ICP</b>. Round {Number(info.round)} is live.
+          </span>
+        </div>
+      )}
 
       {/* ── Recent drawings (last 10) ── */}
       <div className="col" style={{ ...card, gap: 10 }}>

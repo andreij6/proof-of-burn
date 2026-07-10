@@ -25,7 +25,6 @@ export default function LotteryHub({
       <div className="idea-board-container" style={{ paddingBottom: 0 }}>
         {/* ── Page header (eyebrow · title · how it works) ── */}
         <div className="col" style={{ gap: 6 }}>
-          <Eyebrow accent>No-Loss Lottery</Eyebrow>
           <span className="row" style={{ gap: 10, width: '100%', flexWrap: 'wrap' }}>
             <Icon name="ticket" size={22} stroke="var(--burn-ink)" />
             <h4 style={{ margin: 0 }}>No-Loss Lottery</h4>
@@ -57,7 +56,7 @@ export default function LotteryHub({
                 <Eyebrow accent>When a drawing runs</Eyebrow>
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
                   <li><b>Three times a week:</b> Mon, Wed &amp; Sat nights (US Eastern).</li>
-                  <li><b>Only when both thresholds are met</b> — the pot holds <b>≥ 25 ICP</b> and there are enough unique participants; otherwise it rolls over and the pot keeps growing.</li>
+                  <li><b>Only when both thresholds are met</b> — the pot holds <b>≥ 25 ICP</b> and at least <b>25 unique players</b> hold tickets; otherwise it rolls over and the pot keeps growing.</li>
                 </ul>
               </div>
               <div className="col" style={{ gap: 6 }}>
