@@ -86,7 +86,8 @@ sources), list_recent_winners() (winners feed).
 Staking AUTO-ISSUES a Stake Voucher NFT — the voucher IS the stake. The
 holder redeems via redeem_stake_voucher (100% after dissolve), sells it on
 the marketplace, or takes the instant 15%-discount buyback. Tickets always
-follow the voucher's current owner.
+follow the voucher's current owner; buying a voucher grants ITS daily
+tickets to the buyer instantly (once per voucher per UTC day).
 
 ## Flow 3 — Unstake (the exit is always open)
 const out = await cycleBurn.unstake(amount, { SixMonths: null });

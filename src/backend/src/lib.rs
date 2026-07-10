@@ -18587,6 +18587,11 @@ pub struct VoucherRecord {
     pub expires_at: Option<u64>,
     /// Live marketplace ask (ICP e8s); None = not listed.
     pub listed_price_e8s: Option<u64>,
+    /// UTC day of the last instant purchase-grant for THIS voucher — buying
+    /// grants its daily tickets immediately, once per voucher per day (kills
+    /// same-day wash-trade farming).
+    #[serde(default)]
+    pub last_purchase_grant_day: u64,
 }
 
 /// Marketplace sale saga journal — persisted between legs so an interrupted
@@ -18702,6 +18707,15 @@ fn voucher_nft_cid() -> Result<Principal, String> {
 }
 
 /// Backed voucher e8s a user holds in one tier (their wrapped stake).
+/// One voucher's daily ticket rate: base × tier multiplier × whole ICP
+/// (sub-1-ICP floors to one base unit) — the same math the daily grant uses.
+fn voucher_daily_rate(v: &VoucherRecord) -> u64 {
+    let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
+    let tier = tier_from_idx(v.tier);
+    let whole_icp = (v.amount_e8s / ONE_ICP_E8S).max(1);
+    base.saturating_mul(tier.weight_multiplier()).saturating_mul(whole_icp)
+}
+
 fn voucher_backed_e8s(user: Principal, tier: StakeTier) -> u64 {
     VOUCHERS.with(|m| {
         m.borrow()
@@ -18999,6 +19013,7 @@ async fn auto_issue_voucher(user: Principal, tier: StakeTier) -> Option<u64> {
             minted_at: now,
             expires_at: None,
             listed_price_e8s: None,
+            last_purchase_grant_day: 0,
         });
     });
     staking_audit("voucher_auto_issue", user, whole, id);
@@ -19038,7 +19053,7 @@ async fn dev_seed_mock_vouchers(n: u32) -> Result<u32, String> {
         VOUCHERS.with(|m| {
             m.borrow_mut().insert(id, VoucherRecord {
                 id, class: VoucherClass::Backed, tier: tier_idx, amount_e8s: amount,
-                owner, minted_at: now, expires_at: None, listed_price_e8s: Some(ask),
+                owner, minted_at: now, expires_at: None, listed_price_e8s: Some(ask), last_purchase_grant_day: 0,
             });
         });
         made += 1;
@@ -19165,6 +19180,7 @@ async fn wrap_stake_voucher(amount_e8s: u64, tier: StakeTier) -> Result<u64, Str
             minted_at: now,
             expires_at: None,
             listed_price_e8s: None,
+            last_purchase_grant_day: 0,
         });
     });
     staking_audit("voucher_wrap", caller, amount_e8s, id);
@@ -19331,6 +19347,26 @@ async fn buy_voucher(voucher_id: u64) -> Result<(), String> {
         }
     });
     VOUCHER_SALES.with(|m| { m.borrow_mut().remove(&voucher_id); });
+    // Owner rule (2026-07-10): buying a voucher rewards the buyer with THAT
+    // voucher's daily tickets immediately, entering the upcoming draw — once
+    // per voucher per UTC day, so a wash-traded voucher can't be farmed.
+    let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
+    let granted = VOUCHERS.with(|m| {
+        let mut reg = m.borrow_mut();
+        match reg.get(&voucher_id) {
+            Some(mut rec) if rec.class == VoucherClass::Backed && rec.last_purchase_grant_day < today => {
+                rec.last_purchase_grant_day = today;
+                let rate = voucher_daily_rate(&rec);
+                reg.insert(voucher_id, rec);
+                rate
+            }
+            _ => 0,
+        }
+    });
+    if granted > 0 {
+        grant_lottery_tickets(sale.buyer, granted, "voucher_purchase");
+    }
+
     staking_audit("voucher_sale", sale.buyer, sale.price_e8s, voucher_id);
     Ok(())
 }
@@ -19761,6 +19797,7 @@ async fn claim_promo_voucher(target: Option<Principal>) -> Result<u64, String> {
             minted_at: now,
             expires_at: Some(expires_at),
             listed_price_e8s: None,
+            last_purchase_grant_day: 0,
         });
     });
     campaign.claimed += 1;
@@ -29543,6 +29580,20 @@ mod tests {
         set_mock_caller(bob());
         let reclaimed = reclaim_escrow(EscrowKind::StakeVoucher, ExplorerToken::ICP, Some(id)).await.unwrap();
         assert_eq!(reclaimed, 55_000 - ICP_FEE_E8S, "leftover escrow minus the reclaim fee");
+// Owner rule: purchase grants THIS voucher's daily rate INSTANTLY into
+        // the current round (source voucher_purchase), once per voucher per day.
+        {
+            let vid_now = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == bob()).map(|e| *e.key()));
+            if let Some(vid_now) = vid_now {
+                let v = VOUCHERS.with(|m| m.borrow().get(&vid_now)).unwrap();
+                let rate = voucher_daily_rate(&v);
+                let count = LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0));
+                assert!(count >= rate, "instant grant landed: {} >= {}", count, rate);
+                assert_eq!(v.last_purchase_grant_day, current_time() / 1_000_000_000 / SECS_PER_DAY,
+                    "wash guard stamped");
+            }
+        }
+        
         clear_vouchers();
     }
 
@@ -29871,7 +29922,8 @@ mod tests {
                 id: 9_999, class: VoucherClass::Promo, tier: 0, amount_e8s: 0,
                 owner: carol(), minted_at: current_time(),
                 expires_at: Some(current_time() + PROMO_EXPIRY_NS), listed_price_e8s: None,
-            });
+            last_purchase_grant_day: 0,
+        });
         });
         auto_grant_daily_stake_tickets();
         assert_eq!(count(carol()), 0, "admin exclusion holds for promo grants");

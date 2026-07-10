@@ -230,7 +230,7 @@ export function VouchersBody({
     const res = await actor.buy_voucher(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
     setBuyModal(null);
-    return `Voucher #${v.id} is yours — ${fmtICP(v.amount_e8s)} ICP of staked principal, earning tickets from the next daily grant.`;
+    return `Voucher #${v.id} is yours — ${ticketsPerDay(v)} tickets just landed for the upcoming draw, and it keeps earning daily.`;
   });
 
   const usd = (e8s: bigint): string => icpUsdE8s > 0n
@@ -577,7 +577,7 @@ export function VouchersBody({
             </Chip>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
               You become the staker of a <b>{fmtICP(v.amount_e8s)} ICP {TIER_META[v.tier].label}</b> position — earning{' '}
-              <b>{ticketsPerDay(v)} tickets/day</b> from the next daily grant, redeemable for its full value after the dissolve.
+              <b>{ticketsPerDay(v)} tickets/day</b> — today's tickets land the moment the purchase settles, entering the upcoming draw. Redeemable for full value after the dissolve.
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Your {fmtICP(v.listed_price_e8s)} ICP goes to a sale escrow, then the purchase settles and the voucher moves to you. An unfinished purchase is always reclaimable.
