@@ -99,6 +99,7 @@ environments:
     canisters:
       - backend
       - course_nft
+      - voucher_nft
       - frontend
       - ledger
       - ckbtc-ledger

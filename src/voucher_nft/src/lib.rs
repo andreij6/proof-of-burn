@@ -255,11 +255,12 @@ fn now_ns() -> u64 {
 fn inspect_message() {
     let caller = ic_cdk::api::caller();
     let cfg = config();
-    if caller == cfg.minter || caller == cfg.admin {
+    if caller == cfg.minter || cfg.admin == caller {
         ic_cdk::api::call::accept_message();
-    } else {
-        ic_cdk::api::call::reject_message();
     }
+    // Anyone else: fall through WITHOUT accepting — the ingress is refused.
+    // (inspect_message may only accept or decline; constructing a reject
+    // message here violates the IC contract and traps the whole call path.)
 }
 
 fn require_minter() -> Result<(), String> {

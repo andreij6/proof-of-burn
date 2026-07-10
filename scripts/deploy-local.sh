@@ -126,7 +126,7 @@ icp canister call backend admin_set_course_nft_canister "(principal \"$COURSE_NF
 # open the promo claim campaign and seed the buyback fund so the 85% instant
 # exit is live-testable out of the box.
 VOUCHER_NFT_ID=$(canister_id voucher_nft)
-icp canister call voucher_nft set_minter "(principal \"$BACKEND_ID\")" -e "$ENV" --identity "$DEPLOY_IDENTITY" >/dev/null
+icp canister call voucher_nft set_minter "(principal \"$BACKEND_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 icp canister call backend admin_set_voucher_nft_canister "(principal \"$VOUCHER_NFT_ID\")" -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 icp canister settings update voucher_nft --add-controller "$BACKEND_ID" -e "$ENV" --identity "$DEPLOY_IDENTITY" >/dev/null \
   && ok "backend added as voucher_nft controller" \

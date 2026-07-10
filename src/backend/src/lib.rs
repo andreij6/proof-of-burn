@@ -1324,6 +1324,9 @@ async fn admin_trigger_sweep() -> Result<(), String> {
     retry_failed_settlements().await;
     delete_expired_dapps();
     cycle_topup_check().await;
+    let _ = refresh_buyback_fund_cache().await; // voucher fund display stays honest
+    resume_voucher_buybacks().await;
+    route_buyback_spreads().await;
     staking_sweep().await;
     early_adopter_settlement_check().await;
     Ok(())
