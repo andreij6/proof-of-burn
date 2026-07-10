@@ -1,5 +1,21 @@
 # Log
 
+## 2026-07-10 pm — Mainnet deploy 13310af (STAKE VOUCHERS LIVE)
+
+The whole voucher feature ships: voucher_nft canister CREATED on ic
+(abope-haaaa-aaaap-quvda-cai; creation needed icp cycles mint from
+prod-deployer ICP + top-up — created 0.6T, topped to ~0.7T, backend
+cycle-guard maintains it), wired (set_minter as dev1 = init admin,
+admin_set_voucher_nft_canister, backend added controller), flag
+stake_vouchers ON. Live: auto-issue on stake, redeem/buyback/transfer,
+ICP marketplace + Voucher Exchange page, listed-pause rule, instant
+purchase grants, staker_count fix, admin console redo (auto-load,
+4 tabs), scroll-to-top, voucher-native dev docs. Claim page trimmed to
+option-one-only (sign in & claim; no biometrics copy) — paste path
+built but UI-hidden; promo campaign CLOSED; buyback fund 0 (instant
+exit auto-disabled until funded via Admin → Money). Snapshot rotation:
+…28 deleted, …30 created (575 MiB; …29 retained).
+
 ## 2026-07-10 — Stake Vouchers built (all 3 phases, LOCAL)
 
 2-fork fanout (b0dc01f): voucher_nft ICRC-7 canister + backend registry/
