@@ -439,6 +439,10 @@ pub struct Config {
     /// allowlisted minter/custodian on that canister.
     #[serde(default)]
     pub course_nft_canister: Option<Principal>,
+    /// Stake Voucher NFT canister (okf/ideas/stake-vouchers). Set by
+    /// `admin_set_voucher_nft_canister`; None until wired.
+    #[serde(default)]
+    pub voucher_nft_canister: Option<Principal>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
@@ -633,6 +637,7 @@ thread_local! {
             lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
+            voucher_nft_canister: None,
         };
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(0)), default_config))
     });
@@ -703,7 +708,7 @@ fn inspect_message() {
     // an inter-canister ledger-balance call, which forces it to be an update —
     // anonymous visitors still need it to see the pot + next drawing.
     let method = ic_cdk::api::call::method_name();
-    const ANON_OK: [&str; 2] = ["wallet_receive", "get_lottery_info"];
+    const ANON_OK: [&str; 3] = ["wallet_receive", "get_lottery_info", "claim_promo_voucher"];
     if caller == Principal::anonymous() && !ANON_OK.contains(&method.as_str()) {
         ic_cdk::trap("Anonymous callers are not permitted");
     }
@@ -809,6 +814,7 @@ fn init(payload: InitPayload) {
         lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
         default_threshold_usd_e8s: None,
         course_nft_canister: None,
+        voucher_nft_canister: None,
     };
     CONFIG.with(|cell| {
         cell.borrow_mut().set(config);
@@ -5103,6 +5109,7 @@ fn setup_timers() {
         sweep_game_retention(); // 1-day game-data retention (owner 2026-07-06)
         icpswap_lp_grant_daily_tickets().await; // ICP LP: 40 tickets/day per $1 of LP value
         harvest_icpswap_lp().await; // claim + route ICPSwap LP yield (throttled 1h internally)
+        resume_voucher_buybacks().await; // stake vouchers: finish interrupted buybacks + route spreads
         staking_sweep().await; // bootstrap/unstakes every sweep; maturity+inbox hourly inside
         lottery_draw_check().await;
         early_adopter_settlement_check().await; // draw-keyed; maturity read hourly inside
@@ -5120,6 +5127,8 @@ fn setup_timers() {
         if sweep_due("cycle_guards", SWEEP_HOURLY_NS) {
             cycle_topup_check().await;
             course_nft_cycle_guard().await; // forward surplus cycles when the NFT canister runs low
+            voucher_nft_cycle_guard().await; // same guard for the voucher canister
+            let _ = refresh_buyback_fund_cache().await; // keep get_voucher_market's fund number honest
         }
     });
 }
@@ -5311,14 +5320,20 @@ pub const FLAG_ICPSWAP_LP: &str = "icpswap_lp_stake";
 /// (Explorer + X-Farm) nav groups ship dark until turned on.
 pub const FLAG_NAV_GOVERNANCE: &str = "nav_governance";
 pub const FLAG_NAV_COMMUNITY: &str = "nav_community";
+/// Stake Vouchers (okf/ideas/stake-vouchers): wrap stakes into ICRC-7 voucher
+/// NFTs, ICP marketplace, 15% house buyback, promo claim campaigns. Gates
+/// wrap/list/buy/claim ONLY — unwrap, cancel and buyback are exits and are
+/// NEVER flag-gated (custody house rule).
+pub const FLAG_STAKE_VOUCHERS: &str = "stake_vouchers";
 /// X-Farm: autonomous per-user Farmer canisters burn ICP→cycles to run Gemini
 /// (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X. Ships
 /// dark (default OFF) until the owner enables it after a playtest.
 pub const FLAG_X_FARM: &str = "x_farm";
-const KNOWN_FEATURE_FLAGS: [&str; 13] = [
+const KNOWN_FEATURE_FLAGS: [&str; 14] = [
     FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN,
     FLAG_SOLANA_LP, FLAG_ICPSWAP_LP, FLAG_X_FARM, FLAG_NAV_GOVERNANCE, FLAG_NAV_COMMUNITY,
+    FLAG_STAKE_VOUCHERS,
 ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -5432,6 +5447,7 @@ fn feature_default(key: &str) -> bool {
         FLAG_SOLANA_LP => false,
         FLAG_ICPSWAP_LP => false,
         FLAG_NAV_GOVERNANCE => false,
+        FLAG_STAKE_VOUCHERS => false,
         FLAG_NAV_COMMUNITY => false,
         FLAG_X_FARM => false,
         // Every other SHIPPED feature (Lossless Voting/Lottery, Explorer,
@@ -5742,6 +5758,7 @@ fn author_is_staked(user: Principal) -> bool {
         STAKES.with(|m| m.borrow().get(&stake_key(*t, user)))
             .map(|s| s.amount_e8s > 0)
             .unwrap_or(false)
+            || voucher_backed_e8s(user, *t) > 0
     });
     tier_staked
         || EARLY_ADOPTERS.with(|m| m.borrow().get(&user)).map(|e| e.staked_e8s > 0).unwrap_or(false)
@@ -5982,6 +5999,12 @@ pub struct PendingUnstake {
     /// out of the child (child = amount − 0.0001).
     #[serde(default)]
     pub child_e8s: Option<u64>,
+    /// Stake-voucher buyback (okf/ideas/stake-vouchers): Some(sub) targets
+    /// the disburse at (this canister, sub) — the buyback fund — instead of
+    /// the user's wallet, and skips the fee refund + payout record (there is
+    /// no user to reimburse; `user` holds the canister's own principal).
+    #[serde(default)]
+    pub payout_subaccount: Option<[u8; 32]>,
     pub settled_at: Option<u64>,
 }
 
@@ -6548,21 +6571,21 @@ fn mock_merge(target_id: u64, source_id: u64) -> Result<(), String> {
 /// Disburse a fully-dissolved split neuron to the user's main ICP account.
 /// Governance rejects if the neuron hasn't finished dissolving — callers just
 /// retry on the next sweep tick.
-async fn gov_disburse(neuron_id: u64, owner: Principal) -> Result<u64, String> {
+async fn gov_disburse(neuron_id: u64, owner: Principal, sub: [u8; 32]) -> Result<u64, String> {
     let cmd = Command::Disburse(DisburseCmd {
         to_account: Some(GovAccountIdentifier {
-            hash: account_id_hash28(owner, &[0u8; 32]),
+            hash: account_id_hash28(owner, &sub),
         }),
         amount: None, // full stake
     });
     match call_manage_neuron(Some(neuron_id), cmd).await? {
         GovOutcome::Response(CommandResponse::Disburse(r)) => Ok(r.transfer_block_height),
         GovOutcome::Response(_) => Err("UNEXPECTED_NNS_RESPONSE".to_string()),
-        GovOutcome::LocalFallback => mock_disburse(neuron_id, owner).await,
+        GovOutcome::LocalFallback => mock_disburse(neuron_id, owner, sub).await,
     }
 }
 
-async fn mock_disburse(neuron_id: u64, owner: Principal) -> Result<u64, String> {
+async fn mock_disburse(neuron_id: u64, owner: Principal, sub: [u8; 32]) -> Result<u64, String> {
     let stake = MOCK_GOV.with(|g| {
         let g = g.borrow();
         let neuron = g
@@ -6581,7 +6604,7 @@ async fn mock_disburse(neuron_id: u64, owner: Principal) -> Result<u64, String> 
         let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
         let dest = LedgerAccount {
             owner,
-            subaccount: None,
+            subaccount: if sub == [0u8; 32] { None } else { Some(sub) },
         };
         call_ledger_transfer(
             ledger_id,
@@ -7019,6 +7042,7 @@ async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
         fee_refund_block: None,
         merged_into: None,
         child_e8s: Some(amount_e8s),
+        payout_subaccount: None,
         settled_at: None,
     };
     // Best-effort StartDissolving; the sweep retries (and re-stamps the ETA).
@@ -7184,11 +7208,17 @@ async fn process_pending_unstakes() {
                 }
             }
             UnstakeStatus::Dissolving if now >= unstake.dissolve_eta => {
-                match gov_disburse(unstake.split_neuron_id, unstake.user).await {
+                let dest_sub = unstake.payout_subaccount.unwrap_or([0u8; 32]);
+                match gov_disburse(unstake.split_neuron_id, unstake.user, dest_sub).await {
                     Ok(block) => {
                         unstake.disburse_block = Some(block);
                         unstake.status = UnstakeStatus::Disbursed;
                         unstake.settled_at = Some(now);
+                        let is_buyback = unstake.payout_subaccount.is_some();
+                        if is_buyback {
+                            // No user to reimburse; skip refund + payout record.
+                            unstake.fee_refund_block = Some(0);
+                        }
                         let user = unstake.user;
                         let amount = unstake.amount_e8s;
                         let id = unstake.id;
@@ -7196,10 +7226,17 @@ async fn process_pending_unstakes() {
                             m.borrow_mut().insert(id, unstake.clone());
                         });
                         staking_audit("unstake_disbursed", user, amount, id);
-                        record_payout(user, PayoutType::UnstakeDisbursement, IdeaToken::ICP, amount, id);
-                        // Zero-loss: reimburse all cycle fees from the
-                        // treasury right away (retried below if it fails).
-                        settle_unstake_fee_refund(ledger_id, &mut unstake).await;
+                        if is_buyback {
+                            // Buyback principal landed in the fund — realize
+                            // the 15% spread as fee revenue (retried by the
+                            // sweep until routed; see route_buyback_spreads).
+                            route_buyback_spreads().await;
+                        } else {
+                            record_payout(user, PayoutType::UnstakeDisbursement, IdeaToken::ICP, amount, id);
+                            // Zero-loss: reimburse all cycle fees from the
+                            // treasury right away (retried below if it fails).
+                            settle_unstake_fee_refund(ledger_id, &mut unstake).await;
+                        }
                     }
                     Err(e) => {
                         // Not dissolved yet, or transient — retry next tick.
@@ -8307,10 +8344,13 @@ fn user_daily_tickets(user: Principal) -> u64 {
     // (1 ICP for 6 months = base/day; 500 ICP for 2 years = base × 4 × 500).
     // Sub-1-ICP stakes still earn one base unit so small stakers participate.
     let tier_tickets = StakeTier::all().iter().fold(0u64, |acc, &tier| {
+        // A wrapped stake earns exactly like an unwrapped one: the Backed
+        // voucher registry is stake (okf/ideas/stake-vouchers §2).
         let staked_e8s = STAKES
             .with(|m| m.borrow().get(&stake_key(tier, user)))
             .map(|s| s.amount_e8s)
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .saturating_add(voucher_backed_e8s(user, tier));
         if staked_e8s > 0 {
             let whole_icp = (staked_e8s / ONE_ICP_E8S).max(1);
             acc.saturating_add(
@@ -8350,15 +8390,25 @@ fn auto_grant_daily_stake_tickets() {
     }
     let now = current_time();
     let today = now / 1_000_000_000 / SECS_PER_DAY;
-    let stakers: std::collections::BTreeSet<Principal> =
+    let mut stakers: std::collections::BTreeSet<Principal> =
         STAKES.with(|m| m.borrow().iter().map(|e| e.key().user).collect());
+    // Voucher owners earn too: Backed = wrapped stake, Promo = 1/day trial
+    // (okf/ideas/stake-vouchers). Expired promos contribute 0 and drop out
+    // via the per_day == 0 skip.
+    VOUCHERS.with(|m| {
+        for e in m.borrow().iter() {
+            stakers.insert(e.value().owner);
+        }
+    });
     let mut state = lottery_state();
     let mut granted_any = false;
     for user in stakers {
         if is_admin_principal(user) {
             continue;
         }
-        let per_day = user_daily_tickets(user);
+        let stake_part = user_daily_tickets(user);
+        let promo_part = promo_daily_tickets(user);
+        let per_day = stake_part.saturating_add(promo_part);
         if per_day == 0 {
             continue;
         }
@@ -8377,7 +8427,12 @@ fn auto_grant_daily_stake_tickets() {
         LOTTERY_TICKETS.with(|m| {
             m.borrow_mut().insert(user, entry);
         });
-        note_ticket_source(user, "daily_stake", per_day, state.round);
+        if stake_part > 0 {
+            note_ticket_source(user, "daily_stake", stake_part, state.round);
+        }
+        if promo_part > 0 {
+            note_ticket_source(user, "promo_voucher", promo_part, state.round);
+        }
         granted_any = true;
     }
     if granted_any {
@@ -8397,7 +8452,9 @@ fn claim_daily_tickets() -> Result<u64, String> {
     }
     let now = current_time();
     let today = now / 1_000_000_000 / SECS_PER_DAY;
-    let per_day = user_daily_tickets(caller);
+    let stake_part = user_daily_tickets(caller);
+    let promo_part = promo_daily_tickets(caller);
+    let per_day = stake_part.saturating_add(promo_part);
     if per_day == 0 {
         return Err("NOT_STAKED".to_string());
     }
@@ -8422,7 +8479,12 @@ fn claim_daily_tickets() -> Result<u64, String> {
     LOTTERY_TICKETS.with(|m| {
         m.borrow_mut().insert(caller, entry.clone());
     });
-    note_ticket_source(caller, "daily_stake", per_day, state.round);
+    if stake_part > 0 {
+        note_ticket_source(caller, "daily_stake", stake_part, state.round);
+    }
+    if promo_part > 0 {
+        note_ticket_source(caller, "promo_voucher", promo_part, state.round);
+    }
     set_lottery_state(state);
     Ok(entry.count)
 }
@@ -8449,7 +8511,7 @@ fn get_lottery_info() -> LotteryInfo {
         ),
         None => (0, false),
     };
-    let my_daily_tickets = user_daily_tickets(caller);
+    let my_daily_tickets = total_daily_tickets(caller);
 
     LotteryInfo {
         enabled,
@@ -10658,6 +10720,9 @@ pub enum EscrowKind {
     Stake,
     Commitment,
     Project,
+    /// Voucher-marketplace sale escrow (okf/ideas/stake-vouchers). ICP-only;
+    /// `key` = voucher id.
+    StakeVoucher,
 }
 
 /// Is there a non-terminal Commitment for `(caller, proposal_id)`? If so the
@@ -10807,6 +10872,21 @@ async fn reclaim_escrow(
                 return Err("PROJECT_FUNDING_IN_FLIGHT".to_string());
             }
             derive_project_subaccount(&caller, project_id)
+        }
+        EscrowKind::StakeVoucher => {
+            if token != ExplorerToken::ICP {
+                return Err("VOUCHER_ICP_ONLY".to_string());
+            }
+            let voucher_id = key.ok_or_else(|| "KEY_REQUIRED: voucher_id".to_string())?;
+            // The caller's own in-flight sale still draws from this escrow.
+            let in_flight = VOUCHER_SALES
+                .with(|m| m.borrow().get(&voucher_id))
+                .map(|sale| sale.buyer == caller)
+                .unwrap_or(false);
+            if in_flight {
+                return Err("VOUCHER_SALE_IN_FLIGHT".to_string());
+            }
+            derive_subaccount(&caller, VOUCHER_SALE_TAG ^ voucher_id)
         }
     };
     let config = CONFIG.with(|c| c.borrow().get().clone());
@@ -18423,6 +18503,1162 @@ fn dev_clear_farmers() -> Result<(), String> {
     Ok(())
 }
 
+
+// ==========================================
+// 21. Stake Vouchers (okf/ideas/stake-vouchers)
+// ==========================================
+//
+// Staked positions wrap into transferable ICRC-7 voucher NFTs on the
+// dedicated voucher_nft canister (backend = sole minter/burner/transfer
+// authority — the VOUCHERS registry here is the ownership source of truth
+// and the NFT mirrors it). Three exits: sell on the ICP-only marketplace,
+// instant house buyback at a 15% discount (pay 85% → burn NFT → delete
+// registry row → immediately split + dissolve, principal redeems to the
+// buyback fund), or unwrap back to a plain stake and classic-unstake later.
+// Promo-class vouchers (claim campaigns) earn 1 ticket/day for 60 days and
+// can NEVER redeem principal — money paths hard-reject them.
+//
+// Owner-locked rules (2026-07-10): 15% discount; buyback pays from the
+// dedicated [10u8;32] fund subaccount and REFUSES when underfunded; every
+// fee (marketplace fee + realized buyback spread) splits 1/3 treasury /
+// 1/3 buyback fund / 1/3 voucher-canister cycles burn; promo cap 5,000,
+// drip 500/day, expiry 60 days from claim, 1 ticket/day, soulbound.
+
+/// The house buyback fund — a dedicated ICP subaccount seeded by the owner.
+/// Buybacks pay out of it; dissolved buyback principal redeems back into it.
+const BUYBACK_SUBACCOUNT: [u8; 32] = [10u8; 32];
+/// Buyback price: owner receives amount × (10_000 − 1_500) / 10_000 = 85%.
+const BUYBACK_DISCOUNT_BPS: u64 = 1_500;
+/// Marketplace fee default (admin-tunable via admin_set_voucher_config).
+const VOUCHER_FEE_BPS_DEFAULT: u16 = 250;
+/// Minimum wrap (matches the first-stake minimum; admin-tunable).
+const VOUCHER_MIN_WRAP_E8S_DEFAULT: u64 = ONE_ICP_E8S;
+/// Minimum listing ask — keeps fee legs meaningful.
+const VOUCHER_MIN_LIST_E8S: u64 = 10_000_000; // 0.1 ICP
+/// Promo campaign (owner-locked): global cap, daily drip, expiry, rate.
+const PROMO_CAP: u32 = 5_000;
+const PROMO_DAILY_DRIP: u32 = 500;
+const PROMO_EXPIRY_NS: u64 = 60 * 86_400 * 1_000_000_000; // 60 days
+const PROMO_TICKETS_PER_DAY: u64 = 1;
+/// Per-sale escrow seed: `derive_subaccount(&buyer, VOUCHER_SALE_TAG ^ id)`.
+/// Distinct from SALE_ESCROW_TAG (u64::MAX − 307) and every other seed.
+const VOUCHER_SALE_TAG: u64 = u64::MAX - 411;
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoucherClass {
+    Backed,
+    Promo,
+}
+
+/// Registry row — the authoritative claim record (NFT mirrors it).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct VoucherRecord {
+    pub id: u64,
+    pub class: VoucherClass,
+    /// StakeTier::idx(); Promo rows carry 0 (unused).
+    pub tier: u8,
+    /// Backed: staked-ICP claim (e8s). Promo: 0.
+    pub amount_e8s: u64,
+    pub owner: Principal,
+    pub minted_at: u64,
+    /// Promo only: stops earning after this instant (claim + 60 days).
+    pub expires_at: Option<u64>,
+    /// Live marketplace ask (ICP e8s); None = not listed.
+    pub listed_price_e8s: Option<u64>,
+}
+
+/// Marketplace sale saga journal — persisted between legs so an interrupted
+/// buy resumes without repeating a block-indexed transfer.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct VoucherSale {
+    pub voucher_id: u64,
+    pub buyer: Principal,
+    pub seller: Principal,
+    pub price_e8s: u64,
+    pub fee_e8s: u64,
+    pub started_at: u64,
+    pub seller_block: Option<u64>,
+    pub fee_treasury_block: Option<u64>,
+    pub fee_fund_block: Option<u64>,
+    pub fee_cmc_block: Option<u64>,
+    pub cmc_notified: bool,
+    pub transferred: bool,
+}
+
+/// Buyback saga journal — pay → burn NFT → registry delete → split+dissolve;
+/// the 15% spread routes when the dissolved principal lands in the fund.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct BuybackJob {
+    pub voucher_id: u64,
+    pub owner: Principal,
+    pub tier: u8,
+    pub amount_e8s: u64,
+    pub pay_e8s: u64,
+    pub created_at: u64,
+    pub pay_block: Option<u64>,
+    pub nft_burned: bool,
+    pub pending_unstake_id: Option<u64>,
+    /// Spread fee legs (routed after the disburse lands in the fund).
+    pub spread_treasury_block: Option<u64>,
+    pub spread_cmc_block: Option<u64>,
+    pub spread_cmc_notified: bool,
+    pub spread_routed: bool,
+}
+
+/// Promo campaign singleton (MemoryId 132).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PromoCampaign {
+    pub open: bool,
+    pub claimed: u32,
+    /// UTC day of `claims_today` (drip window).
+    pub day: u64,
+    pub claims_today: u32,
+}
+
+/// Admin-tunable knobs (MemoryId 133).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct VoucherConfig {
+    pub market_fee_bps: u16,
+    pub min_wrap_e8s: u64,
+}
+
+impl Default for VoucherConfig {
+    fn default() -> Self {
+        VoucherConfig { market_fee_bps: VOUCHER_FEE_BPS_DEFAULT, min_wrap_e8s: VOUCHER_MIN_WRAP_E8S_DEFAULT }
+    }
+}
+
+impl_storable!(VoucherRecord);
+impl_storable!(VoucherSale);
+impl_storable!(BuybackJob);
+impl_storable!(PromoCampaign);
+impl_storable!(VoucherConfig);
+
+thread_local! {
+    // 128 — voucher registry (id → record; the ownership source of truth)
+    static VOUCHERS: RefCell<StableBTreeMap<u64, VoucherRecord, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(128)))));
+    // 129 — next voucher id (ids start at 1; never reused, burns retire them)
+    static NEXT_VOUCHER_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(129)), 1u64))
+    });
+    // 130 — marketplace sale journals (voucher id → saga)
+    static VOUCHER_SALES: RefCell<StableBTreeMap<u64, VoucherSale, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(130)))));
+    // 131 — buyback saga journals (voucher id → job; kept until spread routed)
+    static BUYBACK_JOBS: RefCell<StableBTreeMap<u64, BuybackJob, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(131)))));
+    // 132 — promo campaign singleton
+    static PROMO_CAMPAIGN: RefCell<StableCell<PromoCampaign, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(132)), PromoCampaign::default()))
+    });
+    // 133 — voucher config (fee bps / min wrap)
+    static VOUCHER_CONFIG: RefCell<StableCell<VoucherConfig, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(133)), VoucherConfig::default()))
+    });
+    // 134 — promo claimed set (principal → 1; one voucher per principal)
+    static PROMO_CLAIMED: RefCell<StableBTreeMap<Principal, u8, Memory>> =
+        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(134)))));
+}
+
+fn voucher_config() -> VoucherConfig {
+    VOUCHER_CONFIG.with(|c| c.borrow().get().clone())
+}
+
+fn promo_campaign() -> PromoCampaign {
+    PROMO_CAMPAIGN.with(|c| c.borrow().get().clone())
+}
+
+fn set_promo_campaign(c2: PromoCampaign) {
+    PROMO_CAMPAIGN.with(|c| { c.borrow_mut().set(c2); });
+}
+
+fn voucher_nft_cid() -> Result<Principal, String> {
+    CONFIG
+        .with(|c| c.borrow().get().voucher_nft_canister)
+        .ok_or_else(|| "VOUCHER_NFT_NOT_CONFIGURED".to_string())
+}
+
+/// Backed voucher e8s a user holds in one tier (their wrapped stake).
+fn voucher_backed_e8s(user: Principal, tier: StakeTier) -> u64 {
+    VOUCHERS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| {
+                let v = e.value();
+                v.class == VoucherClass::Backed && v.owner == user && v.tier == tier.idx()
+            })
+            .map(|e| e.value().amount_e8s)
+            .sum()
+    })
+}
+
+/// Promo tickets/day for a user: 1 per unexpired promo voucher they hold.
+fn promo_daily_tickets(user: Principal) -> u64 {
+    let now = current_time();
+    VOUCHERS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| {
+                let v = e.value();
+                v.class == VoucherClass::Promo
+                    && v.owner == user
+                    && v.expires_at.map(|x| now < x).unwrap_or(false)
+            })
+            .count() as u64
+    }) * PROMO_TICKETS_PER_DAY
+}
+
+/// Stake + booster + backed-voucher + promo tickets/day — the ONE number both
+/// grant paths and the lottery info must agree on (a mismatch would let the
+/// lower path stamp `last_claim_day` and under-grant the higher one).
+fn total_daily_tickets(user: Principal) -> u64 {
+    user_daily_tickets(user).saturating_add(promo_daily_tickets(user))
+}
+
+// ── voucher_nft inter-canister seams (mock pair for native tests) ──────────
+
+#[cfg(target_arch = "wasm32")]
+async fn voucher_nft_mint(
+    token_id: u64,
+    to: Principal,
+    class: VoucherClass,
+    tier: u8,
+    amount_e8s: u64,
+    expires_at: Option<u64>,
+) -> Result<(), String> {
+    #[derive(CandidType)]
+    struct MintArgs {
+        token_id: u64,
+        to: Principal,
+        class: VoucherClass,
+        tier: u8,
+        amount_e8s: u64,
+        expires_at: Option<u64>,
+    }
+    let cid = voucher_nft_cid()?;
+    let args = MintArgs { token_id, to, class, tier, amount_e8s, expires_at };
+    let res: Result<(Result<u64, String>,), _> = ic_cdk::call(cid, "mint", (args,)).await;
+    match res {
+        Ok((Ok(_),)) => Ok(()),
+        Ok((Err(e),)) => Err(format!("VOUCHER_MINT_ERR: {}", e)),
+        Err((c, m)) => Err(format!("VOUCHER_MINT_REJECTED ({:?}): {}", c, m)),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn voucher_nft_transfer(from: Principal, to: Principal, token_id: u64) -> Result<(), String> {
+    let cid = voucher_nft_cid()?;
+    let res: Result<(Result<(), String>,), _> =
+        ic_cdk::call(cid, "custodial_transfer", (from, to, token_id)).await;
+    match res {
+        Ok((Ok(()),)) => Ok(()),
+        Ok((Err(e),)) => Err(format!("VOUCHER_TRANSFER_ERR: {}", e)),
+        Err((c, m)) => Err(format!("VOUCHER_TRANSFER_REJECTED ({:?}): {}", c, m)),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn voucher_nft_burn(token_id: u64) -> Result<(), String> {
+    let cid = voucher_nft_cid()?;
+    let res: Result<(Result<(), String>,), _> = ic_cdk::call(cid, "burn", (token_id,)).await;
+    match res {
+        Ok((Ok(()),)) => Ok(()),
+        Ok((Err(e),)) => Err(format!("VOUCHER_BURN_ERR: {}", e)),
+        Err((c, m)) => Err(format!("VOUCHER_BURN_REJECTED ({:?}): {}", c, m)),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// token_id → owner mirror for native tests.
+    static TEST_MOCK_VOUCHER_OWNER: RefCell<std::collections::HashMap<u64, Principal>> =
+        RefCell::new(std::collections::HashMap::new());
+    static TEST_MOCK_VOUCHER_MINT_FAIL: RefCell<bool> = const { RefCell::new(false) };
+    static TEST_MOCK_VOUCHER_TRANSFER_FAIL: RefCell<bool> = const { RefCell::new(false) };
+    static TEST_MOCK_VOUCHER_BURN_FAIL: RefCell<bool> = const { RefCell::new(false) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn voucher_nft_mint(
+    token_id: u64,
+    to: Principal,
+    _class: VoucherClass,
+    _tier: u8,
+    _amount_e8s: u64,
+    _expires_at: Option<u64>,
+) -> Result<(), String> {
+    if TEST_MOCK_VOUCHER_MINT_FAIL.with(|c| *c.borrow()) {
+        return Err("VOUCHER_MINT_REJECTED (mock failure)".to_string());
+    }
+    TEST_MOCK_VOUCHER_OWNER.with(|m| { m.borrow_mut().insert(token_id, to); });
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn voucher_nft_transfer(from: Principal, to: Principal, token_id: u64) -> Result<(), String> {
+    if TEST_MOCK_VOUCHER_TRANSFER_FAIL.with(|c| *c.borrow()) {
+        return Err("VOUCHER_TRANSFER_REJECTED (mock failure)".to_string());
+    }
+    let live = TEST_MOCK_VOUCHER_OWNER.with(|m| m.borrow().get(&token_id).copied());
+    if live != Some(from) {
+        return Err("VOUCHER_TRANSFER_ERR: from != owner".to_string());
+    }
+    TEST_MOCK_VOUCHER_OWNER.with(|m| { m.borrow_mut().insert(token_id, to); });
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn voucher_nft_burn(token_id: u64) -> Result<(), String> {
+    if TEST_MOCK_VOUCHER_BURN_FAIL.with(|c| *c.borrow()) {
+        return Err("VOUCHER_BURN_REJECTED (mock failure)".to_string());
+    }
+    TEST_MOCK_VOUCHER_OWNER.with(|m| { m.borrow_mut().remove(&token_id); });
+    Ok(())
+}
+
+// ── Candid views ────────────────────────────────────────────────────────────
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct VoucherView {
+    pub id: u64,
+    pub class: VoucherClass,
+    pub tier: StakeTier,
+    pub amount_e8s: u64,
+    pub owner: Principal,
+    pub minted_at: u64,
+    pub expires_at: Option<u64>,
+    pub listed_price_e8s: Option<u64>,
+}
+
+fn tier_from_idx(idx: u8) -> StakeTier {
+    match idx {
+        0 => StakeTier::SixMonths,
+        1 => StakeTier::OneYear,
+        _ => StakeTier::TwoYears,
+    }
+}
+
+fn voucher_view(v: &VoucherRecord) -> VoucherView {
+    VoucherView {
+        id: v.id,
+        class: v.class,
+        tier: tier_from_idx(v.tier),
+        amount_e8s: v.amount_e8s,
+        owner: v.owner,
+        minted_at: v.minted_at,
+        expires_at: v.expires_at,
+        listed_price_e8s: v.listed_price_e8s,
+    }
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+pub struct VoucherMarketInfo {
+    pub enabled: bool,
+    pub min_wrap_e8s: u64,
+    pub market_fee_bps: u16,
+    pub buyback_discount_bps: u16,
+    pub buyback_fund_e8s: u64,
+    pub my_vouchers: Vec<VoucherView>,
+    pub listings: Vec<VoucherView>,
+    pub promo_open: bool,
+    pub promo_remaining: u32,
+    pub promo_claims_today: u32,
+}
+
+/// Cached buyback-fund balance (heap; refreshed by the sweep + every fund
+/// mutation) so `get_voucher_market` stays a QUERY.
+thread_local! {
+    static CACHED_BUYBACK_FUND_E8S: RefCell<u64> = const { RefCell::new(0) };
+}
+
+async fn refresh_buyback_fund_cache() -> u64 {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let acct = LedgerAccount { owner: get_canister_id(), subaccount: Some(BUYBACK_SUBACCOUNT) };
+    match call_ledger_balance(config.ledger_canister_id, acct).await {
+        Ok(b) => {
+            CACHED_BUYBACK_FUND_E8S.with(|c| *c.borrow_mut() = b);
+            b
+        }
+        Err(_) => CACHED_BUYBACK_FUND_E8S.with(|c| *c.borrow()),
+    }
+}
+
+#[ic_cdk::query]
+fn get_voucher_market() -> VoucherMarketInfo {
+    let caller = get_caller();
+    let campaign = promo_campaign();
+    let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
+    let claims_today = if campaign.day == today { campaign.claims_today } else { 0 };
+    VoucherMarketInfo {
+        enabled: feature_visible(FLAG_STAKE_VOUCHERS, caller),
+        min_wrap_e8s: voucher_config().min_wrap_e8s,
+        market_fee_bps: voucher_config().market_fee_bps,
+        buyback_discount_bps: BUYBACK_DISCOUNT_BPS as u16,
+        buyback_fund_e8s: CACHED_BUYBACK_FUND_E8S.with(|c| *c.borrow()),
+        my_vouchers: VOUCHERS.with(|m| {
+            m.borrow()
+                .iter()
+                .filter(|e| e.value().owner == caller)
+                .map(|e| voucher_view(&e.value()))
+                .collect()
+        }),
+        listings: VOUCHERS.with(|m| {
+            m.borrow()
+                .iter()
+                .filter(|e| e.value().listed_price_e8s.is_some())
+                .map(|e| voucher_view(&e.value()))
+                .collect()
+        }),
+        promo_open: campaign.open,
+        promo_remaining: PROMO_CAP.saturating_sub(campaign.claimed),
+        promo_claims_today: claims_today,
+    }
+}
+
+// ── Wrap / unwrap ───────────────────────────────────────────────────────────
+
+/// Wrap `amount_e8s` of the caller's `tier` stake into a Backed voucher NFT.
+/// The STAKES row is debited (the ICP itself stays in the pooled neuron; the
+/// registry row now carries the claim). Whole-ICP amounts only, so a later
+/// buyback's neuron split stays valid. EA/Booster stakes are NOT wrappable
+/// (separate map, permanent by design).
+#[ic_cdk::update]
+async fn wrap_stake_voucher(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
+    require_authenticated()?;
+    if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    let cfg = voucher_config();
+    if amount_e8s < cfg.min_wrap_e8s {
+        return Err("BELOW_MINIMUM".to_string());
+    }
+    if amount_e8s % ONE_ICP_E8S != 0 {
+        return Err("WHOLE_ICP_ONLY".to_string());
+    }
+    let key = stake_key(tier, caller);
+    let mut stake = STAKES.with(|m| m.borrow().get(&key)).ok_or("NO_STAKE")?;
+    if amount_e8s > stake.amount_e8s {
+        return Err("INSUFFICIENT_STAKE".to_string());
+    }
+
+    let now = current_time();
+    let id = NEXT_VOUCHER_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+
+    // Debit first, mint second — revert the debit if the NFT mint fails
+    // (single await; no journal needed).
+    stake.amount_e8s -= amount_e8s;
+    stake.last_action_at = now;
+    let stake_backup = STAKES.with(|m| m.borrow().get(&key));
+    if stake.amount_e8s == 0 {
+        STAKES.with(|m| { m.borrow_mut().remove(&key); });
+    } else {
+        STAKES.with(|m| { m.borrow_mut().insert(key.clone(), stake.clone()); });
+    }
+
+    if let Err(e) = voucher_nft_mint(id, caller, VoucherClass::Backed, tier.idx(), amount_e8s, None).await {
+        // Revert: restore the exact pre-debit row.
+        if let Some(orig) = stake_backup {
+            STAKES.with(|m| { m.borrow_mut().insert(key, orig); });
+        }
+        return Err(e);
+    }
+
+    VOUCHERS.with(|m| {
+        m.borrow_mut().insert(id, VoucherRecord {
+            id,
+            class: VoucherClass::Backed,
+            tier: tier.idx(),
+            amount_e8s,
+            owner: caller,
+            minted_at: now,
+            expires_at: None,
+            listed_price_e8s: None,
+        });
+    });
+    staking_audit("voucher_wrap", caller, amount_e8s, id);
+    Ok(id)
+}
+
+/// Unwrap a Backed voucher back into a plain stake row (burns the NFT).
+/// Deliberately NOT flag-gated: it is an exit.
+#[ic_cdk::update]
+async fn unwrap_stake_voucher(voucher_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    let v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+    if v.owner != caller {
+        return Err("NOT_YOUR_VOUCHER".to_string());
+    }
+    if v.class != VoucherClass::Backed {
+        return Err("PROMO_NOT_REDEEMABLE".to_string());
+    }
+    if v.listed_price_e8s.is_some() {
+        return Err("LISTED: cancel the listing first".to_string());
+    }
+    if VOUCHER_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
+        return Err("SALE_IN_PROGRESS".to_string());
+    }
+    if BUYBACK_JOBS.with(|m| m.borrow().contains_key(&voucher_id)) {
+        return Err("BUYBACK_IN_PROGRESS".to_string());
+    }
+
+    voucher_nft_burn(voucher_id).await?;
+
+    let now = current_time();
+    let tier = tier_from_idx(v.tier);
+    let key = stake_key(tier, caller);
+    let mut stake = STAKES.with(|m| m.borrow().get(&key)).unwrap_or(UserStake {
+        amount_e8s: 0,
+        staked_at: v.minted_at,
+        last_action_at: now,
+    });
+    stake.amount_e8s = stake.amount_e8s.saturating_add(v.amount_e8s);
+    stake.last_action_at = now;
+    STAKES.with(|m| { m.borrow_mut().insert(key, stake); });
+    VOUCHERS.with(|m| { m.borrow_mut().remove(&voucher_id); });
+    staking_audit("voucher_unwrap", caller, v.amount_e8s, voucher_id);
+    Ok(())
+}
+
+// ── Marketplace (ICP asks only) ─────────────────────────────────────────────
+
+#[ic_cdk::update]
+fn list_voucher(voucher_id: u64, price_e8s: u64) -> Result<(), String> {
+    require_authenticated()?;
+    if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    let caller = get_caller();
+    let mut v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+    if v.owner != caller {
+        return Err("NOT_YOUR_VOUCHER".to_string());
+    }
+    if v.class != VoucherClass::Backed {
+        return Err("PROMO_NOT_LISTABLE".to_string());
+    }
+    if price_e8s < VOUCHER_MIN_LIST_E8S {
+        return Err("PRICE_TOO_LOW".to_string());
+    }
+    if VOUCHER_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
+        return Err("SALE_IN_PROGRESS".to_string());
+    }
+    if BUYBACK_JOBS.with(|m| m.borrow().contains_key(&voucher_id)) {
+        return Err("BUYBACK_IN_PROGRESS".to_string());
+    }
+    v.listed_price_e8s = Some(price_e8s);
+    VOUCHERS.with(|m| { m.borrow_mut().insert(voucher_id, v); });
+    Ok(())
+}
+
+/// Cancel a listing. NOT flag-gated (withdrawing an offer is an exit).
+#[ic_cdk::update]
+fn cancel_voucher_listing(voucher_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let mut v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+    if v.owner != caller {
+        return Err("NOT_YOUR_VOUCHER".to_string());
+    }
+    if VOUCHER_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
+        return Err("SALE_IN_PROGRESS".to_string());
+    }
+    if v.listed_price_e8s.is_none() {
+        return Err("NOT_LISTED".to_string());
+    }
+    v.listed_price_e8s = None;
+    VOUCHERS.with(|m| { m.borrow_mut().insert(voucher_id, v); });
+    Ok(())
+}
+
+/// The buyer-specific escrow account for a listing: fund it with
+/// ask + 4 × 0.0001 ICP (the settlement legs' ledger fees), then call
+/// `buy_voucher`. Leftovers are reclaimable via `reclaim_escrow(StakeVoucher)`.
+#[ic_cdk::query]
+fn get_voucher_sale_account(voucher_id: u64) -> LedgerAccount {
+    LedgerAccount {
+        owner: get_canister_id(),
+        subaccount: Some(derive_subaccount(&get_caller(), VOUCHER_SALE_TAG ^ voucher_id)),
+    }
+}
+
+/// Settle a voucher purchase from the caller's funded escrow. Journaled saga:
+/// seller leg → fee legs (1/3 treasury · 1/3 buyback fund · 1/3 voucher-nft
+/// cycles burn) → ownership move (registry + NFT). Resume-safe per leg.
+#[ic_cdk::update]
+async fn buy_voucher(voucher_id: u64) -> Result<(), String> {
+    require_authenticated()?;
+    if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    let buyer = get_caller();
+    let _guard = CallerGuard::new(buyer)?;
+
+    let mut sale = match VOUCHER_SALES.with(|m| m.borrow().get(&voucher_id)) {
+        Some(existing) if existing.buyer == buyer => existing,
+        Some(_) => return Err("SALE_IN_PROGRESS".to_string()),
+        None => {
+            let v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+            let price_e8s = v.listed_price_e8s.ok_or("NOT_LISTED")?;
+            if v.owner == buyer {
+                return Err("CANNOT_BUY_OWN_VOUCHER".to_string());
+            }
+            if v.class != VoucherClass::Backed {
+                return Err("PROMO_NOT_LISTABLE".to_string());
+            }
+            let fee_e8s = price_e8s.saturating_mul(voucher_config().market_fee_bps as u64) / 10_000;
+            VoucherSale {
+                voucher_id,
+                buyer,
+                seller: v.owner,
+                price_e8s,
+                fee_e8s,
+                started_at: current_time(),
+                seller_block: None,
+                fee_treasury_block: None,
+                fee_fund_block: None,
+                fee_cmc_block: None,
+                cmc_notified: false,
+                transferred: false,
+            }
+        }
+    };
+    VOUCHER_SALES.with(|m| { m.borrow_mut().insert(voucher_id, sale.clone()); });
+
+    let result = run_voucher_sale_saga(&mut sale).await;
+    VOUCHER_SALES.with(|m| { m.borrow_mut().insert(voucher_id, sale.clone()); });
+    result?;
+
+    // Success: move the registry row, clear the listing + journal.
+    VOUCHERS.with(|m| {
+        let mut map = m.borrow_mut();
+        if let Some(mut v) = map.get(&voucher_id) {
+            v.owner = sale.buyer;
+            v.listed_price_e8s = None;
+            map.insert(voucher_id, v);
+        }
+    });
+    VOUCHER_SALES.with(|m| { m.borrow_mut().remove(&voucher_id); });
+    staking_audit("voucher_sale", sale.buyer, sale.price_e8s, voucher_id);
+    Ok(())
+}
+
+async fn run_voucher_sale_saga(sale: &mut VoucherSale) -> Result<(), String> {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger = config.ledger_canister_id;
+    let escrow_sub = derive_subaccount(&sale.buyer, VOUCHER_SALE_TAG ^ sale.voucher_id);
+    let self_id = get_canister_id();
+
+    // Escrow must cover price + the settlement legs' ledger fees up front.
+    if sale.seller_block.is_none() {
+        let escrow = LedgerAccount { owner: self_id, subaccount: Some(escrow_sub) };
+        let balance = call_ledger_balance(ledger, escrow).await?;
+        let required = sale.price_e8s + 4 * ICP_FEE_E8S;
+        if balance < required {
+            // Nothing moved yet — drop the journal so the listing stays open.
+            VOUCHER_SALES.with(|m| { m.borrow_mut().remove(&sale.voucher_id); });
+            return Err("ESCROW_NOT_FUNDED".to_string());
+        }
+    }
+
+    // Fee thirds — cycles + fund thirds are fee/3; treasury absorbs remainder.
+    let fund_amt = sale.fee_e8s / 3;
+    let cmc_amt = sale.fee_e8s / 3;
+    let treasury_amt = sale.fee_e8s - fund_amt - cmc_amt;
+
+    // 1. Seller gets ask − fee.
+    if sale.seller_block.is_none() {
+        let dest = LedgerAccount { owner: sale.seller, subaccount: None };
+        let amount = sale.price_e8s - sale.fee_e8s;
+        let b = call_ledger_transfer(ledger, Some(escrow_sub), dest, amount, Some(ICP_FEE_E8S))
+            .await
+            .map_err(|e| format!("SELLER_XFER: {}", e))?;
+        sale.seller_block = Some(b);
+    }
+
+    // 2. Fee → treasury third.
+    if sale.fee_treasury_block.is_none() {
+        if treasury_amt > ICP_FEE_E8S {
+            let dest = LedgerAccount { owner: self_id, subaccount: Some(TREASURY_SUBACCOUNT) };
+            let b = call_ledger_transfer(ledger, Some(escrow_sub), dest, treasury_amt, Some(ICP_FEE_E8S))
+                .await
+                .map_err(|e| format!("FEE_TREASURY_XFER: {}", e))?;
+            sale.fee_treasury_block = Some(b);
+        } else {
+            sale.fee_treasury_block = Some(0); // dust — skipped
+        }
+    }
+
+    // 3. Fee → buyback-fund third.
+    if sale.fee_fund_block.is_none() {
+        if fund_amt > ICP_FEE_E8S {
+            let dest = LedgerAccount { owner: self_id, subaccount: Some(BUYBACK_SUBACCOUNT) };
+            let b = call_ledger_transfer(ledger, Some(escrow_sub), dest, fund_amt, Some(ICP_FEE_E8S))
+                .await
+                .map_err(|e| format!("FEE_FUND_XFER: {}", e))?;
+            sale.fee_fund_block = Some(b);
+        } else {
+            sale.fee_fund_block = Some(0);
+        }
+    }
+
+    // 4. Fee → voucher-canister cycles burn third (CMC top-up).
+    if sale.fee_cmc_block.is_none() {
+        if cmc_amt > ICP_FEE_E8S {
+            if let Ok(target) = voucher_nft_cid() {
+                let b = call_cmc_topup_transfer(ledger, Some(escrow_sub), target, cmc_amt, ICP_FEE_E8S)
+                    .await
+                    .map_err(|e| format!("FEE_CMC_XFER: {}", e))?;
+                sale.fee_cmc_block = Some(b);
+            } else {
+                // No voucher canister wired (local edge) — fold into treasury.
+                let dest = LedgerAccount { owner: self_id, subaccount: Some(TREASURY_SUBACCOUNT) };
+                let b = call_ledger_transfer(ledger, Some(escrow_sub), dest, cmc_amt, Some(ICP_FEE_E8S))
+                    .await
+                    .map_err(|e| format!("FEE_CMC_FOLD_XFER: {}", e))?;
+                sale.fee_cmc_block = Some(b);
+                sale.cmc_notified = true;
+            }
+        } else {
+            sale.fee_cmc_block = Some(0);
+            sale.cmc_notified = true;
+        }
+    }
+    if !sale.cmc_notified {
+        let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+        if let Ok(target) = voucher_nft_cid() {
+            notify_cmc_topup(cmc, target, sale.fee_cmc_block.unwrap(), true)
+                .await
+                .map_err(|e| format!("FEE_CMC_NOTIFY: {}", e))?;
+        }
+        sale.cmc_notified = true;
+    }
+
+    // 5. NFT mirror move (registry moves after the saga returns Ok).
+    if !sale.transferred {
+        voucher_nft_transfer(sale.seller, sale.buyer, sale.voucher_id).await?;
+        sale.transferred = true;
+    }
+    Ok(())
+}
+
+// ── House buyback (15% discount; pay → burn → dissolve) ────────────────────
+
+/// Instant exit: the CURRENT owner is paid 85% of the claim from the buyback
+/// fund; the NFT burns, the registry row dies, and the underlying stake
+/// splits + dissolves with its principal targeted back at the fund. NOT
+/// flag-gated (it is an exit). Refuses when the fund can't cover the payout.
+#[ic_cdk::update]
+async fn buyback_voucher(voucher_id: u64) -> Result<u64, String> {
+    require_authenticated()?;
+    let caller = get_caller();
+    let _guard = CallerGuard::new(caller)?;
+    let _lock = StakingLock::new()?;
+
+    // Resume an interrupted job for this voucher (any caller may nudge it,
+    // but the payout leg is bound to the journaled owner).
+    if let Some(job) = BUYBACK_JOBS.with(|m| m.borrow().get(&voucher_id)) {
+        // Only the interrupted SAGA legs (burn / split) are caller-resumable;
+        // a completed job waiting on its dissolve belongs to the sweep.
+        if job.pending_unstake_id.is_none() || !job.nft_burned {
+            let mut job = job;
+            advance_buyback_job(&mut job).await?;
+            return Ok(job.pay_e8s);
+        }
+        return Err("BUYBACK_IN_PROGRESS".to_string());
+    }
+
+    let v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+    if v.owner != caller {
+        return Err("NOT_YOUR_VOUCHER".to_string());
+    }
+    if v.class != VoucherClass::Backed {
+        return Err("PROMO_NOT_REDEEMABLE".to_string());
+    }
+    if v.listed_price_e8s.is_some() {
+        return Err("LISTED: cancel the listing first".to_string());
+    }
+    if VOUCHER_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
+        return Err("SALE_IN_PROGRESS".to_string());
+    }
+
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let tier = tier_from_idx(v.tier);
+
+    // Pool guards — mirror unstake() so nothing moves if the split can't run.
+    let pool = tier_pool(tier);
+    if pool.neuron_id.is_none() || pool.bootstrap != StakingBootstrap::Ready {
+        return Err("POOL_NOT_READY".to_string());
+    }
+    if pool.pending_refresh_e8s > 0 {
+        return Err("REFRESH_PENDING".to_string());
+    }
+    if pool.total_staked_e8s.saturating_sub(v.amount_e8s) < ONE_ICP_E8S {
+        return Err("POOL_FLOOR".to_string());
+    }
+    require_treasury_can_front(&config).await?;
+
+    // The balance gate (owner-locked): fund must cover 85% + the pay leg fee.
+    let pay_e8s = v.amount_e8s.saturating_mul(10_000 - BUYBACK_DISCOUNT_BPS) / 10_000;
+    let fund = refresh_buyback_fund_cache().await;
+    if fund < pay_e8s + ICP_FEE_E8S {
+        return Err("BUYBACK_UNAVAILABLE".to_string());
+    }
+
+    let mut job = BuybackJob {
+        voucher_id,
+        owner: caller,
+        tier: v.tier,
+        amount_e8s: v.amount_e8s,
+        pay_e8s,
+        created_at: current_time(),
+        pay_block: None,
+        nft_burned: false,
+        pending_unstake_id: None,
+        spread_treasury_block: None,
+        spread_cmc_block: None,
+        spread_cmc_notified: false,
+        spread_routed: false,
+    };
+    BUYBACK_JOBS.with(|m| { m.borrow_mut().insert(voucher_id, job.clone()); });
+    advance_buyback_job(&mut job).await?;
+    Ok(pay_e8s)
+}
+
+/// Drive a buyback job through its legs (each idempotent + journaled):
+/// pay owner 85% → delete registry row → burn NFT → split + start dissolve.
+/// The spread routes later, when the dissolve pays the fund (see
+/// route_buyback_spreads).
+async fn advance_buyback_job(job: &mut BuybackJob) -> Result<(), String> {
+    let config = CONFIG.with(|cell| cell.borrow().get().clone());
+    let ledger = config.ledger_canister_id;
+
+    // 1. Pay the owner 85% from the fund.
+    if job.pay_block.is_none() {
+        let dest = LedgerAccount { owner: job.owner, subaccount: None };
+        let b = call_ledger_transfer(ledger, Some(BUYBACK_SUBACCOUNT), dest, job.pay_e8s, Some(ICP_FEE_E8S))
+            .await
+            .map_err(|e| format!("BUYBACK_PAY_XFER: {}", e))?;
+        job.pay_block = Some(b);
+        // The claim is consumed the instant the owner is paid.
+        VOUCHERS.with(|m| { m.borrow_mut().remove(&job.voucher_id); });
+        BUYBACK_JOBS.with(|m| { m.borrow_mut().insert(job.voucher_id, job.clone()); });
+        staking_audit("voucher_buyback_paid", job.owner, job.pay_e8s, job.voucher_id);
+        let _ = refresh_buyback_fund_cache().await;
+    }
+
+    // 2. Burn the NFT (retryable).
+    if !job.nft_burned {
+        voucher_nft_burn(job.voucher_id).await?;
+        job.nft_burned = true;
+        BUYBACK_JOBS.with(|m| { m.borrow_mut().insert(job.voucher_id, job.clone()); });
+    }
+
+    // 3. Split + start dissolving, principal targeted at the fund.
+    if job.pending_unstake_id.is_none() {
+        let tier = tier_from_idx(job.tier);
+        let mut pool = tier_pool(tier);
+        let neuron_id = pool.neuron_id.ok_or("POOL_NOT_READY")?;
+        fund_pool_neuron_from_treasury(&config, &mut pool, tier, ICP_FEE_E8S).await?;
+        let split_neuron_id = gov_split(neuron_id, job.amount_e8s.saturating_add(ICP_FEE_E8S))
+            .await
+            .map_err(|e| format!("BUYBACK_SPLIT_FAILED: {}", e))?;
+        let now = current_time();
+        pool.total_staked_e8s = pool.total_staked_e8s.saturating_sub(job.amount_e8s);
+        set_tier_pool(tier, pool);
+
+        let id = NEXT_UNSTAKE_ID.with(|c| {
+            let id = *c.borrow().get();
+            c.borrow_mut().set(id + 1);
+            id
+        });
+        let delay_ns = tier.dissolve_delay_secs().saturating_mul(1_000_000_000);
+        let mut pending = PendingUnstake {
+            id,
+            // The house's own unstake: `user` is the canister principal and
+            // the payout targets the buyback fund subaccount.
+            user: get_canister_id(),
+            tier,
+            amount_e8s: job.amount_e8s,
+            split_neuron_id,
+            status: UnstakeStatus::SplitDone,
+            created_at: now,
+            dissolve_eta: now.saturating_add(delay_ns),
+            disburse_block: None,
+            fee_refund_block: None,
+            merged_into: None,
+            child_e8s: Some(job.amount_e8s),
+            payout_subaccount: Some(BUYBACK_SUBACCOUNT),
+            settled_at: None,
+        };
+        if gov_start_dissolving(split_neuron_id).await.is_ok() {
+            pending.status = UnstakeStatus::Dissolving;
+        }
+        PENDING_UNSTAKES.with(|m| { m.borrow_mut().insert(id, pending); });
+        job.pending_unstake_id = Some(id);
+        BUYBACK_JOBS.with(|m| { m.borrow_mut().insert(job.voucher_id, job.clone()); });
+        staking_audit("voucher_buyback_split", job.owner, job.amount_e8s, job.voucher_id);
+    }
+    Ok(())
+}
+
+/// Realize the 15% spread of every buyback whose dissolve has PAID OUT to the
+/// fund: 1/3 → treasury, 1/3 stays in the fund, 1/3 → voucher-canister cycles
+/// burn. Idempotent per job (block-indexed legs); called from the disburse
+/// path and the sweep.
+async fn route_buyback_spreads() {
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let ledger = config.ledger_canister_id;
+    let self_id = get_canister_id();
+    let jobs: Vec<BuybackJob> = BUYBACK_JOBS.with(|m| {
+        m.borrow().iter().map(|e| e.value()).filter(|j| !j.spread_routed).collect()
+    });
+    for mut job in jobs {
+        let Some(pid) = job.pending_unstake_id else { continue };
+        let disbursed = PENDING_UNSTAKES
+            .with(|m| m.borrow().get(&pid))
+            .map(|p| p.status == UnstakeStatus::Disbursed)
+            .unwrap_or(false);
+        if !disbursed {
+            continue;
+        }
+        let spread = job.amount_e8s.saturating_mul(BUYBACK_DISCOUNT_BPS) / 10_000;
+        let fund_amt = spread / 3; // stays in the fund — no transfer
+        let cmc_amt = spread / 3;
+        let treasury_amt = spread - fund_amt - cmc_amt;
+
+        if job.spread_treasury_block.is_none() {
+            if treasury_amt > ICP_FEE_E8S {
+                let dest = LedgerAccount { owner: self_id, subaccount: Some(TREASURY_SUBACCOUNT) };
+                match call_ledger_transfer(ledger, Some(BUYBACK_SUBACCOUNT), dest, treasury_amt, Some(ICP_FEE_E8S)).await {
+                    Ok(b) => job.spread_treasury_block = Some(b),
+                    Err(e) => {
+                        canister_print(&format!("buyback spread treasury leg failed (retry next sweep): {}", e));
+                        BUYBACK_JOBS.with(|m| { m.borrow_mut().insert(job.voucher_id, job.clone()); });
+                        continue;
+                    }
+                }
+            } else {
+                job.spread_treasury_block = Some(0);
+            }
+        }
+        if job.spread_cmc_block.is_none() {
+            if cmc_amt > ICP_FEE_E8S {
+                if let Ok(target) = voucher_nft_cid() {
+                    match call_cmc_topup_transfer(ledger, Some(BUYBACK_SUBACCOUNT), target, cmc_amt, ICP_FEE_E8S).await {
+                        Ok(b) => job.spread_cmc_block = Some(b),
+                        Err(e) => {
+                            canister_print(&format!("buyback spread cmc leg failed (retry next sweep): {}", e));
+                            BUYBACK_JOBS.with(|m| { m.borrow_mut().insert(job.voucher_id, job.clone()); });
+                            continue;
+                        }
+                    }
+                } else {
+                    job.spread_cmc_block = Some(0);
+                    job.spread_cmc_notified = true;
+                }
+            } else {
+                job.spread_cmc_block = Some(0);
+                job.spread_cmc_notified = true;
+            }
+        }
+        if !job.spread_cmc_notified {
+            let cmc = Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap();
+            if let Ok(target) = voucher_nft_cid() {
+                if let Err(e) = notify_cmc_topup(cmc, target, job.spread_cmc_block.unwrap(), true).await {
+                    canister_print(&format!("buyback spread cmc notify failed (retry next sweep): {}", e));
+                    BUYBACK_JOBS.with(|m| { m.borrow_mut().insert(job.voucher_id, job.clone()); });
+                    continue;
+                }
+            }
+            job.spread_cmc_notified = true;
+        }
+        job.spread_routed = true;
+        BUYBACK_JOBS.with(|m| { m.borrow_mut().insert(job.voucher_id, job.clone()); });
+        staking_audit("voucher_buyback_spread", job.owner, spread, job.voucher_id);
+        let _ = refresh_buyback_fund_cache().await;
+    }
+}
+
+/// Sweep leg: resume interrupted buyback jobs (paid-but-not-split etc.).
+async fn resume_voucher_buybacks() {
+    let stuck: Vec<BuybackJob> = BUYBACK_JOBS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|e| e.value())
+            .filter(|j| j.pending_unstake_id.is_none() || !j.nft_burned)
+            .collect()
+    });
+    for mut job in stuck {
+        if let Err(e) = advance_buyback_job(&mut job).await {
+            canister_print(&format!("buyback resume {} pending: {}", job.voucher_id, e));
+        }
+    }
+    route_buyback_spreads().await;
+}
+
+// ── Promo claim campaign ────────────────────────────────────────────────────
+
+/// A self-authenticating (user) principal: 29 bytes, last byte 0x02. Rejects
+/// anonymous (0x04), canister/opaque ids and malformed principals — promo
+/// vouchers mint only to wallets a human can actually control.
+fn is_self_authenticating(p: &Principal) -> bool {
+    let b = p.as_slice();
+    b.len() == 29 && b[28] == 0x02
+}
+
+/// Claim a promo voucher. `target = None` mints to the (authenticated)
+/// caller; `Some(p)` is the PASTE PATH — anonymously callable so Plug/OISY
+/// holders can receive without ever signing in (earning is server-side and
+/// jackpots pay automatically). One per principal; global cap; daily drip.
+#[ic_cdk::update]
+async fn claim_promo_voucher(target: Option<Principal>) -> Result<u64, String> {
+    if !feature_enabled(FLAG_STAKE_VOUCHERS) {
+        return Err("FEATURE_DISABLED".to_string());
+    }
+    let recipient = match target {
+        Some(p) => {
+            if !is_self_authenticating(&p) {
+                return Err("INVALID_PRINCIPAL".to_string());
+            }
+            p
+        }
+        None => {
+            require_authenticated()?;
+            get_caller()
+        }
+    };
+    if is_admin_principal(recipient) {
+        return Err("ADMINS_EXCLUDED".to_string());
+    }
+    if PROMO_CLAIMED.with(|m| m.borrow().contains_key(&recipient)) {
+        return Err("ALREADY_CLAIMED".to_string());
+    }
+    let mut campaign = promo_campaign();
+    if !campaign.open {
+        return Err("CAMPAIGN_CLOSED".to_string());
+    }
+    if campaign.claimed >= PROMO_CAP {
+        return Err("CAMPAIGN_EXHAUSTED".to_string());
+    }
+    let now = current_time();
+    let today = now / 1_000_000_000 / SECS_PER_DAY;
+    if campaign.day != today {
+        campaign.day = today;
+        campaign.claims_today = 0;
+    }
+    if campaign.claims_today >= PROMO_DAILY_DRIP {
+        return Err("DAILY_LIMIT".to_string());
+    }
+
+    let id = NEXT_VOUCHER_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    let expires_at = now.saturating_add(PROMO_EXPIRY_NS);
+    voucher_nft_mint(id, recipient, VoucherClass::Promo, 0, 0, Some(expires_at)).await?;
+
+    VOUCHERS.with(|m| {
+        m.borrow_mut().insert(id, VoucherRecord {
+            id,
+            class: VoucherClass::Promo,
+            tier: 0,
+            amount_e8s: 0,
+            owner: recipient,
+            minted_at: now,
+            expires_at: Some(expires_at),
+            listed_price_e8s: None,
+        });
+    });
+    campaign.claimed += 1;
+    campaign.claims_today += 1;
+    set_promo_campaign(campaign);
+    PROMO_CLAIMED.with(|m| { m.borrow_mut().insert(recipient, 1); });
+    staking_audit("promo_voucher_claim", recipient, 0, id);
+    Ok(id)
+}
+
+// ── Admin ───────────────────────────────────────────────────────────────────
+
+#[ic_cdk::update]
+async fn admin_withdraw_buyback(to: Principal, amount_e8s: u64) -> Result<(), String> {
+    require_admin()?;
+    let config = CONFIG.with(|c| c.borrow().get().clone());
+    let dest = LedgerAccount { owner: to, subaccount: None };
+    call_ledger_transfer(config.ledger_canister_id, Some(BUYBACK_SUBACCOUNT), dest, amount_e8s, Some(ICP_FEE_E8S))
+        .await
+        .map_err(|e| format!("BUYBACK_WITHDRAW: {}", e))?;
+    let _ = refresh_buyback_fund_cache().await;
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn admin_set_voucher_config(fee_bps: Option<u16>, min_wrap_e8s: Option<u64>) -> Result<(), String> {
+    require_admin()?;
+    let mut cfg = voucher_config();
+    if let Some(bps) = fee_bps {
+        if bps > 2_000 {
+            return Err("FEE_TOO_HIGH".to_string()); // 20% ceiling
+        }
+        cfg.market_fee_bps = bps;
+    }
+    if let Some(min) = min_wrap_e8s {
+        cfg.min_wrap_e8s = min;
+    }
+    VOUCHER_CONFIG.with(|c| { c.borrow_mut().set(cfg); });
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn admin_set_promo_campaign(open: bool) -> Result<(), String> {
+    require_admin()?;
+    let mut campaign = promo_campaign();
+    campaign.open = open;
+    set_promo_campaign(campaign);
+    Ok(())
+}
+
+#[ic_cdk::update]
+fn admin_set_voucher_nft_canister(canister: Principal) -> Result<(), String> {
+    require_admin()?;
+    let mut config = CONFIG.with(|c| c.borrow().get().clone());
+    config.voucher_nft_canister = Some(canister);
+    CONFIG.with(|c| { c.borrow_mut().set(config); });
+    Ok(())
+}
+
+/// Sweep guard: keep the voucher_nft canister fueled (course_nft precedent).
+async fn voucher_nft_cycle_guard() {
+    let Ok(cid) = voucher_nft_cid() else { return };
+    if canister_cycle_balance() < CYCLE_TOPUP_TARGET {
+        return;
+    }
+    let Ok(cycles) = canister_status_cycles(cid).await else {
+        return;
+    };
+    if cycles >= COURSE_NFT_CYCLE_FLOOR {
+        return;
+    }
+    match deposit_cycles_to(cid, COURSE_NFT_TOPUP_AMOUNT).await {
+        Ok(()) => canister_print(&format!(
+            "voucher_nft_cycle_guard: forwarded {} cycles (balance was {})",
+            COURSE_NFT_TOPUP_AMOUNT, cycles
+        )),
+        Err(e) => canister_print(&format!("voucher_nft_cycle_guard: deposit failed: {}", e)),
+    }
+}
+
+
+// Must sit AFTER every endpoint definition — export_candid!() only emits
+// methods registered before its expansion point.
 ic_cdk::export_candid!();
 
 #[cfg(test)]
@@ -18642,6 +19878,7 @@ mod tests {
             lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
             default_threshold_usd_e8s: None,
             course_nft_canister: None,
+            voucher_nft_canister: None,
         };
         let bytes = config.to_bytes();
         let decoded = Config::from_bytes(bytes);
@@ -18881,6 +20118,7 @@ mod tests {
                 lottery_tickets_per_day: default_lottery_tickets_per_day(), lottery_min_unique_holders: default_lottery_min_unique_holders(),
                 default_threshold_usd_e8s: None,
                 course_nft_canister: None,
+            voucher_nft_canister: None,
             }
         };
         let mainnet = Config {
@@ -21094,6 +22332,7 @@ mod tests {
             // DISTINCT from get_canister_id()'s native mock (aaaaa-aa) so
             // split-leg assertions can tell the two CMC subaccounts apart.
             course_nft_canister: Some(p("qoctq-giaaa-aaaaa-aaaea-cai")),
+            voucher_nft_canister: Some(p("qoctq-giaaa-aaaaa-aaaea-cai")),
         }
     }
 
@@ -21182,6 +22421,7 @@ mod tests {
             fee_refund_block: None,
             merged_into: None,
             child_e8s: None,
+            payout_subaccount: None,
             settled_at: None,
         };
         let decoded = PendingUnstake::from_bytes(unstake.to_bytes());
@@ -27903,4 +29143,457 @@ mod tests {
 
         acct_disable();
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Stake Vouchers (okf/ideas/stake-vouchers)
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn enable_vouchers() {
+        install_staking_test_config();
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        if !config.admins.contains(&carol()) {
+            config.admins.push(carol());
+        }
+        config.is_local = true;
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+        FEATURE_FLAGS.with(|m| {
+            m.borrow_mut().insert(FLAG_STAKE_VOUCHERS.to_string(), 1u8);
+            m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8);
+            m.borrow_mut().insert(FLAG_LOSSLESS_VOTING.to_string(), 1u8);
+        });
+        set_mock_time(Some(1_700_000_000_000_000_000));
+    }
+
+    fn clear_vouchers() {
+        let ids: Vec<u64> = VOUCHERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        VOUCHERS.with(|m| { let mut m = m.borrow_mut(); for id in &ids { m.remove(id); } });
+        let sales: Vec<u64> = VOUCHER_SALES.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        VOUCHER_SALES.with(|m| { let mut m = m.borrow_mut(); for id in &sales { m.remove(id); } });
+        let jobs: Vec<u64> = BUYBACK_JOBS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        BUYBACK_JOBS.with(|m| { let mut m = m.borrow_mut(); for id in &jobs { m.remove(id); } });
+        let claimed: Vec<Principal> = PROMO_CLAIMED.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        PROMO_CLAIMED.with(|m| { let mut m = m.borrow_mut(); for p2 in &claimed { m.remove(p2); } });
+        set_promo_campaign(PromoCampaign::default());
+        TEST_MOCK_VOUCHER_OWNER.with(|m| m.borrow_mut().clear());
+        TEST_MOCK_VOUCHER_MINT_FAIL.with(|c| *c.borrow_mut() = false);
+        TEST_MOCK_VOUCHER_TRANSFER_FAIL.with(|c| *c.borrow_mut() = false);
+        TEST_MOCK_VOUCHER_BURN_FAIL.with(|c| *c.borrow_mut() = false);
+        let stakes: Vec<StakeKey> = STAKES.with(|m| m.borrow().iter().map(|e| e.key().clone()).collect());
+        STAKES.with(|m| { let mut m = m.borrow_mut(); for k in &stakes { m.remove(k); } });
+        let tickets: Vec<Principal> = LOTTERY_TICKETS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        LOTTERY_TICKETS.with(|m| { let mut m = m.borrow_mut(); for p2 in &tickets { m.remove(p2); } });
+        acct_disable();
+    }
+
+    /// Conservation invariant (plan §6): pooled principal == plain stakes +
+    /// Backed voucher claims, per tier — checked around wrap/unwrap.
+    fn conservation_holds(tier: StakeTier) -> bool {
+        let plain: u64 = STAKES.with(|m| {
+            m.borrow().iter().filter(|e| e.key().tier == tier.idx()).map(|e| e.value().amount_e8s).sum()
+        });
+        let backed: u64 = VOUCHERS.with(|m| {
+            m.borrow().iter()
+                .filter(|e| e.value().class == VoucherClass::Backed && e.value().tier == tier.idx())
+                .map(|e| e.value().amount_e8s).sum()
+        });
+        tier_pool(tier).total_staked_e8s == plain + backed
+    }
+
+    #[tokio::test]
+    async fn test_voucher_wrap_unwrap_conservation_and_ticket_continuity() {
+        enable_vouchers();
+        clear_vouchers();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap(); // 5 ICP
+        assert!(conservation_holds(StakeTier::SixMonths));
+        let before = user_daily_tickets(alice);
+        assert!(before > 0);
+
+        // Guard gauntlet.
+        assert_eq!(wrap_stake_voucher(50_000_000, StakeTier::SixMonths).await.unwrap_err(), "BELOW_MINIMUM");
+        assert_eq!(wrap_stake_voucher(150_000_000, StakeTier::SixMonths).await.unwrap_err(), "WHOLE_ICP_ONLY");
+        assert_eq!(wrap_stake_voucher(600_000_000, StakeTier::SixMonths).await.unwrap_err(), "INSUFFICIENT_STAKE");
+        assert_eq!(wrap_stake_voucher(100_000_000, StakeTier::TwoYears).await.unwrap_err(), "NO_STAKE");
+
+        // Wrap 3 of 5 ICP: stake row shrinks, claim moves to the registry,
+        // pool principal unchanged, tickets IDENTICAL (wrapped == staked).
+        let id = wrap_stake_voucher(300_000_000, StakeTier::SixMonths).await.unwrap();
+        assert_eq!(
+            STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
+            200_000_000
+        );
+        assert_eq!(voucher_backed_e8s(alice, StakeTier::SixMonths), 300_000_000);
+        assert_eq!(tier_pool(StakeTier::SixMonths).total_staked_e8s, 500_000_000);
+        assert!(conservation_holds(StakeTier::SixMonths));
+        assert_eq!(user_daily_tickets(alice), before, "wrapping must not change the daily grant");
+        assert!(author_is_staked(alice));
+
+        // NFT mirror minted to alice.
+        assert_eq!(TEST_MOCK_VOUCHER_OWNER.with(|m| m.borrow().get(&id).copied()), Some(alice));
+
+        // Wrap the REST — the plain row disappears but eligibility survives
+        // through the Backed voucher.
+        wrap_stake_voucher(200_000_000, StakeTier::SixMonths).await.unwrap();
+        assert!(STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).is_none()));
+        assert_eq!(user_daily_tickets(alice), before);
+        assert!(author_is_staked(alice));
+        assert!(conservation_holds(StakeTier::SixMonths));
+
+        // Unwrap works with the FLAG OFF (exits are never gated).
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_STAKE_VOUCHERS.to_string(), 0u8); });
+        unwrap_stake_voucher(id).await.unwrap();
+        assert_eq!(
+            STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
+            300_000_000
+        );
+        assert!(conservation_holds(StakeTier::SixMonths));
+        assert_eq!(user_daily_tickets(alice), before);
+        // …but wrap is gated.
+        assert_eq!(wrap_stake_voucher(100_000_000, StakeTier::SixMonths).await.unwrap_err(), "FEATURE_DISABLED");
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_STAKE_VOUCHERS.to_string(), 1u8); });
+
+        // Mint failure reverts the debit exactly.
+        TEST_MOCK_VOUCHER_MINT_FAIL.with(|c| *c.borrow_mut() = true);
+        assert!(wrap_stake_voucher(100_000_000, StakeTier::SixMonths).await.is_err());
+        assert_eq!(
+            STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
+            300_000_000
+        );
+        assert!(conservation_holds(StakeTier::SixMonths));
+        TEST_MOCK_VOUCHER_MINT_FAIL.with(|c| *c.borrow_mut() = false);
+        clear_vouchers();
+    }
+
+    #[tokio::test]
+    async fn test_voucher_sale_pays_splits_fee_and_moves_tickets() {
+        enable_vouchers();
+        clear_vouchers();
+        let self_id = get_canister_id();
+        seed_stake(StakeTier::OneYear, alice(), 200_000_000);
+        let mut pool = tier_pool(StakeTier::OneYear);
+        pool.total_staked_e8s = 200_000_000;
+        set_tier_pool(StakeTier::OneYear, pool);
+        set_mock_caller(alice());
+        set_mock_ledger_transfer(Ok(1));
+        let id = wrap_stake_voucher(200_000_000, StakeTier::OneYear).await.unwrap();
+
+        // Listing guards.
+        assert_eq!(list_voucher(id, 1_000).unwrap_err(), "PRICE_TOO_LOW");
+        assert_eq!(cancel_voucher_listing(id).unwrap_err(), "NOT_LISTED");
+        set_mock_caller(bob());
+        assert_eq!(list_voucher(id, 100_000_000).unwrap_err(), "NOT_YOUR_VOUCHER");
+        set_mock_caller(alice());
+        list_voucher(id, 100_000_000).unwrap(); // ask: 1 ICP
+
+        // Buyer escrow underfunded → ESCROW_NOT_FUNDED, listing intact.
+        acct_reset();
+        set_mock_caller(bob());
+        assert_eq!(buy_voucher(id).await.unwrap_err(), "ESCROW_NOT_FUNDED");
+        assert!(VOUCHERS.with(|m| m.borrow().get(&id).unwrap().listed_price_e8s.is_some()));
+
+        // Fund escrow with ask + 4 fees + some dust the buyer later reclaims.
+        let escrow_sub = derive_subaccount(&bob(), VOUCHER_SALE_TAG ^ id);
+        acct_set(self_id, Some(escrow_sub), 100_000_000 + 4 * ICP_FEE_E8S + 55_000);
+        buy_voucher(id).await.unwrap();
+
+        // Money: fee = 2.5% of 1 ICP = 2_500_000. thirds: fund 833_333,
+        // cmc 833_333, treasury 833_334 (remainder). Seller: 97_500_000.
+        assert_eq!(acct_get(alice(), None), 97_500_000, "seller receives ask − fee");
+        assert_eq!(acct_get(self_id, Some(TREASURY_SUBACCOUNT)), 833_334, "treasury third + remainder");
+        assert_eq!(acct_get(self_id, Some(BUYBACK_SUBACCOUNT)), 833_333, "buyback-fund third");
+        let cmc = p("rkp4c-7iaaa-aaaaa-aaaca-cai");
+        let voucher_cid = CONFIG.with(|c| c.borrow().get().voucher_nft_canister).unwrap();
+        assert_eq!(
+            acct_get(cmc, Some(principal_to_subaccount(&voucher_cid))),
+            833_333,
+            "voucher-canister cycles-burn third reached the CMC"
+        );
+
+        // Ownership: registry + NFT mirror moved; listing cleared; journal gone.
+        let v = VOUCHERS.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(v.owner, bob());
+        assert!(v.listed_price_e8s.is_none());
+        assert_eq!(TEST_MOCK_VOUCHER_OWNER.with(|m| m.borrow().get(&id).copied()), Some(bob()));
+        assert!(VOUCHER_SALES.with(|m| m.borrow().get(&id).is_none()));
+
+        // Tickets follow the owner: buyer earns from the claim now, seller's
+        // last stake left with the sale → no longer staked, earns nothing.
+        assert!(user_daily_tickets(bob()) > 0);
+        assert!(author_is_staked(bob()));
+        assert_eq!(user_daily_tickets(alice()), 0);
+        assert!(!author_is_staked(alice()));
+
+        // Re-buy of an unlisted voucher → NOT_LISTED; buyer reclaims dust.
+        set_mock_caller(alice());
+        assert_eq!(buy_voucher(id).await.unwrap_err(), "NOT_LISTED");
+        set_mock_caller(bob());
+        let reclaimed = reclaim_escrow(EscrowKind::StakeVoucher, ExplorerToken::ICP, Some(id)).await.unwrap();
+        assert_eq!(reclaimed, 55_000 - ICP_FEE_E8S, "leftover escrow minus the reclaim fee");
+        clear_vouchers();
+    }
+
+    #[tokio::test]
+    async fn test_voucher_buyback_full_saga_and_balance_gate() {
+        enable_vouchers();
+        clear_vouchers();
+        let self_id = get_canister_id();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap(); // 5 ICP, pool Ready
+        let id = wrap_stake_voucher(200_000_000, StakeTier::SixMonths).await.unwrap(); // 2 ICP claim
+
+        // Money sim on: fund the buyback wallet + treasury (front + refills).
+        acct_reset();
+        acct_set(self_id, Some(BUYBACK_SUBACCOUNT), 300_000_000); // 3 ICP fund
+        acct_set(self_id, Some(TREASURY_SUBACCOUNT), 10_000_000);
+        // The mock disburse pays from the staking subaccount later.
+        acct_set(self_id, Some(MOCK_STAKE_SUBACCOUNT), 1_000_000_000);
+
+        // Listed vouchers can't be bought back.
+        list_voucher(id, 150_000_000).unwrap();
+        assert!(buyback_voucher(id).await.unwrap_err().starts_with("LISTED"));
+        cancel_voucher_listing(id).unwrap();
+
+        // The saga: alice is paid 85% of 2 ICP = 1.7 ICP from the fund.
+        let paid = buyback_voucher(id).await.unwrap();
+        assert_eq!(paid, 170_000_000);
+        assert_eq!(acct_get(alice, None), 170_000_000);
+        assert_eq!(
+            acct_get(self_id, Some(BUYBACK_SUBACCOUNT)),
+            300_000_000 - 170_000_000 - ICP_FEE_E8S,
+            "fund paid out 85% + one ledger fee"
+        );
+        // Registry + NFT gone; a pending unstake targets the fund.
+        assert!(VOUCHERS.with(|m| m.borrow().get(&id).is_none()));
+        assert!(TEST_MOCK_VOUCHER_OWNER.with(|m| m.borrow().get(&id).is_none()));
+        let job = BUYBACK_JOBS.with(|m| m.borrow().get(&id)).unwrap();
+        let pid = job.pending_unstake_id.unwrap();
+        let pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(pending.payout_subaccount, Some(BUYBACK_SUBACCOUNT));
+        assert_eq!(pending.user, self_id, "the house's own unstake");
+        assert_eq!(pending.amount_e8s, 200_000_000);
+        assert!(conservation_holds(StakeTier::SixMonths));
+
+        // Owner already paid → the same voucher can't be bought back again.
+        assert_eq!(buyback_voucher(id).await.unwrap_err(), "BUYBACK_IN_PROGRESS");
+
+        // Dissolve completes → principal redeems to the FUND, and the 15%
+        // spread (0.3 ICP) routes: 1/3 treasury, 1/3 stays, 1/3 cycles burn.
+        set_mock_time(Some(1_700_000_000_000_000_000 + StakeTier::SixMonths.dissolve_delay_secs() * 1_000_000_000 + 1));
+        let fund_before = acct_get(self_id, Some(BUYBACK_SUBACCOUNT));
+        let treasury_before = acct_get(self_id, Some(TREASURY_SUBACCOUNT));
+        process_pending_unstakes().await;
+        let pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&pid)).unwrap();
+        assert_eq!(pending.status, UnstakeStatus::Disbursed);
+        assert_eq!(pending.fee_refund_block, Some(0), "no user fee refund on house unstakes");
+        let job = BUYBACK_JOBS.with(|m| m.borrow().get(&id)).unwrap();
+        assert!(job.spread_routed);
+        let spread = 200_000_000 * 1_500 / 10_000; // 30_000_000
+        let third = spread / 3; // 10_000_000
+        let treasury_third = spread - 2 * third;
+        assert_eq!(
+            acct_get(self_id, Some(TREASURY_SUBACCOUNT)),
+            treasury_before + treasury_third
+        );
+        let cmc = p("rkp4c-7iaaa-aaaaa-aaaca-cai");
+        let voucher_cid = CONFIG.with(|c| c.borrow().get().voucher_nft_canister).unwrap();
+        assert_eq!(acct_get(cmc, Some(principal_to_subaccount(&voucher_cid))), third);
+        // Fund: +disbursed principal (2 ICP − ledger fee), −treasury third −
+        // cmc third − their two transfer fees. The remaining third stays put.
+        assert_eq!(
+            acct_get(self_id, Some(BUYBACK_SUBACCOUNT)),
+            fund_before + 200_000_000 - ICP_FEE_E8S - treasury_third - third - 2 * ICP_FEE_E8S
+        );
+
+        // Balance gate: drain the fund → the next buyback REFUSES.
+        set_mock_caller(alice);
+        // (the acct sim is live now — fund alice's stake deposit escrow)
+        acct_set(self_id, Some(derive_subaccount(&alice, STAKE_SEED)), 300_000_000 + 2 * ICP_FEE_E8S);
+        stake(300_000_000, StakeTier::SixMonths).await.unwrap();
+        let id2 = wrap_stake_voucher(300_000_000, StakeTier::SixMonths).await.unwrap();
+        acct_set(self_id, Some(BUYBACK_SUBACCOUNT), 1_000_000); // 0.01 ICP
+        assert_eq!(buyback_voucher(id2).await.unwrap_err(), "BUYBACK_UNAVAILABLE");
+        assert!(VOUCHERS.with(|m| m.borrow().get(&id2).is_some()), "claim untouched when refused");
+        clear_vouchers();
+    }
+
+    #[tokio::test]
+    async fn test_voucher_buyback_journal_resumes_without_double_pay() {
+        enable_vouchers();
+        clear_vouchers();
+        let self_id = get_canister_id();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(300_000_000, StakeTier::SixMonths).await.unwrap();
+        let id = wrap_stake_voucher(200_000_000, StakeTier::SixMonths).await.unwrap();
+
+        acct_reset();
+        acct_set(self_id, Some(BUYBACK_SUBACCOUNT), 300_000_000);
+        acct_set(self_id, Some(TREASURY_SUBACCOUNT), 10_000_000);
+
+        // NFT burn rejects mid-saga: the owner is PAID, the claim is consumed,
+        // the job parks after the pay leg.
+        TEST_MOCK_VOUCHER_BURN_FAIL.with(|c| *c.borrow_mut() = true);
+        assert!(buyback_voucher(id).await.is_err());
+        assert_eq!(acct_get(alice, None), 170_000_000, "pay leg landed");
+        assert!(VOUCHERS.with(|m| m.borrow().get(&id).is_none()), "claim consumed at pay");
+        let job = BUYBACK_JOBS.with(|m| m.borrow().get(&id)).unwrap();
+        assert!(job.pay_block.is_some());
+        assert!(!job.nft_burned);
+        assert!(job.pending_unstake_id.is_none());
+
+        // The sweep resumes: burn + split complete, and alice is NOT paid twice.
+        TEST_MOCK_VOUCHER_BURN_FAIL.with(|c| *c.borrow_mut() = false);
+        resume_voucher_buybacks().await;
+        let job = BUYBACK_JOBS.with(|m| m.borrow().get(&id)).unwrap();
+        assert!(job.nft_burned);
+        assert!(job.pending_unstake_id.is_some());
+        assert_eq!(acct_get(alice, None), 170_000_000, "exactly one payout");
+        clear_vouchers();
+    }
+
+    #[tokio::test]
+    async fn test_promo_claims_both_paths_caps_and_validation() {
+        enable_vouchers();
+        clear_vouchers();
+        // Closed campaign (probe as a NON-admin: the admin check fires first).
+        set_mock_caller(alice());
+        assert_eq!(claim_promo_voucher(None).await.unwrap_err(), "CAMPAIGN_CLOSED");
+        set_mock_caller(carol());
+        admin_set_promo_campaign(true).unwrap();
+        // Admins never earn.
+        assert_eq!(claim_promo_voucher(None).await.unwrap_err(), "ADMINS_EXCLUDED");
+
+        // Signed-in claim path.
+        set_mock_caller(alice());
+        let id = claim_promo_voucher(None).await.unwrap();
+        let v = VOUCHERS.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(v.class, VoucherClass::Promo);
+        assert_eq!(v.amount_e8s, 0);
+        assert_eq!(v.expires_at, Some(current_time() + PROMO_EXPIRY_NS));
+        assert_eq!(claim_promo_voucher(None).await.unwrap_err(), "ALREADY_CLAIMED");
+
+        // Paste path: ANONYMOUS caller mints to a self-authenticating wallet.
+        set_mock_caller(Principal::anonymous());
+        let wallet = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
+        let id2 = claim_promo_voucher(Some(wallet)).await.unwrap();
+        assert_eq!(VOUCHERS.with(|m| m.borrow().get(&id2)).unwrap().owner, wallet);
+        assert_eq!(claim_promo_voucher(Some(wallet)).await.unwrap_err(), "ALREADY_CLAIMED");
+        // Canister ids and the anonymous principal are rejected.
+        assert_eq!(
+            claim_promo_voucher(Some(p("qoctq-giaaa-aaaaa-aaaea-cai"))).await.unwrap_err(),
+            "INVALID_PRINCIPAL"
+        );
+        assert_eq!(
+            claim_promo_voucher(Some(Principal::anonymous())).await.unwrap_err(),
+            "INVALID_PRINCIPAL"
+        );
+
+        // Daily drip: exhaust today's allowance → DAILY_LIMIT; a new UTC day
+        // re-arms the window.
+        let mut c2 = promo_campaign();
+        c2.claims_today = PROMO_DAILY_DRIP;
+        set_promo_campaign(c2);
+        let wallet2 = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
+        assert_eq!(claim_promo_voucher(Some(wallet2)).await.unwrap_err(), "DAILY_LIMIT");
+        set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
+        claim_promo_voucher(Some(wallet2)).await.unwrap();
+
+        // Global cap → CAMPAIGN_EXHAUSTED (promo_open stays true per contract).
+        let mut c2 = promo_campaign();
+        c2.claimed = PROMO_CAP;
+        set_promo_campaign(c2);
+        set_mock_caller(Principal::anonymous());
+        let fresh = p("i3ptn-w5i4d-zwvvn-kxgy4-zkx5d-ukatp-3jbje-vtb6d-y5zmj-kpj33-xae");
+        assert_eq!(claim_promo_voucher(Some(fresh)).await.unwrap_err(), "CAMPAIGN_EXHAUSTED");
+        // Kill switch.
+        set_mock_caller(carol());
+        admin_set_promo_campaign(false).unwrap();
+        set_mock_caller(Principal::anonymous());
+        assert_eq!(claim_promo_voucher(Some(fresh)).await.unwrap_err(), "CAMPAIGN_CLOSED");
+        clear_vouchers();
+    }
+
+    #[tokio::test]
+    async fn test_promo_tickets_expiry_and_money_path_rejections() {
+        enable_vouchers();
+        clear_vouchers();
+        set_mock_caller(carol());
+        admin_set_promo_campaign(true).unwrap();
+        set_mock_caller(alice());
+        let id = claim_promo_voucher(None).await.unwrap();
+
+        // Promo-only holder (NO stake): the sweep grants exactly 1/day with
+        // its own source tag — the stakers-only bypass in action.
+        assert_eq!(user_daily_tickets(alice()), 0);
+        assert_eq!(promo_daily_tickets(alice()), 1);
+        auto_grant_daily_stake_tickets();
+        let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
+        assert_eq!(count(alice()), 1);
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice()), 1, "once per day");
+        let rows = get_my_ticket_breakdown();
+        assert_eq!(rows.iter().find(|r| r.source == "promo_voucher").map(|r| r.count), Some(1));
+        // …and the manual claim path agrees (no under-grant divergence).
+        assert_eq!(claim_daily_tickets().unwrap_err(), "ALREADY_CLAIMED_TODAY");
+
+        // Next day it earns again; after 60 days it goes inert.
+        set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice()), 2);
+        set_mock_time(Some(1_700_000_000_000_000_000 + 61 * 86_400 * 1_000_000_000));
+        assert_eq!(promo_daily_tickets(alice()), 0, "expired: claim + 60 days");
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice()), 2, "expired promos grant nothing");
+
+        // Money paths hard-reject the class.
+        assert_eq!(list_voucher(id, 100_000_000).unwrap_err(), "PROMO_NOT_LISTABLE");
+        assert_eq!(buyback_voucher(id).await.unwrap_err(), "PROMO_NOT_REDEEMABLE");
+        assert_eq!(unwrap_stake_voucher(id).await.unwrap_err(), "PROMO_NOT_REDEEMABLE");
+
+        // Admin-held promo rows never earn (belt over the claim-time reject).
+        VOUCHERS.with(|m| {
+            m.borrow_mut().insert(9_999, VoucherRecord {
+                id: 9_999, class: VoucherClass::Promo, tier: 0, amount_e8s: 0,
+                owner: carol(), minted_at: current_time(),
+                expires_at: Some(current_time() + PROMO_EXPIRY_NS), listed_price_e8s: None,
+            });
+        });
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(carol()), 0, "admin exclusion holds for promo grants");
+        clear_vouchers();
+    }
+
+    #[test]
+    fn test_voucher_market_info_shape() {
+        enable_vouchers();
+        clear_vouchers();
+        set_mock_caller(carol());
+        admin_set_promo_campaign(true).unwrap();
+        admin_set_voucher_config(Some(300), Some(2 * ONE_ICP_E8S)).unwrap();
+        assert_eq!(admin_set_voucher_config(Some(9_999), None).unwrap_err(), "FEE_TOO_HIGH");
+
+        // Anonymous-safe: my_vouchers empty, campaign numbers visible.
+        set_mock_caller(Principal::anonymous());
+        let info = get_voucher_market();
+        assert!(info.my_vouchers.is_empty());
+        assert!(info.promo_open);
+        assert_eq!(info.promo_remaining, PROMO_CAP);
+        assert_eq!(info.market_fee_bps, 300);
+        assert_eq!(info.min_wrap_e8s, 2 * ONE_ICP_E8S);
+        assert_eq!(info.buyback_discount_bps, 1_500);
+
+        // Restore defaults for other tests.
+        set_mock_caller(carol());
+        admin_set_voucher_config(Some(VOUCHER_FEE_BPS_DEFAULT), Some(VOUCHER_MIN_WRAP_E8S_DEFAULT)).unwrap();
+        clear_vouchers();
+    }
+
 }
