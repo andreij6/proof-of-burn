@@ -130,6 +130,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [dapps, setDapps] = useState<DappListing[]>([]);
+  const [dappsLoaded, setDappsLoaded] = useState(false);
   // Random directory order, fixed once per page load (re-seeds on remount).
   const [shuffleSeed] = useState(() => (Math.random() * 0xffffffff) >>> 0);
   const [myDapps, setMyDapps] = useState<DappListing[]>([]);
@@ -209,7 +210,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
         isAdmin ? currentActor.list_pending_featured() : Promise.resolve([]),
         signedIn ? currentActor.get_my_featured() : Promise.resolve([]),
       ]);
-      setDapps(dappList);
+      setDapps(dappList); setDappsLoaded(true);
       setInfo(explorerInfo);
       setMyDapps(mine);
       setPendingDapps(pending);
@@ -988,7 +989,7 @@ export default function Explorer({ actor, identity, principal, host, rootKey, is
         <div className="col" style={{ alignItems: 'center', gap: 10, padding: '48px 0', color: 'var(--fg-3)' }}>
           <Icon name="compass" size={28} stroke="var(--fg-dim)" />
           <span style={{ fontSize: 13 }}>
-            {catFilter ? `No ${catFilter} dapps listed yet.` : 'No dapps listed yet. Be the first.'}
+            {!dappsLoaded ? <span className="row" style={{ gap: 6 }}><LiveDot size={7} color="var(--burn-ink)" /> Loading dapps…</span> : catFilter ? `No ${catFilter} dapps listed yet.` : 'No dapps listed yet. Be the first.'}
           </span>
           {catFilter && (
             <Btn variant="secondary" sm onClick={() => setFilter(null)}>Clear filter</Btn>

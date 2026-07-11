@@ -36,7 +36,7 @@ export default function NeuronStakePage({
         <div className="col" style={{ gap: 6 }}>
           <span className="row" style={{ gap: 10, width: '100%', flexWrap: 'wrap' }}>
             <Icon name="zap" size={22} stroke="var(--burn-ink)" />
-            <h4 style={{ margin: 0 }}>Neuron Stake</h4>
+            <h4 style={{ margin: 0 }}>Stake</h4>
             <Chip tone="pending"><LiveDot size={6} /> daily tickets</Chip>
             <MoreInfo
               title="How staking & vouchers work"

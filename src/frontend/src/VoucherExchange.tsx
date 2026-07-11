@@ -54,7 +54,7 @@ export default function VoucherExchange(props: VoucherExchangeProps) {
             <div className="col" style={{ gap: 6 }}>
               <Eyebrow accent>Selling</Eyebrow>
               <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>List from your vouchers</b> on the Neuron Stake page — you set the ask in ICP.</li>
+                <li><b>List from your vouchers</b> on the Stake page — you set the ask in ICP.</li>
                 <li><b>Listed vouchers pause ticket earning</b> until sold or delisted.</li>
                 <li>A small marketplace fee comes out of the sale.</li>
               </ul>

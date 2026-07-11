@@ -3,7 +3,7 @@ import { Principal } from "@icp-sdk/core/principal";
 import { StakeTier, StakingBootstrap, UnstakeStatus, YieldStatus } from "./bindings/backend";
 import type { StakingPoolInfo, TierPoolInfo, UserStakeInfo, PendingUnstake, YieldDistribution, EarlyAdopterInfo } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, usePageDevControls } from "./ui";
+import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, MoreInfo, fmtICP, usePageDevControls } from "./ui";
 import { useErrorImpression } from "./analytics";
 
 // ==========================================
@@ -554,12 +554,18 @@ export default function Staking({
                 </>
               ) : (
               <>
+              {signedIn && myStake === null ? (
+                <div className="row" style={{ gap: 10, alignItems: 'baseline' }} aria-busy="true" aria-label="Loading your stake">
+                  <Skeleton width={110} height={24} />
+                </div>
+              ) : (
               <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
                 <b className="mono" style={{ fontSize: 24 }}>{fmtICP(selMine?.amount_e8s ?? 0n)}</b>
                 <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
                   ICP in {termLabel}
                 </span>
               </div>
+              )}
 
               <div className="col" style={{ gap: 8 }}>
                 <div className="row" style={{ gap: 8 }}>
@@ -613,6 +619,11 @@ export default function Staking({
         <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <Eyebrow>Term pools</Eyebrow>
         </span>
+        {pool === null ? (
+          <div className="row" style={{ gap: 12, flexWrap: 'wrap' }} aria-busy="true" aria-label="Loading term pools">
+            {[0, 1, 2].map((i) => <Skeleton key={i} width={220} height={96} radius={10} style={{ flex: '1 1 220px' }} />)}
+          </div>
+        ) : (
         <div className="row" style={{ gap: 12, alignItems: 'stretch', flexWrap: 'wrap' }}>
           {TIER_ORDER.map(t => {
             const tp = tierPool(t);
@@ -679,6 +690,7 @@ export default function Staking({
           })}
 
           </div>
+        )}
 
       {/* The permanent Booster neuron — same layout, special terms. */}
           {boostersEnabled && isAdmin && (

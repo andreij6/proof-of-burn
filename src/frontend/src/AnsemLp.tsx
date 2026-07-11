@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
-import { Btn, Chip, Eyebrow, Icon, LiveDot, MoreInfo } from './ui';
+import { Btn, Chip, Eyebrow, Icon, LiveDot, Skeleton, MoreInfo } from './ui';
 
 // ==========================================
 // ANSEM LP — Solana liquidity providers earn lottery tickets.
@@ -179,6 +179,11 @@ export default function AnsemLp({ actor, principal, onSignIn, onGoParticipate }:
             </div>
           )}
 
+          {signedIn && info === null ? (
+            <div className="row" style={{ gap: 14, flexWrap: 'wrap' }} aria-busy="true" aria-label="Loading LP status">
+              {[0, 1].map((i) => <Skeleton key={i} width={260} height={120} radius={10} style={{ flex: '1 1 260px' }} />)}
+            </div>
+          ) : (
           <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
             {/* ── Step 1: wallet ── */}
             <div className="card col" style={{ gap: 10, flex: '1 1 260px', minWidth: 260 }}>
@@ -248,6 +253,7 @@ export default function AnsemLp({ actor, principal, onSignIn, onGoParticipate }:
               )}
             </div>
           </div>
+          )}
 
           {/* ── Qualifying pools ── */}
           <div className="card col" style={{ gap: 8 }}>

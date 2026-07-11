@@ -1934,32 +1934,37 @@ export default function App() {
           </Btn>
         )}
 
-        {/* ── Stake 4 Tickets: staking + LP rewards ── */}
-        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled || ansemLpEnabled || vouchersEnabled) && (
-          <Eyebrow style={{ margin: '14px 0 4px' }}>Stake 4 Tickets</Eyebrow>
+        {/* ── Task 4 Tickets: staking + LP rewards ── */}
+        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled || ansemLpEnabled) && (
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Task 4 Tickets</Eyebrow>
         )}
         {(losslessEnabled || earlyAdoptersEnabled) && (
           <Btn variant={page === 'neuronstake' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('neuronstake')}>
             <Icon name="zap" size={14} stroke={page === 'neuronstake' ? 'var(--char-950)' : 'currentColor'} />
-            Neuron Stake
+            Stake
           </Btn>
         )}
         {icpLpEnabled && (
           <Btn variant={page === 'icplp' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('icplp')}>
             <Icon name="stack" size={14} stroke={page === 'icplp' ? 'var(--char-950)' : 'currentColor'} />
-            ICP LP
-          </Btn>
-        )}
-        {vouchersEnabled && (
-          <Btn variant={page === 'exchange' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('exchange')}>
-            <Icon name="scale" size={14} stroke={page === 'exchange' ? 'var(--char-950)' : 'currentColor'} />
-            Voucher Exchange
+            Liquidity Provider
           </Btn>
         )}
         {ansemLpEnabled && (
           <Btn variant={page === 'ansemlp' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ansemlp')}>
             <Icon name="droplet" size={14} stroke={page === 'ansemlp' ? 'var(--char-950)' : 'currentColor'} />
             ANSEM LP
+          </Btn>
+        )}
+
+        {/* ── Listings: the voucher secondary market ── */}
+        {vouchersEnabled && (
+          <Eyebrow style={{ margin: '14px 0 4px' }}>Listings</Eyebrow>
+        )}
+        {vouchersEnabled && (
+          <Btn variant={page === 'exchange' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('exchange')}>
+            <Icon name="scale" size={14} stroke={page === 'exchange' ? 'var(--char-950)' : 'currentColor'} />
+            Voucher Exchange
           </Btn>
         )}
 

@@ -370,7 +370,12 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
             <Eyebrow>Your tickets</Eyebrow>
             {info?.claimed_today && <Chip tone="ok"><Icon name="check" size={11} /> Claimed today</Chip>}
           </span>
-          {!signedIn ? (
+          {signedIn && loading && !info ? (
+            <div className="col" style={{ gap: 8 }} aria-busy="true" aria-label="Loading your tickets">
+              <Skeleton width={140} height={22} />
+              <Skeleton width="70%" height={12} />
+            </div>
+          ) : !signedIn ? (
             <div className="col" style={{ gap: 10, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
                 Sign in and stake to collect daily tickets.
@@ -477,7 +482,11 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
             last 10 of {Number(info?.draws_held ?? 0n)} held
           </span>
         </span>
-        {draws.length === 0 ? (
+        {loading && draws.length === 0 ? (
+          <span className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--fg-3)' }} aria-busy="true">
+            <LiveDot size={7} color="var(--burn-ink)" /> Loading drawings…
+          </span>
+        ) : draws.length === 0 ? (
           <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
             No drawings yet — the first one runs at the next scheduled slot.
           </span>
@@ -517,7 +526,11 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
             paid instantly — no claiming
           </span>
         </span>
-        {winners.length === 0 ? (
+        {loading && winners.length === 0 ? (
+          <span className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--fg-3)' }} aria-busy="true">
+            <LiveDot size={7} color="var(--burn-ink)" /> Loading winners…
+          </span>
+        ) : winners.length === 0 ? (
           <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
             No jackpots yet. Every rollover makes the next one bigger.
           </span>

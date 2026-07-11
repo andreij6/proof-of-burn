@@ -492,7 +492,11 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
                 {status && !status.played ? 'compete to unlock replays' : 'tap a row to verify their run'}
               </span>
             </span>
-            {board.length === 0 ? (
+            {status === null ? (
+              <span className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--fg-3)' }} aria-busy="true">
+                <LiveDot size={7} color="var(--burn-ink)" /> Loading today's board…
+              </span>
+            ) : board.length === 0 ? (
               <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Nobody has played today's deal yet. First mover takes rank #1.</span>
             ) : (() => {
               // The second winner slot: highest cash (ties: EV, then speed).

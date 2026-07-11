@@ -1128,7 +1128,11 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
               <b style={{ fontSize: 13.5 }}>Today's board</b>
               <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>distance · time · {status?.players_today ?? 0} jumped</span>
             </span>
-            {board.length === 0 ? (
+            {status === null ? (
+              <span className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--fg-3)' }} aria-busy="true">
+                <LiveDot size={7} color="var(--burn-ink)" /> Loading today's board…
+              </span>
+            ) : board.length === 0 ? (
               <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Empty sky so far — first jumper sets the mark.</span>
             ) : (
               <div className="col" style={{ gap: 2, maxHeight: 240, overflowY: 'auto' }}>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
-import { Btn, Chip, Eyebrow, Icon, LiveDot, MoreInfo } from './ui';
+import { Btn, Chip, Eyebrow, Icon, LiveDot, Skeleton, MoreInfo } from './ui';
 
 // ==========================================
 // ICP LP — stake ICPSwap positions, fund the pot, earn tickets.
@@ -18,7 +18,7 @@ import { Btn, Chip, Eyebrow, Icon, LiveDot, MoreInfo } from './ui';
 /** Friendly copy for stake/unstake error codes. */
 export function friendlyIcpLpErr(code: string): string {
   switch (code) {
-    case 'FEATURE_DISABLED': return 'ICP LP staking isn\'t open yet — check back soon.';
+    case 'FEATURE_DISABLED': return 'Liquidity Provider staking isn\'t open yet — check back soon.';
     case 'POOL_NOT_CONFIGURED': return 'That pool isn\'t in the qualifying list.';
     case 'POSITION_NOT_TRANSFERRED': return 'We don\'t see that position under the app\'s principal yet — complete the transfer on ICPSwap first (My Positions → Transfer Position), then try again.';
     case 'NO_RESERVATION': return 'Reserve the position here FIRST, then transfer it on ICPSwap.';
@@ -171,7 +171,7 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
           <b>{Number(info?.tickets_per_usd_day ?? 40n)} lottery tickets a day for every $1
           of LP value</b> — automatically, and you can reclaim your LP whenever you
           like.{' '}
-          <MoreInfo title="How ICP LP staking works">
+          <MoreInfo title="How Liquidity Provider staking works">
             <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
               <Eyebrow accent>The gist</Eyebrow>
               <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
@@ -309,7 +309,12 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
             {/* ── Your staked positions ── */}
             <div className="card col" style={{ gap: 10, flex: '1 1 300px', minWidth: 300 }}>
               <Eyebrow>Your staked positions</Eyebrow>
-              {(info?.my_positions?.length ?? 0) === 0 ? (
+              {info === null ? (
+                <div className="col" style={{ gap: 8 }} aria-busy="true" aria-label="Loading positions">
+                  <Skeleton width="100%" height={16} />
+                  <Skeleton width="80%" height={16} />
+                </div>
+              ) : (info?.my_positions?.length ?? 0) === 0 ? (
                 <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
                   Nothing staked yet. Registered positions appear here with an
                   unstake option.

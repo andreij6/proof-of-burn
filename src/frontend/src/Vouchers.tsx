@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
 import { StakeTier } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
-import { Btn, Chip, Eyebrow, Icon, LiveDot, fmtICP } from './ui';
+import { Btn, Chip, Eyebrow, Icon, LiveDot, Skeleton, fmtICP } from './ui';
 import { TIER_META } from './Staking';
 
 // ==========================================
@@ -272,6 +272,12 @@ export function VouchersBody({
         </span>
         {!signedIn ? (
           <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Sign in to see your vouchers.</span>
+        ) : info === null ? (
+          <div className="col" style={{ gap: 8 }} aria-busy="true" aria-label="Loading your vouchers">
+            <Skeleton width="100%" height={16} />
+            <Skeleton width="86%" height={16} />
+            <Skeleton width="92%" height={16} />
+          </div>
         ) : myUnlisted.length === 0 ? (
           <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
             No vouchers here yet — stake ICP above and your voucher appears instantly, or claim a Golden Ticket when a campaign is live.
@@ -388,7 +394,11 @@ export function VouchersBody({
             best deals first · {feePct}% fee · buyer becomes the staker
           </span>
         </span>
-        {listings.length === 0 ? (
+        {info === null ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }} aria-busy="true" aria-label="Loading listings">
+            {[0, 1, 2].map((i) => <Skeleton key={i} width="100%" height={110} radius={10} />)}
+          </div>
+        ) : listings.length === 0 ? (
           <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
             Nothing listed right now. Vouchers you list appear here for anyone to buy.
           </span>
