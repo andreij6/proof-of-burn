@@ -502,7 +502,7 @@ type LedgerAccount = record { owner : principal; subaccount : opt blob };
 // marketplace; instant house buyback at a 15% discount (pays 85%, burns the
 // NFT and dissolves the stake back to the buyback fund). Promo-class vouchers
 // are tickets-only claim-campaign trials: soulbound, never redeemable.
-type VoucherClass = variant { Backed; Promo };
+type VoucherClass = variant { Backed; Promo; LpBacked };
 type VoucherView = record {
   id : nat64;
   class : VoucherClass;
