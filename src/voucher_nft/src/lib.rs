@@ -70,11 +70,13 @@ impl Account {
 }
 
 /// Voucher class — mirrors the backend registry's class byte.
-/// 0 = Backed (claim on staked ICP), 1 = Promo (tickets-only, soulbound).
+/// 0 = Backed (claim on staked ICP), 1 = Promo (tickets-only, soulbound),
+/// 2 = LpBacked (ICPSwap LP custody companion — soulbound, non-sellable).
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoucherClass {
     Backed,
     Promo,
+    LpBacked,
 }
 
 /// The authoritative per-token record.
@@ -391,7 +393,7 @@ fn custodial_transfer(from: Principal, to: Principal, token_id: u64) -> Result<(
     TOKENS.with(|t| {
         let mut tokens = t.borrow_mut();
         let mut token = tokens.get(&token_id).ok_or("NON_EXISTING_TOKEN")?;
-        if token.class == VoucherClass::Promo {
+        if matches!(token.class, VoucherClass::Promo | VoucherClass::LpBacked) {
             return Err("SOULBOUND".to_string());
         }
         if token.owner != from {
@@ -536,6 +538,7 @@ fn token_metadata_map(tok: &VoucherToken) -> Vec<(String, Value)> {
     let class = match tok.class {
         VoucherClass::Backed => "backed",
         VoucherClass::Promo => "promo",
+        VoucherClass::LpBacked => "lp-backed",
     };
     let tier = match tok.tier {
         0 => "6-month",

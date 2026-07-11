@@ -19,6 +19,9 @@ sha2 = "0.10"
 # ANSEM LP rewards: Ed25519 wallet-signature verification + Solana
 # base58 addresses + PDA on-curve checks (all wasm-safe, no rand).
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+# ICPSwap LP valuation: Uniswap-v3 tick math needs 256-bit arithmetic
+# (sqrtPriceX96 products). Pure Rust, wasm-safe.
+primitive-types = { version = "0.13", default-features = false }
 curve25519-dalek = { version = "4", default-features = false, features = ["alloc"] }
 bs58 = "0.5"
 

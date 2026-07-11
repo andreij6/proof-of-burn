@@ -13,7 +13,7 @@ type Value = variant {
 
 type Account = record { owner : principal; subaccount : opt blob };
 
-type VoucherClass = variant { Backed; Promo };
+type VoucherClass = variant { Backed; Promo; LpBacked };
 
 type NftConfig = record {
   minter : principal;

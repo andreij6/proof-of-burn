@@ -5715,6 +5715,18 @@ fn get_my_ticket_breakdown() -> Vec<TicketSourceRow> {
 /// Grant `count` lottery tickets to `user` in the current round (caller-agnostic
 /// internal helper). Returns the user's new ticket count. No-op if count is 0.
 fn grant_lottery_tickets(user: Principal, count: u64, source: &str) -> u64 {
+    grant_lottery_tickets_inner(user, count, source, true)
+}
+
+/// Grant for a JUST-VERIFIED qualification (e.g. a live Solana LP balance the
+/// canister confirmed this call): admin exclusion still applies, but the
+/// neuron-stake requirement is waived — the verified holding IS the stake
+/// (owner rule 2026-07-11).
+fn grant_lottery_tickets_verified(user: Principal, count: u64, source: &str) -> u64 {
+    grant_lottery_tickets_inner(user, count, source, false)
+}
+
+fn grant_lottery_tickets_inner(user: Principal, count: u64, source: &str, require_stake: bool) -> u64 {
     // Admins are excluded from the lottery entirely (see user_daily_tickets /
     // claim_daily_tickets / add_admin, which all void or zero their tickets).
     // Treat every award path — discussion upvotes, course tickets, anything
@@ -5725,9 +5737,10 @@ fn grant_lottery_tickets(user: Principal, count: u64, source: &str) -> u64 {
     }
     // Owner decision 2026-07-04: ONLY stakers earn lottery tickets. Any award
     // path routing here (course play/ownership, upvote rewards, daily claims)
-    // is a no-op for principals with no active stake (term tiers or Early
-    // Adopters). Mirrored in credit_course_ticket for the course paths.
-    if !author_is_staked(user) {
+    // is a no-op for principals with no active stake (term tiers, Early
+    // Adopters, Backed vouchers, or ICP LP custody). Verified-qualification
+    // paths (ANSEM LP claims) waive this via grant_lottery_tickets_verified.
+    if require_stake && !author_is_staked(user) {
         return LOTTERY_TICKETS.with(|m| m.borrow().get(&user)).map(|e| e.count).unwrap_or(0);
     }
     if count == 0 {
@@ -5753,9 +5766,10 @@ fn grant_lottery_tickets(user: Principal, count: u64, source: &str) -> u64 {
     new_count
 }
 
-/// Is `user` staked in any lottery-participating neuron (term tier or the
-/// permanent booster)? Only stakers can win the lottery, so only stakers earn
-/// the thread-upvote ticket reward.
+/// Is `user` staked in anything that makes them a lottery participant: a
+/// term-tier neuron stake, a Backed voucher, the permanent booster — or ICP
+/// LP custody (owner rule 2026-07-11: staking LP with us IS a stake; no
+/// separate neuron stake required).
 fn author_is_staked(user: Principal) -> bool {
     let tier_staked = StakeTier::all().iter().any(|t| {
         STAKES.with(|m| m.borrow().get(&stake_key(*t, user)))
@@ -5765,6 +5779,7 @@ fn author_is_staked(user: Principal) -> bool {
     });
     tier_staked
         || EARLY_ADOPTERS.with(|m| m.borrow().get(&user)).map(|e| e.staked_e8s > 0).unwrap_or(false)
+        || STAKED_LP.with(|m| m.borrow().iter().any(|e| e.value().user == user))
 }
 
 // ── Projects (Community R&D, admin-curated) ──
@@ -8546,7 +8561,12 @@ fn get_lottery_info() -> LotteryInfo {
         total_tickets: state.total_tickets,
         my_tickets,
         claimed_today,
-        eligible: my_daily_tickets > 0,
+        // Any daily stream (stake/voucher/booster/promo) OR LP custody —
+        // LP tickets are valuation-based and granted by the sweep, so the
+        // numeric daily field can't include them synchronously. Admins are
+        // excluded outright (they can never hold tickets or win).
+        eligible: !is_admin_principal(caller)
+            && (my_daily_tickets > 0 || author_is_staked(caller)),
         admin_excluded: is_admin_principal(caller),
         tickets_per_day: config.lottery_tickets_per_day,
         my_daily_tickets,
@@ -12917,10 +12937,8 @@ async fn claim_lp_reward() -> Result<LpClaimResult, String> {
         return Err("FEATURE_DISABLED".to_string());
     }
     require_lottery_enabled()?;
-    // Stakers-only (owner rule 2026-07-04) — fail loudly instead of granting 0.
-    if !author_is_staked(caller) {
-        return Err("NOT_STAKED".to_string());
-    }
+    // Owner rule 2026-07-11: holding verified $ANSEM LP IS the qualification —
+    // no separate neuron stake required. (Admins remain excluded at grant.)
     let link = SOLANA_WALLETS.with(|m| m.borrow().get(&caller)).ok_or("NO_WALLET_LINKED")?;
     let round = lottery_state().round;
     let claim_key = LpClaimKey { round, user: caller };
@@ -12947,7 +12965,7 @@ async fn claim_lp_reward() -> Result<LpClaimResult, String> {
             if LP_CLAIMS.with(|m| m.borrow().contains_key(&claim_key)) {
                 return Err("ALREADY_CLAIMED_THIS_ROUND".to_string());
             }
-            grant_lottery_tickets(caller, LP_TICKETS_PER_ROUND, "solana_lp");
+            grant_lottery_tickets_verified(caller, LP_TICKETS_PER_ROUND, "solana_lp");
             LP_CLAIMS.with(|m| {
                 m.borrow_mut().insert(claim_key.clone(), LpClaim {
                     round,
@@ -13164,6 +13182,10 @@ pub struct StakedLpPosition {
     pub user: Principal,
     pub pool_name: String,
     pub staked_at: u64,
+    /// The LpBacked voucher NFT minted at stake time (None = mint failed or
+    /// pre-voucher row; burn-on-unstake is best-effort either way).
+    #[serde(default)]
+    pub voucher_id: Option<u64>,
 }
 impl_storable!(StakedLpPosition);
 
@@ -13227,50 +13249,167 @@ thread_local! {
     /// (pool, position id) → (token0Amount, token1Amount) for valuation mocks.
     static MOCK_ICPSWAP_AMOUNTS: RefCell<std::collections::HashMap<(Principal, u128), (u128, u128)>> =
         RefCell::new(std::collections::HashMap::new());
+    /// Heap backoff: after a valuation failure, don't hammer the pool every
+    /// 300s sweep — retry hourly. Reset on upgrade (first sweep re-tries).
+    static ICP_LP_VALUATION_BACKOFF_UNTIL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+// ── Uniswap-v3 tick math (positions valued canister-side) ──────────────────
+//
+// Why: the pool's own getUserPositionWithTokenAmount page-scan exceeds the
+// 5B-instruction limit inside big mainnet pools (IC0522, seen live on
+// ICP/ckUSDC). Instead we fetch OUR positions via the principal-indexed
+// getUserPositionsByPrincipal (cheap) + the pool's metadata() (sqrtPriceX96),
+// and do the constant-product math ourselves. Implementation mirrors
+// Uniswap v3-core TickMath.getSqrtRatioAtTick / LiquidityAmounts.
+
+use primitive_types::{U256, U512};
+
+const TICK_MATH_MAX_TICK: i32 = 887_272;
+/// Q64.96 fixed-point one (2^96).
+fn q96() -> U256 { U256::one() << 96 }
+
+/// Uniswap v3 TickMath.getSqrtRatioAtTick: sqrt(1.0001^tick) as Q64.96.
+fn sqrt_ratio_at_tick(tick: i32) -> Result<U256, String> {
+    if tick.abs() > TICK_MATH_MAX_TICK {
+        return Err(format!("TICK_OUT_OF_RANGE: {}", tick));
+    }
+    let abs_tick = tick.unsigned_abs();
+    const C: [&str; 19] = [
+        "fff97272373d413259a46990580e213a",
+        "fff2e50f5f656932ef12357cf3c7fdcc",
+        "ffe5caca7e10e4e61c3624eaa0941cd0",
+        "ffcb9843d60f6159c9db58835c926644",
+        "ff973b41fa98c081472e6896dfb254c0",
+        "ff2ea16466c96a3843ec78b326b52861",
+        "fe5dee046a99a2a811c461f1969c3053",
+        "fcbe86c7900a88aedcffc83b479aa3a4",
+        "f987a7253ac413176f2b074cf7815e54",
+        "f3392b0822b70005940c7a398e4b70f3",
+        "e7159475a2c29b7443b29c7fa6e889d9",
+        "d097f3bdfd2022b8845ad8f792aa5825",
+        "a9f746462d870fdf8a65dc1f90e061e5",
+        "70d869a156d2a1b890bb3df62baf32f7",
+        "31be135f97d08fd981231505542fcfa6",
+        "9aa508b5b7a84e1c677de54f3e99bc9",
+        "5d6af8dedb81196699c329225ee604",
+        "2216e584f5fa1ea926041bedfe98",
+        "48a170391f7dc42444e8fa2",
+    ];
+    let mut ratio: U256 = if abs_tick & 1 != 0 {
+        U256::from_str_radix("fffcb933bd6fad37aa2d162d1a594001", 16).unwrap()
+    } else {
+        U256::one() << 128
+    };
+    for (i, c) in C.iter().enumerate() {
+        if abs_tick & (1u32 << (i + 1)) != 0 {
+            let m = U256::from_str_radix(c, 16).unwrap();
+            // Q128.128 product then renormalize (full 512-bit intermediate).
+            ratio = u512_to_u256(ratio.full_mul(m) >> 128)?;
+        }
+    }
+    if tick > 0 {
+        ratio = U256::MAX / ratio;
+    }
+    // Q128.128 → Q64.96, rounding up (Uniswap's exact behavior).
+    let shifted = ratio >> 32;
+    let round_up = !(ratio & ((U256::one() << 32) - U256::one())).is_zero();
+    Ok(shifted + if round_up { U256::one() } else { U256::zero() })
+}
+
+fn u512_to_u256(v: U512) -> Result<U256, String> {
+    U256::try_from(v).map_err(|_| "U256_OVERFLOW".to_string())
+}
+
+/// floor(a * b / denom) with a 512-bit intermediate.
+fn mul_div(a: U256, b: U256, denom: U256) -> Result<U256, String> {
+    if denom.is_zero() {
+        return Err("DIV_BY_ZERO".to_string());
+    }
+    u512_to_u256(a.full_mul(b) / U512::from(denom))
+}
+
+/// Uniswap v3 LiquidityAmounts.getAmountsForLiquidity: the token amounts a
+/// position of `liquidity` holds at the pool's current sqrt price.
+fn amounts_for_liquidity(
+    sqrt_p: U256,
+    sqrt_a_in: U256,
+    sqrt_b_in: U256,
+    liquidity: u128,
+) -> Result<(u128, u128), String> {
+    let (sqrt_a, sqrt_b) = if sqrt_a_in <= sqrt_b_in { (sqrt_a_in, sqrt_b_in) } else { (sqrt_b_in, sqrt_a_in) };
+    if sqrt_a.is_zero() {
+        return Err("SQRT_RATIO_ZERO".to_string());
+    }
+    let l = U256::from(liquidity);
+    let amount0 = |lo: U256, hi: U256| -> Result<U256, String> {
+        Ok(mul_div(l << 96, hi - lo, hi)? / lo)
+    };
+    let amount1 = |lo: U256, hi: U256| -> Result<U256, String> {
+        mul_div(l, hi - lo, q96())
+    };
+    let (a0, a1) = if sqrt_p <= sqrt_a {
+        (amount0(sqrt_a, sqrt_b)?, U256::zero())
+    } else if sqrt_p >= sqrt_b {
+        (U256::zero(), amount1(sqrt_a, sqrt_b)?)
+    } else {
+        (amount0(sqrt_p, sqrt_b)?, amount1(sqrt_a, sqrt_p)?)
+    };
+    let to_u128 = |v: U256| -> u128 { u128::try_from(v).unwrap_or(u128::MAX) };
+    Ok((to_u128(a0), to_u128(a1)))
+}
+
+// ── ICPSwap mirrors for the principal-indexed read (candid width-subtyping
+//    lets us declare only the fields we use) ──
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-struct IcpSwapPositionWithAmount {
+struct IcpSwapUserPosition {
     id: candid::Nat,
     #[serde(rename = "tickLower")]
     tick_lower: candid::Int,
     #[serde(rename = "tickUpper")]
     tick_upper: candid::Int,
     liquidity: candid::Nat,
-    #[serde(rename = "feeGrowthInside0LastX128")]
-    fee_growth_0: candid::Nat,
-    #[serde(rename = "feeGrowthInside1LastX128")]
-    fee_growth_1: candid::Nat,
-    #[serde(rename = "tokensOwed0")]
-    tokens_owed0: candid::Nat,
-    #[serde(rename = "tokensOwed1")]
-    tokens_owed1: candid::Nat,
-    #[serde(rename = "token0Amount")]
-    token0_amount: candid::Nat,
-    #[serde(rename = "token1Amount")]
-    token1_amount: candid::Nat,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-struct IcpSwapPositionPage {
-    #[serde(rename = "totalElements")]
-    total_elements: candid::Nat,
-    content: Vec<IcpSwapPositionWithAmount>,
-    offset: candid::Nat,
-    limit: candid::Nat,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum IcpSwapPageResult {
+enum IcpSwapUserPositionsResult {
     #[serde(rename = "ok")]
-    Ok(IcpSwapPositionPage),
+    Ok(Vec<IcpSwapUserPosition>),
     #[serde(rename = "err")]
     Err(IcpSwapError),
 }
 
-/// Live token amounts for the given position ids on `pool` (tick-math done
-/// by the pool). Pages through getUserPositionWithTokenAmount; early-exits
-/// once every wanted id is found.
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+struct IcpSwapPoolMeta {
+    #[serde(rename = "sqrtPriceX96")]
+    sqrt_price_x96: candid::Nat,
+    tick: candid::Int,
+}
+
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
+enum IcpSwapPoolMetaResult {
+    #[serde(rename = "ok")]
+    Ok(IcpSwapPoolMeta),
+    #[serde(rename = "err")]
+    Err(IcpSwapError),
+}
+
+fn nat_to_u256(n: &candid::Nat) -> Result<U256, String> {
+    let bytes = n.0.to_bytes_be();
+    if bytes.len() > 32 {
+        return Err("NAT_TOO_BIG".to_string());
+    }
+    Ok(U256::from_big_endian(&bytes))
+}
+
+fn int_to_i32(i: &candid::Int) -> Result<i32, String> {
+    i32::try_from(i.0.clone()).map_err(|_| "TICK_OVERFLOW".to_string())
+}
+
+/// Live token amounts for the given position ids on `pool`. Reads only OUR
+/// positions (principal-indexed) + the pool's sqrtPriceX96, then does the
+/// tick math canister-side — never the pool's page-scan (which exceeds the
+/// pool's 5B instruction limit on big mainnet pools; IC0522).
 async fn icpswap_position_amounts(
     pool: Principal,
     want: &[u128],
@@ -13284,34 +13423,34 @@ async fn icpswap_position_amounts(
                 .collect()
         }));
     }
-    let mut found = std::collections::HashMap::new();
-    let mut offset = 0u64;
-    const PAGE: u64 = 200;
-    for _ in 0..50 {
-        let (res,): (IcpSwapPageResult,) = ic_cdk::call(
-            pool,
-            "getUserPositionWithTokenAmount",
-            (candid::Nat::from(offset), candid::Nat::from(PAGE)),
-        )
+    let (pos_res,): (IcpSwapUserPositionsResult,) =
+        ic_cdk::call(pool, "getUserPositionsByPrincipal", (get_canister_id(),))
+            .await
+            .map_err(|(c, m)| format!("ICPSWAP_CALL_FAILED: {:?} {}", c, m))?;
+    let positions = match pos_res {
+        IcpSwapUserPositionsResult::Ok(p2) => p2,
+        IcpSwapUserPositionsResult::Err(e) => return Err(format!("ICPSWAP_ERROR: {:?}", e)),
+    };
+    let (meta_res,): (IcpSwapPoolMetaResult,) = ic_cdk::call(pool, "metadata", ())
         .await
         .map_err(|(c, m)| format!("ICPSWAP_CALL_FAILED: {:?} {}", c, m))?;
-        let page = match res {
-            IcpSwapPageResult::Ok(p2) => p2,
-            IcpSwapPageResult::Err(e) => return Err(format!("ICPSWAP_ERROR: {:?}", e)),
-        };
-        let n = page.content.len() as u64;
-        for pos in page.content {
-            let id = u128::try_from(pos.id.0.clone()).map_err(|_| "POSITION_ID_OVERFLOW".to_string())?;
-            if want.contains(&id) {
-                let a0 = u128::try_from(pos.token0_amount.0.clone()).unwrap_or(u128::MAX);
-                let a1 = u128::try_from(pos.token1_amount.0.clone()).unwrap_or(u128::MAX);
-                found.insert(id, (a0, a1));
-            }
+    let meta = match meta_res {
+        IcpSwapPoolMetaResult::Ok(m) => m,
+        IcpSwapPoolMetaResult::Err(e) => return Err(format!("ICPSWAP_ERROR: {:?}", e)),
+    };
+    let sqrt_p = nat_to_u256(&meta.sqrt_price_x96)?;
+
+    let mut found = std::collections::HashMap::new();
+    for pos in positions {
+        let id = u128::try_from(pos.id.0.clone()).map_err(|_| "POSITION_ID_OVERFLOW".to_string())?;
+        if !want.contains(&id) {
+            continue;
         }
-        if found.len() == want.len() || n < PAGE {
-            break;
-        }
-        offset += PAGE;
+        let liquidity = u128::try_from(pos.liquidity.0.clone()).map_err(|_| "LIQUIDITY_OVERFLOW".to_string())?;
+        let sqrt_a = sqrt_ratio_at_tick(int_to_i32(&pos.tick_lower)?)?;
+        let sqrt_b = sqrt_ratio_at_tick(int_to_i32(&pos.tick_upper)?)?;
+        let (a0, a1) = amounts_for_liquidity(sqrt_p, sqrt_a, sqrt_b, liquidity)?;
+        found.insert(id, (a0, a1));
     }
     Ok(found)
 }
@@ -13592,11 +13731,47 @@ async fn stake_lp_position(pool: Principal, position_id: u128) -> Result<IcpLpPo
         return Err("POSITION_ALREADY_STAKED".to_string());
     }
     let now = current_time();
-    let record = StakedLpPosition { user: caller, pool_name: cfg.name.clone(), staked_at: now };
+    // Mint the NON-SELLABLE LpBacked voucher (best-effort — custody first;
+    // amount_e8s 0 so it can never be misread as an ICP principal claim).
+    let voucher_id = mint_lp_voucher(caller).await;
+    let record = StakedLpPosition { user: caller, pool_name: cfg.name.clone(), staked_at: now, voucher_id };
     STAKED_LP.with(|m| { m.borrow_mut().insert(key.clone(), record); });
     LP_RESERVATIONS.with(|m| { m.borrow_mut().remove(&key); });
     staking_audit("icpswap_lp_stake", caller, position_id as u64, 0);
     Ok(IcpLpPositionView { pool, pool_name: cfg.name, position_id, staked_at: now })
+}
+
+/// Mint the LP-custody companion voucher. Best-effort: an NFT hiccup never
+/// blocks an LP stake; None is recorded and the row still confers full
+/// participant status (author_is_staked reads STAKED_LP directly).
+async fn mint_lp_voucher(owner: Principal) -> Option<u64> {
+    if !feature_enabled(FLAG_STAKE_VOUCHERS) || voucher_nft_cid().is_err() {
+        return None;
+    }
+    let id = NEXT_VOUCHER_ID.with(|c| {
+        let id = *c.borrow().get();
+        c.borrow_mut().set(id + 1);
+        id
+    });
+    if let Err(e) = voucher_nft_mint(id, owner, VoucherClass::LpBacked, 0, 0, None).await {
+        canister_print(&format!("mint_lp_voucher: {}", e));
+        return None;
+    }
+    VOUCHERS.with(|m| {
+        m.borrow_mut().insert(id, VoucherRecord {
+            id,
+            class: VoucherClass::LpBacked,
+            tier: 0,
+            amount_e8s: 0,
+            owner,
+            minted_at: current_time(),
+            expires_at: None,
+            listed_price_e8s: None,
+            last_purchase_grant_day: 0,
+        });
+    });
+    staking_audit("lp_voucher_mint", owner, 0, id);
+    Some(id)
 }
 
 /// Return a custodied position to `return_to` (the staker's ICPSwap
@@ -13616,6 +13791,14 @@ async fn unstake_lp_position(pool: Principal, position_id: u128, return_to: Prin
     }
     icpswap_transfer_position_out(pool, return_to, position_id).await?;
     STAKED_LP.with(|m| { m.borrow_mut().remove(&key); });
+    // Burn the companion LpBacked voucher (best-effort — the exit NEVER
+    // blocks on the NFT canister).
+    if let Some(vid) = record.voucher_id {
+        VOUCHERS.with(|m| { m.borrow_mut().remove(&vid); });
+        if voucher_nft_burn(vid).await.is_err() {
+            canister_print(&format!("lp voucher burn failed for #{vid} (registry row removed)"));
+        }
+    }
     staking_audit("icpswap_lp_unstake", caller, position_id as u64, 0);
     Ok(())
 }
@@ -13650,6 +13833,11 @@ async fn icpswap_lp_grant_daily_tickets() {
     if !feature_visible(FLAG_ICPSWAP_LP, Principal::anonymous()) {
         return;
     }
+    // A recent valuation failure backs the whole pass off for an hour — a
+    // broken/overloaded pool must not burn 288 inter-canister calls a day.
+    if current_time() < ICP_LP_VALUATION_BACKOFF_UNTIL.with(|c| c.get()) {
+        return;
+    }
     let day = epoch_day(current_time()) as u64;
     // Group staked positions by user.
     let mut by_user: std::collections::BTreeMap<Principal, Vec<IcpLpKey>> = Default::default();
@@ -13664,7 +13852,9 @@ async fn icpswap_lp_grant_daily_tickets() {
             continue;
         }
         if !author_is_staked(user) {
-            continue; // stakers-only; retry next sweep in case they stake
+            // Unreachable in practice since 2026-07-11 (the STAKED_LP row
+            // being enumerated IS a stake) — kept as defense in depth.
+            continue;
         }
         // Value every position; ANY failure skips the user this pass so a
         // partial valuation never underpays permanently.
@@ -13687,6 +13877,8 @@ async fn icpswap_lp_grant_daily_tickets() {
                 }
                 Err(e) => {
                     canister_print(&format!("icpswap daily tickets: valuation failed for {}: {}", user, e));
+                    ICP_LP_VALUATION_BACKOFF_UNTIL
+                        .with(|c| c.set(current_time().saturating_add(ICP_LP_HARVEST_INTERVAL_NS)));
                     failed = true;
                     break;
                 }
@@ -18614,6 +18806,11 @@ const VOUCHER_SALE_TAG: u64 = u64::MAX - 411;
 pub enum VoucherClass {
     Backed,
     Promo,
+    /// Wraps an ICPSwap LP custody position (owner 2026-07-11). NON-SELLABLE:
+    /// no marketplace, no buyback, no transfer, no redeem — LP is instantly
+    /// reclaimable via unstake_lp_position, so a market has nothing to solve.
+    /// Earns NO voucher-math tickets (the LP grant path pays 40/day/$).
+    LpBacked,
 }
 
 /// Registry row — the authoritative claim record (NFT mirrors it).
@@ -19124,6 +19321,9 @@ async fn transfer_voucher(id: u64, to: Principal) -> Result<(), String> {
     if matches!(v.class, VoucherClass::Promo) {
         return Err("PROMO_NOT_ALLOWED".to_string());
     }
+    if matches!(v.class, VoucherClass::LpBacked) {
+        return Err("LP_NOT_ALLOWED".to_string());
+    }
     if v.listed_price_e8s.is_some() {
         return Err("VOUCHER_LISTED".to_string());
     }
@@ -19153,6 +19353,9 @@ async fn redeem_stake_voucher(id: u64) -> Result<u64, String> {
     }
     if matches!(v.class, VoucherClass::Promo) {
         return Err("PROMO_NOT_ALLOWED".to_string());
+    }
+    if matches!(v.class, VoucherClass::LpBacked) {
+        return Err("LP_NOT_ALLOWED".to_string());
     }
     if v.listed_price_e8s.is_some() {
         return Err("VOUCHER_LISTED".to_string());
@@ -19243,6 +19446,9 @@ async fn unwrap_stake_voucher(voucher_id: u64) -> Result<(), String> {
     if v.owner != caller {
         return Err("NOT_YOUR_VOUCHER".to_string());
     }
+    if matches!(v.class, VoucherClass::LpBacked) {
+        return Err("LP_NOT_ALLOWED".to_string());
+    }
     if v.class != VoucherClass::Backed {
         return Err("PROMO_NOT_REDEEMABLE".to_string());
     }
@@ -19286,6 +19492,9 @@ fn list_voucher(voucher_id: u64, price_e8s: u64) -> Result<(), String> {
     let mut v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
     if v.owner != caller {
         return Err("NOT_YOUR_VOUCHER".to_string());
+    }
+    if matches!(v.class, VoucherClass::LpBacked) {
+        return Err("LP_NOT_ALLOWED".to_string());
     }
     if v.class != VoucherClass::Backed {
         return Err("PROMO_NOT_LISTABLE".to_string());
@@ -19544,6 +19753,9 @@ async fn buyback_voucher(voucher_id: u64) -> Result<u64, String> {
     let v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
     if v.owner != caller {
         return Err("NOT_YOUR_VOUCHER".to_string());
+    }
+    if matches!(v.class, VoucherClass::LpBacked) {
+        return Err("LP_NOT_ALLOWED".to_string());
     }
     if v.class != VoucherClass::Backed {
         return Err("PROMO_NOT_REDEEMABLE".to_string());
@@ -28377,9 +28589,9 @@ mod tests {
         let (pk, sig) = sign_challenge(alice(), round, 1, now + 60_000_000_000);
         link_solana_wallet(pk.clone(), sig, 1, now + 60_000_000_000).unwrap();
 
-        // Unstaked → loud NOT_STAKED (owner rule).
-        assert_eq!(claim_lp_reward().await.unwrap_err(), "NOT_STAKED");
-        seed_stake(StakeTier::SixMonths, alice(), 100_000_000);
+        // Owner rule 2026-07-11: NO neuron stake required — the verified LP
+        // balance is the qualification. Alice never stakes in this test; the
+        // only rejection left pre-balance is the floor.
 
         // Below the floor → NO_QUALIFYING_LP.
         let owner: [u8; 32] = pk.clone().try_into().unwrap();
@@ -28420,6 +28632,140 @@ mod tests {
     }
 
     // ── ICP LP staking (ICPSwap custody) ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_lp_custody_confers_full_participant_status() {
+        // Owner rule 2026-07-11: staking LP = lottery participant, no
+        // separate neuron stake — plus the NON-SELLABLE LpBacked voucher.
+        clear_icp_lp();
+        clear_vouchers();
+        enable_icp_lp();
+        enable_vouchers();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(carol());
+        // Pin a DISTINCT ckUSDC ledger (test config defaults ck ledgers to
+        // the ICP ledger → the reverse map would price at ICP's rate).
+        admin_set_explorer_ledger(ExplorerToken::CkUSDC, p("xevnm-gaaaa-aaaar-qafnq-cai")).unwrap();
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let usdc = token_ledger(IdeaToken::CkUSDC, &cfg);
+        admin_set_icpswap_pools(vec![IcpLpPoolCfg {
+            name: "ICP/ckUSDC".into(), pool,
+            token0_symbol: "ckUSDC".into(), token0_ledger: usdc,
+            token1_symbol: "ckUSDC".into(), token1_ledger: usdc,
+        }]).unwrap();
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![41]); });
+
+        // dave has NO neuron stake, NO voucher, NO booster.
+        let dave = Principal::self_authenticating(b"lp-only-dave");
+        assert!(!author_is_staked(dave));
+        set_mock_caller(dave);
+        reserve_lp_position(pool, 41).unwrap();
+        stake_lp_position(pool, 41).await.unwrap();
+
+        // 1) LP custody IS a stake.
+        assert!(author_is_staked(dave), "LP custody confers staked status");
+        assert!(get_lottery_info().eligible, "lottery page reads eligible");
+        // 2) The grant path pays a pure LP holder.
+        MOCK_ICPSWAP_AMOUNTS.with(|m| { m.borrow_mut().insert((pool, 41), (1_000_000, 0)); }); // $1
+        icpswap_lp_grant_daily_tickets().await;
+        let count = LOTTERY_TICKETS.with(|m| m.borrow().get(&dave).map(|e| e.count).unwrap_or(0));
+        assert_eq!(count, ICP_LP_TICKETS_PER_USD_DAY, "$1 → 40/day with no neuron stake");
+        // 3) LpBacked companion voucher exists, is ticket-inert and sell-proof.
+        let vid = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == dave).map(|e| *e.key()))
+            .expect("LP stake minted a companion voucher");
+        let v = VOUCHERS.with(|m| m.borrow().get(&vid)).unwrap();
+        assert_eq!(v.class, VoucherClass::LpBacked);
+        assert_eq!(v.amount_e8s, 0, "never a principal claim");
+        assert_eq!(user_daily_tickets(dave), 0, "no voucher-math tickets — LP path pays instead");
+        assert_eq!(list_voucher(vid, 100_000_000).unwrap_err(), "LP_NOT_ALLOWED");
+        assert_eq!(buyback_voucher(vid).await.unwrap_err(), "LP_NOT_ALLOWED");
+        assert_eq!(redeem_stake_voucher(vid).await.unwrap_err(), "LP_NOT_ALLOWED");
+        assert_eq!(transfer_voucher(vid, alice()).await.unwrap_err(), "LP_NOT_ALLOWED");
+        assert_eq!(unwrap_stake_voucher(vid).await.unwrap_err(), "LP_NOT_ALLOWED");
+        // 4) Unstake burns the voucher and status reverts.
+        unstake_lp_position(pool, 41, dave).await.unwrap();
+        assert!(VOUCHERS.with(|m| m.borrow().get(&vid).is_none()), "voucher burned at unstake");
+        assert!(!author_is_staked(dave));
+        clear_icp_lp();
+        clear_vouchers();
+        LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&dave); });
+    }
+
+    #[test]
+    fn test_uniswap_v3_math_vectors() {
+        let q = q96();
+        // Canonical TickMath constants (Uniswap v3-core).
+        assert_eq!(sqrt_ratio_at_tick(0).unwrap(), q);
+        assert_eq!(sqrt_ratio_at_tick(-887_272).unwrap(), U256::from(4295128739u64));
+        assert_eq!(
+            sqrt_ratio_at_tick(887_272).unwrap(),
+            U256::from_dec_str("1461446703485210103287273052203988822378723970342").unwrap()
+        );
+        assert_eq!(
+            sqrt_ratio_at_tick(1).unwrap(),
+            U256::from_dec_str("79232123823359799118286999568").unwrap()
+        );
+        assert_eq!(
+            sqrt_ratio_at_tick(-1).unwrap(),
+            U256::from_dec_str("79224201403219477170569942574").unwrap()
+        );
+        assert!(sqrt_ratio_at_tick(887_273).is_err(), "out of range");
+
+        // Closed-form amounts: A = Q/2, B = 2Q, L = 1e18.
+        let l = 1_000_000_000_000_000_000u128;
+        let a = q / 2;
+        let b = q * 2;
+        // In range at P = Q: exactly L/2 of each.
+        assert_eq!(amounts_for_liquidity(q, a, b, l).unwrap(), (l / 2, l / 2));
+        // Below range (P ≤ A): all token0. With [Q, 2Q]: L/2, none of token1.
+        assert_eq!(amounts_for_liquidity(q / 4, q, b, l).unwrap(), (l / 2, 0));
+        // Above range (P ≥ B): all token1. With [Q, 2Q]: exactly L.
+        assert_eq!(amounts_for_liquidity(b * 2, q, b, l).unwrap(), (0, l));
+        // Reversed bounds normalize.
+        assert_eq!(amounts_for_liquidity(q, b, a, l).unwrap(), (l / 2, l / 2));
+    }
+
+    #[tokio::test]
+    async fn test_lp_valuation_failure_backoff() {
+        clear_icp_lp();
+        enable_icp_lp();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        let pool = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(carol());
+        // Pin a DISTINCT ckUSDC ledger (test config defaults ck ledgers to
+        // the ICP ledger → the reverse map would price at ICP's rate).
+        admin_set_explorer_ledger(ExplorerToken::CkUSDC, p("xevnm-gaaaa-aaaar-qafnq-cai")).unwrap();
+        let cfg = CONFIG.with(|c| c.borrow().get().clone());
+        let usdc = token_ledger(IdeaToken::CkUSDC, &cfg);
+        admin_set_icpswap_pools(vec![IcpLpPoolCfg {
+            name: "ICP/ckUSDC".into(), pool,
+            token0_symbol: "ckUSDC".into(), token0_ledger: usdc,
+            token1_symbol: "ckUSDC".into(), token1_ledger: usdc,
+        }]).unwrap();
+        MOCK_ICPSWAP_OUR_POSITIONS.with(|m| { m.borrow_mut().insert(pool, vec![7]); });
+        set_mock_caller(alice());
+        reserve_lp_position(pool, 7).unwrap();
+        stake_lp_position(pool, 7).await.unwrap();
+        MOCK_ICPSWAP_AMOUNTS.with(|m| { m.borrow_mut().insert((pool, 7), (1_000_000, 0)); });
+
+        // A live backoff stamp silences the whole pass…
+        ICP_LP_VALUATION_BACKOFF_UNTIL.with(|c| c.set(current_time() + 1_000_000_000));
+        icpswap_lp_grant_daily_tickets().await;
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0)),
+            0, "backoff suppresses the pass"
+        );
+        // …and an expired one lets it grant.
+        ICP_LP_VALUATION_BACKOFF_UNTIL.with(|c| c.set(0));
+        icpswap_lp_grant_daily_tickets().await;
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0)),
+            ICP_LP_TICKETS_PER_USD_DAY
+        );
+        clear_icp_lp();
+        LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
+    }
 
     fn enable_icp_lp() {
         install_staking_test_config();
@@ -28640,18 +28986,17 @@ mod tests {
         icpswap_lp_grant_daily_tickets().await;
         let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
         assert_eq!(count(alice()), 200, "40 tickets per $1 per day, proportional");
-        assert_eq!(count(bob()), 0, "unstaked earns nothing (owner rule)");
+        // Owner rule 2026-07-11: LP custody IS a stake — bob earns at HIS
+        // value ($10 → 400) with NO separate neuron stake.
+        assert_eq!(count(bob()), 400, "LP custody alone qualifies");
         set_mock_caller(alice());
         assert!(get_icp_lp_info().granted_today);
         let rows = get_my_ticket_breakdown();
         assert_eq!(rows.iter().find(|r| r.source == "icpswap_lp").map(|r| r.count), Some(200));
 
-        // Same day: no double grant; bob ICP-staking mid-day collects on the
-        // NEXT sweep at HIS value ($10 → 400).
+        // Same day: no double grant for either.
         icpswap_lp_grant_daily_tickets().await;
         assert_eq!(count(alice()), 200);
-        seed_stake(StakeTier::SixMonths, bob(), 100_000_000);
-        icpswap_lp_grant_daily_tickets().await;
         assert_eq!(count(bob()), 400);
 
         // Next UTC day: fresh valuation — alice's LP halved → half the tickets.
