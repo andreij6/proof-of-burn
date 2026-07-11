@@ -142,6 +142,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, cursor: 'pointer',
     fontFamily: BODY, fontWeight: 600, borderRadius: 8, border: '1px solid transparent',
     height: 48, padding: '0 24px', fontSize: 15, background: 'var(--burn)', color: 'var(--char-950)',
+    whiteSpace: 'nowrap',
   };
   const ghostBtn: React.CSSProperties = {
     display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontFamily: BODY, fontWeight: 600,
@@ -178,7 +179,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
             <span style={{ fontFamily: MONO, fontSize: 11, color: 'var(--fg-3)', letterSpacing: '.04em', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 7 }}>
               <LiveDot size={6} /> next draw {cd}
             </span>
-            <button onClick={onEnter} style={{ ...primaryBtn, height: 34, padding: '0 14px', fontSize: 13 }}>Launch app →</button>
+            <button onClick={onEnter} style={{ ...primaryBtn, height: 34, padding: '0 14px', fontSize: 13, whiteSpace: 'nowrap', flexShrink: 0 }}>Launch app →</button>
           </div>
         </div>
       </nav>

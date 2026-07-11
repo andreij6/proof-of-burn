@@ -284,7 +284,7 @@ export function VouchersBody({
           </span>
         ) : (
           <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 300, width: '100%' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+            <table style={{ width: '100%', minWidth: 560, borderCollapse: 'collapse', fontSize: 12.5 }}>
               <thead>
                 <tr className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'left' }}>
                   <th style={{ padding: '6px 8px', fontWeight: 500 }}>Voucher</th>
@@ -321,7 +321,7 @@ export function VouchersBody({
                           : `${ticketsPerDay(v)}/day`}
                       </td>
                       <td style={{ padding: '8px' }}>
-                        <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                        <span className="row" style={{ gap: 6, justifyContent: 'flex-end', flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
                           {promo ? (
                             <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>tickets only</span>
                           ) : (
