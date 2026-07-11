@@ -66,7 +66,7 @@ const TICKET_SOURCE_LABELS: Record<string, string> = {
   dev: 'Dev grants (local)',
   test: 'Test grants',
   promo_voucher: 'Golden Ticket',
-  voucher_purchase: 'Voucher purchases',
+  voucher_purchase: 'Bond purchases',
 };
 
 export default function Lottery({ actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onGoStaking, onGoExchange, onGoLiquidity }: LotteryProps) {

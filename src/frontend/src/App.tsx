@@ -530,7 +530,7 @@ export default function App() {
       const res = await actor.transfer_voucher(id, to);
       if (res.__kind__ === 'Err') { setVoucherXferMsg(friendlyVoucherErr(res.Err)); return; }
       setVoucherXferId(null); setVoucherXferTo("");
-      setVoucherXferMsg(`Voucher #${id} sent — it now lives in ${voucherXferTo.trim().slice(0, 8)}… and earns tickets there.`);
+      setVoucherXferMsg(`Bond #${id} sent — it now lives in ${voucherXferTo.trim().slice(0, 8)}… and earns tickets there.`);
       await loadWalletVouchers();
     } catch (e: any) { setVoucherXferMsg(e?.message || String(e)); }
     finally { setVoucherXferBusy(false); }
@@ -1964,7 +1964,7 @@ export default function App() {
         {vouchersEnabled && (
           <Btn variant={page === 'exchange' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('exchange')}>
             <Icon name="scale" size={14} stroke={page === 'exchange' ? 'var(--char-950)' : 'currentColor'} />
-            Voucher Exchange
+            Bond Exchange
           </Btn>
         )}
 
@@ -3692,7 +3692,7 @@ export default function App() {
               <>
                 <hr />
                 <div className="col" style={{ gap: 8 }}>
-                  <Eyebrow>Vouchers · your staked positions as NFTs</Eyebrow>
+                  <Eyebrow>Bonds · your staked positions as NFTs</Eyebrow>
                   {voucherXferMsg && (
                     <div style={{ padding: 10, borderRadius: 6, background: 'var(--bg-alt)', border: '1px solid var(--border)', color: 'var(--fg-2)', fontSize: 12 }}>
                       {voucherXferMsg}
@@ -3721,7 +3721,7 @@ export default function App() {
                         {!promo && !listed && voucherXferId === v.id && (
                           <div className="col" style={{ gap: 6 }}>
                             <span style={{ fontSize: 11, color: 'var(--fg-3)', lineHeight: 1.4 }}>
-                              Send this voucher to another wallet's principal (Plug / OISY / NNS). This moves the
+                              Send this bond to another wallet's principal (Plug / OISY / NNS). This moves the
                               <b> stake and its ticket stream there permanently</b> — double-check the principal.
                             </span>
                             <input type="text" placeholder="Destination principal" className="burn-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
@@ -3740,7 +3740,7 @@ export default function App() {
                   <span className="row" style={{ gap: 6, fontSize: 11, color: 'var(--fg-3)', lineHeight: 1.4, marginTop: 2 }}>
                     <Icon name="info" size={11} stroke="var(--fg-3)" style={{ marginTop: 2, flexShrink: 0 }} />
                     <span>
-                      <b>Deposit a voucher held elsewhere?</b> Sign in as that wallet and withdraw it here targeting your
+                      <b>Deposit a bond held elsewhere?</b> Sign in as that wallet and withdraw it here targeting your
                       principal: <span className="mono" style={{ overflowWrap: 'anywhere' }}>{principal.toString()}</span>
                     </span>
                   </span>

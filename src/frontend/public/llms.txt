@@ -31,7 +31,7 @@ type BalanceResult = variant { Ok : nat64; Err : text };
 type LedgerAccount = record { owner : principal; subaccount : opt blob };
 service : {
   get_stake_deposit_address : () -> (LedgerAccount) query;
-  stake : (nat64, StakeTier) -> (Result); // ALSO auto-issues a Stake Voucher NFT
+  stake : (nat64, StakeTier) -> (Result); // ALSO auto-issues a Stake Bond NFT
   unstake : (nat64, StakeTier) -> (BalanceResult);
   get_my_stake : () -> (UserStakeInfo) query;
   get_lottery_info : () -> (LotteryInfo) query;
@@ -82,19 +82,20 @@ const info = await cycleBurn.get_lottery_info();
 Also: get_my_stake() (per-tier positions), get_my_ticket_breakdown() (ticket
 sources), list_recent_winners() (winners feed).
 
-## Voucher note (2026-07-10)
-Staking AUTO-ISSUES a Stake Voucher NFT — the voucher IS the stake. The
+## Bond note (2026-07-10)
+Staking AUTO-ISSUES a Stake Bond NFT — the bond IS the stake. (The on-chain
+API keeps the original `voucher` naming — Bond is the product name.) The
 holder redeems via redeem_stake_voucher (100% after dissolve), sells it on
 the marketplace, or takes the instant 15%-discount buyback. Tickets always
-follow the voucher's current owner; buying a voucher grants ITS daily
-tickets to the buyer instantly (once per voucher per UTC day).
+follow the bond's current owner; buying a bond grants ITS daily
+tickets to the buyer instantly (once per bond per UTC day).
 
-## Flow 3 — Exit (the exit is always open, and it is VOUCHER-NATIVE)
-Since staking auto-issues a voucher, the exit starts from the voucher — NOT
-from unstake(amount, tier), which returns NO_STAKE for voucher-held positions
+## Flow 3 — Exit (the exit is always open, and it is BOND-NATIVE)
+Since staking auto-issues a Stake Bond, the exit starts from the bond — NOT
+from unstake(amount, tier), which returns NO_STAKE for bond-held positions
 (it only drains legacy plain rows).
-1. Find the user's voucher: const m = await cycleBurn.get_voucher_market();
-   const voucher = m.my_vouchers[0]; // Backed, unlisted
+1. Find the user's bond: const m = await cycleBurn.get_voucher_market();
+   const voucher = m.my_vouchers[0]; // Backed, unlisted (API keeps 'voucher' names)
 2. Exit one of three ways:
    - 100% after dissolve: const out = await cycleBurn.redeem_stake_voucher(voucher.id);
      Ok is a pending-unstake id; the ICP pays the OWNER automatically once the
@@ -102,14 +103,16 @@ from unstake(amount, tier), which returns NO_STAKE for voucher-held positions
    - Instant 85%: await cycleBurn.buyback_voucher(voucher.id); // Ok = ICP paid now
      Refuses with BUYBACK_UNAVAILABLE when the buyback fund can't cover it.
    - Market price: list_voucher(voucher.id, askE8s) — a buyer takes the position.
-- Tickets void only when the user's LAST position empties; listed vouchers
+- Tickets void only when the user's LAST position empties; listed bonds
   pause earning until sold or delisted.
 
-## Stake Vouchers (exit liquidity + marketplace)
-Staking AUTO-ISSUES a VOUCHER — an NFT claim on the staked ICP (the stake IS
-the voucher; wrap_stake_voucher remains for legacy/remainder rows). Tickets
-follow the voucher's current owner (server-side daily grants); buying a
-voucher makes the buyer a staker. A voucher LISTED FOR SALE earns no tickets
+## Stake Bonds (exit liquidity + marketplace)
+Staking AUTO-ISSUES a STAKE BOND — an NFT claim on the staked ICP (the stake
+IS the bond; wrap_stake_voucher remains for legacy/remainder rows). NOTE: the
+on-chain API keeps the original `voucher` naming (wrap_stake_voucher,
+buy_voucher, …) — Bond is the product name. Tickets
+follow the bond's current owner (server-side daily grants); buying a
+bond makes the buyer a staker. A bond LISTED FOR SALE earns no tickets
 until delisted. All calls are caller-keyed: make
 them with the END USER's identity, same rule as staking.
 
@@ -142,7 +145,7 @@ service additions : {
 
 Flow A — wrap + instant exit (house buyback):
 1. await cycleBurn.wrap_stake_voucher(100_000_000n, { SixMonths: null });
-   // Wraps 1 ICP of the caller's existing 6-month stake into voucher NFT.
+   // Wraps 1 ICP of the caller's existing 6-month stake into a Bond NFT.
    // Minimum wrap: min_wrap_e8s (1 ICP). Tickets keep flowing to the holder.
 2. await cycleBurn.buyback_voucher(voucherId);
    // Pays the owner 85% of principal in ICP IMMEDIATELY (the 15% discount is
@@ -168,21 +171,21 @@ await cycleBurn.claim_promo_voucher(destOrNull);
 // null → mints to the CALLER (signed-in claim). Some(principal) → mints to
 // that principal and works ANONYMOUSLY (paste-a-wallet flow; must be a
 // self-authenticating user principal — not anonymous, not a canister id).
-// Promo vouchers earn 1 ticket/day for 60 days, then expire. They are
+// Golden Tickets earn 1 ticket/day for 60 days, then expire. They are
 // tickets-only: never redeemable for ICP, never buyback-eligible, not
 // listable, not transferable (soulbound). One per principal per campaign;
 // campaign-capped with a daily claim limit (errors: CAMPAIGN_CLOSED,
 // CAMPAIGN_EXHAUSTED, DAILY_LIMIT, ALREADY_CLAIMED, INVALID_PRINCIPAL).
 
 ## Rules your UI should reflect
-- Tickets need a position, not a visit: staked ICP (a voucher) or a custodied
+- Tickets need a position, not a visit: staked ICP (a Stake Bond) or a custodied
   LP position both qualify, and tickets land automatically every day — no
   claim call needed. Show my_daily_tickets as the user's daily earn rate.
 - Winners are paid automatically to their own wallet: 65% winner / 30% next
   pot / 5% burned. The integrating app never touches prize money.
 - Drawings run Mon/Wed/Sat nights (US Eastern) only when both gates are met;
   otherwise the pot rolls over and keeps growing.
-- Voucher rules: Backed vouchers are receipts on real staked ICP (wrap is
+- Bond rules: Backed bonds are receipts on real staked ICP (wrap is
   reversible via unwrap; the 15% instant-exit discount is an optional fee,
-  never principal risk). Promo vouchers are tickets-only golden tickets.
+  never principal risk). Golden Tickets are the tickets-only promo class.
 - Live docs for humans: https://kyclk-5qaaa-aaaap-quthq-cai.icp0.io/#/dev-docs

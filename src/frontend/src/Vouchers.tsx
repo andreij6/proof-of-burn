@@ -19,20 +19,20 @@ import { TIER_META } from './Staking';
 /** Friendly copy for voucher endpoint error codes. */
 export function friendlyVoucherErr(code: string): string {
   switch (code) {
-    case 'FEATURE_DISABLED': return 'Stake Vouchers aren\'t open yet — check back soon.';
+    case 'FEATURE_DISABLED': return 'Stake Bonds aren\'t open yet — check back soon.';
     case 'BUYBACK_UNAVAILABLE': return 'Instant exit is temporarily unavailable — the buyback fund is replenishing. Sell on the marketplace or wait for the dissolve instead.';
     case 'CAMPAIGN_CLOSED': return 'The Golden Ticket campaign isn\'t open right now.';
     case 'CAMPAIGN_EXHAUSTED': return 'All Golden Tickets have been claimed — the campaign is over.';
     case 'DAILY_LIMIT': return 'Today\'s Golden Tickets are gone — more unlock tomorrow. Come back then!';
     case 'ALREADY_CLAIMED': return 'This account already claimed its Golden Ticket (one per account).';
     case 'INVALID_PRINCIPAL': return 'That doesn\'t look like a wallet principal — paste the principal shown in your wallet (not an account id, not a canister).';
-    case 'NOT_YOUR_VOUCHER': return 'Only the voucher\'s current owner can do that.';
-    case 'VOUCHER_LISTED': return 'That voucher is listed for sale — cancel the listing first.';
+    case 'NOT_YOUR_VOUCHER': return 'Only the bond\'s current owner can do that.';
+    case 'VOUCHER_LISTED': return 'That bond is listed for sale — cancel the listing first.';
     case 'PROMO_NOT_ALLOWED': return 'Golden Tickets earn tickets only — they can\'t be sold, redeemed, transferred, or bought back.';
     case 'INSUFFICIENT_STAKE': return 'You don\'t have that much unwrapped stake in that tier.';
-    case 'BELOW_MINIMUM': return 'The minimum voucher is 1 ICP of staked principal.';
+    case 'BELOW_MINIMUM': return 'The minimum bond is 1 ICP of staked principal.';
     case 'ESCROW_NOT_FUNDED': return 'The sale escrow hasn\'t received the full ask yet — send the exact ICP amount, then buy.';
-    case 'NOT_LISTED': return 'That voucher isn\'t for sale.';
+    case 'NOT_LISTED': return 'That bond isn\'t for sale.';
     default: return code;
   }
 }
@@ -242,14 +242,14 @@ export function VouchersBody({
     };
   });
 
-  const list = (v: VoucherView) => runOp(`list-${v.id}`, 'Listing your voucher on the Exchange…', async () => {
+  const list = (v: VoucherView) => runOp(`list-${v.id}`, 'Listing your bond on the Exchange…', async () => {
     const price = parsePriceIcp(priceText);
     if (!price) throw new Error('Enter an ask in ICP (up to 4 decimals).');
     const res = await actor.list_voucher(v.id, price);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
     return {
       title: `Listed at ${fmtICP(price)} ICP`,
-      detail: 'Your voucher is on the Exchange. It won\'t earn tickets while listed — cancel anytime to resume.',
+      detail: 'Your bond is on the Exchange. It won\'t earn tickets while listed — cancel anytime to resume.',
       onDone: () => { setSellModal(null); setSellStep('choose'); setPriceText(''); onGoExchange?.(); },
     };
   });
@@ -257,7 +257,7 @@ export function VouchersBody({
   const cancelListing = (v: VoucherView) => run(`cancel-${v.id}`, async () => {
     const res = await actor.cancel_voucher_listing(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    return `Listing for voucher #${v.id} cancelled — it's earning tickets again.`;
+    return `Listing for bond #${v.id} cancelled — it's earning tickets again.`;
   });
 
   const buyback = (v: VoucherView) => {
@@ -267,7 +267,7 @@ export function VouchersBody({
       if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
       return {
         title: `${fmtICP(res.Ok)} ICP paid to your wallet`,
-        detail: 'The sale is complete and the voucher is burned. The ICP is already in your wallet.',
+        detail: 'The sale is complete and the bond is burned. The ICP is already in your wallet.',
         onDone: () => { setSellModal(null); setSellStep('choose'); setRedeemModal(null); },
       };
     });
@@ -289,7 +289,7 @@ export function VouchersBody({
     const res = await actor.buy_voucher(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
     return {
-      title: `Voucher #${v.id} is yours`,
+      title: `Bond #${v.id} is yours`,
       detail: `${ticketsPerDay(v)} tickets just landed for the upcoming draw, and it keeps earning daily.`,
       onDone: () => setBuyModal(null),
     };
@@ -329,27 +329,27 @@ export function VouchersBody({
       {/* ── Your vouchers (unlisted + promo) ── */}
       <div className="card col" style={{ gap: 10 }}>
         <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
-          <Eyebrow>Your vouchers</Eyebrow>
+          <Eyebrow>Your bonds</Eyebrow>
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>every stake arrives here as an NFT</span>
         </span>
         {!signedIn ? (
-          <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Sign in to see your vouchers.</span>
+          <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Sign in to see your bonds.</span>
         ) : info === null ? (
-          <div className="col" style={{ gap: 8 }} aria-busy="true" aria-label="Loading your vouchers">
+          <div className="col" style={{ gap: 8 }} aria-busy="true" aria-label="Loading your bonds">
             <Skeleton width="100%" height={16} />
             <Skeleton width="86%" height={16} />
             <Skeleton width="92%" height={16} />
           </div>
         ) : myUnlisted.length === 0 ? (
           <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
-            No vouchers here yet — stake ICP above and your voucher appears instantly, or claim a Golden Ticket when a campaign is live.
+            No bonds here yet — stake ICP above and your bond appears instantly, or claim a Golden Ticket when a campaign is live.
           </span>
         ) : (
           <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 300, width: '100%' }}>
             <table style={{ width: '100%', minWidth: 560, borderCollapse: 'collapse', fontSize: 12.5 }}>
               <thead>
                 <tr className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)', textAlign: 'left' }}>
-                  <th style={{ padding: '6px 8px', fontWeight: 500 }}>Voucher</th>
+                  <th style={{ padding: '6px 8px', fontWeight: 500 }}>Bond</th>
                   <th style={{ padding: '6px 8px', fontWeight: 500 }}>Value</th>
                   <th style={{ padding: '6px 8px', fontWeight: 500 }}>Term</th>
                   <th style={{ padding: '6px 8px', fontWeight: 500 }}>Tickets</th>
@@ -427,7 +427,7 @@ export function VouchersBody({
               return (
                 <div key={String(v.id)} className="col" style={{ gap: 8, padding: 12, borderRadius: 10, border: '1px solid var(--haze)', background: 'color-mix(in srgb, var(--haze) 8%, var(--surface))' }}>
                   <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                    <b style={{ fontSize: 13.5 }}>{TIER_META[v.tier].short} voucher</b>
+                    <b style={{ fontSize: 13.5 }}>{TIER_META[v.tier].short} bond</b>
                     <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>#{String(v.id)}</span>
                   </span>
                   <div className="col" style={{ gap: 3, fontSize: 12 }}>
@@ -467,7 +467,7 @@ export function VouchersBody({
           </div>
         ) : listings.length === 0 ? (
           <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>
-            Nothing listed right now. Vouchers you list appear here for anyone to buy.
+            Nothing listed right now. Bonds you list appear here for anyone to buy.
           </span>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
@@ -477,7 +477,7 @@ export function VouchersBody({
               return (
                 <div key={String(v.id)} className="col" style={{ gap: 8, padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)' }}>
                   <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                    <b style={{ fontSize: 13.5 }}>{TIER_META[v.tier].short} voucher</b>
+                    <b style={{ fontSize: 13.5 }}>{TIER_META[v.tier].short} bond</b>
                     <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>#{String(v.id)}</span>
                   </span>
                   <div className="col" style={{ gap: 3, fontSize: 12 }}>
@@ -532,7 +532,7 @@ export function VouchersBody({
                 onDismissError={() => setOpPhase(null)} />
             ) : (<>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-              Your voucher is the claim on this ICP — choose how it comes back to you.
+              Your bond is the claim on this ICP — choose how it comes back to you.
             </span>
             <div className="col" style={opt}>
               <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
@@ -569,7 +569,7 @@ export function VouchersBody({
         const price = parsePriceIcp(priceText);
         const delta = price != null ? listingDeltaPct(price, v.amount_e8s) : null;
         return (
-          <ModalShell title={`Sell your ${TIER_META[v.tier].short} voucher`} locked={busy !== null}
+          <ModalShell title={`Sell your ${TIER_META[v.tier].short} bond`} locked={busy !== null}
             onClose={() => { setSellModal(null); setSellStep('choose'); setPriceText(''); setOpPhase(null); }}>
             {opPhase ? (
               <OpPanel phase={opPhase}
@@ -605,7 +605,7 @@ export function VouchersBody({
                   </div>
                   <div className="col" style={opt}>
                     <span className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-                      <b style={{ fontSize: 13.5 }}>List on the Voucher Exchange</b>
+                      <b style={{ fontSize: 13.5 }}>List on the Bond Exchange</b>
                       <Chip tone="pending">you set the ask</Chip>
                     </span>
                     <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
@@ -629,7 +629,7 @@ export function VouchersBody({
                 )}
                 <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
                   A {feePct}% marketplace fee is taken from the sale.{' '}
-                  <b>While listed, this voucher stops earning lottery tickets</b> — they resume the moment you cancel or it sells.
+                  <b>While listed, this bond stops earning lottery tickets</b> — they resume the moment you cancel or it sells.
                 </span>
                 <span className="row" style={{ gap: 8 }}>
                   <Btn variant="primary" onClick={() => list(v)} disabled={busy !== null || price == null}>
@@ -677,7 +677,7 @@ export function VouchersBody({
               <b>{ticketsPerDay(v)} tickets/day</b> — today's tickets land the moment the purchase settles, entering the upcoming draw. Redeemable for full value after the dissolve.
             </span>
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Your {fmtICP(v.listed_price_e8s)} ICP goes to a sale escrow, then the purchase settles and the voucher moves to you. An unfinished purchase is always reclaimable.
+              Your {fmtICP(v.listed_price_e8s)} ICP goes to a sale escrow, then the purchase settles and the bond moves to you. An unfinished purchase is always reclaimable.
             </span>
             <Btn variant="primary" onClick={() => buy(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
               <Icon name="coins" size={13} stroke="var(--char-950)" /> Buy for {fmtICP(v.listed_price_e8s)} ICP

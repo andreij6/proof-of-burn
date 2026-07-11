@@ -187,7 +187,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     if (res.__kind__ === 'Err') throw new Error(res.Err);
     setVFeeInput(''); setVMinWrapInput('');
     await loadVoucherMarket();
-    return 'Voucher economics updated.';
+    return 'Bond economics updated.';
   });
   const setPromoCampaign = (open: boolean) => run('promo', async () => {
     const res = await actor.admin_set_promo_campaign(open);
@@ -207,7 +207,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       : await actor.admin_set_course_nft_canister(target);
     if (res.__kind__ === 'Err') throw new Error(res.Err);
     if (kind === 'voucher') setWireVoucherInput(''); else setWireCourseInput('');
-    return `${kind === 'voucher' ? 'Voucher' : 'Course'} NFT canister wired to ${formatPrincipal(target)}.`;
+    return `${kind === 'voucher' ? 'Bond' : 'Course'} NFT canister wired to ${formatPrincipal(target)}.`;
   });
   const fundBuyback = () => run('buybackfund', async () => {
     const icp = parseFloat(buybackFundAmt);
@@ -733,7 +733,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
             {/* ── Buyback wallet ── */}
             <div className="col" style={{ ...card, gap: 12 }}>
-              <Eyebrow>Voucher buyback wallet</Eyebrow>
+              <Eyebrow>Bond buyback wallet</Eyebrow>
               <b className="mono" style={big}>{buybackFundE8s !== null ? fmtICP(buybackFundE8s) : pending} ICP</b>
               <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: 10 }}>
                 <input type="number" min="0" step="0.1" placeholder="ICP from treasury" className="burn-input" style={{ ...inputStyle, maxWidth: 170 }}
@@ -748,7 +748,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                 </Btn>
               </div>
               <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-                Pays instant voucher exits (85% of principal); the option auto-disables for users when
+                Pays instant bond exits (85% of principal); the option auto-disables for users when
                 this can't cover a sale. Replenished by dissolved principals + the fund's third of
                 fees. External top-ups: backend canister, subaccount <span className="mono">0x0a×32</span>.
               </span>
@@ -810,7 +810,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                   </Btn>
                 </div>
                 <div className="col" style={{ gap: 4, flex: '1 1 150px', minWidth: 140 }}>
-                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>Voucher NFT</span>
+                  <span style={{ fontSize: 10.5, color: 'var(--fg-3)', textTransform: 'uppercase' }}>Bond NFT</span>
                   <b className="mono" style={{ ...big, fontSize: 18 }}>auto</b>
                   <span style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>sweep-guarded + fee-third burns</span>
                 </div>
@@ -901,7 +901,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
             <div className="col" style={{ ...card, gap: 10, flex: '1 1 280px', minWidth: 260 }}>
               <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
-                <Eyebrow>Voucher economics</Eyebrow>
+                <Eyebrow>Bond economics</Eyebrow>
                 <span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>
                   {voucherMkt ? `${(voucherMkt.market_fee_bps / 100).toFixed(1)}% fee · min ${fmtICP(voucherMkt.min_wrap_e8s)} ICP · buyback 15%` : '…'}
                 </span>
@@ -916,7 +916,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                 </Btn>
               </div>
               <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Fees split 1/3 treasury · 1/3 buyback fund · 1/3 voucher-canister cycles burn.
+                Fees split 1/3 treasury · 1/3 buyback fund · 1/3 bond-canister cycles burn.
               </span>
             </div>
 
@@ -1425,12 +1425,12 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           <Section icon="zap" title="Lossless staking — three terms, one principal, zero loss">
             <Li>Three pooled NNS neurons, one per term: 6 months, 1 year, 2 years. Your ICP joins the term's neuron; your principal is never spent. Every neuron is made PUBLIC on the NNS the moment it's configured — anyone can audit it on the dashboard.</Li>
             <Li>Staking grants <b>no voting power</b> — voting is burn-only. Staking's sole reward is lottery eligibility: the term length scales the daily ticket grant (6mo / 1y / 2y → 5 / 10 / 20 tickets per ICP per day).</Li>
-            <Li>Whole-ICP amounts only. Every stake is issued as a Voucher NFT; exits are voucher-native (sell, instant 85% buyback, or redeem = dissolve for 100%). The treasury fronts every neuron fee.</Li>
+            <Li>Whole-ICP amounts only. Every stake is issued as a Bond NFT; exits are bond-native (sell, instant 85% buyback, or redeem = dissolve for 100%). The treasury fronts every neuron fee.</Li>
             <Li>Neuron maturity harvests once it crosses ~1.05 ICP and is split <b>70% lottery prize pot / 30% treasury</b> — all the staking neurons feed the same pot.</Li>
           </Section>
 
           <Section icon="spark" title="No-Loss Lottery — dynamic odds, funded by yield">
-            <Li>Stakers only — daily grant = base ({base}) × term multiplier × whole ICP staked, granted server-side every UTC day (no visit needed). Fully unstake and any tickets already held void immediately; the same happens on promotion to admin. Listed vouchers pause their ticket stream until delisted; buying a voucher grants its daily rate instantly (once per voucher per day).</Li>
+            <Li>Stakers only — daily grant = base ({base}) × term multiplier × whole ICP staked, granted server-side every UTC day (no visit needed). Fully unstake and any tickets already held void immediately; the same happens on promotion to admin. Listed bonds pause their ticket stream until delisted; buying a bond grants its daily rate instantly (once per bond per day).</Li>
             <Li>Drawings 3× a week (Mon/Wed/Sat nights US Eastern), but a drawing only runs when the pot holds at least 25 ICP AND enough unique players hold tickets — below that it rolls over. Odds are dynamic: every drawing that runs has a 1-in-13 chance of paying out regardless of ticket supply, decided by on-chain randomness (raw_rand).</Li>
             <Li>The winner takes 65% of the prize pot; 30% seeds the next round; 5% is burned to backend-canister cycles; all tickets reset.</Li>
             <Li>The pot is funded purely by staking yield — players never pay in, so nobody can lose money.</Li>
@@ -1443,9 +1443,9 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <Li>The Perm neuron's harvested yield is split <b>30% treasury / 70% lottery prize pot</b> — never distributed to users.</Li>
           </Section>
 
-          <Section icon="star" title="Stake Vouchers — the stake as an NFT">
-            <Li>Staking auto-issues a Backed voucher NFT for the position; tickets follow the voucher's current owner (day-keyed grants — wash-trading earns nothing).</Li>
-            <Li>Exits: sell on the Voucher Exchange (fee splits 1/3 treasury · 1/3 buyback fund · 1/3 voucher-canister cycles burn), instant 85% house buyback (balance-gated by the buyback wallet; burns the NFT and dissolves the claim back to the fund), or redeem (dissolve for 100%).</Li>
+          <Section icon="star" title="Stake Bonds — the stake as an NFT">
+            <Li>Staking auto-issues a Backed bond NFT for the position; tickets follow the bond's current owner (day-keyed grants — wash-trading earns nothing).</Li>
+            <Li>Exits: sell on the Bond Exchange (fee splits 1/3 treasury · 1/3 buyback fund · 1/3 bond-canister cycles burn), instant 85% house buyback (balance-gated by the buyback wallet; burns the NFT and dissolves the claim back to the fund), or redeem (dissolve for 100%).</Li>
             <Li>Golden Tickets (promo class) are tickets-only: 1/day for 60 days, soulbound, never redeemable, never buyback-eligible.</Li>
           </Section>
 
@@ -1455,7 +1455,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           </Section>
 
           <Section icon="wallet" title="Treasury & cycles — how the lights stay on">
-            <Li>Treasury inflows: 50% of burns, 30% of staking + Perm yield, voucher-fee thirds, Neuron Syndicate initiation fees, explorer and mini-golf payments.</Li>
+            <Li>Treasury inflows: 50% of burns, 30% of staking + Perm yield, bond-fee thirds, Neuron Syndicate initiation fees, explorer and mini-golf payments.</Li>
             <Li>Cycles: 25% of each burn tops up each canister via the CMC. If the backend dips below 5T cycles, the sweep auto-converts treasury ICP into cycles (two-phase, idempotent).</Li>
             <Li>Withdrawals and neuron allocations are guarded by the 15 ICP floor (override available) — below ~10 ICP the cycle top-up silently stops.</Li>
           </Section>

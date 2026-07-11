@@ -220,7 +220,7 @@ export default function Staking({
     if (whole < E8S) { setError('Nothing to convert — under 1 ICP folds into your next stake.'); return; }
     const res = await actor.wrap_stake_voucher(whole, t);
     if (res.__kind__ === 'Err') { setError(`Convert failed: ${res.Err}`); return; }
-    setNotice(`Converted ${fmtICP(whole)} ICP of ${TIER_META[t].label} stake into a voucher — manage it below.`);
+    setNotice(`Converted ${fmtICP(whole)} ICP of ${TIER_META[t].label} stake into a bond — manage it below.`);
     await refresh();
     onActivity();
   });
@@ -593,18 +593,18 @@ export default function Staking({
                     <div style={{ borderTop: '1px solid var(--border)' }} />
                     <div className="col" style={{ gap: 6, border: '1px solid var(--haze)', borderRadius: 8, padding: '10px 12px', background: 'color-mix(in srgb, var(--haze) 8%, var(--surface))' }}>
                       <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
-                        You have <b>{fmtICP(selMine.amount_e8s)} ICP</b> of legacy {termLabel} stake not yet in a voucher.
-                        Exits are voucher-native now — convert it to manage it below (sell, redeem, or instant exit).
+                        You have <b>{fmtICP(selMine.amount_e8s)} ICP</b> of legacy {termLabel} stake not yet in a bond.
+                        Exits are bond-native now — convert it to manage it below (sell, redeem, or instant exit).
                       </span>
                       <Btn variant="secondary" sm onClick={() => handleConvert(tier, selMine.amount_e8s)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-                        {busy === `convert-${tier}` ? <LiveDot size={7} /> : <Icon name="star" size={12} stroke="var(--burn-ink)" />} Convert to voucher
+                        {busy === `convert-${tier}` ? <LiveDot size={7} /> : <Icon name="star" size={12} stroke="var(--burn-ink)" />} Convert to bond
                       </Btn>
                     </div>
                   </>
                 )}
                 <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--fg-3)' }}>
                   <Icon name="star" size={12} stroke="var(--fg-3)" />
-                  Every stake arrives as a Voucher NFT below — redeem it for 100% after the {Math.round(termDays)}-day
+                  Every stake arrives as a Bond NFT below — redeem it for 100% after the {Math.round(termDays)}-day
                   dissolve, sell it, or take an instant exit. No separate unstake needed.
                 </span>
               </div>

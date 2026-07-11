@@ -39,7 +39,7 @@ export default function NeuronStakePage({
             <h4 style={{ margin: 0 }}>Stake</h4>
             <Chip tone="pending"><LiveDot size={6} /> daily tickets</Chip>
             <MoreInfo
-              title="How staking & vouchers work"
+              title="How staking & bonds work"
               style={{
                 marginLeft: 'auto', textDecoration: 'none', fontSize: 12.5, fontWeight: 600,
                 border: '1px solid var(--burn)', borderRadius: 999, padding: '6px 14px',
@@ -50,8 +50,8 @@ export default function NeuronStakePage({
                 <Eyebrow accent>The gist</Eyebrow>
                 <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
                   <b>Your ICP stays yours.</b> Staking mints free daily lottery
-                  tickets and issues a <b>Voucher NFT</b> for the position — the
-                  voucher IS your stake, and it's tradeable.
+                  tickets and issues a <b>Bond NFT</b> for the position — the
+                  bond IS your stake, and it's tradeable.
                 </p>
               </div>
               <div className="col" style={{ gap: 6 }}>
@@ -59,14 +59,14 @@ export default function NeuronStakePage({
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
                   <li><b>5 / 10 / 20 tickets a day per ICP</b> for 6-month / 1-year / 2-year terms — tiers add up.</li>
                   <li><b>Scales with your stake:</b> 500 ICP for 2 years is 10,000 tickets every day.</li>
-                  <li><b>Tickets follow the voucher</b> — whoever holds it earns; a voucher <b>listed for sale pauses</b> its tickets until delisted.</li>
+                  <li><b>Tickets follow the bond</b> — whoever holds it earns; a bond <b>listed for sale pauses</b> its tickets until delisted.</li>
                 </ul>
               </div>
               <div className="col" style={{ gap: 6 }}>
                 <Eyebrow accent>Three ways out</Eyebrow>
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                  <li><b>Wait for the dissolve</b> — redeem the voucher and your full principal returns after the term. 100%, never gated.</li>
-                  <li><b>Instant exit</b> — the house buys the voucher back on the spot for 85% of principal (an optional express-exit fee).</li>
+                  <li><b>Wait for the dissolve</b> — redeem the bond and your full principal returns after the term. 100%, never gated.</li>
+                  <li><b>Instant exit</b> — the house buys the bond back on the spot for 85% of principal (an optional express-exit fee).</li>
                   <li><b>Sell it</b> — list at any ask on the marketplace; the buyer takes over the stake and its tickets.</li>
                 </ul>
               </div>
@@ -79,7 +79,7 @@ export default function NeuronStakePage({
             </MoreInfo>
           </span>
           <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-            Every stake is issued as a <b>Voucher NFT</b> below — sell it, redeem
+            Every stake is issued as a <b>Bond NFT</b> below — sell it, redeem
             it, or take an instant exit, right on this page.
           </span>
         </div>

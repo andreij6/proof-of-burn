@@ -99,7 +99,8 @@ info.eligible;         // caller holds an active stake
 info.min_pot_e8s;      // draw gate: pot must reach this
 info.min_unique_holders; // draw gate: distinct players needed`;
 
-const UNSTAKE_SNIPPET = `// Exits are VOUCHER-NATIVE: staking auto-issued a voucher — start there.
+const UNSTAKE_SNIPPET = `// Exits are BOND-NATIVE: staking auto-issued a Stake Bond — start there.
+// (The on-chain API keeps its original 'voucher' naming — Bond is the product name.)
 // (unstake(amount, tier) only drains legacy plain-stake rows.)
 const m = await cycleBurn.get_voucher_market();
 const voucher = m.my_vouchers[0];
@@ -112,8 +113,9 @@ if ('Err' in out) throw new Error(out.Err);
 // await cycleBurn.buyback_voucher(voucher.id);
 // or list it at your price: await cycleBurn.list_voucher(voucher.id, askE8s);`;
 
-const VOUCHER_CANDID_SNIPPET = `// Stake Vouchers — an NFT claim on a staked position. Tickets follow the
-// voucher's CURRENT owner; buying one makes the buyer a staker.
+const VOUCHER_CANDID_SNIPPET = `// Stake Bonds — an NFT claim on a staked position. Tickets follow the
+// bond's CURRENT owner; buying one makes the buyer a staker. (The API keeps
+// its original 'voucher' naming — Bond is the product name.)
 type VoucherClass = variant { Backed; Promo };
 type VoucherView = record {
   id : nat64; class : VoucherClass; tier : StakeTier; amount_e8s : nat64;
@@ -154,7 +156,7 @@ await cycleBurn.buy_voucher(id);                    // buyer becomes the staker
 
 // Golden Ticket claim (promo class — tickets ONLY, 1/day for 60 days):
 // null → mints to the caller; a principal → mints to that wallet and works
-// ANONYMOUSLY (paste-a-wallet flow on /#/claim). Promo vouchers can never
+// ANONYMOUSLY (paste-a-wallet flow on /#/claim). Golden Tickets can never
 // redeem ICP, never sell, never buy back — they only earn tickets.
 await cycleBurn.claim_promo_voucher(null);`;
 
@@ -336,28 +338,30 @@ export default function DevDocs() {
         <CodeBlock code={UNSTAKE_SNIPPET} />
       </div>
 
-      {/* ── Stake Vouchers ── */}
+      {/* ── Stake Bonds ── */}
       <div className="col" style={{ ...card, gap: 10 }}>
-        {h('05', 'Stake Vouchers — exit liquidity your app can offer')}
+        {h('05', 'Stake Bonds — exit liquidity your app can offer')}
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-          Wrap a stake into a transferable NFT: sell it on the ICP marketplace,
-          take the instant house buyback at <b>85% of principal</b> (the 15%
-          discount is an express-exit fee, balance-gated by the buyback fund),
-          or redeem for 100% after the dissolve. Holders can also{' '}
-          <b>transfer_voucher</b> to another wallet's principal (the ticket
-          stream follows). A voucher <b>listed for sale earns no tickets until
-          delisted</b>. Same identity rule as everything else: <b>every call is
-          keyed to the caller's principal</b> — integrate with your user's
-          identity, never a proxy.
+          A Stake Bond is the stake as a transferable NFT: sell it on the ICP
+          marketplace, take the instant house buyback at <b>85% of principal</b>{' '}
+          (the 15% discount is an express-exit fee, balance-gated by the buyback
+          fund), or redeem for 100% after the dissolve. Holders can also{' '}
+          <b>transfer_voucher</b> it to another wallet's principal (the ticket
+          stream follows). A bond <b>listed for sale earns no tickets until
+          delisted</b>. Note: <b>the on-chain API keeps the original{' '}
+          <span className="mono">voucher</span> naming</b> (wrap_stake_voucher,
+          buy_voucher, …) — Bond is the product name. Same identity rule as
+          everything else: <b>every call is keyed to the caller's principal</b>{' '}
+          — integrate with your user's identity, never a proxy.
         </span>
         <CodeBlock code={VOUCHER_CANDID_SNIPPET} />
         <CodeBlock code={VOUCHER_FLOW_SNIPPET} />
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-          Promo ("Golden Ticket") vouchers are a separate tickets-only class: 1
-          ticket/day for 60 days, soulbound, never redeemable — both money paths
-          reject them at the endpoint level. Voucher actions (wrap/list/buyback)
-          currently require signing in with Internet Identity on our app; the
-          promo claim's paste-a-principal path is the exception (works anonymously).
+          Golden Tickets (the promo class) are tickets-only: 1 ticket/day for 60
+          days, soulbound, never redeemable — both money paths reject them at
+          the endpoint level. Bond actions (wrap/list/buyback) currently require
+          signing in with Internet Identity on our app; the promo claim's
+          paste-a-principal path is the exception (works anonymously).
         </span>
       </div>
 
@@ -365,7 +369,7 @@ export default function DevDocs() {
       <div className="col" style={{ ...card, gap: 8 }}>
         {h('06', 'Rules your UI should reflect')}
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-          <li><b>Tickets need a position, not a visit:</b> staked ICP (a voucher) or a custodied LP position both qualify, and tickets land automatically every day, server-side — your users never need to visit anyone's app to earn.</li>
+          <li><b>Tickets need a position, not a visit:</b> staked ICP (a Stake Bond) or a custodied LP position both qualify, and tickets land automatically every day, server-side — your users never need to visit anyone's app to earn.</li>
           <li><b>Full unstake voids tickets instantly</b> — partial unstake keeps the rest earning.</li>
           <li><b>The transfer must land before <span className="mono">stake()</span></b> — send exactly the amount you pass to <span className="mono">stake</span>; the treasury covers ledger fees.</li>
           <li><b>Drawings pay winners directly</b> — 65% to the winner, 30% seeds the next pot, 5% burns to cycles. Your app never touches prize money.</li>
