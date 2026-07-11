@@ -1,5 +1,15 @@
 # Log
 
+## 2026-07-11 — Mainnet deploy 7b1ff07 (polish batch)
+
+First-load indicators across every fetching surface (7 pages had
+misleading empty-states); nav restructure: "Task 4 Tickets" (Stake ·
+Liquidity Provider · ANSEM LP) + new "Listings" section (Voucher
+Exchange) above Play 4 Tickets; wrap_stake_voucher export hotfix from
+last night included; mobile: Launch-app button no longer wraps,
+vouchers table scrolls instead of crushing. Snapshots trimmed back to
+2 (…2b, …2c 624MiB).
+
 ## 2026-07-10 late — Mainnet deploy 530ca2b (slot-scheduled yield routing)
 
 Owner correction: EA yield now routes at every SCHEDULED draw slot,
