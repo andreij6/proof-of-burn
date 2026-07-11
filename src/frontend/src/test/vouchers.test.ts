@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   friendlyVoucherErr, buybackQuoteE8s, buybackAvailable, listingDeltaPct,
   promoDaysLeft, parseWrapIcp, parsePriceIcp, isPromo,
-  sortListingsBestDeal, type VoucherView,
+  sortListingsBestDeal, type VoucherView, isLpBacked, isBacked,
 } from '../Vouchers';
 import { Principal } from '@icp-sdk/core/principal';
 import { validateClaimPrincipal } from '../ClaimPromo';
@@ -116,6 +116,24 @@ describe('parsePriceIcp (listing asks, up to 4 decimals)', () => {
     expect(parsePriceIcp('1.23456')).toBeNull();
     expect(parsePriceIcp('1,5')).toBeNull();
     expect(parsePriceIcp('')).toBeNull();
+  });
+});
+
+describe('voucher class helpers are TOTAL (LpBacked + unknown classes)', () => {
+  it('recognizes LpBacked in both binding shapes', () => {
+    expect(isLpBacked('LpBacked')).toBe(true);
+    expect(isLpBacked({ LpBacked: null })).toBe(true);
+    expect(isLpBacked('Backed')).toBe(false);
+    expect(isPromo('LpBacked')).toBe(false);
+  });
+  it('only plain Backed gets money actions; unknown classes never crash', () => {
+    expect(isBacked('Backed')).toBe(true);
+    expect(isBacked({ Backed: null })).toBe(true);
+    expect(isBacked('LpBacked')).toBe(false);
+    expect(isBacked('Promo')).toBe(false);
+    expect(isBacked('SomeFutureClass')).toBe(false);
+    expect(isPromo('SomeFutureClass')).toBe(false);
+    expect(isLpBacked('SomeFutureClass')).toBe(false);
   });
 });
 

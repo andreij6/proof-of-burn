@@ -73,7 +73,7 @@ export default function NeuronStakePage({
               <div className="col" style={{ gap: 6 }}>
                 <Eyebrow accent>Why stake</Eyebrow>
                 <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                  <li><b>The platform key:</b> game competitions, LP rewards, and every other ticket source require an active stake (any amount).</li>
+                  <li><b>The platform key:</b> staking ICP here (or an LP position on the Liquidity Provider pages) unlocks game competitions and every ticket source.</li>
                 </ul>
               </div>
             </MoreInfo>

@@ -11,7 +11,7 @@ import { Btn, Chip, Eyebrow, Icon, LiveDot, Skeleton, MoreInfo } from './ui';
 // and reads the LIVE balance through the NNS SOL RPC canister. Any balance
 // over the floor pays 10 tickets into the CURRENT drawing. After each
 // drawing the round bumps and the claim re-arms — that's the re-confirmation.
-// Staking ICP is required (tickets are stakers-only platform-wide).
+// Holding qualifying LP is itself the entry — no separate ICP stake needed.
 // ==========================================
 
 /** The EXACT challenge string the backend verifies — any drift fails. */
@@ -22,7 +22,7 @@ export function lpChallengeMessage(principalText: string, round: bigint, nonce: 
 /** Friendly copy for the claim/link error codes. */
 export function friendlyLpErr(code: string): string {
   switch (code) {
-    case 'NOT_STAKED': return 'Tickets are stakers-only — stake any amount of ICP to activate LP rewards.';
+    case 'NOT_STAKED': return 'A stake or LP position is needed for this — link your LP and try again.';
     case 'NO_WALLET_LINKED': return 'Link your Solana wallet first.';
     case 'ALREADY_CLAIMED_THIS_ROUND': return 'Already confirmed for this drawing — come back after it settles.';
     case 'NO_QUALIFYING_LP': return 'No qualifying $ANSEM LP found in this wallet right now.';
@@ -48,10 +48,11 @@ interface AnsemLpProps {
   actor: any;
   principal: Principal | null;
   onSignIn: () => void;
-  onGoParticipate: () => void;
+  /** Kept for App.tsx call-site stability; LP no longer needs an ICP stake. */
+  onGoParticipate?: () => void;
 }
 
-export default function AnsemLp({ actor, principal, onSignIn, onGoParticipate }: AnsemLpProps) {
+export default function AnsemLp({ actor, principal, onSignIn }: AnsemLpProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<LpInfo | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -151,7 +152,6 @@ export default function AnsemLp({ actor, principal, onSignIn, onGoParticipate }:
             <div className="col" style={{ gap: 6 }}>
               <Eyebrow accent>The fine print</Eyebrow>
               <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                <li><b>Stakers-only:</b> tickets require an active ICP stake (any amount), like everywhere on the platform.</li>
                 <li><b>Custodial wallets can't sign</b> — you need a wallet with message signing (Phantom, Solflare).</li>
               </ul>
             </div>
@@ -216,17 +216,7 @@ export default function AnsemLp({ actor, principal, onSignIn, onGoParticipate }:
             {/* ── Step 2: confirm each round ── */}
             <div className="card col" style={{ gap: 10, flex: '1 1 260px', minWidth: 260, border: '1px solid var(--burn)', background: 'color-mix(in srgb, var(--burn) 10%, var(--surface))' }}>
               <Eyebrow accent>2 · Drawing #{Number(info?.round ?? 0n)}</Eyebrow>
-              {!info?.staked ? (
-                <>
-                  <span style={{ fontSize: 12.5, color: 'var(--fg-2)', flex: 1 }}>
-                    Tickets are stakers-only. Stake any amount of ICP to activate LP
-                    rewards.
-                  </span>
-                  <Btn variant="primary" onClick={onGoParticipate}>
-                    <Icon name="zap" size={13} stroke="var(--char-950)" /> Stake ICP
-                  </Btn>
-                </>
-              ) : info?.claimed_this_round ? (
+              {info?.claimed_this_round ? (
                 <>
                   <Chip tone="ok" style={{ alignSelf: 'flex-start' }}>
                     <Icon name="checkCircle" size={11} /> Confirmed for this drawing

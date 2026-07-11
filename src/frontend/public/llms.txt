@@ -175,7 +175,8 @@ await cycleBurn.claim_promo_voucher(destOrNull);
 // CAMPAIGN_EXHAUSTED, DAILY_LIMIT, ALREADY_CLAIMED, INVALID_PRINCIPAL).
 
 ## Rules your UI should reflect
-- Tickets are stakers-only and land automatically every day — no visit or
+- Tickets need a position, not a visit: staked ICP (a voucher) or a custodied
+  LP position both qualify, and tickets land automatically every day — no
   claim call needed. Show my_daily_tickets as the user's daily earn rate.
 - Winners are paid automatically to their own wallet: 65% winner / 30% next
   pot / 5% burned. The integrating app never touches prize money.

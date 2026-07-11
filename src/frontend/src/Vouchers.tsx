@@ -78,13 +78,29 @@ export function parsePriceIcp(text: string): bigint | null {
   return v > 0 ? BigInt(v) : null;
 }
 
-type VoucherClass = 'Backed' | 'Promo' | { Backed: null } | { Promo: null };
+type VoucherClass =
+  | 'Backed' | 'Promo' | 'LpBacked'
+  | { Backed: null } | { Promo: null } | { LpBacked: null };
 /** The wrapper bindings decode unit variants as enum STRINGS ("Promo"), not
- *  raw candid objects ({Promo:null}) — handle both so the helper survives
- *  either layer (the 'in'-on-string crash shipped once; never again). */
+ *  raw candid objects ({Promo:null}) — handle both so the helpers survive
+ *  either layer (the 'in'-on-string crash shipped once; never again). All
+ *  three helpers are TOTAL over unknown class strings: anything that isn't
+ *  recognized is treated as display-only (no money actions). */
 export function isPromo(c: VoucherClass | { Promo?: null } | string): boolean {
   if (typeof c === 'string') return c === 'Promo';
   return typeof c === 'object' && c !== null && 'Promo' in c;
+}
+/** LP-custody receipt voucher — managed on the Liquidity Provider page,
+ *  never sellable or redeemable here. */
+export function isLpBacked(c: VoucherClass | { LpBacked?: null } | string): boolean {
+  if (typeof c === 'string') return c === 'LpBacked';
+  return typeof c === 'object' && c !== null && 'LpBacked' in c;
+}
+/** ONLY plain Backed vouchers get money actions (sell/redeem/buy) — promos,
+ *  LP receipts, and any future/unknown class are display-only. */
+export function isBacked(c: VoucherClass | object | string): boolean {
+  if (typeof c === 'string') return c === 'Backed';
+  return typeof c === 'object' && c !== null && 'Backed' in c;
 }
 
 export interface VoucherView {
@@ -137,6 +153,8 @@ interface VouchersBodyProps {
   section: 'mine' | 'exchange';
   /** After a successful listing, jump to the Voucher Exchange. */
   onGoExchange?: () => void;
+  /** LP-receipt vouchers are managed on the Liquidity Provider page. */
+  onGoLiquidity?: () => void;
   /** Bare mode: no page container — render as a plain card column for
    *  embedding inside another page's row (the lottery page). */
   bare?: boolean;
@@ -145,7 +163,7 @@ interface VouchersBodyProps {
 const ticketsPerDay = (v: VoucherView) => Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8));
 
 export function VouchersBody({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, section, onGoExchange, bare,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, section, onGoExchange, onGoLiquidity, bare,
 }: VouchersBodyProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<VoucherMarketInfo | null>(null);
@@ -160,6 +178,11 @@ export function VouchersBody({
   const [sellStep, setSellStep] = useState<'choose' | 'list'>('choose');
   const [buyModal, setBuyModal] = useState<bigint | null>(null);
   const [priceText, setPriceText] = useState('');
+  // In-modal operation lifecycle (owner 2026-07-11: money ops must NEVER look
+  // frozen). While a money op runs, the open modal swaps to a processing
+  // panel; it ends on an explicit success/error panel instead of silently
+  // closing. Only one modal is ever open, so one shared phase suffices.
+  const [opPhase, setOpPhase] = useState<OpPhase | null>(null);
 
   const refresh = async () => {
     if (!actor) return;
@@ -185,21 +208,50 @@ export function VouchersBody({
     finally { setBusy(null); }
   };
 
-  const redeem = (v: VoucherView) => run(`redeem-${v.id}`, async () => {
+  /** Money-op runner for the modals: shows a processing panel while the
+   *  update call is in flight, then an explicit success/error panel — the
+   *  modal never silently closes, and never looks frozen. The page-level
+   *  notice stays as a secondary echo. */
+  const runOp = async (
+    label: string,
+    processingText: string,
+    fn: () => Promise<{ title: string; detail: string; onDone?: () => void }>,
+  ) => {
+    if (busy) return;
+    setBusy(label); setErr(null); setNotice(null);
+    setOpPhase({ kind: 'processing', text: processingText });
+    try {
+      const success = await fn();
+      setOpPhase({ kind: 'success', ...success });
+      setNotice(`${success.title} — ${success.detail}`);
+      await refresh();
+    } catch (e: any) {
+      const message = e?.message || String(e);
+      setOpPhase({ kind: 'error', message });
+      setErr(message);
+    } finally { setBusy(null); }
+  };
+
+  const redeem = (v: VoucherView) => runOp(`redeem-${v.id}`, 'Starting the dissolve…', async () => {
     const res = await actor.redeem_stake_voucher(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    setRedeemModal(null);
-    return `Redeeming — your ${fmtICP(v.amount_e8s)} ICP pays out automatically after the ${TIER_META[v.tier].label} dissolve.`;
+    return {
+      title: 'Dissolve started',
+      detail: `Your ${fmtICP(v.amount_e8s)} ICP pays your wallet automatically after the ${TIER_META[v.tier].label} dissolve — nothing to claim.`,
+      onDone: () => setRedeemModal(null),
+    };
   });
 
-  const list = (v: VoucherView) => run(`list-${v.id}`, async () => {
+  const list = (v: VoucherView) => runOp(`list-${v.id}`, 'Listing your voucher on the Exchange…', async () => {
     const price = parsePriceIcp(priceText);
     if (!price) throw new Error('Enter an ask in ICP (up to 4 decimals).');
     const res = await actor.list_voucher(v.id, price);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    setSellModal(null); setPriceText('');
-    onGoExchange?.();
-    return `Voucher #${v.id} listed at ${fmtICP(price)} ICP. It won't earn tickets while listed — cancel to resume.`;
+    return {
+      title: `Listed at ${fmtICP(price)} ICP`,
+      detail: 'Your voucher is on the Exchange. It won\'t earn tickets while listed — cancel anytime to resume.',
+      onDone: () => { setSellModal(null); setSellStep('choose'); setPriceText(''); onGoExchange?.(); },
+    };
   });
 
   const cancelListing = (v: VoucherView) => run(`cancel-${v.id}`, async () => {
@@ -208,14 +260,20 @@ export function VouchersBody({
     return `Listing for voucher #${v.id} cancelled — it's earning tickets again.`;
   });
 
-  const buyback = (v: VoucherView) => run(`buyback-${v.id}`, async () => {
-    const res = await actor.buyback_voucher(v.id);
-    if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    setRedeemModal(null);
-    return `Instant exit complete — ${fmtICP(res.Ok)} ICP paid to your wallet. The voucher is burned.`;
-  });
+  const buyback = (v: VoucherView) => {
+    const quote = buybackQuoteE8s(v.amount_e8s, info?.buyback_discount_bps ?? 1500);
+    return runOp(`buyback-${v.id}`, `Paying you ${fmtICP(quote)} ICP from the buyback fund…`, async () => {
+      const res = await actor.buyback_voucher(v.id);
+      if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
+      return {
+        title: `${fmtICP(res.Ok)} ICP paid to your wallet`,
+        detail: 'The sale is complete and the voucher is burned. The ICP is already in your wallet.',
+        onDone: () => { setSellModal(null); setSellStep('choose'); setRedeemModal(null); },
+      };
+    });
+  };
 
-  const buy = (v: VoucherView) => run(`buy-${v.id}`, async () => {
+  const buy = (v: VoucherView) => runOp(`buy-${v.id}`, 'Sending your payment to escrow…', async () => {
     if (v.listed_price_e8s == null) throw new Error(friendlyVoucherErr('NOT_LISTED'));
     // 1. Fund the sale escrow with EXACTLY the ask, 2. settle the purchase.
     const escrow = await actor.get_voucher_sale_account(v.id);
@@ -227,10 +285,14 @@ export function VouchersBody({
     if (xfer.__kind__ === 'Err') {
       throw new Error(`Payment transfer failed: ${JSON.stringify(xfer.Err, (_k, val) => typeof val === 'bigint' ? val.toString() : val)}`);
     }
+    setOpPhase({ kind: 'processing', text: 'Payment escrowed — settling the purchase…' });
     const res = await actor.buy_voucher(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
-    setBuyModal(null);
-    return `Voucher #${v.id} is yours — ${ticketsPerDay(v)} tickets just landed for the upcoming draw, and it keeps earning daily.`;
+    return {
+      title: `Voucher #${v.id} is yours`,
+      detail: `${ticketsPerDay(v)} tickets just landed for the upcoming draw, and it keeps earning daily.`,
+      onDone: () => setBuyModal(null),
+    };
   });
 
   const usd = (e8s: bigint): string => icpUsdE8s > 0n
@@ -297,42 +359,47 @@ export function VouchersBody({
               <tbody>
                 {myUnlisted.map((v) => {
                   const promo = isPromo(v.class);
+                  const lp = isLpBacked(v.class);
+                  // Money actions ONLY for plain Backed vouchers — promos, LP
+                  // receipts, and any unknown future class are display-only.
+                  const backed = isBacked(v.class);
                   return (
                     <tr key={String(v.id)} style={{ borderTop: '1px solid var(--border)' }}>
                       <td style={{ padding: '8px' }}>
                         <span className="row" style={{ gap: 6 }}>
-                          <Icon name={promo ? 'spark' : 'star'} size={13} stroke={promo ? 'var(--haze-ink)' : 'var(--burn-ink)'} />
+                          <Icon name={promo ? 'spark' : lp ? 'stack' : 'star'} size={13} stroke={promo ? 'var(--haze-ink)' : 'var(--burn-ink)'} />
                           <b>{promo ? 'Golden Ticket' : `#${String(v.id)}`}</b>
-                          {!promo && <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}></span>}
+                          {lp && <Chip tone="pending" style={{ height: 16, fontSize: 9 }}>LP</Chip>}
                         </span>
                       </td>
                       <td className="mono" style={{ padding: '8px' }}>
-                        {promo ? '—' : `${fmtICP(v.amount_e8s)} ICP`}
+                        {promo ? '—' : lp ? 'LP position' : backed ? `${fmtICP(v.amount_e8s)} ICP` : '—'}
                       </td>
                       <td style={{ padding: '8px', color: 'var(--fg-2)' }}>
                         {promo
                           ? (v.expires_at != null && promoDaysLeft(v.expires_at, Date.now()) > 0
                               ? `${promoDaysLeft(v.expires_at, Date.now())}d left` : 'expired')
-                          : TIER_META[v.tier].short}
+                          : lp ? '—' : backed ? TIER_META[v.tier].short : '—'}
                       </td>
                       <td className="mono" style={{ padding: '8px', color: 'var(--sprout-ink)' }}>
                         {promo
                           ? (v.expires_at != null && promoDaysLeft(v.expires_at, Date.now()) > 0 ? '1/day' : '0')
-                          : `${ticketsPerDay(v)}/day`}
+                          : lp ? 'via LP rewards' : backed ? `${ticketsPerDay(v)}/day` : '—'}
                       </td>
                       <td style={{ padding: '8px' }}>
                         <span className="row" style={{ gap: 6, justifyContent: 'flex-end', flexWrap: 'nowrap', whiteSpace: 'nowrap' }}>
-                          {promo ? (
-                            <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>tickets only</span>
+                          {backed ? (
+                            /* ONE action (owner 2026-07-11): selling lives inside
+                               the redeem modal's "Sell it instead" chooser. */
+                            <Btn variant="primary" sm onClick={() => { setOpPhase(null); setRedeemModal(v.id); }} disabled={busy !== null}>
+                              <Icon name="coins" size={11} stroke="var(--char-950)" /> Redeem ICP
+                            </Btn>
+                          ) : lp ? (
+                            <Btn variant="ghost" sm onClick={() => onGoLiquidity?.()}>
+                              Manage on Liquidity Provider →
+                            </Btn>
                           ) : (
-                            <>
-                              <Btn variant="secondary" sm onClick={() => { setSellModal(v.id); setSellStep('choose'); setPriceText(''); }} disabled={busy !== null}>
-                                <Icon name="coins" size={11} /> Sell…
-                              </Btn>
-                              <Btn variant="primary" sm onClick={() => setRedeemModal(v.id)} disabled={busy !== null}>
-                                <Icon name="coins" size={11} stroke="var(--char-950)" /> Redeem ICP
-                              </Btn>
-                            </>
+                            <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>tickets only</span>
                           )}
                         </span>
                       </td>
@@ -434,7 +501,7 @@ export function VouchersBody({
                       {busy === `cancel-${v.id}` ? <LiveDot size={7} /> : null} Cancel listing
                     </Btn>
                   ) : signedIn ? (
-                    <Btn variant="primary" sm onClick={() => setBuyModal(v.id)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                    <Btn variant="primary" sm onClick={() => { setOpPhase(null); setBuyModal(v.id); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
                       <Icon name="coins" size={12} stroke="var(--char-950)" /> Buy
                     </Btn>
                   ) : (
@@ -457,7 +524,13 @@ export function VouchersBody({
         if (!v) return null;
         const opt: React.CSSProperties = { border: '1px solid var(--border)', borderRadius: 10, padding: 14, background: 'var(--bg-alt)', width: '100%' };
         return (
-          <ModalShell title={`Redeem ${fmtICP(v.amount_e8s)} ICP`} onClose={() => setRedeemModal(null)}>
+          <ModalShell title={`Redeem ${fmtICP(v.amount_e8s)} ICP`} locked={busy !== null}
+            onClose={() => { setRedeemModal(null); setOpPhase(null); }}>
+            {opPhase ? (
+              <OpPanel phase={opPhase}
+                onDone={() => { const done = opPhase.kind === 'success' ? opPhase.onDone : undefined; setOpPhase(null); done?.(); }}
+                onDismissError={() => setOpPhase(null)} />
+            ) : (<>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
               Your voucher is the claim on this ICP — choose how it comes back to you.
             </span>
@@ -470,7 +543,7 @@ export function VouchersBody({
                 The full amount pays your wallet automatically after the {TIER_META[v.tier].label} dissolve. Nothing to claim.
               </span>
               <Btn variant="primary" sm onClick={() => redeem(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-                {busy === `redeem-${v.id}` ? <LiveDot size={7} /> : <Icon name="clock" size={12} stroke="var(--char-950)" />} Start the dissolve
+                <Icon name="clock" size={12} stroke="var(--char-950)" /> Start the dissolve
               </Btn>
             </div>
             <div className="col" style={opt}>
@@ -480,10 +553,11 @@ export function VouchersBody({
               <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
                 Cash out without the wait — sell instantly to the house or list it on the Exchange.
               </span>
-              <Btn variant="secondary" sm onClick={() => { setRedeemModal(null); setSellModal(v.id); setSellStep('choose'); setPriceText(''); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+              <Btn variant="secondary" sm onClick={() => { setRedeemModal(null); setSellModal(v.id); setSellStep('choose'); setPriceText(''); setOpPhase(null); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
                 <Icon name="coins" size={12} /> Sell options
               </Btn>
             </div>
+            </>)}
           </ModalShell>
         );
       })()}
@@ -495,7 +569,13 @@ export function VouchersBody({
         const price = parsePriceIcp(priceText);
         const delta = price != null ? listingDeltaPct(price, v.amount_e8s) : null;
         return (
-          <ModalShell title={`Sell your ${TIER_META[v.tier].short} voucher`} onClose={() => { setSellModal(null); setSellStep('choose'); setPriceText(''); }}>
+          <ModalShell title={`Sell your ${TIER_META[v.tier].short} voucher`} locked={busy !== null}
+            onClose={() => { setSellModal(null); setSellStep('choose'); setPriceText(''); setOpPhase(null); }}>
+            {opPhase ? (
+              <OpPanel phase={opPhase}
+                onDone={() => { const done = opPhase.kind === 'success' ? opPhase.onDone : undefined; setOpPhase(null); done?.(); }}
+                onDismissError={() => setOpPhase(null)} />
+            ) : (<>
             <div className="col" style={{ gap: 3, fontSize: 12.5, border: '1px solid var(--border)', borderRadius: 10, padding: 12, background: 'var(--bg-alt)' }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                 <span style={{ color: 'var(--fg-3)' }}>Value (staked principal)</span>
@@ -553,12 +633,13 @@ export function VouchersBody({
                 </span>
                 <span className="row" style={{ gap: 8 }}>
                   <Btn variant="primary" onClick={() => list(v)} disabled={busy !== null || price == null}>
-                    {busy === `list-${v.id}` ? <LiveDot size={8} /> : <Icon name="check" size={13} stroke="var(--char-950)" />} List for sale
+                    <Icon name="check" size={13} stroke="var(--char-950)" /> List for sale
                   </Btn>
                   <Btn variant="ghost" sm onClick={() => setSellStep('choose')}>← Back</Btn>
                 </span>
               </>
             )}
+            </>)}
           </ModalShell>
         );
       })()}
@@ -569,7 +650,13 @@ export function VouchersBody({
         if (!v || v.listed_price_e8s == null) return null;
         const delta = listingDeltaPct(v.listed_price_e8s, v.amount_e8s);
         return (
-          <ModalShell title="Confirm purchase" onClose={() => setBuyModal(null)}>
+          <ModalShell title="Confirm purchase" locked={busy !== null}
+            onClose={() => { setBuyModal(null); setOpPhase(null); }}>
+            {opPhase ? (
+              <OpPanel phase={opPhase}
+                onDone={() => { const done = opPhase.kind === 'success' ? opPhase.onDone : undefined; setOpPhase(null); done?.(); }}
+                onDismissError={() => setOpPhase(null)} />
+            ) : (<>
             <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
               <div className="col" style={{ gap: 2, flex: '1 1 130px', border: '1px solid var(--border)', borderRadius: 10, padding: 12, background: 'var(--bg-alt)' }}>
                 <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Value</span>
@@ -593,8 +680,9 @@ export function VouchersBody({
               Your {fmtICP(v.listed_price_e8s)} ICP goes to a sale escrow, then the purchase settles and the voucher moves to you. An unfinished purchase is always reclaimable.
             </span>
             <Btn variant="primary" onClick={() => buy(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
-              {busy === `buy-${v.id}` ? <LiveDot size={8} /> : <Icon name="coins" size={13} stroke="var(--char-950)" />} Buy for {fmtICP(v.listed_price_e8s)} ICP
+              <Icon name="coins" size={13} stroke="var(--char-950)" /> Buy for {fmtICP(v.listed_price_e8s)} ICP
             </Btn>
+            </>)}
           </ModalShell>
         );
       })()}
@@ -602,19 +690,74 @@ export function VouchersBody({
   );
 }
 
-/** Shared modal frame — overlay + centered card, closes on backdrop click. */
-function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+/** Lifecycle of an in-modal money operation. */
+type OpPhase =
+  | { kind: 'processing'; text: string }
+  | { kind: 'success'; title: string; detail: string; onDone?: () => void }
+  | { kind: 'error'; message: string };
+
+/** The three op panels a modal swaps to while a money op runs/finishes —
+ *  the user always sees WHAT is happening and that their funds are safe. */
+function OpPanel({ phase, onDone, onDismissError }: {
+  phase: OpPhase;
+  onDone: () => void;
+  onDismissError: () => void;
+}) {
+  if (phase.kind === 'processing') {
+    return (
+      <div className="col" style={{ alignItems: 'center', gap: 12, padding: '30px 8px' }} aria-busy="true" role="status">
+        <LiveDot size={12} color="var(--burn-ink)" />
+        <b style={{ fontSize: 14.5, textAlign: 'center' }}>{phase.text}</b>
+        <span style={{ fontSize: 12, color: 'var(--fg-3)', textAlign: 'center', lineHeight: 1.5 }}>
+          Your funds are safe — this takes a few seconds. Don't close the tab.
+        </span>
+      </div>
+    );
+  }
+  if (phase.kind === 'success') {
+    return (
+      <div className="col" style={{ alignItems: 'center', gap: 10, padding: '26px 8px' }} role="status">
+        <Icon name="checkCircle" size={34} stroke="var(--sprout-ink)" />
+        <b style={{ fontSize: 15, textAlign: 'center' }}>{phase.title}</b>
+        <span style={{ fontSize: 12.5, color: 'var(--fg-2)', textAlign: 'center', lineHeight: 1.55, maxWidth: 340 }}>
+          {phase.detail}
+        </span>
+        <Btn variant="primary" onClick={onDone} style={{ marginTop: 4 }}>Done</Btn>
+      </div>
+    );
+  }
   return (
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,0.55)', display: 'grid', placeItems: 'center', padding: 16 }}>
+    <div className="col" style={{ alignItems: 'center', gap: 10, padding: '26px 8px' }} role="alert">
+      <Icon name="x" size={30} stroke="var(--ember)" />
+      <b style={{ fontSize: 14.5, textAlign: 'center' }}>That didn't go through</b>
+      <span style={{ fontSize: 12.5, color: 'var(--ember)', textAlign: 'center', lineHeight: 1.55, maxWidth: 340 }}>
+        {phase.message}
+      </span>
+      <span style={{ fontSize: 11.5, color: 'var(--fg-3)', textAlign: 'center', maxWidth: 340 }}>
+        Nothing is lost when an operation fails — any payment already in escrow stays reclaimable.
+      </span>
+      <Btn variant="secondary" onClick={onDismissError} style={{ marginTop: 4 }}>Close</Btn>
+    </div>
+  );
+}
+
+/** Shared modal frame — overlay + centered card, closes on backdrop click.
+ *  `locked` (a money op in flight) disables BOTH the backdrop and the ✕ so a
+ *  stray click can't dismiss the modal mid-operation. */
+function ModalShell({ title, onClose, locked, children }: { title: string; onClose: () => void; locked?: boolean; children: React.ReactNode }) {
+  return (
+    <div onClick={locked ? undefined : onClose} style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'rgba(0,0,0,0.55)', display: 'grid', placeItems: 'center', padding: 16 }}>
       <div className="col" onClick={(e) => e.stopPropagation()} style={{
         gap: 12, maxWidth: 460, width: '100%', maxHeight: '90vh', overflowY: 'auto',
         background: 'var(--surface)', border: '1px solid var(--border-hi)', borderRadius: 14, padding: 20,
       }}>
         <span className="row" style={{ justifyContent: 'space-between' }}>
           <b style={{ fontSize: 15 }}>{title}</b>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--fg-2)' }} aria-label="Close">
-            <Icon name="x" size={14} />
-          </button>
+          {!locked && (
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--fg-2)' }} aria-label="Close">
+              <Icon name="x" size={14} />
+            </button>
+          )}
         </span>
         {children}
       </div>

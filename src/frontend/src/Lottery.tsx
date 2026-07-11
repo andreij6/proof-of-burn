@@ -30,6 +30,8 @@ interface LotteryProps {
   onGoStaking: () => void;
   /** After listing a voucher, jump to the Voucher Exchange. */
   onGoExchange: () => void;
+  /** LP-receipt vouchers are managed on the Liquidity Provider page. */
+  onGoLiquidity: () => void;
 }
 
 /** Countdown split into DD/HH/MM/SS block values; null when passed. */
@@ -67,7 +69,7 @@ const TICKET_SOURCE_LABELS: Record<string, string> = {
   voucher_purchase: 'Voucher purchases',
 };
 
-export default function Lottery({ actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onGoStaking, onGoExchange }: LotteryProps) {
+export default function Lottery({ actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onGoStaking, onGoExchange, onGoLiquidity }: LotteryProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
 
   const [info, setInfo] = useState<LotteryInfo | null>(null);
@@ -395,7 +397,7 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
           ) : info && !info.eligible && (info.my_tickets ?? 0n) === 0n ? (
             <div className="col" style={{ gap: 8, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Staking is the entry ticket: stake ICP to start collecting
+                Staking is the entry ticket: stake ICP (or an LP position) to start collecting
                 5 / 10 / 20 free tickets a day (6-month / 1-year / 2-year terms).
               </span>
               <Btn variant="primary" sm onClick={onGoStaking}>
@@ -457,6 +459,7 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
           onSignIn={onSignIn}
           section="mine"
           onGoExchange={onGoExchange}
+          onGoLiquidity={onGoLiquidity}
           bare
         />
       </div>

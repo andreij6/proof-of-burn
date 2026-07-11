@@ -64,10 +64,11 @@ interface IcpLpProps {
   actor: any;
   principal: Principal | null;
   onSignIn: () => void;
-  onGoParticipate: () => void;
+  /** Kept for App.tsx call-site stability; LP no longer needs an ICP stake. */
+  onGoParticipate?: () => void;
 }
 
-export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: IcpLpProps) {
+export default function IcpLp({ actor, principal, onSignIn }: IcpLpProps) {
   const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<IcpLpInfo | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -194,7 +195,7 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
               <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
                 <li><b>Scales with value:</b> {Number(info?.tickets_per_usd_day ?? 40n)} tickets per day per $1 of LP — $25 of LP is {Number(info?.tickets_per_usd_day ?? 40n) * 25} tickets every day.</li>
                 <li><b>Valued live, daily:</b> your position is re-priced each day from the pool itself and live USD rates.</li>
-                <li><b>Stakers-only:</b> like everywhere on the platform, tickets require an active ICP stake (any amount).</li>
+                <li><b>Your LP is the entry:</b> a staked position earns by itself — no separate ICP stake needed.</li>
               </ul>
             </div>
             <div className="col" style={{ gap: 6 }}>
@@ -225,17 +226,6 @@ export default function IcpLp({ actor, principal, onSignIn, onGoParticipate }: I
           {err && (
             <div className="row" style={{ gap: 8, border: '1px solid var(--ember)', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, color: 'var(--ember)' }}>
               <Icon name="x" size={14} stroke="var(--ember)" /> {err}
-            </div>
-          )}
-
-          {info && !info.staked && (
-            <div className="row" style={{ gap: 8, border: '1px solid var(--haze)', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, color: 'var(--haze-ink)', justifyContent: 'space-between', flexWrap: 'wrap' }}>
-              <span className="row" style={{ gap: 6 }}>
-                <Icon name="lock" size={13} stroke="var(--haze-ink)" /> Tickets are stakers-only — stake any amount of ICP to activate LP rewards.
-              </span>
-              <Btn variant="primary" sm onClick={onGoParticipate}>
-                <Icon name="zap" size={12} stroke="var(--char-950)" /> Stake ICP
-              </Btn>
             </div>
           )}
 

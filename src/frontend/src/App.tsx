@@ -2486,6 +2486,7 @@ export default function App() {
               onSignIn={handleLogin}
               onGoNeuronStake={() => setPage('neuronstake')}
               onGoExchange={() => setPage('exchange')}
+              onGoLiquidity={() => setPage('icplp')}
             />
           ) : page === 'devdocs' ? (
             <DevDocs />

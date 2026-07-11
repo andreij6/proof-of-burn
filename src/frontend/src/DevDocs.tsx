@@ -365,7 +365,7 @@ export default function DevDocs() {
       <div className="col" style={{ ...card, gap: 8 }}>
         {h('06', 'Rules your UI should reflect')}
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-          <li><b>Tickets are stakers-only</b> and land automatically every day, server-side — your users never need to visit anyone's app to earn.</li>
+          <li><b>Tickets need a position, not a visit:</b> staked ICP (a voucher) or a custodied LP position both qualify, and tickets land automatically every day, server-side — your users never need to visit anyone's app to earn.</li>
           <li><b>Full unstake voids tickets instantly</b> — partial unstake keeps the rest earning.</li>
           <li><b>The transfer must land before <span className="mono">stake()</span></b> — send exactly the amount you pass to <span className="mono">stake</span>; the treasury covers ledger fees.</li>
           <li><b>Drawings pay winners directly</b> — 65% to the winner, 30% seeds the next pot, 5% burns to cycles. Your app never touches prize money.</li>
