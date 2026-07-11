@@ -19168,6 +19168,7 @@ async fn redeem_stake_voucher(id: u64) -> Result<u64, String> {
     unstake(amount, tier).await.map_err(|e| format!("UNSTAKE_AFTER_REDEEM: {}", e))
 }
 
+#[ic_cdk::update]
 async fn wrap_stake_voucher(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     require_authenticated()?;
     if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
