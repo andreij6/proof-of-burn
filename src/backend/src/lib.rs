@@ -612,6 +612,13 @@ impl_storable!(PoolNeuron);
 // ==========================================
 // 3. Persistent Memory Layout
 // ==========================================
+//
+// ORPHANED MemoryIds — NEVER REUSE (features removed 2026-07-12, owner):
+//   Dapp Explorer directory: 40 DAPPS, 41 NEXT_DAPP_ID, 42 EXPLORER_QUOTES,
+//     88 FEATURED, 89 NEXT_FEATURED_ID, 94 FEATURED_QUOTES.
+//   Solana/ANSEM LP: 118 SOLANA_WALLETS, 119 SOLANA_WALLET_OWNERS,
+//     120 LP_CLAIMS, 121 LP_POOLS.
+//   X-Farm: 54 XFARM_FARMERS, 55 XFARM_NEXT_ID, 56 XFARM_CONFIG.
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
@@ -830,7 +837,6 @@ fn init(payload: InitPayload) {
     }
     // Real directory content (idGeek, Liquidium), not mocks — seeded on every
     // network when the Explorer is empty.
-    seed_default_dapps();
     // Populate the leader-neuron stats (real on mainnet, mock on local).
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), async {
@@ -859,7 +865,6 @@ fn post_upgrade() {
             refresh_icp_rate(&config).await;
         });
     }
-    seed_default_dapps();
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), fetch_leader_neuron_info());
     // Warm the treasury-balance cache right away so the commit/"Add More" gating
     // isn't briefly "depleted" after an upgrade (it defaults to 0 = can't front).
@@ -875,6 +880,8 @@ fn post_upgrade() {
     // list_feature_flags would still surface them as dead admin toggles.
     for retired in [
         "poker", "arcade_turborush", "ticker", "fast_lane", "cofounders", "stake_vouchers",
+        // Removed 2026-07-12 (owner): Dapp Explorer, Solana LP, X-Farm, Community nav.
+        "dapp_explorer", "solana_lp_rewards", "x_farm", "nav_community",
         // Removed 2026-07-06 (owner): whole features deleted outright.
         "idea_board", "discussions", "crash", "cycles_faucet",
         "arcade", "arcade_fieldgoal", "dashboard", "mission_statement", "fast_lane",
@@ -1322,7 +1329,6 @@ async fn admin_trigger_sweep() -> Result<(), String> {
     SWEEP_LAST_RUNS.with(|m| m.borrow_mut().clear());
     proposal_sync_sweep().await;
     retry_failed_settlements().await;
-    delete_expired_dapps();
     cycle_topup_check().await;
     let _ = refresh_buyback_fund_cache().await; // voucher fund display stays honest
     resume_voucher_buybacks().await;
@@ -1957,9 +1963,6 @@ thread_local! {
     /// Ok — lets unit tests simulate a CMC notify failure (the C2 trapped-fund
     /// scenario) and assert the renew journaled the block + the sweep recovers it.
     static TEST_CMC_NOTIFY_FAIL: RefCell<Option<String>> = const { RefCell::new(None) };
-    /// When Some(err), the host `xfarm_extend_farmer` mock returns that Err — lets
-    /// unit tests simulate a Farmer `extend` failure (post-money renew error path).
-    static TEST_XFARM_EXTEND_FAIL: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1967,10 +1970,6 @@ fn set_mock_cmc_notify_fail(err: Option<String>) {
     TEST_CMC_NOTIFY_FAIL.with(|cell| { *cell.borrow_mut() = err; });
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn set_mock_xfarm_extend_fail(err: Option<String>) {
-    TEST_XFARM_EXTEND_FAIL.with(|cell| { *cell.borrow_mut() = err; });
-}
 
 /// Subaccount key for the accounting ledger; `None` subaccount → all-zeros.
 #[cfg(not(target_arch = "wasm32"))]
@@ -5106,8 +5105,6 @@ fn setup_timers() {
         // ── every sweep (time-sensitive or call-free when idle) ──
         proposal_sync_sweep().await;
         retry_failed_settlements().await;
-        delete_expired_dapps();
-        expire_featured().await;
         luckproof_daily_award(); // pay yesterday's Sklansky Trainer winner (tickets = player count)
         sweep_game_retention(); // 1-day game-data retention (owner 2026-07-06)
         icpswap_lp_grant_daily_tickets().await; // ICP LP: 40 tickets/day per $1 of LP value
@@ -5117,7 +5114,6 @@ fn setup_timers() {
         lottery_draw_check().await;
         early_adopter_settlement_check().await; // draw-keyed; maturity read hourly inside
         sweep_play_sessions(); // PB-306: reap completed/expired play sessions.
-        xfarm_sweep().await; // X-Farm: reap depleted Farmers + re-notify pending CMC legs.
         // ── hourly: pure balance/status polling ──
         if sweep_due("balance_caches", SWEEP_HOURLY_NS) {
             // Treasury cache is ALSO refreshed on-demand by the commit-fronting
@@ -5311,7 +5307,6 @@ pub const FLAG_LOSSLESS_VOTING: &str = "lossless_voting";
 /// buy/Golden-Ticket-claim entry paths check this flag — but unwrap, cancel,
 /// buyback and redeem are exits and are NEVER flag-gated (custody house rule).
 pub const FLAG_LOSSLESS_LOTTERY: &str = "lossless_lottery";
-pub const FLAG_EXPLORER: &str = "dapp_explorer";
 pub const FLAG_EARLY_ADOPTERS: &str = "early_adopters";
 // Per-game arcade kill switches (the parent `arcade` hub flag was retired
 // 2026-07-06 — each game's own flag now gates it alone).
@@ -5319,25 +5314,19 @@ pub const FLAG_ARCADE_MINIGOLF: &str = "arcade_minigolf";
 pub const FLAG_ARCADE_LUCKPROOF: &str = "arcade_luckproof";
 pub const FLAG_ARCADE_SKYDIVE: &str = "arcade_skydive";
 pub const FLAG_ARCADE_BULLRUN: &str = "arcade_bullrun";
-pub const FLAG_SOLANA_LP: &str = "solana_lp_rewards";
 pub const FLAG_ICPSWAP_LP: &str = "icpswap_lp_stake";
 /// Nav-section flags (owner 2026-07-10): the app's core is the No-Loss
 /// Lottery — Governance (Voting + Neuron Syndicate) and Community
-/// (Explorer + X-Farm) nav groups ship dark until turned on.
+/// nav group ships dark until turned on.
 pub const FLAG_NAV_GOVERNANCE: &str = "nav_governance";
-pub const FLAG_NAV_COMMUNITY: &str = "nav_community";
 /// Stake Vouchers (okf/ideas/stake-vouchers): wrap stakes into ICRC-7 voucher
 /// NFTs, ICP marketplace, 15% house buyback, promo claim campaigns. Gates
 /// wrap/list/buy/claim ONLY — unwrap, cancel and buyback are exits and are
 /// NEVER flag-gated (custody house rule).
-/// X-Farm: autonomous per-user Farmer canisters burn ICP→cycles to run Gemini
-/// (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X. Ships
-/// dark (default OFF) until the owner enables it after a playtest.
-pub const FLAG_X_FARM: &str = "x_farm";
-const KNOWN_FEATURE_FLAGS: [&str; 13] = [
-    FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER, FLAG_EARLY_ADOPTERS,
+const KNOWN_FEATURE_FLAGS: [&str; 9] = [
+    FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN,
-    FLAG_SOLANA_LP, FLAG_ICPSWAP_LP, FLAG_X_FARM, FLAG_NAV_GOVERNANCE, FLAG_NAV_COMMUNITY,
+    FLAG_ICPSWAP_LP, FLAG_NAV_GOVERNANCE,
     ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
@@ -5448,12 +5437,9 @@ fn feature_default(key: &str) -> bool {
         FLAG_ARCADE_LUCKPROOF => false,
         FLAG_ARCADE_SKYDIVE => false,
         FLAG_ARCADE_BULLRUN => false,
-        FLAG_SOLANA_LP => false,
         FLAG_ICPSWAP_LP => false,
         FLAG_NAV_GOVERNANCE => false,
-        FLAG_NAV_COMMUNITY => false,
-        FLAG_X_FARM => false,
-        // Every other SHIPPED feature (Lossless Voting/Lottery, Explorer,
+        // Every other SHIPPED feature (Lossless Voting/Lottery,
         // Early Adopters) defaults ON; unknown keys stay OFF.
         k => KNOWN_FEATURE_FLAGS.contains(&k),
     }
@@ -9039,47 +9025,7 @@ pub enum ExplorerToken {
     CkUSDT,
 }
 
-#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DappStatus {
-    /// Community submission awaiting admin review — never shown publicly.
-    Pending,
-    Approved,
-}
 
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct DappListing {
-    pub id: u64,
-    pub submitter: Principal,
-    pub name: String,
-    pub url: String,
-    pub description: String,
-    /// True for paid community submissions (badged in the UI); false for
-    /// admin-curated listings.
-    pub community: bool,
-    pub status: DappStatus,
-    pub created_at: u64,
-    pub approved_at: Option<u64>,
-    /// None = permanent (admin listings). Community listings expire
-    /// `days` after approval and are then deleted by the sweep.
-    pub expires_at: Option<u64>,
-    pub days: u64,
-    pub token: Option<ExplorerToken>,
-    /// Amount paid in `token`'s smallest unit (0 for admin listings).
-    pub amount_paid: u64,
-    /// Categories this dapp belongs to (subset of `DAPP_CATEGORIES`). Drives
-    /// the Explorer's category filter; not shown on the grid cards.
-    #[serde(default)]
-    pub categories: Vec<String>,
-    /// True if the submitter flagged the dapp as "vibe coded" (built largely
-    /// with AI assistance). Shown as a badge above the title. Always false for
-    /// curated/admin and default-seeded listings.
-    #[serde(default)]
-    pub is_vibe_coded: bool,
-    /// Optional X/Twitter handle (without the leading @), e.g. "ICPSwap".
-    /// Rendered as a link on the card. None = no handle shown.
-    #[serde(default)]
-    pub twitter: Option<String>,
-}
 
 /// A locked price for one caller: deposit `amount` (+ one ledger fee) on the
 /// token's ledger, then call `submit_dapp` before `expires_at`.
@@ -9117,33 +9063,17 @@ pub struct ExplorerInfo {
     pub available_categories: Vec<String>,
 }
 
-impl_storable!(DappListing);
 impl_storable!(ExplorerQuote);
 
 thread_local! {
-    static DAPPS: RefCell<StableBTreeMap<u64, DappListing, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(40))))
-    });
 
-    static NEXT_DAPP_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(41)), 1u64))
-    });
 
-    static EXPLORER_QUOTES: RefCell<StableBTreeMap<Principal, ExplorerQuote, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(42))))
-    });
 
     // Transient USD-rate cache [(rate_e8s, fetched_at); one slot per token].
     // Heap-only on purpose: rates are refetched after an upgrade.
     static EXPLORER_USD_RATES: RefCell<[(u64, u64); 5]> = const { RefCell::new([(0, 0); 5]) };
 }
 
-fn require_explorer_enabled() -> Result<(), String> {
-    if !feature_visible(FLAG_EXPLORER, get_caller()) {
-        return Err("FEATURE_DISABLED".to_string());
-    }
-    Ok(())
-}
 
 fn explorer_token_index(token: ExplorerToken) -> usize {
     match token {
@@ -9233,22 +9163,6 @@ fn derive_explorer_subaccount(user: &Principal) -> [u8; 32] {
     sub
 }
 
-fn validate_dapp_text(name: &str, url: &str, description: &str) -> Result<(), String> {
-    if name.is_empty() || name.chars().count() > MAX_DAPP_NAME_LEN {
-        return Err("INVALID_NAME".to_string());
-    }
-    if description.is_empty() || description.chars().count() > MAX_DAPP_DESC_LEN {
-        return Err("INVALID_DESCRIPTION".to_string());
-    }
-    if url.len() > MAX_DAPP_URL_LEN
-        || !url.starts_with("https://")
-        || url.len() <= "https://".len()
-        || url.chars().any(|c| c.is_whitespace() || c.is_control())
-    {
-        return Err("INVALID_URL".to_string());
-    }
-    Ok(())
-}
 
 /// days × $1/day converted into the token's smallest unit at `rate_usd_e8s`
 /// (USD per whole token). Returns (token amount, USD total in e8s).
@@ -9697,50 +9611,6 @@ pub struct TokenUsdRate {
     pub rate_usd_e8s: u64,
 }
 
-/// Cached USD rates for every supported token — what the UI uses to render
-/// dollar thresholds and conversion previews. Same source the canister uses
-/// for valuations (XRC-cached on mainnet, admin/static locally).
-#[ic_cdk::query]
-fn get_usd_rates() -> Vec<TokenUsdRate> {
-    [ExplorerToken::ICP, ExplorerToken::CkBTC, ExplorerToken::CkETH, ExplorerToken::CkUSDC, ExplorerToken::CkUSDT]
-        .iter()
-        .map(|&t| TokenUsdRate { token: t, rate_usd_e8s: cached_usd_rate_e8s(t) })
-        .collect()
-}
-
-fn dapp_is_live(d: &DappListing, now: u64) -> bool {
-    d.status == DappStatus::Approved && d.expires_at.map(|x| now <= x).unwrap_or(true)
-}
-
-/// Sweep pass: drop approved community listings whose paid window has lapsed.
-fn delete_expired_dapps() {
-    let now = current_time();
-    let expired: Vec<u64> = DAPPS.with(|m| {
-        m.borrow()
-            .iter()
-            .filter(|e| {
-                let d = e.value();
-                matches!(d.expires_at, Some(x) if now > x)
-            })
-            .map(|e| *e.key())
-            .collect()
-    });
-    DAPPS.with(|m| {
-        let mut m = m.borrow_mut();
-        for id in expired {
-            m.remove(&id);
-        }
-    });
-}
-
-fn next_dapp_id() -> u64 {
-    NEXT_DAPP_ID.with(|c| {
-        let id = *c.borrow().get();
-        c.borrow_mut().set(id + 1);
-        id
-    })
-}
-
 fn log_dapp_event(event_type: &str, dapp_id: u64, user: Principal, amount: u64) {
     let entry = AuditLogEntry {
         timestamp: current_time(),
@@ -9753,6 +9623,21 @@ fn log_dapp_event(event_type: &str, dapp_id: u64, user: Principal, amount: u64) 
         let _ = log.borrow_mut().append(&entry);
     });
 }
+
+/// Cached USD rates for every supported token — what the UI uses to render
+/// dollar thresholds and conversion previews. Same source the canister uses
+/// for valuations (XRC-cached on mainnet, admin/static locally).
+#[ic_cdk::query]
+fn get_usd_rates() -> Vec<TokenUsdRate> {
+    [ExplorerToken::ICP, ExplorerToken::CkBTC, ExplorerToken::CkETH, ExplorerToken::CkUSDC, ExplorerToken::CkUSDT]
+        .iter()
+        .map(|&t| TokenUsdRate { token: t, rate_usd_e8s: cached_usd_rate_e8s(t) })
+        .collect()
+}
+
+
+
+
 
 /// Admin-curated cards. Real ecosystem content (not local mocks), so this
 /// seeds on every network. Per-entry insert-if-missing (matched by name) so
@@ -9777,199 +9662,16 @@ const DAPP_CATEGORIES: [&str; 12] = [
 ];
 const MAX_DAPP_CATEGORIES: usize = 3;
 
-/// Validate + normalize submitted categories: each must be a known category
-/// (case-insensitive), deduped, capped at `MAX_DAPP_CATEGORIES`. Empty is
-/// allowed (an uncategorized listing simply never matches a category filter).
-fn validate_dapp_categories(cats: &[String]) -> Result<Vec<String>, String> {
-    let mut out: Vec<String> = Vec::new();
-    for c in cats {
-        let c = c.trim();
-        if c.is_empty() {
-            continue;
-        }
-        let canon = DAPP_CATEGORIES
-            .iter()
-            .find(|k| k.eq_ignore_ascii_case(c))
-            .ok_or_else(|| format!("UNKNOWN_CATEGORY: {}", c))?;
-        if !out.iter().any(|e| e == *canon) {
-            out.push((*canon).to_string());
-        }
-    }
-    if out.len() > MAX_DAPP_CATEGORIES {
-        return Err("TOO_MANY_CATEGORIES".to_string());
-    }
-    Ok(out)
-}
 
-/// X/Twitter handle (without @) for a curated default dapp. Verified handles
-/// only — returns None when the handle isn't known (no link shown). Used to set
-/// and backfill the card link in `seed_default_dapps`.
-fn seed_twitter(name: &str) -> Option<String> {
-    let h = match name {
-        "idGeek 2.0" => "theIDGEEK",
-        "ICPSwap" => "ICPSwap",
-        "OpenChat" => "OpenChat",
-        "onicai" => "onicaiHQ",
-        "DGDG" => "dgdg_app",
-        "Taggr" => "TAGGR_",
-        _ => return None,
-    };
-    Some(h.to_string())
-}
 
-fn seed_default_dapps() {
-    let owner = CONFIG.with(|c| {
-        c.borrow().get().admins.first().copied().unwrap_or_else(Principal::anonymous)
-    });
-    let now = current_time();
-    let samples: [(&str, &str, &str, &[&str]); 15] = [
-        (
-            "idGeek 2.0",
-            "https://xdtth-dyaaa-aaaah-qc73q-cai.raw.icp0.io/",
-            "Secure, automated and decentralized marketplace for buying and selling Internet Identities with their linked assets — including SNS neurons — executed entirely by smart contracts on the Internet Computer.",
-            &["Marketplace", "DeFi"],
-        ),
-        (
-            "Liquidium",
-            "https://app.liquidium.fi/i/actual-coral-giraffe",
-            "Cross-chain lending protocol: supply Bitcoin and borrow stablecoins without selling your holdings. Chain Fusion collateral across chains, auto-compounded yield for lenders, no lock-ups, fully non-custodial.",
-            &["DeFi"],
-        ),
-        (
-            "ICPSwap",
-            "https://app.icpswap.com/",
-            "The Internet Computer's leading decentralized exchange: swap, provide concentrated liquidity, and farm across ICP, ckBTC, ckETH and stablecoin pools — every order book, position and fee settled fully on-chain.",
-            &["DEX", "DeFi"],
-        ),
-        (
-            "OISY Wallet",
-            "https://oisy.com/",
-            "Browser-based multi-chain wallet powered by Chain Fusion: hold and send BTC, ETH, SOL, ICP and ERC-20 tokens from one interface — no extension, no seed phrase, secured by Internet Identity and threshold cryptography.",
-            &["Wallet"],
-        ),
-        (
-            "OpenChat",
-            "https://oc.app/",
-            "Fully on-chain messaging that feels like your favorite chat app: communities, channels, and instant crypto transfers in-chat. Governed by its own SNS DAO — the flagship proof that social runs on the Internet Computer.",
-            &["Social", "DAO"],
-        ),
-        (
-            "Partyhats",
-            "https://partyhats.xyz/",
-            "Fully on-chain casino with no house edge: burn PARTY tokens to play mines and other provably-fair games, provide liquidity on PartyDEX to earn yield, and trade ICP Party Hat NFTs — every bet and payout settled by smart contracts on the Internet Computer.",
-            &["Gaming", "DeFi"],
-        ),
-        (
-            "Dyvr",
-            "https://dyvr.me/",
-            "A platform of connected apps for the on-chain internet, powered by the $DEEP token: explore the network, lend and borrow, and optimize canister infrastructure — a suite of integrated products built on the Internet Computer.",
-            &["Infrastructure", "DeFi"],
-        ),
-        (
-            "onicai",
-            "https://www.onicai.com/",
-            "AI-as-a-Service platform pioneering on-chain artificial intelligence: run large language models entirely inside ICP canisters, compete in incentivized AI tournaments via funnAI, and build with open-source GGUF tooling — no off-chain inference required.",
-            &["AI"],
-        ),
-        (
-            "DGDG",
-            "https://dgdg.app/",
-            "NFT marketplace and aggregator for the Internet Computer: browse, buy and list collections like ICP.DOG, ICP Punks and ICP Flower with transparent creator fees and royalties, connecting via Internet Identity, Plug, Stoic or Bitfinity.",
-            &["NFT", "Marketplace"],
-        ),
-        (
-            "IC Terminal",
-            "https://icterminal.com/metrics.php?m=active_addresses&r=1d&chartStyle=line",
-            "On-chain analytics terminal for the Internet Computer: track active addresses, transaction volume, token metrics and network activity through customizable real-time charts — a data dashboard for monitoring the health of the IC ecosystem.",
-            &["Analytics"],
-        ),
-        (
-            "ICP Index",
-            "https://icpindex.app/",
-            "An index and analytics dashboard for the Internet Computer ecosystem — explore ICP market data and rankings. Visit the site for the latest.",
-            &["Analytics"],
-        ),
-        (
-            "Taggr",
-            "https://taggr.link/",
-            "Fully on-chain SocialFi network — a decentralized blog, forum and social platform where users truly own their content. The community governs every code change through on-chain voting, and the network self-funds its own cycles from user activity, aiming to run perpetually and censorship-resistant on the Internet Computer.",
-            &["Social", "DAO"],
-        ),
-        (
-            "Menese Protocol",
-            "https://www.meneseprotocol.io/",
-            "A multichain operating system on the Internet Computer for cross-chain interoperability: ICP-native routers connect EVM chains and Solana for non-custodial token movement, with a Motoko backend, a developer SDK and a multichain launchpad.",
-            &["Infrastructure", "DeFi"],
-        ),
-        (
-            "nftGeek",
-            "https://t5t44-naaaa-aaaah-qcutq-cai.raw.icp0.io/",
-            "Analytics tool for Internet Computer NFTs: explore collections, holders, transfers and market activity across IC NFT projects — on-chain data and insights for collectors and traders, served entirely from a canister.",
-            &["NFT", "Analytics"],
-        ),
-        (
-            "iiname",
-            "https://z7eqj-riaaa-aaaac-qc7zq-cai.icp0.io/",
-            "A readable name for your unreadable principal ID: claim a human-readable handle on the Internet Computer and turn it into a shareable link-in-bio profile — avatar plus your X, GitHub and other links — so people find and reach you by name instead of a long principal, all on-chain.",
-            &["Identity", "Social"],
-        ),
-    ];
-    for (name, url, description, categories) in samples {
-        // If this default listing already exists (seeded by an earlier
-        // version), backfill its categories on upgrade rather than skipping —
-        // the field decodes as empty for pre-categories listings.
-        let existing = DAPPS.with(|m| {
-            m.borrow().iter().find(|e| e.value().name == name).map(|e| (*e.key(), e.value()))
-        });
-        if let Some((existing_id, mut d)) = existing {
-            let mut changed = false;
-            // The seed is the source of truth for curated (non-community) dapps —
-            // keep url / description / categories / twitter in sync on upgrade
-            // (e.g. a domain move or a copy edit). Community listings are left
-            // untouched.
-            if !d.community {
-                let seed_cats: Vec<String> = categories.iter().map(|c| c.to_string()).collect();
-                if d.url != url { d.url = url.to_string(); changed = true; }
-                if d.description != description { d.description = description.to_string(); changed = true; }
-                if d.categories != seed_cats { d.categories = seed_cats; changed = true; }
-                if let Some(h) = seed_twitter(name) {
-                    if d.twitter.as_deref() != Some(h.as_str()) { d.twitter = Some(h); changed = true; }
-                }
-            }
-            if changed {
-                DAPPS.with(|m| { m.borrow_mut().insert(existing_id, d); });
-            }
-            continue;
-        }
-        let id = next_dapp_id();
-        DAPPS.with(|m| {
-            m.borrow_mut().insert(id, DappListing {
-                id,
-                submitter: owner,
-                name: name.to_string(),
-                url: url.to_string(),
-                description: description.to_string(),
-                community: false,
-                status: DappStatus::Approved,
-                created_at: now,
-                approved_at: Some(now),
-                expires_at: None,
-                days: 0,
-                token: None,
-                amount_paid: 0,
-                categories: categories.iter().map(|c| c.to_string()).collect(),
-                is_vibe_coded: false,
-                twitter: seed_twitter(name),
-            });
-        });
-    }
-}
 
 #[ic_cdk::query]
 fn get_explorer_info() -> ExplorerInfo {
     let config = CONFIG.with(|c| c.borrow().get().clone());
     ExplorerInfo {
-        enabled: feature_visible(FLAG_EXPLORER, get_caller()),
+        // Directory removed 2026-07-12; this endpoint is now the wallet token
+        // registry (ledgers + fees) — `enabled` no longer gates a page.
+        enabled: false,
         icp_ledger: explorer_token_ledger(ExplorerToken::ICP, &config),
         ckbtc_ledger: explorer_token_ledger(ExplorerToken::CkBTC, &config),
         cketh_ledger: explorer_token_ledger(ExplorerToken::CkETH, &config),
@@ -9988,261 +9690,13 @@ fn get_explorer_info() -> ExplorerInfo {
     }
 }
 
-/// All live (approved, unexpired) listings: admin-curated first in curation
-/// order, then community listings in approval order.
-#[ic_cdk::query]
-fn list_dapps() -> Vec<DappListing> {
-    let now = current_time();
-    let mut dapps: Vec<DappListing> = DAPPS.with(|m| {
-        m.borrow()
-            .iter()
-            .map(|e| e.value())
-            .filter(|d| dapp_is_live(d, now))
-            .collect()
-    });
-    dapps.sort_by_key(|d| (d.community, d.approved_at.unwrap_or(d.created_at), d.id));
-    dapps
-}
 
-/// The caller's own submissions in every state — lets the UI show "pending
-/// admin approval" and time remaining.
-#[ic_cdk::query]
-fn list_my_dapp_submissions() -> Vec<DappListing> {
-    let caller = get_caller();
-    let mut dapps: Vec<DappListing> = DAPPS.with(|m| {
-        m.borrow()
-            .iter()
-            .map(|e| e.value())
-            .filter(|d| d.community && d.submitter == caller)
-            .collect()
-    });
-    dapps.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
-    dapps
-}
 
-/// Admin: the approval queue, oldest first.
-#[ic_cdk::query(guard = "require_admin")]
-fn list_pending_dapps() -> Vec<DappListing> {
-    let mut dapps: Vec<DappListing> = DAPPS.with(|m| {
-        m.borrow()
-            .iter()
-            .map(|e| e.value())
-            .filter(|d| d.status == DappStatus::Pending)
-            .collect()
-    });
-    dapps.sort_by_key(|d| (d.created_at, d.id));
-    dapps
-}
 
-/// The caller's deposit account for Explorer listing fees. Fund it on the
-/// quoted token's ledger with `quote.amount` + one transfer fee, then call
-/// `submit_dapp`.
-#[ic_cdk::query]
-fn get_explorer_deposit_address() -> LedgerAccount {
-    let caller = get_caller();
-    LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(derive_explorer_subaccount(&caller)),
-    }
-}
 
-/// Price `days` of visibility in `token` at the live USD rate and lock that
-/// price for the caller for 15 minutes. An update (not a query) because the
-/// mainnet path may refresh the rate via the XRC.
-#[ic_cdk::update]
-async fn get_explorer_quote(token: ExplorerToken, days: u64) -> Result<ExplorerQuote, String> {
-    require_authenticated()?;
-    require_explorer_enabled()?;
-    let caller = get_caller();
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let rate = explorer_usd_rate_e8s(token, &config).await?;
-    let (amount, usd_total_e8s) = explorer_quote_amount(days, rate, explorer_token_decimals(token))?;
-    let now = current_time();
-    let quote = ExplorerQuote {
-        token,
-        days,
-        amount,
-        rate_usd_e8s: rate,
-        usd_total_e8s,
-        created_at: now,
-        expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
-    };
-    EXPLORER_QUOTES.with(|m| {
-        m.borrow_mut().insert(caller, quote.clone());
-    });
-    Ok(quote)
-}
 
-/// Submit a community listing. Requires a fresh quote for the same token +
-/// days (get_explorer_quote) and the quoted amount (+ one ledger fee)
-/// deposited on get_explorer_deposit_address. The payment moves to the
-/// treasury immediately; the listing stays Pending — invisible to the
-/// public — until an admin approves it. Rejection refunds from the treasury.
-#[ic_cdk::update]
-async fn submit_dapp(
-    name: String,
-    url: String,
-    description: String,
-    token: ExplorerToken,
-    days: u64,
-    categories: Vec<String>,
-    is_vibe_coded: bool,
-) -> Result<u64, String> {
-    require_authenticated()?;
-    require_explorer_enabled()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
 
-    let name = name.trim().to_string();
-    let url = url.trim().to_string();
-    let description = description.trim().to_string();
-    validate_dapp_text(&name, &url, &description)?;
-    let categories = validate_dapp_categories(&categories)?;
-    if !(EXPLORER_MIN_DAYS..=EXPLORER_MAX_DAYS).contains(&days) {
-        return Err("INVALID_DAYS".to_string());
-    }
 
-    let quota_err = DAPPS.with(|m| {
-        let m = m.borrow();
-        if m.len() >= MAX_DAPPS {
-            return Some("DAPP_QUOTA_REACHED");
-        }
-        let pending_by_caller = m
-            .iter()
-            .filter(|e| {
-                let d = e.value();
-                d.submitter == caller && d.status == DappStatus::Pending
-            })
-            .count();
-        if pending_by_caller >= MAX_PENDING_DAPPS_PER_USER {
-            return Some("TOO_MANY_PENDING_DAPPS");
-        }
-        None
-    });
-    if let Some(e) = quota_err {
-        return Err(e.to_string());
-    }
-
-    // The stored quote locks the price so a rate move between depositing and
-    // submitting can't invalidate the payment.
-    let now = current_time();
-    let quote = EXPLORER_QUOTES
-        .with(|m| m.borrow().get(&caller))
-        .ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.token != token || quote.days != days {
-        return Err("QUOTE_MISMATCH".to_string());
-    }
-    if now > quote.expires_at {
-        return Err("QUOTE_EXPIRED".to_string());
-    }
-
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let ledger_id = explorer_token_ledger(token, &config);
-    let fee = explorer_token_fee(token, &config);
-    let sub = derive_explorer_subaccount(&caller);
-    let escrow = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(sub),
-    };
-    let balance = call_ledger_balance(ledger_id, escrow).await?;
-    if balance < quote.amount.saturating_add(fee) {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
-    }
-    let treasury_dest = LedgerAccount {
-        owner: get_canister_id(),
-        subaccount: Some(TREASURY_SUBACCOUNT),
-    };
-    call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
-        .await
-        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
-
-    let id = next_dapp_id();
-    DAPPS.with(|m| {
-        m.borrow_mut().insert(id, DappListing {
-            id,
-            submitter: caller,
-            name,
-            url,
-            description,
-            community: true,
-            status: DappStatus::Pending,
-            created_at: now,
-            approved_at: None,
-            expires_at: None, // set when an admin approves
-            days,
-            token: Some(token),
-            amount_paid: quote.amount,
-            categories,
-            is_vibe_coded,
-            twitter: None,
-        });
-    });
-    EXPLORER_QUOTES.with(|m| {
-        m.borrow_mut().remove(&caller);
-    });
-    log_dapp_event("dapp_submit", id, caller, quote.amount);
-    Ok(id)
-}
-
-/// Admin: approve a pending community listing. Its paid `days` window starts
-/// now.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_approve_dapp(id: u64) -> Result<(), String> {
-    let now = current_time();
-    DAPPS.with(|m| {
-        let mut m = m.borrow_mut();
-        let mut d = m.get(&id).ok_or_else(|| "DAPP_NOT_FOUND".to_string())?;
-        if d.status != DappStatus::Pending {
-            return Err("NOT_PENDING".to_string());
-        }
-        d.status = DappStatus::Approved;
-        d.approved_at = Some(now);
-        d.expires_at = Some(now.saturating_add(d.days.saturating_mul(DAY_NANOS)));
-        m.insert(id, d);
-        Ok(())
-    })?;
-    log_dapp_event("dapp_approve", id, get_caller(), 0);
-    Ok(())
-}
-
-/// Admin: reject a pending community listing. The payment is refunded from
-/// the treasury (minus one ledger fee), then the listing is deleted.
-/// The listing is REMOVED before the refund transfer (and restored if it
-/// fails) so a concurrent second reject — or an interleaved approve — can't
-/// refund the same payment twice across the await (review 2026-06-11).
-#[ic_cdk::update(guard = "require_admin")]
-async fn admin_reject_dapp(id: u64) -> Result<(), String> {
-    let listing = DAPPS
-        .with(|m| m.borrow().get(&id))
-        .ok_or_else(|| "DAPP_NOT_FOUND".to_string())?;
-    if listing.status != DappStatus::Pending {
-        return Err("NOT_PENDING".to_string());
-    }
-    // Claim the listing before any await: concurrent callers now see
-    // DAPP_NOT_FOUND instead of double-refunding.
-    DAPPS.with(|m| {
-        m.borrow_mut().remove(&id);
-    });
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    if let Some(token) = listing.token {
-        let fee = explorer_token_fee(token, &config);
-        let refund = listing.amount_paid.saturating_sub(fee);
-        if refund > 0 {
-            let ledger_id = explorer_token_ledger(token, &config);
-            let dest = LedgerAccount { owner: listing.submitter, subaccount: None };
-            if let Err(e) = call_ledger_transfer(ledger_id, Some(TREASURY_SUBACCOUNT), dest, refund, Some(fee)).await {
-                // Refund failed — put the listing back so the reject can be
-                // retried (nothing has been paid out).
-                DAPPS.with(|m| {
-                    m.borrow_mut().insert(id, listing.clone());
-                });
-                return Err(format!("REFUND_FAILED: {}", e));
-            }
-        }
-    }
-    log_dapp_event("dapp_reject", id, listing.submitter, listing.amount_paid);
-    Ok(())
-}
 
 // ════════════════════════════════════════════════════════════════════════════
 // Featured Dapp — a paid, time-boxed "hero" placement on the Explorer (PB-FEAT).
@@ -10260,64 +9714,13 @@ const FEATURED_MAX_DAYS: u64 = 90;
 const MAX_FEATURED_ACTIVE: usize = 3;
 const FEATURED_PENDING_TTL_NANOS: u64 = 7 * DAY_NANOS;
 
-#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FeaturedStatus { Pending, Active, Expired, Rejected }
 
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct FeaturedDapp {
-    pub id: u64,
-    pub listing_id: u64,
-    pub applicant: Principal,
-    pub status: FeaturedStatus,
-    pub token: Option<ExplorerToken>,
-    pub amount_paid: u64,
-    pub usd_total_e8s: u64,
-    pub days: u64,
-    pub created_at: u64,
-    pub approved_at: Option<u64>,
-    pub expires_at: Option<u64>,
-    #[serde(default)]
-    pub payment_block: Option<u64>,
-}
-impl_storable!(FeaturedDapp);
 
-/// A featured placement joined to its listing — what the UI renders.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct FeaturedView {
-    pub featured: FeaturedDapp,
-    pub listing: DappListing,
-}
 
-/// Everything the Explorer hero needs in one query.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct FeaturedInfo {
-    pub active: Vec<FeaturedView>,
-    pub slots_total: u32,
-    pub slots_open: u32,
-    pub price_per_day_usd_e8s: u64,
-    pub min_days: u64,
-    pub max_days: u64,
-}
 
 thread_local! {
-    static FEATURED: RefCell<StableBTreeMap<u64, FeaturedDapp, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(88))))
-    });
-    static NEXT_FEATURED_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(89)), 1u64))
-    });
-    static FEATURED_QUOTES: RefCell<StableBTreeMap<Principal, ExplorerQuote, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(94))))
-    });
 }
 
-fn next_featured_id() -> u64 {
-    NEXT_FEATURED_ID.with(|c| {
-        let id = *c.borrow().get();
-        c.borrow_mut().set(id + 1);
-        id
-    })
-}
 
 /// Per-caller escrow subaccount for featured premiums — distinct from the
 /// explorer listing escrow so the two never collide.
@@ -10331,387 +9734,24 @@ fn derive_featured_subaccount(user: &Principal) -> [u8; 32] {
     sub
 }
 
-fn featured_quote_amount(days: u64, rate_usd_e8s: u64, decimals: u32) -> Result<(u64, u64), String> {
-    if !(FEATURED_MIN_DAYS..=FEATURED_MAX_DAYS).contains(&days) {
-        return Err("INVALID_DAYS".to_string());
-    }
-    if rate_usd_e8s == 0 {
-        return Err("RATE_UNAVAILABLE".to_string());
-    }
-    let usd_total = (days as u128) * (FEATURED_PRICE_PER_DAY_USD_E8S as u128);
-    let scale = 10u128.pow(decimals);
-    let amount = u64::try_from(usd_total.saturating_mul(scale) / (rate_usd_e8s as u128))
-        .map_err(|_| "AMOUNT_OVERFLOW".to_string())?;
-    if amount == 0 {
-        return Err("AMOUNT_TOO_SMALL".to_string());
-    }
-    Ok((amount, usd_total as u64))
-}
 
-/// A featured row counts against the 3-slot cap when it's Active, not past its
-/// window, and its listing still exists.
-fn featured_is_live(f: &FeaturedDapp, now: u64) -> bool {
-    f.status == FeaturedStatus::Active
-        && f.expires_at.map(|e| now <= e).unwrap_or(false)
-        && DAPPS.with(|m| m.borrow().get(&f.listing_id).is_some())
-}
 
-fn featured_active_count(now: u64) -> usize {
-    FEATURED.with(|m| m.borrow().iter().filter(|e| featured_is_live(&e.value(), now)).count())
-}
 
-fn featured_view(f: FeaturedDapp) -> Option<FeaturedView> {
-    DAPPS.with(|m| m.borrow().get(&f.listing_id)).map(|listing| FeaturedView { featured: f, listing })
-}
 
-/// Anonymous-OK query: the active featured set (joined to listings) + slot/price
-/// info. The hero picks one of `active` at random client-side per page load.
-#[ic_cdk::query]
-fn get_featured_dapps() -> FeaturedInfo {
-    let now = current_time();
-    let active: Vec<FeaturedView> = FEATURED.with(|m| {
-        m.borrow().iter()
-            .map(|e| e.value())
-            .filter(|f| featured_is_live(f, now))
-            .filter_map(featured_view)
-            .collect()
-    });
-    let slots_open = (MAX_FEATURED_ACTIVE as u32).saturating_sub(active.len() as u32);
-    FeaturedInfo {
-        active,
-        slots_total: MAX_FEATURED_ACTIVE as u32,
-        slots_open,
-        price_per_day_usd_e8s: FEATURED_PRICE_PER_DAY_USD_E8S,
-        min_days: FEATURED_MIN_DAYS,
-        max_days: FEATURED_MAX_DAYS,
-    }
-}
 
-/// The caller's own featured applications (any state), joined to their listings.
-#[ic_cdk::query]
-fn get_my_featured() -> Vec<FeaturedView> {
-    let caller = get_caller();
-    FEATURED.with(|m| {
-        m.borrow().iter()
-            .map(|e| e.value())
-            .filter(|f| f.applicant == caller && f.status != FeaturedStatus::Rejected)
-            .filter_map(featured_view)
-            .collect()
-    })
-}
 
-/// Admin: pending featured applications awaiting review.
-#[ic_cdk::query]
-fn list_pending_featured() -> Vec<FeaturedView> {
-    if require_admin().is_err() {
-        return vec![];
-    }
-    FEATURED.with(|m| {
-        m.borrow().iter()
-            .map(|e| e.value())
-            .filter(|f| f.status == FeaturedStatus::Pending)
-            .filter_map(featured_view)
-            .collect()
-    })
-}
 
-fn get_featured_deposit_address_inner(caller: Principal) -> LedgerAccount {
-    LedgerAccount { owner: get_canister_id(), subaccount: Some(derive_featured_subaccount(&caller)) }
-}
 
-#[ic_cdk::query]
-fn get_featured_deposit_address() -> LedgerAccount {
-    get_featured_deposit_address_inner(get_caller())
-}
 
-/// Quote `days` of featured placement in `token` at the live USD rate; locks the
-/// price for the caller for 15 minutes (separate from the listing quote).
-#[ic_cdk::update]
-async fn get_featured_quote(token: ExplorerToken, days: u64) -> Result<ExplorerQuote, String> {
-    require_authenticated()?;
-    require_explorer_enabled()?;
-    let caller = get_caller();
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let rate = explorer_usd_rate_e8s(token, &config).await?;
-    let (amount, usd_total_e8s) = featured_quote_amount(days, rate, explorer_token_decimals(token))?;
-    let now = current_time();
-    let quote = ExplorerQuote {
-        token, days, amount, rate_usd_e8s: rate, usd_total_e8s,
-        created_at: now, expires_at: now.saturating_add(EXPLORER_QUOTE_TTL_NANOS),
-    };
-    FEATURED_QUOTES.with(|m| { m.borrow_mut().insert(caller, quote.clone()); });
-    Ok(quote)
-}
 
-/// Apply to feature an Approved listing you own. Requires a fresh featured quote
-/// and the quoted amount (+ fee) deposited on get_featured_deposit_address. The
-/// premium moves to the treasury; the application is Pending until an admin
-/// approves it (rejection refunds). One active/pending placement per listing.
-#[ic_cdk::update]
-async fn apply_featured(listing_id: u64, token: ExplorerToken, days: u64) -> Result<u64, String> {
-    require_authenticated()?;
-    require_explorer_enabled()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-    if !(FEATURED_MIN_DAYS..=FEATURED_MAX_DAYS).contains(&days) {
-        return Err("INVALID_DAYS".to_string());
-    }
 
-    // Listing must exist, be approved, and be the caller's.
-    let listing = DAPPS.with(|m| m.borrow().get(&listing_id)).ok_or_else(|| "DAPP_NOT_FOUND".to_string())?;
-    if listing.status != DappStatus::Approved {
-        return Err("LISTING_NOT_APPROVED".to_string());
-    }
-    if listing.submitter != caller {
-        return Err("NOT_LISTING_OWNER".to_string());
-    }
-    // One active/pending placement per listing.
-    let dup = FEATURED.with(|m| m.borrow().iter().any(|e| {
-        let f = e.value();
-        f.listing_id == listing_id && matches!(f.status, FeaturedStatus::Pending | FeaturedStatus::Active)
-    }));
-    if dup {
-        return Err("ALREADY_FEATURED".to_string());
-    }
 
-    let now = current_time();
-    let quote = FEATURED_QUOTES.with(|m| m.borrow().get(&caller)).ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.token != token || quote.days != days {
-        return Err("QUOTE_MISMATCH".to_string());
-    }
-    if now > quote.expires_at {
-        return Err("QUOTE_EXPIRED".to_string());
-    }
 
-    let config = CONFIG.with(|c| c.borrow().get().clone());
-    let ledger_id = explorer_token_ledger(token, &config);
-    let fee = explorer_token_fee(token, &config);
-    let sub = derive_featured_subaccount(&caller);
-    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
-    let balance = call_ledger_balance(ledger_id, escrow).await?;
-    if balance < quote.amount.saturating_add(fee) {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
-    }
-    let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-    let block = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, quote.amount, Some(fee))
-        .await
-        .map_err(|e| format!("FEE_TRANSFER_FAILED: {}", e))?;
 
-    let id = next_featured_id();
-    FEATURED.with(|m| {
-        m.borrow_mut().insert(id, FeaturedDapp {
-            id, listing_id, applicant: caller, status: FeaturedStatus::Pending,
-            token: Some(token), amount_paid: quote.amount, usd_total_e8s: quote.usd_total_e8s,
-            days, created_at: now, approved_at: None, expires_at: None, payment_block: Some(block),
-        });
-    });
-    FEATURED_QUOTES.with(|m| { m.borrow_mut().remove(&caller); });
-    log_dapp_event("featured_apply", id, caller, quote.amount);
-    Ok(id)
-}
 
-/// Admin: approve a pending featured application — goes live for `days`.
-/// Synchronous (no await) so the max-3 count-then-set is atomic / race-safe.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_approve_featured(id: u64) -> Result<(), String> {
-    let now = current_time();
-    if featured_active_count(now) >= MAX_FEATURED_ACTIVE {
-        return Err("FEATURED_SLOTS_FULL".to_string());
-    }
-    FEATURED.with(|m| {
-        let mut m = m.borrow_mut();
-        let mut f = m.get(&id).ok_or_else(|| "FEATURED_NOT_FOUND".to_string())?;
-        if f.status != FeaturedStatus::Pending {
-            return Err("NOT_PENDING".to_string());
-        }
-        f.status = FeaturedStatus::Active;
-        f.approved_at = Some(now);
-        f.expires_at = Some(now.saturating_add(f.days.saturating_mul(DAY_NANOS)));
-        m.insert(id, f);
-        Ok(())
-    })?;
-    log_dapp_event("featured_approve", id, get_caller(), 0);
-    Ok(())
-}
 
-/// Admin: reject a pending featured application — refund from the treasury
-/// (claim-before-await so a concurrent reject can't double-refund).
-#[ic_cdk::update(guard = "require_admin")]
-async fn admin_reject_featured(id: u64) -> Result<(), String> {
-    let mut f = FEATURED.with(|m| m.borrow().get(&id)).ok_or_else(|| "FEATURED_NOT_FOUND".to_string())?;
-    if f.status != FeaturedStatus::Pending {
-        return Err("NOT_PENDING".to_string());
-    }
-    // Claim before await.
-    let pending = f.clone();
-    f.status = FeaturedStatus::Rejected;
-    FEATURED.with(|m| { m.borrow_mut().insert(id, f); });
-    if let Some(token) = pending.token {
-        let config = CONFIG.with(|c| c.borrow().get().clone());
-        let fee = explorer_token_fee(token, &config);
-        let refund = pending.amount_paid.saturating_sub(fee);
-        if refund > 0 {
-            let ledger_id = explorer_token_ledger(token, &config);
-            let dest = LedgerAccount { owner: pending.applicant, subaccount: None };
-            if let Err(e) = call_ledger_transfer(ledger_id, Some(TREASURY_SUBACCOUNT), dest, refund, Some(fee)).await {
-                FEATURED.with(|m| { m.borrow_mut().insert(id, pending.clone()); }); // restore Pending
-                return Err(format!("REFUND_FAILED: {}", e));
-            }
-        }
-    }
-    log_dapp_event("featured_reject", id, pending.applicant, pending.amount_paid);
-    Ok(())
-}
 
-/// Admin: take a live featured placement down early (no refund — the premium was
-/// already earned). Frees its slot immediately.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_remove_featured(id: u64) -> Result<(), String> {
-    FEATURED.with(|m| -> Result<(), String> {
-        let mut m = m.borrow_mut();
-        let mut f = m.get(&id).ok_or_else(|| "FEATURED_NOT_FOUND".to_string())?;
-        f.status = FeaturedStatus::Expired;
-        m.insert(id, f);
-        Ok(())
-    })?;
-    log_dapp_event("featured_remove", id, get_caller(), 0);
-    Ok(())
-}
 
-/// Timer sweep: expire live placements past their window, and auto-refund
-/// Pending applications older than FEATURED_PENDING_TTL so a never-reviewed
-/// payment is never parked indefinitely.
-async fn expire_featured() {
-    let now = current_time();
-    // Active → Expired (synchronous, no money).
-    let to_expire: Vec<u64> = FEATURED.with(|m| {
-        m.borrow().iter().filter_map(|e| {
-            let f = e.value();
-            let past = f.expires_at.map(|x| now > x).unwrap_or(false);
-            if f.status == FeaturedStatus::Active && past { Some(f.id) } else { None }
-        }).collect()
-    });
-    for id in to_expire {
-        FEATURED.with(|m| {
-            let mut m = m.borrow_mut();
-            if let Some(mut f) = m.get(&id) {
-                f.status = FeaturedStatus::Expired;
-                m.insert(id, f);
-            }
-        });
-    }
-    // Stale Pending → auto-refund (reuse the reject path).
-    let stale: Vec<u64> = FEATURED.with(|m| {
-        m.borrow().iter().filter_map(|e| {
-            let f = e.value();
-            if f.status == FeaturedStatus::Pending && now.saturating_sub(f.created_at) > FEATURED_PENDING_TTL_NANOS {
-                Some(f.id)
-            } else { None }
-        }).collect()
-    });
-    for id in stale {
-        let _ = admin_reject_featured(id).await;
-    }
-}
-
-/// Local-dev: replace all featured rows with `active` live + `pending` pending
-/// placements, referencing the first approved listings, so every hero/admin
-/// state can be previewed without paying. Local only.
-#[ic_cdk::update]
-fn dev_seed_featured_dapps(active: u64, pending: u64) -> Result<u64, String> {
-    require_authenticated()?;
-    require_local_dev()?;
-    let now = current_time();
-    let caller = get_caller();
-    // Approved listings to attach placements to.
-    let listing_ids: Vec<u64> = DAPPS.with(|m| {
-        m.borrow().iter().filter(|e| e.value().status == DappStatus::Approved).map(|e| *e.key()).collect()
-    });
-    if listing_ids.is_empty() {
-        return Err("NO_APPROVED_LISTINGS".to_string());
-    }
-    FEATURED.with(|m| { let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
-    let total = active.saturating_add(pending);
-    let mut seeded = 0u64;
-    for i in 0..total {
-        let listing_id = listing_ids[(i as usize) % listing_ids.len()];
-        let id = next_featured_id();
-        let is_active = i < active;
-        let days = 30;
-        FEATURED.with(|m| {
-            m.borrow_mut().insert(id, FeaturedDapp {
-                id, listing_id, applicant: caller,
-                status: if is_active { FeaturedStatus::Active } else { FeaturedStatus::Pending },
-                token: Some(ExplorerToken::ICP), amount_paid: 0, usd_total_e8s: 0, days,
-                created_at: now,
-                approved_at: if is_active { Some(now) } else { None },
-                expires_at: if is_active { Some(now.saturating_add(days * DAY_NANOS)) } else { None },
-                payment_block: None,
-            });
-        });
-        seeded += 1;
-    }
-    Ok(seeded)
-}
-
-#[ic_cdk::update]
-fn dev_clear_featured_dapps() -> Result<(), String> {
-    require_authenticated()?;
-    require_local_dev()?;
-    FEATURED.with(|m| { let keys: Vec<u64> = m.borrow().iter().map(|e| *e.key()).collect(); let mut m = m.borrow_mut(); for k in keys { m.remove(&k); } });
-    Ok(())
-}
-
-/// Admin: add a permanent curated listing (no payment, no badge, no expiry).
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_add_dapp(name: String, url: String, description: String, categories: Vec<String>) -> Result<u64, String> {
-    let name = name.trim().to_string();
-    let url = url.trim().to_string();
-    let description = description.trim().to_string();
-    validate_dapp_text(&name, &url, &description)?;
-    let categories = validate_dapp_categories(&categories)?;
-    let at_quota = DAPPS.with(|m| m.borrow().len() >= MAX_DAPPS);
-    if at_quota {
-        return Err("DAPP_QUOTA_REACHED".to_string());
-    }
-    let now = current_time();
-    let id = next_dapp_id();
-    let caller = get_caller();
-    DAPPS.with(|m| {
-        m.borrow_mut().insert(id, DappListing {
-            id,
-            submitter: caller,
-            name,
-            url,
-            description,
-            community: false,
-            status: DappStatus::Approved,
-            created_at: now,
-            approved_at: Some(now),
-            expires_at: None,
-            days: 0,
-            token: None,
-            amount_paid: 0,
-            categories,
-            is_vibe_coded: false,
-            twitter: None,
-        });
-    });
-    log_dapp_event("dapp_admin_add", id, caller, 0);
-    Ok(id)
-}
-
-/// Admin: remove any listing outright (no refund — use admin_reject_dapp for
-/// pending submissions that should get their payment back).
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_remove_dapp(id: u64) -> Result<(), String> {
-    let existed = DAPPS.with(|m| m.borrow_mut().remove(&id)).is_some();
-    if !existed {
-        return Err("DAPP_NOT_FOUND".to_string());
-    }
-    log_dapp_event("dapp_remove", id, get_caller(), 0);
-    Ok(())
-}
 
 /// Admin: point ckUSDC (or the other tokens) at locally deployed test
 /// ledgers. Local-only — mainnet ledgers are hard-pinned.
@@ -11045,7 +10085,6 @@ fn admin_collect_user_principals() -> Vec<Principal> {
     STAKES.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.key().user); }));
     LOTTERY_TICKETS.with(|m| m.borrow().iter().for_each(|e| { set.insert(*e.key()); }));
     EARLY_ADOPTERS.with(|m| m.borrow().iter().for_each(|e| { set.insert(*e.key()); }));
-    XFARM_FARMERS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().owner); }));
     POOL_NEURONS.with(|m| m.borrow().iter().for_each(|e| { set.insert(e.value().registered_by); }));
     set.remove(&Principal::anonymous());
     set.into_iter().collect()
@@ -12565,426 +11604,37 @@ fn complete_bullrun_daily(run_id: u64, coins: u32, millis: u64) -> Result<u32, S
     Ok(rank)
 }
 
-// ── ANSEM LP Rewards (Solana chain fusion) ───────────────────────────────────
-// Rewards $ANSEM liquidity providers on Solana with 10 lottery tickets per
-// drawing. The user proves wallet ownership ONCE by signing a challenge in
-// their Solana wallet (plain Ed25519 over bytes — verified right here, no
-// chain call); then, once per lottery round, `claim_lp_reward` derives the
-// wallet's associated token account for each admin-configured LP mint and
-// reads the LIVE balance through the NNS SOL RPC canister
-// (tghme-zyaaa-aaaar-qarca-cai, 3-provider Equality consensus, paid in
-// attached cycles). Any balance ≥ the pool's floor → tickets. Claims key on
-// the lottery round, so every drawing re-arms the claim — that IS the
-// owner-required re-confirmation. Staking stays REQUIRED (owner decision
-// 2026-07-04): the grant path's stakers-only gate is enforced up front.
+// ── ANSEM / Solana LP Rewards — REMOVED 2026-07-12 (owner). SOL RPC reads,
+//    ed25519 signMessage verification, ATA derivation and $ANSEM LP ticket
+//    grants gone. No escrow existed (free ticket grants + free signature
+//    links) — nothing to refund. ORPHANED MemoryIds (never reuse, §3):
+//    118 SOLANA_WALLETS, 119 SOLANA_WALLET_OWNERS, 120 LP_CLAIMS, 121 LP_POOLS.
+
+// ── ICP LP staking (ICPSwap custody, Model B) ────────────────────────────────
+// Users STAKE their ICPSwap position NFTs with this canister: they transfer
+// the position to us on ICPSwap (transferPosition — the transfer itself is
+// the ownership proof), then register it here. While staked they earn 10
+// lottery tickets every lottery round, and the sweep periodically claims the
+// positions' accrued trading fees. Yield routing (owner decision 2026-07-05):
+//   • ICP → 50% lottery pot, 25% backend cycles burn, 25% frontend cycles
+//     burn (the CMC legs reuse the settle_burn_split machinery);
+//   • every other token (ckUSDC/ckUSDT/ckBTC/ckETH…) → treasury subaccount
+//     on that token's ledger, held for the owner to allocate later.
+// Unstake transfers the position back to a principal the staker names, and
+// is deliberately NOT feature-flag-gated: the custody exit always works.
 //
-// MVP scope: fungible LP mints only (PumpSwap = Token-2022 LP; classic SPL
-// also supported via config). Meteora DLMM/DAMM-v2 positions are NOT LP
-// tokens and are out of scope (see okf/ideas/ansem-lp-reward).
+// SAFETY: fee claims use ICPSwap's `claimToSubaccount`, which pays the
+// claimed tokens to a DEDICATED subaccount (ICPSWAP_LP_YIELD_SUBACCOUNT) on
+// each token's ledger. The routing pass reads and routes ONLY that
+// subaccount's balances — it can never touch the canister's general funds.
+// Routing is idempotent by construction: whatever sits in the yield
+// subaccount gets routed on the next pass; a failed leg simply waits.
+//
+// ICPSwap wire types are mirrored from ICPSwap-Labs/icpswap-v3-service
+// (src/SwapPool.mo + src/Types.mo, fetched 2026-07-05): Motoko
+// Result.Result<T, Error> encodes as `variant { ok : T; err : Error }`.
 
-const SOL_RPC_CANISTER: &str = "tghme-zyaaa-aaaar-qarca-cai";
-/// Cycles attached per SOL RPC read (excess is refunded by the SOL RPC canister).
-const SOL_RPC_CYCLES: u128 = 10_000_000_000;
-const LP_TICKETS_PER_ROUND: u64 = 10;
-/// Challenge freshness window.
-const LP_CHALLENGE_MAX_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
-const ATA_PROGRAM_B58: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
-const TOKEN_PROGRAM_B58: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const TOKEN_2022_PROGRAM_B58: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct SolanaWalletLink {
-    /// Raw 32-byte Ed25519 public key (the Solana address).
-    pub pubkey: Vec<u8>,
-    pub linked_at: u64,
-}
-impl_storable!(SolanaWalletLink);
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SolanaPubkeyKey {
-    pub pubkey: Vec<u8>,
-}
-impl_storable!(SolanaPubkeyKey);
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct LpClaimKey {
-    pub round: u64,
-    pub user: Principal,
-}
-impl_storable!(LpClaimKey);
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct LpClaim {
-    pub round: u64,
-    pub user: Principal,
-    pub wallet: Vec<u8>,
-    pub pool: String,
-    /// Raw LP token amount that qualified (base units, decimal string on wire).
-    pub amount: u128,
-    pub claimed_at: u64,
-}
-impl_storable!(LpClaim);
-
-/// One qualifying pool: any wallet holding ≥ min_amount of `lp_mint` earns
-/// the round's tickets. PumpSwap LP mints are Token-2022.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct LpPool {
-    pub name: String,
-    /// Raw 32-byte LP mint.
-    pub lp_mint: Vec<u8>,
-    pub token_2022: bool,
-    /// Dust filter in raw LP base units.
-    pub min_amount: u128,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug, Default)]
-pub struct LpPoolsCfg {
-    pub pools: Vec<LpPool>,
-}
-impl_storable!(LpPoolsCfg);
-
-thread_local! {
-    /// MemoryId 118: principal → linked Solana wallet.
-    static SOLANA_WALLETS: RefCell<StableBTreeMap<Principal, SolanaWalletLink, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(118)))));
-    /// MemoryId 119: wallet pubkey → owning principal (one wallet, one principal).
-    static SOLANA_WALLET_OWNERS: RefCell<StableBTreeMap<SolanaPubkeyKey, Principal, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(119)))));
-    /// MemoryId 120: (lottery round, principal) → claim.
-    static LP_CLAIMS: RefCell<StableBTreeMap<LpClaimKey, LpClaim, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(120)))));
-    /// MemoryId 121: qualifying pools (admin-configured).
-    static LP_POOLS: RefCell<StableCell<LpPoolsCfg, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(121)), LpPoolsCfg::default())));
-    /// Native tests + local replica: mocked ATA balances (b58 ATA → amount).
-    static MOCK_LP_BALANCES: RefCell<std::collections::HashMap<String, u128>> =
-        RefCell::new(std::collections::HashMap::new());
-}
-
-/// The exact challenge string the Solana wallet signs. The frontend builds
-/// the identical string; any drift fails verification.
-fn lp_challenge_message(user: Principal, round: u64, nonce: u64, expires_ns: u64) -> String {
-    format!(
-        "Cycle Burn LP verification\nprincipal: {}\nround: {}\nnonce: {}\nexpires_ns: {}",
-        user, round, nonce, expires_ns
-    )
-}
-
-/// Is a 32-byte string a valid ed25519 curve point? (PDA bump search needs
-/// the OFF-curve check.)
-fn solana_on_curve(bytes: &[u8; 32]) -> bool {
-    curve25519_dalek::edwards::CompressedEdwardsY(*bytes).decompress().is_some()
-}
-
-/// Solana `find_program_address` for the ATA program: the associated token
-/// account of (owner, mint) under the given token program. Pure function —
-/// verified against an independent Python implementation (see tests).
-fn solana_find_ata(owner: &[u8; 32], mint: &[u8; 32], token_program: &[u8; 32]) -> Result<[u8; 32], String> {
-    use sha2::Digest;
-    let ata_program: [u8; 32] = bs58::decode(ATA_PROGRAM_B58)
-        .into_vec()
-        .map_err(|e| e.to_string())?
-        .try_into()
-        .map_err(|_| "bad ATA program id".to_string())?;
-    for bump in (0u8..=255).rev() {
-        let mut h = sha2::Sha256::new();
-        h.update(owner);
-        h.update(token_program);
-        h.update(mint);
-        h.update([bump]);
-        h.update(ata_program);
-        h.update(b"ProgramDerivedAddress");
-        let d: [u8; 32] = h.finalize().into();
-        if !solana_on_curve(&d) {
-            return Ok(d);
-        }
-    }
-    Err("no valid PDA bump".to_string())
-}
-
-/// Verify an Ed25519 signature from a Solana wallet over `message`.
-fn solana_verify_signature(pubkey: &[u8], signature: &[u8], message: &[u8]) -> Result<(), String> {
-    let pk: [u8; 32] = pubkey.try_into().map_err(|_| "pubkey must be 32 bytes".to_string())?;
-    let sig: [u8; 64] = signature.try_into().map_err(|_| "signature must be 64 bytes".to_string())?;
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).map_err(|_| "invalid pubkey".to_string())?;
-    vk.verify_strict(message, &ed25519_dalek::Signature::from_bytes(&sig))
-        .map_err(|_| "SIGNATURE_INVALID".to_string())
-}
-
-// ── SOL RPC canister wire types (mirrored from its candid) ──
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolCluster { Mainnet, Devnet, Testnet }
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolConsensusStrategy {
-    Equality,
-    Threshold { total: Option<u8>, min: u8 },
-}
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-struct SolRpcConfig {
-    #[serde(rename = "responseSizeEstimate")]
-    response_size_estimate: Option<u64>,
-    #[serde(rename = "responseConsensus")]
-    response_consensus: Option<SolConsensusStrategy>,
-}
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolSupportedProvider {
-    AlchemyMainnet, AlchemyDevnet, AnkrMainnet, AnkrDevnet, ChainstackMainnet,
-    ChainstackDevnet, DrpcMainnet, DrpcDevnet, HeliusMainnet, HeliusDevnet, PublicNodeMainnet,
-}
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-struct SolHttpHeader { value: String, name: String }
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-struct SolRpcEndpoint { url: String, headers: Option<Vec<SolHttpHeader>> }
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolRpcSource { Supported(SolSupportedProvider), Custom(SolRpcEndpoint) }
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolRpcSources { Custom(Vec<SolRpcSource>), Default(SolCluster) }
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-#[allow(non_camel_case_types)]
-enum SolCommitment { processed, confirmed, finalized }
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-struct SolGetTokenAccountBalanceParams {
-    pubkey: String,
-    commitment: Option<SolCommitment>,
-}
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-struct SolTokenAmount {
-    decimals: u8,
-    #[serde(rename = "uiAmount")]
-    ui_amount: Option<f64>,
-    #[serde(rename = "uiAmountString")]
-    ui_amount_string: String,
-    amount: String,
-}
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-struct SolJsonRpcError { code: i64, message: String }
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolProviderError {
-    TooFewCycles { expected: candid::Nat, received: candid::Nat },
-    InvalidRpcConfig(String),
-    UnsupportedCluster(String),
-}
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolRejectionCode { NoError, CanisterError, SysTransient, DestinationInvalid, Unknown, SysFatal, CanisterReject }
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolHttpOutcallError {
-    IcError { code: SolRejectionCode, message: String },
-    InvalidHttpJsonRpcResponse { status: u16, body: String, #[serde(rename = "parsingError")] parsing_error: Option<String> },
-}
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolRpcError {
-    JsonRpcError(SolJsonRpcError),
-    ProviderError(SolProviderError),
-    ValidationError(String),
-    HttpOutcallError(SolHttpOutcallError),
-}
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolBalanceResult { Ok(SolTokenAmount), Err(SolRpcError) }
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-enum SolMultiBalanceResult {
-    Consistent(SolBalanceResult),
-    Inconsistent(Vec<(SolRpcSource, SolBalanceResult)>),
-}
-
-/// Read a token account balance (raw base units) via the SOL RPC canister.
-/// A missing token account (never created / zero-initialized) reads as 0.
-/// Native tests + local replicas use the mock map instead.
-async fn sol_get_token_balance(ata_b58: &str) -> Result<u128, String> {
-    let is_local = CONFIG.with(|c| c.borrow().get().is_local);
-    if cfg!(not(target_arch = "wasm32")) || is_local {
-        return Ok(MOCK_LP_BALANCES.with(|m| m.borrow().get(ata_b58).copied().unwrap_or(0)));
-    }
-    let sol_rpc = Principal::from_text(SOL_RPC_CANISTER).map_err(|e| e.to_string())?;
-    let args = (
-        SolRpcSources::Default(SolCluster::Mainnet),
-        Some(SolRpcConfig {
-            response_size_estimate: None,
-            response_consensus: Some(SolConsensusStrategy::Equality),
-        }),
-        SolGetTokenAccountBalanceParams {
-            pubkey: ata_b58.to_string(),
-            commitment: Some(SolCommitment::finalized),
-        },
-    );
-    let (res,): (SolMultiBalanceResult,) =
-        ic_cdk::api::call::call_with_payment128(sol_rpc, "getTokenAccountBalance", args, SOL_RPC_CYCLES)
-            .await
-            .map_err(|(code, msg)| format!("SOL_RPC_CALL_FAILED: {:?} {}", code, msg))?;
-    match res {
-        SolMultiBalanceResult::Consistent(SolBalanceResult::Ok(amount)) => {
-            amount.amount.parse::<u128>().map_err(|_| "SOL_RPC_BAD_AMOUNT".to_string())
-        }
-        SolMultiBalanceResult::Consistent(SolBalanceResult::Err(SolRpcError::JsonRpcError(e)))
-            if e.message.to_lowercase().contains("could not find account") =>
-        {
-            Ok(0) // no token account = no LP
-        }
-        SolMultiBalanceResult::Consistent(SolBalanceResult::Err(e)) => {
-            Err(format!("SOL_RPC_ERROR: {:?}", e))
-        }
-        SolMultiBalanceResult::Inconsistent(_) => Err("SOL_RPC_INCONSISTENT: providers disagreed — retry".to_string()),
-    }
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct LpPoolView {
-    pub name: String,
-    pub lp_mint_b58: String,
-    pub token_2022: bool,
-    pub min_amount: u128,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct LpRewardInfo {
-    pub enabled: bool,
-    pub round: u64,
-    pub tickets_per_round: u64,
-    /// The caller's linked wallet (base58), if any.
-    pub my_wallet_b58: Option<String>,
-    pub claimed_this_round: bool,
-    /// Claiming requires an active stake (owner rule: stakers-only tickets).
-    pub staked: bool,
-    pub pools: Vec<LpPoolView>,
-}
-
-#[ic_cdk::query]
-fn get_lp_reward_info() -> LpRewardInfo {
-    let caller = get_caller();
-    let round = lottery_state().round;
-    LpRewardInfo {
-        enabled: feature_visible(FLAG_SOLANA_LP, caller),
-        round,
-        tickets_per_round: LP_TICKETS_PER_ROUND,
-        my_wallet_b58: SOLANA_WALLETS
-            .with(|m| m.borrow().get(&caller))
-            .map(|l| bs58::encode(l.pubkey).into_string()),
-        claimed_this_round: LP_CLAIMS.with(|m| m.borrow().contains_key(&LpClaimKey { round, user: caller })),
-        staked: caller != Principal::anonymous() && author_is_staked(caller),
-        pools: LP_POOLS.with(|c| c.borrow().get().clone()).pools.iter().map(|p| LpPoolView {
-            name: p.name.clone(),
-            lp_mint_b58: bs58::encode(&p.lp_mint).into_string(),
-            token_2022: p.token_2022,
-            min_amount: p.min_amount,
-        }).collect(),
-    }
-}
-
-/// Link a Solana wallet: the wallet signed the canonical challenge (which
-/// binds the caller's principal + the current round + a nonce + an expiry),
-/// so possession of the key is proven. One wallet ↔ one principal.
-#[ic_cdk::update]
-fn link_solana_wallet(pubkey: Vec<u8>, signature: Vec<u8>, nonce: u64, expires_ns: u64) -> Result<String, String> {
-    require_authenticated()?;
-    if !feature_visible(FLAG_SOLANA_LP, get_caller()) {
-        return Err("FEATURE_DISABLED".to_string());
-    }
-    let caller = get_caller();
-    let now = current_time();
-    if expires_ns <= now {
-        return Err("CHALLENGE_EXPIRED".to_string());
-    }
-    if expires_ns > now.saturating_add(LP_CHALLENGE_MAX_TTL_NS) {
-        return Err("CHALLENGE_TTL_TOO_LONG".to_string());
-    }
-    let round = lottery_state().round;
-    let message = lp_challenge_message(caller, round, nonce, expires_ns);
-    solana_verify_signature(&pubkey, &signature, message.as_bytes())?;
-    // One wallet, one principal — ever (prevents one LP position farming
-    // tickets across many principals).
-    let key = SolanaPubkeyKey { pubkey: pubkey.clone() };
-    if let Some(owner) = SOLANA_WALLET_OWNERS.with(|m| m.borrow().get(&key)) {
-        if owner != caller {
-            return Err("WALLET_ALREADY_LINKED".to_string());
-        }
-    }
-    // Re-linking replaces the caller's previous wallet.
-    if let Some(prev) = SOLANA_WALLETS.with(|m| m.borrow().get(&caller)) {
-        SOLANA_WALLET_OWNERS.with(|m| { m.borrow_mut().remove(&SolanaPubkeyKey { pubkey: prev.pubkey }); });
-    }
-    SOLANA_WALLET_OWNERS.with(|m| { m.borrow_mut().insert(key, caller); });
-    SOLANA_WALLETS.with(|m| {
-        m.borrow_mut().insert(caller, SolanaWalletLink { pubkey: pubkey.clone(), linked_at: now });
-    });
-    Ok(bs58::encode(pubkey).into_string())
-}
-
-#[ic_cdk::update]
-fn unlink_solana_wallet() -> Result<(), String> {
-    require_authenticated()?;
-    let caller = get_caller();
-    if let Some(link) = SOLANA_WALLETS.with(|m| m.borrow_mut().remove(&caller)) {
-        SOLANA_WALLET_OWNERS.with(|m| { m.borrow_mut().remove(&SolanaPubkeyKey { pubkey: link.pubkey }); });
-    }
-    Ok(())
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct LpClaimResult {
-    pub pool: String,
-    pub amount: u128,
-    pub tickets: u64,
-    pub round: u64,
-}
-
-/// Claim the round's LP reward: reads the linked wallet's LIVE LP balances
-/// on Solana and grants LP_TICKETS_PER_ROUND tickets if any configured pool
-/// clears its floor. Once per lottery round; the next drawing re-arms it.
-#[ic_cdk::update]
-async fn claim_lp_reward() -> Result<LpClaimResult, String> {
-    require_authenticated()?;
-    let caller = get_caller();
-    if !feature_visible(FLAG_SOLANA_LP, caller) {
-        return Err("FEATURE_DISABLED".to_string());
-    }
-    require_lottery_enabled()?;
-    // Owner rule 2026-07-11: holding verified $ANSEM LP IS the qualification —
-    // no separate neuron stake required. (Admins remain excluded at grant.)
-    let link = SOLANA_WALLETS.with(|m| m.borrow().get(&caller)).ok_or("NO_WALLET_LINKED")?;
-    let round = lottery_state().round;
-    let claim_key = LpClaimKey { round, user: caller };
-    if LP_CLAIMS.with(|m| m.borrow().contains_key(&claim_key)) {
-        return Err("ALREADY_CLAIMED_THIS_ROUND".to_string());
-    }
-    let pools = LP_POOLS.with(|c| c.borrow().get().clone()).pools;
-    if pools.is_empty() {
-        return Err("NO_POOLS_CONFIGURED".to_string());
-    }
-    let owner: [u8; 32] = link.pubkey.clone().try_into().map_err(|_| "bad wallet".to_string())?;
-    for pool in pools {
-        let mint: [u8; 32] = pool.lp_mint.clone().try_into().map_err(|_| "bad pool mint".to_string())?;
-        let token_program: [u8; 32] = bs58::decode(if pool.token_2022 { TOKEN_2022_PROGRAM_B58 } else { TOKEN_PROGRAM_B58 })
-            .into_vec()
-            .map_err(|e| e.to_string())?
-            .try_into()
-            .map_err(|_| "bad token program".to_string())?;
-        let ata = solana_find_ata(&owner, &mint, &token_program)?;
-        let ata_b58 = bs58::encode(ata).into_string();
-        let balance = sol_get_token_balance(&ata_b58).await?;
-        if balance >= pool.min_amount && balance > 0 {
-            // Re-check the claim after the await (another call could have won).
-            if LP_CLAIMS.with(|m| m.borrow().contains_key(&claim_key)) {
-                return Err("ALREADY_CLAIMED_THIS_ROUND".to_string());
-            }
-            grant_lottery_tickets_verified(caller, LP_TICKETS_PER_ROUND, "solana_lp");
-            LP_CLAIMS.with(|m| {
-                m.borrow_mut().insert(claim_key.clone(), LpClaim {
-                    round,
-                    user: caller,
-                    wallet: link.pubkey.clone(),
-                    pool: pool.name.clone(),
-                    amount: balance,
-                    claimed_at: current_time(),
-                });
-            });
-            staking_audit("solana_lp_reward", caller, LP_TICKETS_PER_ROUND, round);
-            return Ok(LpClaimResult { pool: pool.name, amount: balance, tickets: LP_TICKETS_PER_ROUND, round });
-        }
-    }
-    Err("NO_QUALIFYING_LP".to_string())
-}
-
-/// One approved pool's custody snapshot for the Admin page: how many
-/// positions we hold and what they're worth right now.
+/// One approved pool's live staked-LP totals (positions we hold + value).
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct IcpLpPoolStats {
     pub pool: Principal,
@@ -13040,57 +11690,6 @@ async fn admin_get_icp_lp_pool_stats() -> Result<Vec<IcpLpPoolStats>, String> {
     }
     Ok(out)
 }
-
-/// Admin: configure the qualifying pools. Mints as base58 strings.
-#[ic_cdk::update]
-fn admin_set_lp_pools(pools: Vec<LpPoolView>) -> Result<u64, String> {
-    require_admin()?;
-    let mut cfg = LpPoolsCfg::default();
-    for p in pools {
-        let mint = bs58::decode(&p.lp_mint_b58).into_vec().map_err(|e| format!("bad mint {}: {}", p.lp_mint_b58, e))?;
-        if mint.len() != 32 {
-            return Err(format!("mint {} is not 32 bytes", p.lp_mint_b58));
-        }
-        cfg.pools.push(LpPool { name: p.name, lp_mint: mint, token_2022: p.token_2022, min_amount: p.min_amount });
-    }
-    let n = cfg.pools.len() as u64;
-    LP_POOLS.with(|c| { let _ = c.borrow_mut().set(cfg); });
-    Ok(n)
-}
-
-/// Local/dev: set a mocked ATA balance (the local replica has no SOL RPC
-/// canister). Admin-gated and inert on mainnet (mock map only consulted
-/// when is_local).
-#[ic_cdk::update]
-fn dev_set_lp_mock_balance(ata_b58: String, amount: u128) -> Result<(), String> {
-    require_admin()?;
-    MOCK_LP_BALANCES.with(|m| { m.borrow_mut().insert(ata_b58, amount); });
-    Ok(())
-}
-
-// ── ICP LP staking (ICPSwap custody, Model B) ────────────────────────────────
-// Users STAKE their ICPSwap position NFTs with this canister: they transfer
-// the position to us on ICPSwap (transferPosition — the transfer itself is
-// the ownership proof), then register it here. While staked they earn 10
-// lottery tickets every lottery round, and the sweep periodically claims the
-// positions' accrued trading fees. Yield routing (owner decision 2026-07-05):
-//   • ICP → 50% lottery pot, 25% backend cycles burn, 25% frontend cycles
-//     burn (the CMC legs reuse the settle_burn_split machinery);
-//   • every other token (ckUSDC/ckUSDT/ckBTC/ckETH…) → treasury subaccount
-//     on that token's ledger, held for the owner to allocate later.
-// Unstake transfers the position back to a principal the staker names, and
-// is deliberately NOT feature-flag-gated: the custody exit always works.
-//
-// SAFETY: fee claims use ICPSwap's `claimToSubaccount`, which pays the
-// claimed tokens to a DEDICATED subaccount (ICPSWAP_LP_YIELD_SUBACCOUNT) on
-// each token's ledger. The routing pass reads and routes ONLY that
-// subaccount's balances — it can never touch the canister's general funds.
-// Routing is idempotent by construction: whatever sits in the yield
-// subaccount gets routed on the next pass; a failed leg simply waits.
-//
-// ICPSwap wire types are mirrored from ICPSwap-Labs/icpswap-v3-service
-// (src/SwapPool.mo + src/Types.mo, fetched 2026-07-05): Motoko
-// Result.Result<T, Error> encodes as `variant { ok : T; err : Error }`.
 
 const ICPSWAP_LP_YIELD_SUBACCOUNT: [u8; 32] = [9u8; 32];
 /// Owner formula (2026-07-05): 40 tickets per DAY per $1 of staked LP value
@@ -17738,270 +16337,14 @@ async fn dev_clear_courses() -> Result<u64, String> {
 // used by its registration/usage maps are ORPHANED — never reuse (see §3).
 // ==========================================
 
-/// USD (e8s) → ICP (e8s) at the cached XRC rate. Mirrors
-/// `expected_icp_for_token`'s maths. Returns 0 if no rate is cached.
-/// (Kept when the Cycles Faucet was removed — X-Farm tier pricing uses it.)
-fn usd_e8s_to_icp_e8s(usd_e8s: u64) -> u64 {
-    let icp_rate = cached_usd_rate_e8s(ExplorerToken::ICP); // USD e8s per 1 ICP
-    if icp_rate == 0 {
-        return 0;
-    }
-    u64::try_from(usd_e8s as u128 * 100_000_000u128 / icp_rate as u128).unwrap_or(u64::MAX)
-}
-
 // ====================================================================
-// X-Farm — autonomous per-user Farmer canisters that burn ICP→cycles to run
-// Gemini (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X.
-// Spec: okf/ideas/x-farm/{README,01,02,03,05}.md. Ship dark behind FLAG_X_FARM
-// (default OFF). LOCAL deploys only — mainnet gated per-deploy by the owner.
-//
-// Reuse (do NOT re-clone — okf/notes/duplication-review-2026-06-19.md): the money path
-// is settle_burn_split's CMC leg (call_cmc_topup_transfer + notify_cmc_topup,
-// journaled burn_block_index, CMC_REFUNDED→drop block, PB-148 class); the 10%
-// treasury leg is call_ledger_transfer to TREASURY_SUBACCOUNT; the escrow
-// subaccount is the derive_*_subaccount family; USD→ICP is the cached XRC via
-// explorer_usd_rate_e8s / usd_e8s_to_icp_e8s. Net-new: a factory that calls the
-// management canister's create_canister/install_code (none exist in the repo
-// yet) + a 2nd canister wasm (src/xfarm_farmer/) the factory installs.
+// X-Farm — REMOVED 2026-07-12 (owner). Per-user Farmer canisters (Gemini/
+// Cloud-Run tweet drafting) + factory gone, with the src/xfarm_farmer
+// canister and the Cloud-Run proxy. ORPHANED MemoryIds (never reuse, §3):
+// 54 XFARM_FARMERS, 55 XFARM_NEXT_ID, 56 XFARM_CONFIG. Only escrow-recovery
+// survives so any stranded Farmer-creation deposit stays refundable.
 // ====================================================================
 
-/// CMC canister id (duplication-review B7 — first canonical definition; the
-/// ~10 other call sites still inline the literal and can migrate later).
-const CMC_ID: &str = "rkp4c-7iaaa-aaaaa-aaaca-cai";
-fn cmc_principal() -> Principal {
-    Principal::from_text(CMC_ID).unwrap()
-}
-
-// ── Tunables ─────────────────────────────────────────────────────────
-const XFARM_MAX_PERSONA: usize = 300;
-const XFARM_QUOTE_TTL_NANOS: u64 = 15 * 60 * 1_000_000_000;
-// Attached to create_canister: 500B is the creation FEE (deducted on create); the
-// remainder is the new Farmer's initial balance, which must cover install_code until
-// the 90% CMC top-up funds the 7-day budget. 1.5T → ~1T left after the fee.
-const XFARM_CREATION_CYCLES: u128 = 1_500_000_000_000;
-const XFARM_DURATION_DAYS: u64 = 7;                   // default/min depletion window (D2)
-// Per-day pricing (owner-chosen lifespan): $0.50/day, 7..30 days. Mirrors the
-// Explorer per-day model (EXPLORER_PRICE_PER_DAY_USD_E8S). Tier = drafts/day only;
-// price is days × per-day (tier no longer affects price).
-// Per-day USD price is PER TIER (FarmerTier.price_usd_e8s, USD e8s/day). The full
-// 30-day lifespan gets a 10% discount.
-const XFARM_30DAY_DISCOUNT_PCT: u128 = 10;
-const XFARM_MIN_DAYS: u32 = 7;
-const XFARM_MAX_DAYS: u32 = 30;
-const XFARM_MAX_TIERS: usize = 10;
-const XFARM_MAX_DRAFTS_PER_DAY: u32 = 15;
-const XFARM_DRAFT_RETENTION_DAYS: u64 = 30;
-const XFARM_SWEEP_BATCH: usize = 25;
-const DAY_NS: u64 = 86_400 * 1_000_000_000;
-
-// ── Types ────────────────────────────────────────────────────────────
-#[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FarmerStatus { Active, Depleted, Disabled, Failed }
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct FarmerTier {
-    pub id: u32,
-    pub name: String,
-    pub drafts_per_day: u32,
-    pub duration_days: u32,
-    /// USD reference price (D1); XRC-quoted to ICP at payment time.
-    pub price_usd_e8s: u64,
-    /// D9 premium — tier gets 1 Nano-Banana image/day via the proxy.
-    pub includes_image: bool,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct XFarmProxy {
-    pub url: String,
-    pub bearer: String,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct XFarmConfig {
-    pub tiers: Vec<FarmerTier>,
-    pub proxy: XFarmProxy,
-    pub max_active_farmers: usize,
-}
-
-impl Default for XFarmConfig {
-    fn default() -> Self {
-        XFarmConfig {
-            tiers: vec![
-                // price_usd_e8s = USD/DAY per tier. Final cost = days × rate, with a 10%
-                // discount at the full 30-day lifespan. duration_days field unused
-                // (lifespan is per-farmer, 7..30). Image "Harvest" tier removed (proxy
-                // serves no images yet — Phase-2). Admin can override via admin_set_xfarm_tiers.
-                FarmerTier { id: 1, name: "Sprout".into(),  drafts_per_day: 5,  duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false }, // $1.00/day
-                FarmerTier { id: 2, name: "Grow".into(),    drafts_per_day: 10, duration_days: 7, price_usd_e8s: 150_000_000, includes_image: false }, // $1.50/day
-                FarmerTier { id: 3, name: "Bloom".into(),   drafts_per_day: 15, duration_days: 7, price_usd_e8s: 200_000_000, includes_image: false }, // $2.00/day
-            ],
-            proxy: XFarmProxy { url: String::new(), bearer: String::new() },
-            max_active_farmers: 0, // 0 = unlimited (no per-user cap; optional global brake only)
-        }
-    }
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct Farmer {
-    pub id: u64,
-    pub owner: Principal,
-    /// None under the dev-seed mock path; Some for a real per-user canister.
-    pub canister_id: Option<Principal>,
-    pub tier_id: u32,
-    pub persona: String,
-    pub created_at: u64,
-    /// Display only — the cycle balance is the real 7-day timer (D2).
-    pub expected_depleted_at: u64,
-    /// ICP e8s directed to cycles (the 90% leg, net of the CMC leg fee). A
-    /// record of what was burned; the Farmer's own cycle balance is authoritative.
-    pub budget_cycles: u64,
-    /// Reported by the Farmer via report_depleted (R9: surfaced in the dashboard).
-    pub burned_cycles: u64,
-    pub last_generation_at: u64,
-    pub last_burn_tick_at: u64,
-    pub status: FarmerStatus,
-    #[serde(default)]
-    pub treasury_block: Option<u64>,
-    /// Idempotency for the 90% CMC leg (PB-148 class); reset to None on CMC_REFUNDED.
-    #[serde(default)]
-    pub burn_block_index: Option<u64>,
-    #[serde(default)]
-    pub install_done: bool,
-    #[serde(default)]
-    pub cmc_notified: bool,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct XFarmQuote {
-    pub tier_id: u32,
-    pub days: u32,         // owner-chosen lifespan (7..30); price = days × $0.50
-    pub price_e8s: u64,    // ICP at the cached XRC rate for (days × per-day USD)
-    pub fee_e8s: u64,     // 2 × ICP fee (two outbound escrow legs: treasury + CMC)
-    pub usd_e8s: u64,      // USD reference total (days × tier USD/day, less any 30-day discount)
-    pub rate_usd_e8s: u64, // cached ICP/USD rate used
-    pub created_at: u64,
-    pub expires_at: u64,
-}
-
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct XFarmInfo {
-    pub enabled: bool,
-    pub tiers: Vec<FarmerTier>,
-    pub proxy_set: bool,
-    pub wasm_uploaded: bool,
-    pub max_active_farmers: usize,
-    pub active_count: usize,
-}
-
-#[derive(CandidType, Deserialize, Clone, Debug)]
-pub struct XFarmDraft {
-    pub id: u64,
-    pub text: String,
-    pub created_at: u64,
-    pub cited_url: Option<String>,
-    pub image_url: Option<String>,
-}
-
-/// Init args the factory passes to install_code on the Farmer wasm.
-#[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct FarmerInitArgs {
-    pub farmer_id: u64,
-    pub owner: Principal,
-    /// The backend (factory) canister — the Farmer calls it back to report
-    /// depletion so the sweep can reap it. Sole controller of the Farmer.
-    pub backend_canister_id: Principal,
-    pub tier_id: u32,
-    pub persona: String,
-    pub drafts_per_day: u32,
-    pub duration_days: u32,
-    pub budget_cycles: u64,
-    pub proxy_url: String,
-    pub proxy_bearer: String,
-}
-
-// ── Management-canister arg structs (net-new; inline like CanisterIdRecord) ──
-#[derive(CandidType, Serialize, Clone)]
-struct XFarmCanisterSettings {
-    controllers: Option<Vec<Principal>>,
-    compute_allocation: Option<u64>,
-    memory_allocation: Option<u64>,
-    freezing_threshold: Option<u64>,
-}
-#[derive(CandidType, Serialize)]
-struct CreateCanisterArgs {
-    settings: Option<XFarmCanisterSettings>,
-}
-#[derive(CandidType, Deserialize)]
-struct CreateCanisterResult {
-    canister_id: Principal,
-}
-#[derive(CandidType, Serialize, Clone, Copy)]
-enum XFarmInstallMode { install, reinstall, upgrade }
-#[derive(CandidType, Serialize)]
-struct InstallCodeArgs {
-    mode: XFarmInstallMode,
-    canister_id: Principal,
-    wasm_module: Vec<u8>,
-    arg: Vec<u8>,
-}
-
-// ── Stable storage (MemoryIds 54–56; 57/58 held in reserve) ──────────
-thread_local! {
-    static XFARM_FARMERS: RefCell<StableBTreeMap<u64, Farmer, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(54)))));
-    static XFARM_NEXT_ID: RefCell<StableCell<u64, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(55)), 1u64)));
-    static XFARM_CONFIG: RefCell<StableCell<XFarmConfig, Memory>> =
-        MEMORY_MANAGER.with(|mm| RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(56)), XFarmConfig::default())));
-
-    // Heap-only (lost on upgrade; admin re-uploads): the Farmer wasm bytes + audit hash.
-    static XFARM_WASM: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
-    static XFARM_WASM_HASH: RefCell<Option<[u8; 32]>> = const { RefCell::new(None) };
-    // Heap-only 15-min locked quotes per caller (mirrors EXPLORER_QUOTES but ephemeral).
-    static XFARM_QUOTES: RefCell<std::collections::HashMap<Principal, XFarmQuote>> =
-        RefCell::new(std::collections::HashMap::new());
-    // Heap-only dev-seed drafts so the local UI works with no Farmer canister.
-    static XFARM_MOCK_DRAFTS: RefCell<std::collections::HashMap<u64, Vec<XFarmDraft>>> =
-        RefCell::new(std::collections::HashMap::new());
-}
-
-impl_storable!(Farmer);
-impl_storable!(XFarmConfig);
-
-// ── Guards + accessors ───────────────────────────────────────────────
-fn require_x_farm_enabled() -> Result<(), String> {
-    if !feature_visible(FLAG_X_FARM, get_caller()) {
-        return Err("FEATURE_DISABLED".to_string());
-    }
-    Ok(())
-}
-
-fn xfarm_config() -> XFarmConfig {
-    XFARM_CONFIG.with(|c| c.borrow().get().clone())
-}
-fn put_xfarm_config(cfg: XFarmConfig) {
-    XFARM_CONFIG.with(|c| c.borrow_mut().set(cfg));
-}
-fn xfarm_put_farmer(f: &Farmer) {
-    XFARM_FARMERS.with(|m| m.borrow_mut().insert(f.id, f.clone()));
-}
-fn next_farmer_id() -> u64 {
-    XFARM_NEXT_ID.with(|c| {
-        let v = *c.borrow().get();
-        c.borrow_mut().set(v + 1);
-        v
-    })
-}
-fn xfarm_farmers_by_owner(owner: &Principal) -> Vec<Farmer> {
-    XFARM_FARMERS.with(|m| {
-        m.borrow().iter().filter(|e| e.value().owner == *owner).map(|e| e.value().clone()).collect()
-    })
-}
-fn xfarm_active_count() -> usize {
-    XFARM_FARMERS.with(|m| {
-        m.borrow().iter().filter(|e| e.value().status == FarmerStatus::Active).count()
-    })
-}
 fn derive_xfarm_subaccount(user: &Principal) -> [u8; 32] {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
@@ -18013,321 +16356,7 @@ fn derive_xfarm_subaccount(user: &Principal) -> [u8; 32] {
     sub
 }
 
-// ── Factory primitives (net-new management-canister calls) ───────────
-#[cfg(target_arch = "wasm32")]
-async fn xfarm_create_canister(creation_cycles: u128) -> Result<Principal, String> {
-    // Factory = sole controller (R5: factory owns the lifecycle of every Farmer).
-    let args = CreateCanisterArgs {
-        settings: Some(XFarmCanisterSettings {
-            controllers: Some(vec![get_canister_id()]),
-            compute_allocation: None,
-            memory_allocation: None,
-            freezing_threshold: Some(0),
-        }),
-    };
-    // Cycles are attached to the CALL (msg payment), not an arg field — the mgmt
-    // canister deducts the 500B creation fee from them and credits the rest to the
-    // new canister. Passing them in the struct (the old bug) sent 0 → reject.
-    let res: Result<(CreateCanisterResult,), _> = ic_cdk::api::call::call_with_payment128(
-        Principal::management_canister(), "create_canister", (args,), creation_cycles,
-    ).await;
-    res.map(|(r,)| r.canister_id)
-        .map_err(|(c, m)| format!("CREATE_CANISTER_FAILED ({:?}): {}", c, m))
-}
-#[cfg(not(target_arch = "wasm32"))]
-async fn xfarm_create_canister(_creation_cycles: u128) -> Result<Principal, String> {
-    // Host mock: a stable, non-anonymous stand-in principal for unit tests
-    // (a self-authenticating id over a fixed pubkey). Real create_canister only
-    // runs on wasm; tests use dev_seed_farmer (canister_id None) instead.
-    Ok(Principal::self_authenticating(&[1u8; 29]))
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn xfarm_install_code(canister_id: Principal, wasm: Vec<u8>, arg: Vec<u8>) -> Result<(), String> {
-    let args = InstallCodeArgs { mode: XFarmInstallMode::install, canister_id, wasm_module: wasm, arg };
-    let res: Result<(), _> = ic_cdk::call(Principal::management_canister(), "install_code", (args,)).await;
-    res.map_err(|(c, m)| format!("INSTALL_CODE_FAILED ({:?}): {}", c, m))
-}
-#[cfg(not(target_arch = "wasm32"))]
-async fn xfarm_install_code(_canister_id: Principal, _wasm: Vec<u8>, _arg: Vec<u8>) -> Result<(), String> {
-    Ok(())
-}
-
-// Upgrade an EXISTING Farmer canister's code (preserves stable state via post_upgrade).
-// Used to roll out a Farmer-wasm fix to already-created Farmers. Empty arg: the
-// Farmer's post_upgrade takes no args.
-#[cfg(target_arch = "wasm32")]
-async fn xfarm_upgrade_code(canister_id: Principal, wasm: Vec<u8>) -> Result<(), String> {
-    let args = InstallCodeArgs {
-        mode: XFarmInstallMode::upgrade, canister_id, wasm_module: wasm,
-        arg: candid::encode_args(()).unwrap_or_default(),
-    };
-    let res: Result<(), _> = ic_cdk::call(Principal::management_canister(), "install_code", (args,)).await;
-    res.map_err(|(c, m)| format!("UPGRADE_CODE_FAILED ({:?}): {}", c, m))
-}
-#[cfg(not(target_arch = "wasm32"))]
-async fn xfarm_upgrade_code(_canister_id: Principal, _wasm: Vec<u8>) -> Result<(), String> { Ok(()) }
-
-#[cfg(target_arch = "wasm32")]
-async fn xfarm_stop_canister(cid: Principal) -> Result<(), String> {
-    ic_cdk::call(Principal::management_canister(), "stop_canister", (CanisterIdRecord { canister_id: cid },))
-        .await.map_err(|(c, m)| format!("STOP_FAILED ({:?}): {}", c, m))
-}
-#[cfg(not(target_arch = "wasm32"))]
-async fn xfarm_stop_canister(_cid: Principal) -> Result<(), String> { Ok(()) }
-
-#[cfg(target_arch = "wasm32")]
-async fn xfarm_delete_canister(cid: Principal) -> Result<(), String> {
-    ic_cdk::call(Principal::management_canister(), "delete_canister", (CanisterIdRecord { canister_id: cid },))
-        .await.map_err(|(c, m)| format!("DELETE_FAILED ({:?}): {}", c, m))
-}
-#[cfg(not(target_arch = "wasm32"))]
-async fn xfarm_delete_canister(_cid: Principal) -> Result<(), String> { Ok(()) }
-
-// Tell an EXISTING Farmer canister to bump its cycle budget + duration and re-arm
-// the burn timer (called by renew_farmer after the money legs). The Farmer's
-// `extend` returns Result<(), String>; the inter-canister call itself may also
-// reject, so both layers are unwrapped.
-#[cfg(target_arch = "wasm32")]
-async fn xfarm_extend_farmer(cid: Principal, add_budget: u64, add_days: u32) -> Result<(), String> {
-    let res: Result<(Result<(), String>,), _> = ic_cdk::call(cid, "extend", (add_budget, add_days)).await;
-    match res {
-        Ok((Ok(()),)) => Ok(()),
-        Ok((Err(e),)) => Err(format!("EXTEND_FAILED: {}", e)),
-        Err((c, m)) => Err(format!("EXTEND_CALL ({:?}): {}", c, m)),
-    }
-}
-// Host mock: no-op Ok (the Farmer canister only runs on wasm). A test-fail seam
-// lets unit tests simulate an extend failure to exercise the renew error path.
-#[cfg(not(target_arch = "wasm32"))]
-async fn xfarm_extend_farmer(_cid: Principal, _add_budget: u64, _add_days: u32) -> Result<(), String> {
-    if let Some(e) = TEST_XFARM_EXTEND_FAIL.with(|cell| cell.borrow().clone()) {
-        return Err(e);
-    }
-    Ok(())
-}
-
-// ── Public query/update API ─────────────────────────────────────────
-
-#[ic_cdk::query]
-fn get_xfarm_tiers() -> Vec<FarmerTier> {
-    xfarm_config().tiers
-}
-
-#[ic_cdk::query]
-fn get_xfarm_info() -> XFarmInfo {
-    let cfg = xfarm_config();
-    XFarmInfo {
-        enabled: feature_visible(FLAG_X_FARM, get_caller()),
-        tiers: cfg.tiers,
-        proxy_set: !cfg.proxy.url.is_empty(),
-        wasm_uploaded: XFARM_WASM.with(|w| w.borrow().is_some()),
-        max_active_farmers: cfg.max_active_farmers,
-        active_count: xfarm_active_count(),
-    }
-}
-
-#[ic_cdk::query]
-fn get_xfarm_deposit_address() -> LedgerAccount {
-    let caller = get_caller();
-    LedgerAccount { owner: get_canister_id(), subaccount: Some(derive_xfarm_subaccount(&caller)) }
-}
-
-#[ic_cdk::query]
-fn list_my_farmers() -> Vec<Farmer> {
-    xfarm_farmers_by_owner(&get_caller())
-}
-
-/// USD tier price → ICP at the cached XRC rate; lock the quote for the caller
-/// for 15 minutes (mirrors get_explorer_quote). An update (not a query) because
-/// the mainnet path may refresh the rate via the XRC.
-#[ic_cdk::update]
-async fn get_xfarm_quote(tier_id: u32, days: u32) -> Result<XFarmQuote, String> {
-    require_authenticated()?;
-    require_x_farm_enabled()?;
-    let caller = get_caller();
-    let cfg = xfarm_config();
-    // Tier sets both drafts/day AND the per-day price (price_usd_e8s = USD/day).
-    let tier = cfg.tiers.iter().find(|t| t.id == tier_id)
-        .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
-    if days < XFARM_MIN_DAYS || days > XFARM_MAX_DAYS { return Err("BAD_DAYS".to_string()); }
-    let backend_cfg = CONFIG.with(|c| c.borrow().get().clone());
-    let rate = explorer_usd_rate_e8s(ExplorerToken::ICP, &backend_cfg).await?; // USD e8s per 1 ICP
-    if rate == 0 { return Err("RATE_UNAVAILABLE".to_string()); }
-    // days × per-tier USD/day, with a 10% discount at the full 30-day lifespan.
-    let mut usd_total = days as u128 * tier.price_usd_e8s as u128;
-    if days >= XFARM_MAX_DAYS {
-        usd_total = usd_total * (100 - XFARM_30DAY_DISCOUNT_PCT) / 100;
-    }
-    let price = u64::try_from(usd_total * 100_000_000u128 / rate as u128)
-        .map_err(|_| "PRICE_OVERFLOW".to_string())?;
-    if price == 0 { return Err("PRICE_TOO_LOW".to_string()); }
-    let now = current_time();
-    let q = XFarmQuote {
-        tier_id, days, price_e8s: price, fee_e8s: ICP_FEE_E8S * 2,
-        usd_e8s: u64::try_from(usd_total).unwrap_or(u64::MAX), rate_usd_e8s: rate,
-        created_at: now, expires_at: now + XFARM_QUOTE_TTL_NANOS,
-    };
-    XFARM_QUOTES.with(|qq| qq.borrow_mut().insert(caller, q.clone()));
-    Ok(q)
-}
-
-/// Create a Farmer: escrow → 10% treasury → create+install the Farmer canister →
-/// 90% burn-to-cycles funding it (CMC topup, journaled). Reuses settle_burn_split's
-/// CMC leg + submit_dapp's escrow ordering. Per R5 the order is create→install→top-up;
-/// a partial failure leaves a persisted Farmer the sweep can resume or clean up.
-#[ic_cdk::update]
-async fn create_farmer(tier_id: u32, persona: String, days: u32) -> Result<Farmer, String> {
-    require_authenticated()?;
-    require_x_farm_enabled()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    // Run the whole create flow; on ANY failure auto-refund the escrow deposit so a
-    // failed create never strands the owner's ICP (e.g. WASM_NOT_UPLOADED). The
-    // frontend deposits BEFORE calling, so the deposit is in escrow on entry. Pre-money
-    // failures (the common case) refund in full; a post-treasury failure finds the
-    // escrow already drained → refund no-ops, leaving the half-Farmer to the sweep.
-    let result: Result<Farmer, String> = async move {
-    let cfg = xfarm_config();
-    let tier = cfg.tiers.iter().find(|t| t.id == tier_id).cloned()
-        .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
-    if days < XFARM_MIN_DAYS || days > XFARM_MAX_DAYS { return Err("BAD_DAYS".to_string()); }
-    let persona = persona.trim().to_string();
-    if persona.is_empty() || persona.chars().count() > XFARM_MAX_PERSONA {
-        return Err(format!("BAD_PERSONA: 1..{} chars", XFARM_MAX_PERSONA));
-    }
-    // Unlimited Farmers per owner (more farms = more ICP burned, on-theme). The
-    // only limiter is an optional global brake: 0 = off / unlimited.
-    if cfg.max_active_farmers > 0 && xfarm_active_count() >= cfg.max_active_farmers {
-        return Err("MAX_FARMERS_REACHED".to_string());
-    }
-    // Fail fast: the factory cannot install the Farmer without its wasm uploaded.
-    // Checked after the cheap input validations but before any money moves, so a
-    // missing upload can't strand a half-created Farmer (escrow paid / canister
-    // created / install_done=false) the sweep never reaps and that blocks the
-    // owner from retrying with FARMER_EXISTS.
-    if XFARM_WASM.with(|w| w.borrow().is_none()) {
-        return Err("WASM_NOT_UPLOADED".to_string());
-    }
-
-    // Locked quote (price locked 15 min, like EXPLORER_QUOTES).
-    let quote = XFARM_QUOTES.with(|q| q.borrow().get(&caller).cloned())
-        .ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.tier_id != tier_id || quote.days != days { return Err("QUOTE_MISMATCH".to_string()); }
-    if current_time() > quote.expires_at { return Err("QUOTE_EXPIRED".to_string()); }
-
-    let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
-    let fee = ICP_FEE_E8S;
-    let sub = derive_xfarm_subaccount(&caller);
-    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
-    let balance = call_ledger_balance(ledger_id, escrow.clone()).await
-        .map_err(|e| format!("ESCROW_BALANCE: {}", e))?;
-    // Two outbound escrow legs (treasury + CMC) ⇒ escrow must hold price + 2 fees.
-    if balance < quote.price_e8s.saturating_add(quote.fee_e8s) {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
-    }
-
-    // Allocate + persist the Farmer first so a retry sweep can resume.
-    let id = next_farmer_id();
-    let now = current_time();
-    let treasury_amt = quote.price_e8s / 10; // 10% → treasury
-    let burn_amt = quote.price_e8s.saturating_sub(treasury_amt); // 90% → cycles
-    let mut farmer = Farmer {
-        id, owner: caller, canister_id: None, tier_id, persona: persona.clone(),
-        created_at: now,
-        expected_depleted_at: now + (days as u64) * DAY_NS,
-        budget_cycles: 0, burned_cycles: 0,
-        last_generation_at: 0, last_burn_tick_at: 0,
-        status: FarmerStatus::Active,
-        treasury_block: None, burn_block_index: None, install_done: false, cmc_notified: false,
-    };
-    xfarm_put_farmer(&farmer);
-
-    // Order: create + install the Farmer canister FIRST (paid from the backend's own
-    // cycles), and only AFTER it exists move the owner's ICP. So a create/install
-    // failure strands NO user ICP — it just removes the persisted Farmer and returns
-    // an error with the deposit untouched in escrow ("ICP not returned" fix + R5).
-
-    // Factory: create the Farmer canister (sole controller = this backend, R5).
-    if farmer.canister_id.is_none() {
-        let cid = match xfarm_create_canister(XFARM_CREATION_CYCLES).await {
-            Ok(cid) => cid,
-            Err(e) => { XFARM_FARMERS.with(|m| m.borrow_mut().remove(&id)); return Err(e); }
-        };
-        farmer.canister_id = Some(cid);
-        xfarm_put_farmer(&farmer);
-    }
-    let farmer_cid = farmer.canister_id.unwrap();
-
-    // Install the Farmer wasm (net-new 2nd canister).
-    if !farmer.install_done {
-        let wasm = XFARM_WASM.with(|w| w.borrow().clone())
-            .ok_or_else(|| "WASM_NOT_UPLOADED".to_string())?;
-        let init = FarmerInitArgs {
-            farmer_id: id, owner: caller, backend_canister_id: get_canister_id(),
-            tier_id, persona: persona.clone(),
-            drafts_per_day: tier.drafts_per_day, duration_days: days,
-            budget_cycles: burn_amt.saturating_sub(fee), // 90% net of the CMC leg fee
-            proxy_url: cfg.proxy.url.clone(), proxy_bearer: cfg.proxy.bearer.clone(),
-        };
-        let arg = candid::encode_args((init,)).map_err(|e| format!("ENCODE_INIT: {}", e))?;
-        // R5: if install fails, delete the orphan canister so it can't accumulate.
-        if let Err(e) = xfarm_install_code(farmer_cid, wasm, arg).await {
-            let _ = xfarm_delete_canister(farmer_cid).await;
-            XFARM_FARMERS.with(|m| m.borrow_mut().remove(&id));
-            return Err(e);
-        }
-        farmer.install_done = true;
-        xfarm_put_farmer(&farmer);
-    }
-
-    // 10% → treasury (only now that the canister exists; idempotent via treasury_block).
-    if farmer.treasury_block.is_none() {
-        let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-        let b = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, treasury_amt, Some(fee))
-            .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
-        farmer.treasury_block = Some(b);
-        xfarm_put_farmer(&farmer);
-    }
-
-    // 90% → burn to cycles funding the Farmer (CMC topup to the Farmer canister;
-    // idempotent via burn_block_index + notify — PB-148 class, mirrors settle_burn_split).
-    if farmer.burn_block_index.is_none() {
-        let b = call_cmc_topup_transfer(ledger_id, Some(sub), farmer_cid, burn_amt, fee)
-            .await.map_err(|e| format!("BACKEND_CMC_XFER: {}", e))?;
-        farmer.burn_block_index = Some(b);
-        farmer.budget_cycles = burn_amt.saturating_sub(fee);
-        xfarm_put_farmer(&farmer);
-    }
-    if let Err(e) = notify_cmc_topup(cmc_principal(), farmer_cid, farmer.burn_block_index.unwrap(), false).await {
-        if e.starts_with("CMC_REFUNDED") {
-            farmer.burn_block_index = None; // drop the block so the sweep re-transfers
-            xfarm_put_farmer(&farmer);
-        }
-        return Err(format!("BACKEND_CMC_NOTIFY: {}", e));
-    }
-    farmer.cmc_notified = true;
-    xfarm_put_farmer(&farmer);
-
-    XFARM_QUOTES.with(|q| q.borrow_mut().remove(&caller));
-    staking_audit("xfarm_create", caller, quote.price_e8s, id);
-    Ok(farmer)
-    }.await;
-
-    if result.is_err() {
-        if let Ok(amt) = xfarm_refund_escrow(caller).await {
-            if amt > 0 {
-                canister_print(&format!("xfarm: refunded {} e8s to {} after failed create", amt, caller.to_text()));
-            }
-        }
-    }
-    result
-}
-
-/// Refund a caller's x-farm escrow deposit (balance − fee) back to their main account.
-/// Recovers funds when create_farmer aborts after the frontend has already deposited
-/// (it deposits before calling). Returns 0 when there's nothing above the fee.
+/// Refund a caller's stranded x-farm escrow deposit (balance − fee).
 async fn xfarm_refund_escrow(caller: Principal) -> Result<u64, String> {
     let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
     let fee = ICP_FEE_E8S;
@@ -18357,410 +16386,6 @@ async fn refund_xfarm_escrow() -> Result<u64, String> {
 async fn admin_refund_xfarm_escrow(user: Principal) -> Result<u64, String> {
     xfarm_refund_escrow(user).await
 }
-
-/// RENEW: pay again to extend an existing (Active) Farmer's lifespan. Reuses the
-/// create money path — 10% → treasury, 90% → CMC topup to the EXISTING Farmer
-/// canister — then calls the Farmer's `extend(add_budget_cycles, add_days)` to bump
-/// the budget + duration and re-arm the burn timer. The owner gets a fresh quote for
-/// the Farmer's tier first (frontend calls get_xfarm_quote). A depleted/swept Farmer
-/// (no canister) can't be renewed → create a new one.
-///
-/// C2 trapped-fund fix (2026-06-20): the CMC leg now journals `burn_block_index` +
-/// clears `cmc_notified` BEFORE the notify call (mirrors `create_farmer`), so a
-/// transient notify failure no longer strands the 90% ICP at the CMC — `xfarm_sweep`
-/// re-notifies the journaled block and recovers it as cycles. `CMC_REFUNDED` drops
-/// the block (the CMC sent the ICP back to the escrow) and the auto-refund wrapper
-/// returns it. Like `create_farmer`, ANY failure auto-refunds the escrow: pre-money
-/// failures refund the full deposit; post-money failures find the escrow drained →
-/// refund no-ops (the CMC leg is journaled, so the sweep recovers those funds).
-///
-/// NOTE: the money legs here are NOT guarded the way create's are — the Farmer's
-/// `treasury_block` / `burn_block_index` / `cmc_notified` fields are reused from
-/// create and can't cleanly distinguish "this renew's block" from "create's block"
-/// without per-renew struct fields. So a renew always re-runs the treasury + CMC
-/// transfers (overwriting the historical create blocks). This matches the pre-fix
-/// behavior; the only change is the journaling that lets the sweep recover a notify
-/// failure. The retry-after-extend-failure double-charge this implies is a known
-/// limitation documented in okf/notes/escrow-fix-review-2026-06-20.md (the proper fix is
-/// a per-renew epoch field; deferred — extend failures are rare, the Farmer canister
-/// is controller-owned and the call is local).
-#[ic_cdk::update]
-async fn renew_farmer(farmer_id: u64, days: u32) -> Result<Farmer, String> {
-    require_authenticated()?;
-    require_x_farm_enabled()?;
-    let caller = get_caller();
-    let _guard = CallerGuard::new(caller)?;
-
-    let result: Result<Farmer, String> = async move {
-    let mut farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
-        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
-    if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
-    if farmer.status != FarmerStatus::Active { return Err("CANNOT_RENEW".to_string()); }
-    if days < XFARM_MIN_DAYS || days > XFARM_MAX_DAYS { return Err("BAD_DAYS".to_string()); }
-    let farmer_cid = farmer.canister_id.ok_or_else(|| "NO_CANISTER".to_string())?;
-
-    let cfg = xfarm_config();
-    // Tier must still exist (selects drafts/day); price is days-based.
-    let _tier = cfg.tiers.iter().find(|t| t.id == farmer.tier_id)
-        .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
-
-    // Fresh locked quote for the Farmer's tier + chosen extension days.
-    let quote = XFARM_QUOTES.with(|q| q.borrow().get(&caller).cloned())
-        .ok_or_else(|| "NO_QUOTE".to_string())?;
-    if quote.tier_id != farmer.tier_id || quote.days != days { return Err("QUOTE_MISMATCH".to_string()); }
-    if current_time() > quote.expires_at { return Err("QUOTE_EXPIRED".to_string()); }
-
-    let ledger_id = CONFIG.with(|c| c.borrow().get().ledger_canister_id);
-    let fee = ICP_FEE_E8S;
-    let sub = derive_xfarm_subaccount(&caller);
-    let escrow = LedgerAccount { owner: get_canister_id(), subaccount: Some(sub) };
-    let balance = call_ledger_balance(ledger_id, escrow.clone()).await
-        .map_err(|e| format!("ESCROW_BALANCE: {}", e))?;
-    if balance < quote.price_e8s.saturating_add(quote.fee_e8s) {
-        return Err("INSUFFICIENT_DEPOSIT".to_string());
-    }
-
-    let treasury_amt = quote.price_e8s / 10;            // 10% → treasury
-    let burn_amt = quote.price_e8s.saturating_sub(treasury_amt); // 90% → cycles
-    let add_budget = burn_amt.saturating_sub(fee);
-
-    // 10% → treasury (overwrites the historical create block — see NOTE above).
-    let treasury_dest = LedgerAccount { owner: get_canister_id(), subaccount: Some(TREASURY_SUBACCOUNT) };
-    let tb = call_ledger_transfer(ledger_id, Some(sub), treasury_dest, treasury_amt, Some(fee))
-        .await.map_err(|e| format!("TREASURY_XFER: {}", e))?;
-    farmer.treasury_block = Some(tb);
-    xfarm_put_farmer(&farmer);
-
-    // 90% → CMC topup to the EXISTING Farmer canister. Journal the block + clear
-    // cmc_notified BEFORE notify (the C2 fix) so a notify failure is recoverable by
-    // `xfarm_sweep` (which re-notifies any Active farmer with a block + !cmc_notified).
-    let block = call_cmc_topup_transfer(ledger_id, Some(sub), farmer_cid, burn_amt, fee)
-        .await.map_err(|e| format!("RENEW_CMC_XFER: {}", e))?;
-    farmer.burn_block_index = Some(block);
-    farmer.cmc_notified = false;
-    xfarm_put_farmer(&farmer);
-    if let Err(e) = notify_cmc_topup(cmc_principal(), farmer_cid, block, false).await {
-        if e.starts_with("CMC_REFUNDED") {
-            // The CMC refused the block and sent the ICP back to the escrow subaccount;
-            // drop the block so the sweep doesn't re-notify a refunded one, and let the
-            // auto-refund wrapper below return it to the owner.
-            farmer.burn_block_index = None;
-            xfarm_put_farmer(&farmer);
-        }
-        return Err(format!("RENEW_CMC_NOTIFY: {}", e));
-    }
-    farmer.cmc_notified = true;
-    xfarm_put_farmer(&farmer);
-
-    // Tell the Farmer to extend its budget + duration + re-arm the burn timer.
-    xfarm_extend_farmer(farmer_cid, add_budget, days).await?;
-
-    farmer.budget_cycles = farmer.budget_cycles.saturating_add(add_budget);
-    farmer.expected_depleted_at = farmer.expected_depleted_at
-        .saturating_add((days as u64) * DAY_NS);
-    farmer.status = FarmerStatus::Active;
-    xfarm_put_farmer(&farmer);
-
-    XFARM_QUOTES.with(|q| q.borrow_mut().remove(&caller));
-    staking_audit("xfarm_renew", caller, quote.price_e8s, farmer_id);
-    Ok(farmer)
-    }.await;
-
-    // On ANY failure auto-refund whatever's left in the escrow (mirrors create_farmer).
-    // Pre-treasury failures refund the full deposit; post-treasury/post-CMC failures
-    // find the escrow drained → refund no-ops (the CMC leg is journaled, so the sweep
-    // recovers those funds as cycles rather than stranding them at the CMC).
-    if result.is_err() {
-        if let Ok(amt) = xfarm_refund_escrow(caller).await {
-            if amt > 0 {
-                canister_print(&format!(
-                    "xfarm: refunded {} e8s to {} after failed renew", amt, caller.to_text()));
-            }
-        }
-    }
-    result
-}
-
-/// Called by a Farmer canister when its cycle balance hits the stop-floor (D2).
-/// Only the Farmer's own canister may report. Sets Depleted so the sweep reaps it.
-#[ic_cdk::update]
-fn report_depleted(farmer_id: u64, burned_cycles: u64) -> Result<(), String> {
-    let caller = get_caller();
-    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
-        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
-    if farmer.canister_id != Some(caller) {
-        return Err("NOT_FARMER_CANISTER".to_string());
-    }
-    XFARM_FARMERS.with(|m| {
-        let mut map = m.borrow_mut();
-        if let Some(mut f) = map.get(&farmer_id) {
-            f.burned_cycles = burned_cycles;
-            f.status = FarmerStatus::Depleted;
-            map.insert(farmer_id, f);
-        }
-    });
-    Ok(())
-}
-
-/// On-demand generation: the owner viewing a Farmer triggers (throttled to max
-/// 1/day inside the Farmer) a fresh generation, then returns its retained drafts.
-/// Dev-seed Farmers (no canister) just return the seeded mock drafts so the UI works.
-#[ic_cdk::update]
-async fn get_farmer_drafts(farmer_id: u64, since: u64) -> Result<Vec<XFarmDraft>, String> {
-    require_authenticated()?;
-    let caller = get_caller();
-    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
-        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
-    if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
-    match farmer.canister_id {
-        None => Ok(XFARM_MOCK_DRAFTS.with(|d| d.borrow().get(&farmer.id).cloned()).unwrap_or_default()
-            .into_iter().filter(|x| x.created_at >= since).collect()),
-        Some(cid) => {
-            // request_generation triggers the throttled (1/day) on-demand outcall in
-            // the Farmer and returns its retained drafts (Result<vec Draft, text>).
-            let res: Result<(Result<Vec<XFarmDraft>, String>,), _> =
-                ic_cdk::call(cid, "request_generation", (farmer_id,)).await;
-            match res {
-                Ok((Ok(drafts),)) => Ok(drafts.into_iter().filter(|x| x.created_at >= since).collect()),
-                Ok((Err(e),)) => Err(format!("GENERATION_FAILED: {}", e)),
-                Err((c, m)) => Err(format!("DRAFTS_FAILED ({:?}): {}", c, m)),
-            }
-        }
-    }
-}
-
-/// Read-only companion to `get_farmer_drafts`: returns the Farmer's currently
-/// STORED drafts WITHOUT triggering generation (no Gemini outcall, no throttle
-/// consumed). The UI calls this first to paint cached drafts instantly, then calls
-/// `get_farmer_drafts` in the background to (maybe) refresh — so a slow or failed
-/// generation never blanks the list the owner already has.
-#[ic_cdk::update]
-async fn get_farmer_drafts_cached(farmer_id: u64, since: u64) -> Result<Vec<XFarmDraft>, String> {
-    require_authenticated()?;
-    let caller = get_caller();
-    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
-        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
-    if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
-    match farmer.canister_id {
-        None => Ok(XFARM_MOCK_DRAFTS.with(|d| d.borrow().get(&farmer.id).cloned()).unwrap_or_default()
-            .into_iter().filter(|x| x.created_at >= since).collect()),
-        Some(cid) => {
-            // get_drafts(since) is a pure read on the Farmer — no outcall, no throttle.
-            let res: Result<(Result<Vec<XFarmDraft>, String>,), _> =
-                ic_cdk::call(cid, "get_drafts", (since,)).await;
-            match res {
-                Ok((Ok(drafts),)) => Ok(drafts),
-                Ok((Err(e),)) => Err(format!("DRAFTS_REJECTED: {}", e)),
-                Err((c, m)) => Err(format!("DRAFTS_FAILED ({:?}): {}", c, m)),
-            }
-        }
-    }
-}
-
-/// The owner's live Farmer status: cycles remaining, days of budget left, next
-/// generation. Proxies to the Farmer canister for the live cycle balance.
-#[ic_cdk::update]
-async fn get_farmer_status(farmer_id: u64) -> Result<(Farmer, u64, u64), String> {
-    require_authenticated()?;
-    let caller = get_caller();
-    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
-        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
-    if farmer.owner != caller { return Err("NOT_OWNER".to_string()); }
-    let (cycles_remaining, next_gen) = match farmer.canister_id {
-        // next_gen = next UTC midnight after the last generation (when the
-        // 1-per-UTC-day throttle resets) — matches the Farmer's get_status; 0 = ready.
-        None => (
-            farmer.budget_cycles.saturating_sub(farmer.burned_cycles),
-            if farmer.last_generation_at == 0 { 0 } else { (farmer.last_generation_at / DAY_NS + 1) * DAY_NS },
-        ),
-        Some(cid) => {
-            // get_status(id) -> Result<(cycles_remaining, next_generation_at), String>.
-            // The Farmer returns a candid `variant { Ok; Err }`, so decode the Result —
-            // NOT a bare tuple (that mismatch made every real-canister status call fail,
-            // hiding the next-round countdown + days-left on mainnet).
-            let res: Result<(Result<(u64, u64), String>,), _> =
-                ic_cdk::call(cid, "get_status", (farmer.id,)).await;
-            match res {
-                Ok((Ok((cr, ng)),)) => (cr, ng),
-                Ok((Err(e),)) => return Err(format!("STATUS_REJECTED: {}", e)),
-                Err((c, m)) => return Err(format!("STATUS_FAILED ({:?}): {}", c, m)),
-            }
-        }
-    };
-    Ok((farmer, cycles_remaining, next_gen))
-}
-
-// ── Sweep (added to setup_timers; bounded per pass like sweep_play_sessions) ──
-async fn xfarm_sweep() {
-    if !feature_active(FLAG_X_FARM) { return; }
-    // (a) reap Depleted Farmers (stop+delete the canister; nothing to reclaim —
-    //     cycles are ~0 by design, D2/finding #7), (b) re-notify pending CMC legs.
-    let mut to_clean: Vec<(u64, Principal)> = Vec::new();
-    let mut to_renotify: Vec<(u64, Principal, u64)> = Vec::new();
-    XFARM_FARMERS.with(|m| {
-        for entry in m.borrow().iter() {
-            let f = entry.value();
-            if f.status == FarmerStatus::Depleted {
-                if let Some(cid) = f.canister_id {
-                    to_clean.push((f.id, cid));
-                    if to_clean.len() >= XFARM_SWEEP_BATCH { break; }
-                }
-            } else if f.status == FarmerStatus::Active && f.burn_block_index.is_some() && !f.cmc_notified {
-                to_renotify.push((f.id, f.canister_id.unwrap(), f.burn_block_index.unwrap()));
-            }
-        }
-    });
-    for (id, cid) in to_clean {
-        let _ = xfarm_stop_canister(cid).await;
-        if let Err(e) = xfarm_delete_canister(cid).await {
-            canister_print(&format!("xfarm sweep: delete farmer {} failed: {}", id, e));
-            continue;
-        }
-        XFARM_FARMERS.with(|m| m.borrow_mut().remove(&id));
-    }
-    for (id, cid, block) in to_renotify {
-        match notify_cmc_topup(cmc_principal(), cid, block, false).await {
-            Ok(_) => XFARM_FARMERS.with(|m| {
-                let mut map = m.borrow_mut();
-                if let Some(mut f) = map.get(&id) { f.cmc_notified = true; map.insert(id, f); }
-            }),
-            Err(e) => canister_print(&format!("xfarm sweep: renotify farmer {} failed: {}", id, e)),
-        }
-    }
-}
-
-// ── Admin ───────────────────────────────────────────────────────────
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_xfarm_proxy(url: String, bearer: String) -> Result<(), String> {
-    let url = url.trim().to_string();
-    if url.is_empty() { return Err("INVALID_URL".to_string()); }
-    let mut cfg = xfarm_config();
-    cfg.proxy = XFarmProxy { url, bearer: bearer.trim().to_string() };
-    put_xfarm_config(cfg);
-    Ok(())
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_xfarm_tiers(tiers: Vec<FarmerTier>) -> Result<(), String> {
-    if tiers.is_empty() || tiers.len() > XFARM_MAX_TIERS { return Err("BAD_TIERS".to_string()); }
-    let mut seen = std::collections::HashSet::new();
-    for t in &tiers {
-        if t.drafts_per_day == 0 || t.drafts_per_day > XFARM_MAX_DRAFTS_PER_DAY {
-            return Err("BAD_DRAFTS_PER_DAY".to_string());
-        }
-        if t.duration_days == 0 { return Err("BAD_DURATION".to_string()); }
-        if !seen.insert(t.id) { return Err("DUP_TIER_ID".to_string()); }
-    }
-    let mut cfg = xfarm_config();
-    cfg.tiers = tiers;
-    put_xfarm_config(cfg);
-    Ok(())
-}
-
-/// Upload the Farmer wasm the factory installs (heap-cached; re-upload after an
-/// upgrade). Records the sha256 audit hash. Rotatable by re-calling.
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_xfarm_wasm(wasm: Vec<u8>) -> Result<(), String> {
-    if wasm.is_empty() { return Err("EMPTY_WASM".to_string()); }
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(&wasm);
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&h.finalize());
-    XFARM_WASM_HASH.with(|c| *c.borrow_mut() = Some(hash));
-    XFARM_WASM.with(|w| *w.borrow_mut() = Some(wasm));
-    Ok(())
-}
-
-/// Admin: upgrade every existing Farmer canister to the currently-uploaded wasm
-/// (preserves each Farmer's stable state via post_upgrade). Rolls out a Farmer-wasm
-/// fix to already-created Farmers. Returns the count upgraded; bounded by live Farmers.
-#[ic_cdk::update(guard = "require_admin")]
-async fn admin_reinstall_all_farmers() -> Result<u64, String> {
-    let wasm = XFARM_WASM.with(|w| w.borrow().clone()).ok_or_else(|| "WASM_NOT_UPLOADED".to_string())?;
-    let targets: Vec<(u64, Principal)> = XFARM_FARMERS.with(|m| {
-        m.borrow().iter().filter_map(|e| e.value().canister_id.map(|c| (e.value().id, c))).collect()
-    });
-    let mut upgraded = 0u64;
-    for (id, cid) in targets {
-        match xfarm_upgrade_code(cid, wasm.clone()).await {
-            Ok(()) => upgraded += 1,
-            Err(e) => canister_print(&format!("xfarm reinstall: farmer {} ({}) failed: {}", id, cid.to_text(), e)),
-        }
-    }
-    Ok(upgraded)
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-fn admin_set_xfarm_config(max_active_farmers: usize) -> Result<(), String> {
-    // 0 = unlimited (no per-user cap; optional global brake only).
-    let mut cfg = xfarm_config();
-    cfg.max_active_farmers = max_active_farmers;
-    put_xfarm_config(cfg);
-    Ok(())
-}
-
-#[ic_cdk::update(guard = "require_admin")]
-async fn admin_disable_farmer(id: u64) -> Result<(), String> {
-    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&id))
-        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
-    if let Some(cid) = farmer.canister_id {
-        let _ = xfarm_stop_canister(cid).await;
-    }
-    XFARM_FARMERS.with(|m| {
-        let mut map = m.borrow_mut();
-        if let Some(mut f) = map.get(&id) { f.status = FarmerStatus::Disabled; map.insert(id, f); }
-    });
-    Ok(())
-}
-
-// ── Dev seeds (require_local_dev; offline UI states with no real canister/burn) ──
-#[ic_cdk::update(guard = "require_local_dev")]
-fn dev_seed_farmer(tier_id: u32, persona: String) -> Result<Farmer, String> {
-    let caller = get_caller();
-    let cfg = xfarm_config();
-    let tier = cfg.tiers.iter().find(|t| t.id == tier_id).cloned()
-        .ok_or_else(|| "TIER_NOT_FOUND".to_string())?;
-    // Local: usd_e8s_to_icp_e8s returns 0 if no admin-set rate; floor at 1 ICP.
-    let price = usd_e8s_to_icp_e8s(tier.price_usd_e8s).max(100_000_000);
-    let id = next_farmer_id();
-    let now = current_time();
-    let farmer = Farmer {
-        id, owner: caller, canister_id: None, tier_id, persona: persona.trim().to_string(),
-        created_at: now, expected_depleted_at: now + XFARM_DURATION_DAYS * DAY_NS,
-        budget_cycles: price * 9 / 10, burned_cycles: price / 20,
-        last_generation_at: now, last_burn_tick_at: now,
-        status: FarmerStatus::Active,
-        treasury_block: None, burn_block_index: None, install_done: true, cmc_notified: true,
-    };
-    xfarm_put_farmer(&farmer);
-    Ok(farmer)
-}
-
-#[ic_cdk::update(guard = "require_local_dev")]
-fn dev_seed_drafts(farmer_id: u64, n: u32) -> Result<(), String> {
-    let farmer = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id))
-        .ok_or_else(|| "FARMER_NOT_FOUND".to_string())?;
-    if farmer.owner != get_caller() { return Err("NOT_OWNER".to_string()); }
-    let now = current_time();
-    let drafts: Vec<XFarmDraft> = (0..n).map(|i| XFarmDraft {
-        id: i as u64, created_at: now,
-        text: format!("Draft #{} — ICP just processed its Nth tx; the AI-agent-economy thesis holds.", i + 1),
-        cited_url: Some("https://dashboard.internetcomputer.org/".to_string()),
-        image_url: None,
-    }).collect();
-    XFARM_MOCK_DRAFTS.with(|d| d.borrow_mut().insert(farmer_id, drafts));
-    Ok(())
-}
-
-#[ic_cdk::update(guard = "require_local_dev")]
-fn dev_clear_farmers() -> Result<(), String> {
-    let ids: Vec<u64> = XFARM_FARMERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-    XFARM_FARMERS.with(|m| { let mut map = m.borrow_mut(); for id in ids { map.remove(&id); } });
-    XFARM_MOCK_DRAFTS.with(|d| d.borrow_mut().clear());
-    Ok(())
-}
-
 
 // ==========================================
 // 21. Stake Vouchers (okf/ideas/stake-vouchers)
@@ -21703,19 +19328,19 @@ mod tests {
     #[test]
     fn test_feature_flag_default_and_override() {
         // dapp_explorer defaults ON; unknown flags default OFF.
-        assert!(feature_enabled(FLAG_EXPLORER));
+        assert!(feature_enabled(FLAG_EARLY_ADOPTERS));
         assert!(!feature_enabled("nonexistent_future_feature"));
 
         // Admin override wins over the default.
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_EXPLORER.to_string(), 0u8);
+            m.borrow_mut().insert(FLAG_EARLY_ADOPTERS.to_string(), 0u8);
         });
-        assert!(!feature_enabled(FLAG_EXPLORER));
+        assert!(!feature_enabled(FLAG_EARLY_ADOPTERS));
 
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_EXPLORER.to_string(), 1u8);
+            m.borrow_mut().insert(FLAG_EARLY_ADOPTERS.to_string(), 1u8);
         });
-        assert!(feature_enabled(FLAG_EXPLORER));
+        assert!(feature_enabled(FLAG_EARLY_ADOPTERS));
 
         // Retired flags are gone from the known list — they no longer surface
         // as admin toggles even if stale stable rows linger pre-purge.
@@ -21730,12 +19355,12 @@ mod tests {
             m.borrow_mut().insert("future_thing".to_string(), 1u8);
         });
         let flags = list_feature_flags();
-        assert_eq!(flags.iter().filter(|f| f.key == FLAG_EXPLORER).count(), 1);
+        assert_eq!(flags.iter().filter(|f| f.key == FLAG_EARLY_ADOPTERS).count(), 1);
         assert!(flags.iter().any(|f| f.key == "future_thing" && f.enabled));
 
         // cleanup for other tests on this thread
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().remove(&FLAG_EXPLORER.to_string());
+            m.borrow_mut().remove(&FLAG_EARLY_ADOPTERS.to_string());
             m.borrow_mut().remove(&"future_thing".to_string());
         });
     }
@@ -21806,374 +19431,22 @@ mod tests {
         assert!(explorer_quote_amount(1, 0, 8).is_err());
     }
 
-    #[test]
-    fn test_validate_dapp_text() {
-        assert!(validate_dapp_text("My Dapp", "https://example.com", "A fine dapp.").is_ok());
-        assert!(validate_dapp_text("", "https://example.com", "d").is_err());
-        assert!(validate_dapp_text(&"x".repeat(61), "https://example.com", "d").is_err());
-        assert!(validate_dapp_text("n", "http://example.com", "d").is_err(), "https only");
-        assert!(validate_dapp_text("n", "https://", "d").is_err(), "host required");
-        assert!(validate_dapp_text("n", "https://exa mple.com", "d").is_err(), "no whitespace");
-        assert!(validate_dapp_text("n", "https://example.com", "").is_err());
-        assert!(validate_dapp_text("n", "https://example.com", &"x".repeat(281)).is_err());
-    }
 
-    #[test]
-    fn test_seed_default_dapps_idempotent_and_listed_first() {
-        clear_dapps();
-        seed_default_dapps();
-        seed_default_dapps(); // re-run inserts nothing new
-        let listed = list_dapps();
-        assert_eq!(listed.len(), 15);
-        assert_eq!(listed[0].name, "idGeek 2.0");
-        assert_eq!(listed[1].name, "Liquidium");
-        assert_eq!(listed[2].name, "ICPSwap");
-        assert_eq!(listed[3].name, "OISY Wallet");
-        assert_eq!(listed[4].name, "OpenChat");
-        assert_eq!(listed[5].name, "Partyhats");
-        assert_eq!(listed[6].name, "Dyvr");
-        assert_eq!(listed[7].name, "onicai");
-        assert_eq!(listed[8].name, "DGDG");
-        assert_eq!(listed[9].name, "IC Terminal");
-        assert_eq!(listed[10].name, "ICP Index");
-        assert_eq!(listed[11].name, "Taggr");
-        assert_eq!(listed[12].name, "Menese Protocol");
-        assert_eq!(listed[13].name, "nftGeek");
-        assert_eq!(listed[14].name, "iiname");
-        assert!(listed.iter().all(|d| !d.community && d.expires_at.is_none()));
-    }
 
-    #[test]
-    fn test_seed_default_dapps_backfills_missing_on_populated_directory() {
-        clear_dapps();
-        seed_default_dapps();
-        // Simulate a directory seeded before the newer curated entries existed.
-        let icpswap_id = list_dapps().iter().find(|d| d.name == "ICPSwap").unwrap().id;
-        DAPPS.with(|m| { m.borrow_mut().remove(&icpswap_id); });
-        assert_eq!(list_dapps().len(), 14);
-        seed_default_dapps();
-        let listed = list_dapps();
-        assert_eq!(listed.len(), 15, "missing curated entry is backfilled");
-        assert_eq!(listed.iter().filter(|d| d.name == "ICPSwap").count(), 1, "no duplicates");
-    }
 
-    #[tokio::test]
-    async fn test_submit_dapp_full_flow_and_approval_gating() {
-        clear_dapps();
-        let user = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
-        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
-        let mut cfg = test_config(true);
-        cfg.admins = vec![admin];
-        CONFIG.with(|c| { c.borrow_mut().set(cfg); });
-        set_mock_caller(user);
 
-        // No quote yet → submit refused.
-        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30, vec![], false)
-            .await
-            .unwrap_err();
-        assert_eq!(err, "NO_QUOTE");
 
-        // Quote 30 days in ICP at the local default rate ($5): $30 = 6 ICP.
-        let quote = get_explorer_quote(ExplorerToken::ICP, 30).await.unwrap();
-        assert_eq!(quote.amount, 600_000_000);
-        assert_eq!(quote.usd_total_e8s, 3_000_000_000);
 
-        // Token/days must match the quote.
-        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::CkBTC, 30, vec![], false)
-            .await
-            .unwrap_err();
-        assert_eq!(err, "QUOTE_MISMATCH");
-
-        // Underfunded escrow refused; funded escrow accepted.
-        set_mock_ledger_balance(quote.amount); // missing the fee
-        let err = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30, vec![], false)
-            .await
-            .unwrap_err();
-        assert_eq!(err, "INSUFFICIENT_DEPOSIT");
-        set_mock_ledger_balance(quote.amount + 10_000);
-        set_mock_ledger_transfer(Ok(7));
-        let id = submit_dapp(
-            "D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::ICP, 30,
-            // mixed case + a dup → canonicalized + deduped to ["DeFi", "DEX"].
-            vec!["defi".into(), "DeFi".into(), "DEX".into()], true,
-        )
-        .await
-        .unwrap();
-        {
-            let stored = list_my_dapp_submissions();
-            assert_eq!(stored[0].categories, vec!["DeFi".to_string(), "DEX".to_string()]);
-            assert!(stored[0].is_vibe_coded, "vibe-coded flag persists");
-        }
-
-        // Pending: hidden from the public list, visible to the submitter,
-        // queued for the admin.
-        assert!(list_dapps().iter().all(|d| d.id != id));
-        assert_eq!(list_my_dapp_submissions().len(), 1);
-        assert_eq!(list_my_dapp_submissions()[0].status, DappStatus::Pending);
-        // The quote is consumed — a second submit needs a new one.
-        let err = submit_dapp("E".into(), "https://e.app".into(), "desc".into(), ExplorerToken::ICP, 30, vec![], false)
-            .await
-            .unwrap_err();
-        assert_eq!(err, "NO_QUOTE");
-
-        // Approval makes it public with the paid window applied, badged.
-        set_mock_caller(admin);
-        admin_approve_dapp(id).unwrap();
-        let listed = list_dapps();
-        let mine = listed.iter().find(|d| d.id == id).expect("approved listing is public");
-        assert!(mine.community, "community submissions carry the badge flag");
-        let expires = mine.expires_at.expect("paid listings expire");
-        assert_eq!(expires - mine.approved_at.unwrap(), 30 * DAY_NANOS);
-        assert_eq!(mine.categories, vec!["DeFi".to_string(), "DEX".to_string()]);
-        assert!(mine.is_vibe_coded);
-        assert_eq!(admin_approve_dapp(id).unwrap_err(), "NOT_PENDING");
-        clear_dapps();
-    }
-
-    #[test]
-    fn test_validate_dapp_categories() {
-        // Canonicalizes case + dedups.
-        assert_eq!(
-            validate_dapp_categories(&["defi".into(), "DeFi".into()]).unwrap(),
-            vec!["DeFi".to_string()]
-        );
-        // Empty is allowed (uncategorized).
-        assert_eq!(validate_dapp_categories(&[]).unwrap(), Vec::<String>::new());
-        // Unknown rejected; over-cap rejected.
-        assert!(validate_dapp_categories(&["Nonsense".into()]).is_err());
-        assert!(validate_dapp_categories(
-            &["DeFi".into(), "DEX".into(), "NFT".into(), "AI".into()]
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn test_seed_default_dapps_categorized_and_not_vibe_coded() {
-        clear_dapps();
-        seed_default_dapps();
-        let dapps = list_dapps();
-        assert!(!dapps.is_empty());
-        for d in &dapps {
-            assert!(!d.is_vibe_coded, "{} must not be vibe-coded", d.name);
-            assert!(!d.categories.is_empty(), "{} needs ≥1 category", d.name);
-            for c in &d.categories {
-                assert!(DAPP_CATEGORIES.contains(&c.as_str()), "{} canonical", c);
-            }
-        }
-        clear_dapps();
-    }
-
-    #[tokio::test]
-    async fn test_reject_dapp_refunds_and_deletes() {
-        clear_dapps();
-        let user = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
-        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
-        set_mock_caller(user);
-        let quote = get_explorer_quote(ExplorerToken::CkUSDC, 5).await.unwrap();
-        assert_eq!(quote.amount, 5_000_000); // $5 at 6 decimals
-        set_mock_ledger_balance(quote.amount + 10_000);
-        set_mock_ledger_transfer(Ok(1));
-        let id = submit_dapp("D".into(), "https://d.app".into(), "desc".into(), ExplorerToken::CkUSDC, 5, vec![], false)
-            .await
-            .unwrap();
-
-        // A failed refund keeps the listing for a retry.
-        set_mock_ledger_transfer(Err("ledger down".into()));
-        assert!(admin_reject_dapp(id).await.is_err());
-        assert_eq!(list_pending_dapps().len(), 1);
-
-        set_mock_ledger_transfer(Ok(2));
-        admin_reject_dapp(id).await.unwrap();
-        assert!(DAPPS.with(|m| m.borrow().get(&id)).is_none());
-        clear_dapps();
-    }
 
     fn clear_votes() {
         let ids: Vec<u64> = VOTES.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
         VOTES.with(|m| { let mut m = m.borrow_mut(); for id in ids { m.remove(&id); } });
     }
 
-    fn clear_featured() {
-        let ids: Vec<u64> = FEATURED.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-        FEATURED.with(|m| { let mut m = m.borrow_mut(); for id in ids { m.remove(&id); } });
-        FEATURED_QUOTES.with(|m| {
-            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
-            let mut m = m.borrow_mut();
-            for k in keys { m.remove(&k); }
-        });
-    }
 
-    /// Insert an Approved listing owned by `owner` directly (skips the paid flow).
-    fn seed_approved_listing(owner: Principal, name: &str) -> u64 {
-        let id = next_dapp_id();
-        let now = current_time();
-        DAPPS.with(|m| {
-            m.borrow_mut().insert(id, DappListing {
-                id, submitter: owner, name: name.into(), url: "https://d.app".into(),
-                description: "desc".into(), community: true, status: DappStatus::Approved,
-                created_at: now, approved_at: Some(now), expires_at: None, days: 30,
-                token: Some(ExplorerToken::ICP), amount_paid: 0, categories: vec![],
-                is_vibe_coded: false, twitter: None,
-            });
-        });
-        id
-    }
 
-    #[tokio::test]
-    async fn test_featured_apply_approve_and_slot_cap() {
-        clear_dapps();
-        clear_featured();
-        let user = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
-        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
-        let mut cfg = test_config(true);
-        cfg.admins = vec![admin];
-        CONFIG.with(|c| { c.borrow_mut().set(cfg); });
-        set_mock_caller(user);
 
-        let listing = seed_approved_listing(user, "Featurable");
 
-        // No quote → refused.
-        assert_eq!(
-            apply_featured(listing, ExplorerToken::ICP, 30).await.unwrap_err(),
-            "NO_QUOTE"
-        );
-
-        // Quote 30 days featured in ICP: $10/day × 30 = $300 → 60 ICP at $5/ICP.
-        let quote = get_featured_quote(ExplorerToken::ICP, 30).await.unwrap();
-        assert_eq!(quote.usd_total_e8s, 30_000_000_000); // $300
-        assert_eq!(quote.amount, 6_000_000_000);         // 60 ICP
-
-        // Below the day floor is rejected at quote time.
-        assert_eq!(get_featured_quote(ExplorerToken::ICP, 3).await.unwrap_err(), "INVALID_DAYS");
-
-        // Underfunded escrow refused, then funded apply succeeds.
-        set_mock_ledger_balance(quote.amount); // missing fee
-        assert_eq!(
-            apply_featured(listing, ExplorerToken::ICP, 30).await.unwrap_err(),
-            "INSUFFICIENT_DEPOSIT"
-        );
-        set_mock_ledger_balance(quote.amount + 10_000);
-        set_mock_ledger_transfer(Ok(42));
-        let fid = apply_featured(listing, ExplorerToken::ICP, 30).await.unwrap();
-
-        // Pending: not in the active hero set, but in the admin queue & mine.
-        assert_eq!(get_featured_dapps().active.len(), 0);
-        set_mock_caller(admin);
-        assert_eq!(list_pending_featured().len(), 1);
-        set_mock_caller(user);
-        assert_eq!(get_my_featured().len(), 1);
-
-        // A second application for the same listing is refused while pending.
-        let _ = get_featured_quote(ExplorerToken::ICP, 30).await.unwrap();
-        assert_eq!(
-            apply_featured(listing, ExplorerToken::ICP, 30).await.unwrap_err(),
-            "ALREADY_FEATURED"
-        );
-
-        // Approve → live in the hero with the paid window.
-        set_mock_caller(admin);
-        admin_approve_featured(fid).unwrap();
-        let info = get_featured_dapps();
-        assert_eq!(info.active.len(), 1);
-        assert_eq!(info.slots_open, 2);
-        assert_eq!(info.active[0].listing.id, listing);
-        assert_eq!(admin_approve_featured(fid).unwrap_err(), "NOT_PENDING");
-
-        // Slot cap: fill the remaining 2 slots, then a 4th approval is refused.
-        clear_featured();
-        let mut ids = vec![];
-        for i in 0..4 {
-            let l = seed_approved_listing(user, &format!("L{}", i));
-            let id = next_featured_id();
-            FEATURED.with(|m| {
-                m.borrow_mut().insert(id, FeaturedDapp {
-                    id, listing_id: l, applicant: user, status: FeaturedStatus::Pending,
-                    token: Some(ExplorerToken::ICP), amount_paid: 0, usd_total_e8s: 0, days: 30,
-                    created_at: current_time(), approved_at: None, expires_at: None, payment_block: None,
-                });
-            });
-            ids.push(id);
-        }
-        admin_approve_featured(ids[0]).unwrap();
-        admin_approve_featured(ids[1]).unwrap();
-        admin_approve_featured(ids[2]).unwrap();
-        assert_eq!(get_featured_dapps().active.len(), 3);
-        assert_eq!(admin_approve_featured(ids[3]).unwrap_err(), "FEATURED_SLOTS_FULL");
-
-        // Removing one frees a slot so the 4th can go live.
-        admin_remove_featured(ids[0]).unwrap();
-        assert_eq!(get_featured_dapps().active.len(), 2);
-        admin_approve_featured(ids[3]).unwrap();
-        assert_eq!(get_featured_dapps().active.len(), 3);
-
-        clear_featured();
-        clear_dapps();
-    }
-
-    #[tokio::test]
-    async fn test_featured_reject_refunds() {
-        clear_dapps();
-        clear_featured();
-        let user = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
-        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
-        let mut cfg = test_config(true);
-        cfg.admins = vec![admin];
-        CONFIG.with(|c| { c.borrow_mut().set(cfg); });
-        set_mock_caller(user);
-
-        let listing = seed_approved_listing(user, "Featurable");
-        let quote = get_featured_quote(ExplorerToken::CkUSDC, 7).await.unwrap();
-        assert_eq!(quote.usd_total_e8s, 7_000_000_000); // $70
-        set_mock_ledger_balance(quote.amount + 10_000);
-        set_mock_ledger_transfer(Ok(1));
-        let fid = apply_featured(listing, ExplorerToken::CkUSDC, 7).await.unwrap();
-
-        // Failed refund keeps it pending for a retry.
-        set_mock_caller(admin);
-        set_mock_ledger_transfer(Err("ledger down".into()));
-        assert!(admin_reject_featured(fid).await.is_err());
-        assert_eq!(list_pending_featured().len(), 1);
-
-        // Successful refund marks it Rejected (dropped from the queue & mine).
-        set_mock_ledger_transfer(Ok(2));
-        admin_reject_featured(fid).await.unwrap();
-        assert_eq!(list_pending_featured().len(), 0);
-        set_mock_caller(user);
-        assert_eq!(get_my_featured().len(), 0);
-
-        clear_featured();
-        clear_dapps();
-    }
-
-    #[test]
-    fn test_expired_dapps_hidden_and_swept() {
-        clear_dapps();
-        let now = current_time();
-        let id = next_dapp_id();
-        DAPPS.with(|m| {
-            m.borrow_mut().insert(id, DappListing {
-                id,
-                submitter: p("2vxsx-fae"),
-                name: "Old".into(),
-                url: "https://old.app".into(),
-                description: "d".into(),
-                community: true,
-                status: DappStatus::Approved,
-                created_at: now.saturating_sub(2 * DAY_NANOS),
-                approved_at: Some(now.saturating_sub(2 * DAY_NANOS)),
-                expires_at: Some(now.saturating_sub(DAY_NANOS)),
-                days: 1,
-                token: Some(ExplorerToken::ICP),
-                amount_paid: 20_000_000,
-                categories: vec![],
-                is_vibe_coded: false,
-                twitter: None,
-            });
-        });
-        assert!(list_dapps().is_empty(), "expired listings never render");
-        delete_expired_dapps();
-        assert!(DAPPS.with(|m| m.borrow().get(&id)).is_none(), "sweep deletes them");
-    }
 
     // ── Arcade ─────────────────────────────────────────────────────────────
 
@@ -22783,22 +20056,6 @@ mod tests {
         clear_arcade();
     }
 
-    fn clear_dapps() {
-        let ids: Vec<u64> = DAPPS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-        DAPPS.with(|m| {
-            let mut m = m.borrow_mut();
-            for id in ids {
-                m.remove(&id);
-            }
-        });
-        EXPLORER_QUOTES.with(|m| {
-            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
-            let mut m = m.borrow_mut();
-            for k in keys {
-                m.remove(&k);
-            }
-        });
-    }
 
     fn test_config(is_local: bool) -> Config {
         Config {
@@ -27755,266 +25012,13 @@ mod tests {
     // live in src/xfarm_farmer and are exercised by that crate's unit tests
     // (the daily_tick inter-canister http_request path is a PocketIC concern).
 
-    fn xfarm_reset() {
-        let ids: Vec<u64> = XFARM_FARMERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-        XFARM_FARMERS.with(|m| { let mut m = m.borrow_mut(); for id in ids { m.remove(&id); } });
-        XFARM_NEXT_ID.with(|c| c.borrow_mut().set(1));
-        put_xfarm_config(XFarmConfig::default());
-        XFARM_WASM.with(|w| *w.borrow_mut() = None);
-        XFARM_WASM_HASH.with(|c| *c.borrow_mut() = None);
-        XFARM_QUOTES.with(|q| q.borrow_mut().clear());
-        XFARM_MOCK_DRAFTS.with(|d| d.borrow_mut().clear());
-        FEATURE_FLAGS.with(|m| m.borrow_mut().remove(&FLAG_X_FARM.to_string()));
-        // Pin the ICP rate at $5 for deterministic quote math.
-        admin_set_usd_rate(ExplorerToken::ICP, 500_000_000).unwrap();
-    }
 
-    fn xfarm_enable() {
-        FEATURE_FLAGS.with(|m| m.borrow_mut().insert(FLAG_X_FARM.to_string(), 1u8));
-    }
 
-    fn xfarm_set_admins(admin: Principal) {
-        let mut cfg = CONFIG.with(|c| c.borrow().get().clone());
-        cfg.admins = vec![admin];
-        CONFIG.with(|c| c.borrow_mut().set(cfg));
-    }
 
-    #[test]
-    fn test_xfarm_tier_validation() {
-        install_staking_test_config();
-        xfarm_reset();
-        let admin = p("gwrne-un4am-3lsx4-7dmak-pnj5y-zxsk2-aalax-2rzyk-k4e23-jgmqy-3qe");
-        xfarm_set_admins(admin);
-        set_mock_caller(admin);
 
-        // Good tiers accepted.
-        admin_set_xfarm_tiers(vec![
-            FarmerTier { id: 1, name: "Sprout".into(), drafts_per_day: 1, duration_days: 7, price_usd_e8s: 240_000_000, includes_image: false },
-            FarmerTier { id: 2, name: "Bloom".into(),  drafts_per_day: 10, duration_days: 7, price_usd_e8s: 480_000_000, includes_image: true },
-        ]).unwrap();
-        assert_eq!(get_xfarm_tiers().len(), 2);
 
-        // Empty / too many / duplicate ids / bad drafts / bad duration rejected.
-        assert_eq!(admin_set_xfarm_tiers(vec![]).unwrap_err(), "BAD_TIERS");
-        let too_many: Vec<FarmerTier> = (1..=11).map(|i| FarmerTier {
-            id: i, name: format!("T{}", i), drafts_per_day: 1, duration_days: 7,
-            price_usd_e8s: 100_000_000, includes_image: false,
-        }).collect();
-        assert_eq!(admin_set_xfarm_tiers(too_many).unwrap_err(), "BAD_TIERS");
-        assert_eq!(admin_set_xfarm_tiers(vec![
-            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 1, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
-            FarmerTier { id: 1, name: "B".into(), drafts_per_day: 1, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
-        ]).unwrap_err(), "DUP_TIER_ID");
-        assert_eq!(admin_set_xfarm_tiers(vec![
-            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 0, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
-        ]).unwrap_err(), "BAD_DRAFTS_PER_DAY");
-        assert_eq!(admin_set_xfarm_tiers(vec![
-            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 16, duration_days: 7, price_usd_e8s: 100_000_000, includes_image: false },
-        ]).unwrap_err(), "BAD_DRAFTS_PER_DAY");
-        assert_eq!(admin_set_xfarm_tiers(vec![
-            FarmerTier { id: 1, name: "A".into(), drafts_per_day: 1, duration_days: 0, price_usd_e8s: 100_000_000, includes_image: false },
-        ]).unwrap_err(), "BAD_DURATION");
 
-        // The admin guard (`guard = "require_admin"`) is an ic_cdk macro that
-        // only runs in the canister runtime, not on host — so it isn't exercised
-        // by a direct host call. require_admin() itself is unit-tested elsewhere.
-        assert!(require_admin().is_ok(), "admin caller passes the guard fn");
-        set_mock_caller(p("rrkah-fqaaa-aaaaa-aaaaq-cai"));
-        assert_eq!(require_admin().unwrap_err(), "Caller is not an admin");
-    }
 
-    #[tokio::test]
-    async fn test_xfarm_quote_pricing_and_lock() {
-        install_staking_test_config();
-        xfarm_reset();
-        xfarm_enable();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        set_mock_caller(alice);
-
-        // Days-based pricing: $1.00/day. 7 days = $7.00; at $5/ICP = 1.40 ICP.
-        let q1 = get_xfarm_quote(1, 7).await.unwrap();
-        assert_eq!(q1.tier_id, 1);
-        assert_eq!(q1.days, 7);
-        assert_eq!(q1.usd_e8s, 700_000_000, "7 × $1.00 = $7.00");
-        assert_eq!(q1.price_e8s, 140_000_000, "$7.00 at $5/ICP = 1.40 ICP");
-        assert_eq!(q1.fee_e8s, ICP_FEE_E8S * 2);
-        assert_eq!(q1.rate_usd_e8s, 500_000_000);
-        assert!(q1.expires_at > q1.created_at);
-
-        // Full 30-day lifespan gets 10% off: Sprout $30 × 0.90 = $27 → 5.4 ICP.
-        let q30 = get_xfarm_quote(1, 30).await.unwrap();
-        assert_eq!(q30.usd_e8s, 2_700_000_000, "Sprout 30 × $1.00 × 0.90 = $27");
-        assert_eq!(q30.price_e8s, 540_000_000, "$27 at $5/ICP = 5.4 ICP");
-
-        // The discount applies only at the full 30 days: 29 days = $29 (no discount).
-        let q29 = get_xfarm_quote(1, 29).await.unwrap();
-        assert_eq!(q29.usd_e8s, 2_900_000_000, "29 × $1.00 = $29 (no discount)");
-
-        // Tier SETS the per-day price: Grow = $1.50/day. 7d = $10.50 → 2.1 ICP.
-        let q2 = get_xfarm_quote(2, 7).await.unwrap();
-        assert_eq!(q2.usd_e8s, 1_050_000_000, "Grow 7 × $1.50 = $10.50");
-        assert_eq!(q2.price_e8s, 210_000_000, "$10.50 at $5/ICP = 2.1 ICP");
-        assert_ne!(q2.price_e8s, q1.price_e8s, "tier changes the price");
-
-        // Bloom = $2.00/day, 30-day 10% discount: $60 × 0.90 = $54.
-        let q3 = get_xfarm_quote(3, 30).await.unwrap();
-        assert_eq!(q3.usd_e8s, 5_400_000_000, "Bloom 30 × $2.00 × 0.90 = $54");
-
-        // Days out of range [7, 30] → BAD_DAYS.
-        assert_eq!(get_xfarm_quote(1, 6).await.unwrap_err(), "BAD_DAYS");
-        assert_eq!(get_xfarm_quote(1, 31).await.unwrap_err(), "BAD_DAYS");
-
-        // Unknown tier.
-        assert_eq!(get_xfarm_quote(99, 7).await.unwrap_err(), "TIER_NOT_FOUND");
-
-        // Flag off → quote refused.
-        FEATURE_FLAGS.with(|m| m.borrow_mut().insert(FLAG_X_FARM.to_string(), 0u8));
-        assert_eq!(get_xfarm_quote(1, 7).await.unwrap_err(), "FEATURE_DISABLED");
-        xfarm_enable();
-    }
-
-    #[tokio::test]
-    async fn test_xfarm_create_farmer_happy_path_and_money_split() {
-        install_staking_test_config();
-        xfarm_reset();
-        xfarm_enable();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        xfarm_set_admins(alice);
-        set_mock_caller(alice);
-
-        // Admin uploads the Farmer wasm the factory installs.
-        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
-        assert!(get_xfarm_info().wasm_uploaded);
-
-        // Quote + fund escrow (price + 2 fees) + create.
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-        set_mock_ledger_transfer(Ok(42));
-        let f = create_farmer(1, "degen maxis, gm".into(), 7).await.unwrap();
-        assert_eq!(f.tier_id, 1);
-        assert_eq!(f.status, FarmerStatus::Active);
-        assert_eq!(f.persona, "degen maxis, gm");
-        assert!(f.canister_id.is_some(), "host factory stub mints a stand-in id");
-        assert!(f.install_done, "Farmer wasm installed (no-op on host)");
-        assert!(f.cmc_notified, "CMC notify leg completed (no-op on host)");
-        assert_eq!(f.treasury_block, Some(42), "10% treasury leg journaled");
-        assert_eq!(f.burn_block_index, Some(42), "90% CMC leg journaled");
-
-        // Money split: 10% treasury / 90% burn; budget_cycles = 90% net of the
-        // single CMC-leg fee. At $5, tier 1 = 0.48 ICP.
-        let treasury_amt = q.price_e8s / 10;                 // 4_800_000
-        let burn_amt = q.price_e8s - treasury_amt;           // 43_200_000
-        let stored = xfarm_farmers_by_owner(&alice).pop().unwrap();
-        assert_eq!(stored.budget_cycles, burn_amt - ICP_FEE_E8S, "90% net of the CMC leg fee");
-        let _ = treasury_amt; // documented for the reader
-        assert_eq!(xfarm_active_count(), 1);
-
-        // Quote is consumed after a successful create.
-        assert!(XFARM_QUOTES.with(|qq| qq.borrow().get(&alice).is_none()));
-
-        // Unlimited farms per owner: a SECOND create for the same owner now SUCCEEDS
-        // (was FARMER_EXISTS). Needs a fresh quote + escrow.
-        let q2 = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q2.price_e8s + q2.fee_e8s);
-        set_mock_ledger_transfer(Ok(43));
-        let f2 = create_farmer(1, "another persona".into(), 7).await.unwrap();
-        assert_ne!(f2.id, f.id, "second farmer gets a fresh id");
-        assert_eq!(xfarm_farmers_by_owner(&alice).len(), 2, "owner can hold multiple farmers");
-        assert_eq!(xfarm_active_count(), 2);
-        assert_eq!(list_my_farmers().len(), 2, "list_my_farmers returns all the owner's farmers");
-
-        // BAD_PERSONA: empty or over the 300-char cap.
-        xfarm_reset();
-        xfarm_enable();
-        set_mock_caller(alice);
-        assert_eq!(create_farmer(1, "".into(), 7).await.unwrap_err().starts_with("BAD_PERSONA"), true);
-        let long = "x".repeat(301);
-        assert_eq!(create_farmer(1, long, 7).await.unwrap_err().starts_with("BAD_PERSONA"), true);
-    }
-
-    #[tokio::test]
-    async fn test_xfarm_create_farmer_guards() {
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        let bob = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
-        let mk_admin = || { xfarm_set_admins(alice); };
-
-        // NO_QUOTE: no locked quote for the caller.
-        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
-        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
-        set_mock_caller(alice);
-        assert_eq!(create_farmer(1, "valid persona".into(), 7).await.unwrap_err(), "NO_QUOTE");
-
-        // QUOTE_MISMATCH: locked a tier-1 quote, asked for tier 2.
-        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
-        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
-        set_mock_caller(alice);
-        let _ = get_xfarm_quote(1, 7).await.unwrap();
-        assert_eq!(create_farmer(2, "valid persona".into(), 7).await.unwrap_err(), "QUOTE_MISMATCH");
-
-        // INSUFFICIENT_DEPOSIT: funded below price + 2 fees.
-        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
-        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
-        set_mock_caller(alice);
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s - 1); // one e8 short
-        set_mock_ledger_transfer(Ok(7));
-        assert_eq!(create_farmer(1, "valid persona".into(), 7).await.unwrap_err(), "INSUFFICIENT_DEPOSIT");
-
-        // WASM_NOT_UPLOADED: escrow + create succeed, install fails → farmer removed.
-        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
-        set_mock_caller(alice);
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-        set_mock_ledger_transfer(Ok(7));
-        // (wasm is empty after reset → install step fails)
-        assert_eq!(create_farmer(1, "valid persona".into(), 7).await.unwrap_err(), "WASM_NOT_UPLOADED");
-        assert!(xfarm_farmers_by_owner(&alice).is_empty(), "failed install removes the farmer");
-
-        // FEATURE_DISABLED: flag off → refused before any state work.
-        install_staking_test_config(); xfarm_reset(); mk_admin();
-        set_mock_caller(alice);
-        FEATURE_FLAGS.with(|m| m.borrow_mut().insert(FLAG_X_FARM.to_string(), 0u8));
-        assert_eq!(create_farmer(1, "valid persona".into(), 7).await.unwrap_err(), "FEATURE_DISABLED");
-
-        // MAX_FARMERS_REACHED: cap = 1, alice is active, bob is blocked.
-        install_staking_test_config(); xfarm_reset(); xfarm_enable(); mk_admin();
-        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
-        admin_set_xfarm_config(1).unwrap(); // cap active Farmers at 1
-        set_mock_caller(alice);
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-        set_mock_ledger_transfer(Ok(7));
-        create_farmer(1, "alice persona".into(), 7).await.unwrap();
-        set_mock_caller(bob);
-        let qb = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(qb.price_e8s + qb.fee_e8s);
-        set_mock_ledger_transfer(Ok(8));
-        assert_eq!(create_farmer(1, "bob persona".into(), 7).await.unwrap_err(), "MAX_FARMERS_REACHED");
-    }
-
-    /// Fix #2 (2026-06-20): renew_farmer happy path. The renew reuses the
-    /// Farmer's money-leg fields; a fresh renew (cmc_notified from create) resets
-    /// them, then re-runs the 10% treasury + 90% CMC legs idempotantly and bumps
-    /// budget_cycles + expected_depleted_at after `extend`.
-    /// Regression: the Farmer's `get_status` returns `Result<(u64,u64),String>`
-    /// (candid `variant { Ok; Err }`). `get_farmer_status` used to decode the reply
-    /// as a BARE tuple `(u64,u64)`, which fails for every real farmer canister →
-    /// status (countdown + days-left) silently vanished on mainnet. This pins the
-    /// wire-level shape: the Result type decodes, the bare tuple must NOT.
-    #[test]
-    fn test_get_farmer_status_decodes_result_not_bare_tuple() {
-        use candid::{Encode, Decode};
-        // Exactly what the Farmer's get_status replies with.
-        let reply = Encode!(&Ok::<(u64, u64), String>((123u64, 456u64))).unwrap();
-        // The fix: decode as the Result the Farmer actually returns.
-        let decoded = Decode!(&reply, Result<(u64, u64), String>).unwrap();
-        assert_eq!(decoded, Ok((123u64, 456u64)));
-        // The old code: decoding a variant reply as a bare record must fail.
-        assert!(
-            Decode!(&reply, (u64, u64)).is_err(),
-            "bare-tuple decode of a Result reply must fail — this was the mainnet bug"
-        );
-    }
 
     #[test]
     fn test_parse_supply_e8s() {
@@ -28065,258 +25069,11 @@ mod tests {
         assert!(token_amount_usd_e8s(ExplorerToken::CkUSDT, 1_000_000) >= COMMIT_MIN_USD_E8S);
     }
 
-    #[tokio::test]
-    async fn test_xfarm_renew_farmer_happy_path() {
-        install_staking_test_config();
-        xfarm_reset();
-        xfarm_enable();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        xfarm_set_admins(alice);
-        set_mock_caller(alice);
-        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
 
-        // Create a tier-1 / 7-day farmer.
-        let q0 = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q0.price_e8s + q0.fee_e8s);
-        set_mock_ledger_transfer(Ok(42));
-        let f = create_farmer(1, "degen maxis, gm".into(), 7).await.unwrap();
-        let before = xfarm_farmers_by_owner(&alice).pop().unwrap();
-        assert_eq!(before.cmc_notified, true);
-        let budget_before = before.budget_cycles;
-        let depletion_before = before.expected_depleted_at;
 
-        // Renew: fresh quote for the same tier + days, fund escrow, renew.
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        assert_eq!(q.tier_id, 1);
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-        set_mock_ledger_transfer(Ok(100)); // treasury + CMC blocks
-        let renewed = renew_farmer(f.id, 7).await.unwrap();
-        assert_eq!(renewed.status, FarmerStatus::Active);
-        assert_eq!(renewed.cmc_notified, true, "renew CMC notify leg completed");
-        assert_eq!(renewed.treasury_block, Some(100), "renew treasury leg journaled");
-        assert_eq!(renewed.burn_block_index, Some(100), "renew CMC block journaled before notify");
 
-        let add_budget = (q.price_e8s - q.price_e8s / 10).saturating_sub(ICP_FEE_E8S);
-        assert_eq!(
-            renewed.budget_cycles, budget_before + add_budget,
-            "budget bumped by the 90% net of the CMC-leg fee",
-        );
-        assert_eq!(
-            renewed.expected_depleted_at, depletion_before + 7 * DAY_NS,
-            "duration extended by the renew days",
-        );
-        // Quote consumed on success.
-        assert!(XFARM_QUOTES.with(|qq| qq.borrow().get(&alice).is_none()));
-    }
 
-    /// Fix #2 (C2 trapped-fund): a CMC notify failure mid-renew used to strand the
-    /// 90% ICP at the CMC with no record the sweep could re-notify. Now the block
-    /// is journaled BEFORE notify (burn_block_index = Some, cmc_notified = false),
-    /// so `xfarm_sweep` recovers it as cycles. The 10% treasury leg is also
-    /// journaled and skipped on the retry (idempotent). Pre-treasury failures
-    /// auto-refund the escrow.
-    #[tokio::test]
-    async fn test_xfarm_renew_notify_failure_journals_and_sweep_recovers() {
-        install_staking_test_config();
-        xfarm_reset();
-        xfarm_enable();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        xfarm_set_admins(alice);
-        set_mock_caller(alice);
-        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
 
-        // Create a farmer (notify Ok — no fail set yet).
-        let q0 = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q0.price_e8s + q0.fee_e8s);
-        set_mock_ledger_transfer(Ok(42));
-        let f = create_farmer(1, "persona".into(), 7).await.unwrap();
-        let farmer_id = f.id;
-
-        // Renew: treasury + CMC topup succeed, but the notify FAILS (transient CMC
-        // error, NOT a Refunded). Block must be journaled so the sweep can retry.
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-        set_mock_ledger_transfer(Ok(200)); // treasury + CMC blocks
-        set_mock_cmc_notify_fail(Some("CMC call rejected (test): boom".to_string()));
-        let err = renew_farmer(farmer_id, 7).await.unwrap_err();
-        assert!(
-            err.starts_with("RENEW_CMC_NOTIFY"),
-            "renew surfaces the notify failure: {}", err,
-        );
-        // The C2 fix: block journaled + not yet notified → sweep can recover it.
-        let mid = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id).unwrap());
-        assert_eq!(mid.cmc_notified, false, "notify failed → not marked notified");
-        assert!(mid.burn_block_index.is_some(), "CMC block journaled before notify (the C2 fix)");
-        assert!(mid.treasury_block.is_some(), "treasury leg completed before the failed notify");
-
-        // Sweep re-notifies the journaled block; with the fail cleared it succeeds.
-        set_mock_cmc_notify_fail(None);
-        xfarm_sweep().await;
-        let after = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id).unwrap());
-        assert_eq!(after.cmc_notified, true, "sweep recovered the stranded CMC leg");
-
-        // ── CMC_REFUNDED path: the block is dropped (the CMC sent the ICP back to
-        // the escrow subaccount) and the auto-refund wrapper returns it. ─────────
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-        set_mock_ledger_transfer(Ok(300));
-        set_mock_cmc_notify_fail(Some("CMC_REFUNDED: test".to_string()));
-        let err = renew_farmer(farmer_id, 7).await.unwrap_err();
-        assert!(err.starts_with("RENEW_CMC_NOTIFY"), "CMC_REFUNDED surfaces: {}", err);
-        let refunded = XFARM_FARMERS.with(|m| m.borrow().get(&farmer_id).unwrap());
-        assert_eq!(refunded.burn_block_index, None, "CMC_REFUNDED drops the block (sweep won't re-notify a refunded one)");
-        set_mock_cmc_notify_fail(None);
-    }
-
-    /// Fix #2 auto-refund: a renew that fails BEFORE the treasury leg (e.g. an
-    /// expired quote, a bad-days guard, insufficient deposit) auto-refunds the
-    /// escrow so the deposit isn't stranded — mirrors create_farmer.
-    #[tokio::test]
-    async fn test_xfarm_renew_premoney_failure_auto_refunds() {
-        install_staking_test_config();
-        xfarm_reset();
-        xfarm_enable();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        xfarm_set_admins(alice);
-        set_mock_caller(alice);
-        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
-
-        // Create + renew once so a farmer exists in Active state.
-        let q0 = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q0.price_e8s + q0.fee_e8s);
-        set_mock_ledger_transfer(Ok(42));
-        let f = create_farmer(1, "persona".into(), 7).await.unwrap();
-        let q1 = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q1.price_e8s + q1.fee_e8s);
-        set_mock_ledger_transfer(Ok(43));
-        renew_farmer(f.id, 7).await.unwrap();
-
-        // Now a renew that fails at a pre-money guard: BAD_DAYS. The caller's
-        // escrow (funded below) is auto-refunded rather than stranded. We assert
-        // the guard fires and the call returns Err; the refund is a no-op here
-        // because no deposit was made for this attempt, but the wrapper must not
-        // panic and the farmer must remain Active + money legs untouched.
-        let q2 = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q2.price_e8s + q2.fee_e8s);
-        set_mock_ledger_transfer(Ok(44));
-        assert_eq!(renew_farmer(f.id, 99).await.unwrap_err(), "BAD_DAYS");
-        let after = XFARM_FARMERS.with(|m| m.borrow().get(&f.id).unwrap());
-        assert_eq!(after.status, FarmerStatus::Active, "failed renew leaves the farmer Active");
-        assert_eq!(after.cmc_notified, true, "prior renew's CMC leg intact");
-        // The quote for the failed attempt is NOT consumed (renew returned before
-        // the consume step) — the owner can re-lock and retry.
-        assert!(XFARM_QUOTES.with(|qq| qq.borrow().get(&alice).is_some()), "quote survives a pre-money failure");
-    }
-
-    /// Fix #2 post-money path: the money legs (treasury + CMC topup + notify) all
-    /// succeed, but the Farmer `extend` call fails. The renew returns Err; the
-    /// budget/duration are NOT bumped (extend never ran); the money legs stay
-    /// journaled (cmc_notified=true). The escrow is already drained → the
-    /// auto-refund no-ops. A retry (re-locking the quote, re-funding the escrow)
-    /// re-runs the money legs and completes the extend — the documented limitation
-    /// (the re-charge is the price of not having per-renew block fields).
-    #[tokio::test]
-    async fn test_xfarm_renew_extend_failure_is_idempotent_retry() {
-        install_staking_test_config();
-        xfarm_reset();
-        xfarm_enable();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        xfarm_set_admins(alice);
-        set_mock_caller(alice);
-        admin_set_xfarm_wasm(vec![0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
-
-        let q0 = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q0.price_e8s + q0.fee_e8s);
-        set_mock_ledger_transfer(Ok(42));
-        let f = create_farmer(1, "persona".into(), 7).await.unwrap();
-        let before = xfarm_farmers_by_owner(&alice).pop().unwrap();
-        let budget_before = before.budget_cycles;
-        let depletion_before = before.expected_depleted_at;
-
-        // Renew: money legs succeed, extend fails.
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-        set_mock_ledger_transfer(Ok(500));
-        set_mock_xfarm_extend_fail(Some("EXTEND_FAILED: farmer down".to_string()));
-        let err = renew_farmer(f.id, 7).await.unwrap_err();
-        assert!(err.starts_with("EXTEND_FAILED"), "extend failure surfaces: {}", err);
-        let mid = XFARM_FARMERS.with(|m| m.borrow().get(&f.id).unwrap());
-        assert_eq!(mid.cmc_notified, true, "money legs completed before extend");
-        assert!(mid.treasury_block.is_some() && mid.burn_block_index.is_some());
-        assert_eq!(mid.budget_cycles, budget_before, "budget NOT bumped (extend never ran)");
-        assert_eq!(mid.expected_depleted_at, depletion_before, "duration NOT extended (extend never ran)");
-
-        // Retry: re-lock a fresh quote, re-fund the escrow, clear the extend fail.
-        set_mock_xfarm_extend_fail(None);
-        let q2 = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q2.price_e8s + q2.fee_e8s);
-        set_mock_ledger_transfer(Ok(600));
-        let renewed = renew_farmer(f.id, 7).await.unwrap();
-        assert!(renewed.budget_cycles > budget_before, "retry bumps the budget");
-        assert!(renewed.expected_depleted_at > depletion_before, "retry extends the duration");
-        assert_eq!(renewed.cmc_notified, true);
-    }
-
-    #[tokio::test]
-    async fn test_xfarm_report_depleted_and_sweep_reap() {
-        install_staking_test_config();
-        xfarm_reset();
-        xfarm_enable();
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-        xfarm_set_admins(alice);
-        set_mock_caller(alice);
-        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-        set_mock_ledger_transfer(Ok(42));
-        let f = create_farmer(1, "persona".into(), 7).await.unwrap();
-        let farmer_cid = f.canister_id.unwrap();
-        let id = f.id;
-
-        // A random caller may not report depletion — only the Farmer's own canister.
-        set_mock_caller(p("rrkah-fqaaa-aaaaa-aaaaq-cai")); // alice, not the farmer cid
-        assert_eq!(report_depleted(id, 1_000).unwrap_err(), "NOT_FARMER_CANISTER");
-
-        // The Farmer canister reports → status becomes Depleted + burned_cycles recorded.
-        set_mock_caller(farmer_cid);
-        report_depleted(id, 99_000_000_000).unwrap();
-        let stored = XFARM_FARMERS.with(|m| m.borrow().get(&id)).unwrap();
-        assert_eq!(stored.status, FarmerStatus::Depleted);
-        assert_eq!(stored.burned_cycles, 99_000_000_000);
-
-        // The sweep reaps Depleted Farmers (stop+delete are no-ops on host).
-        xfarm_sweep().await;
-        assert!(XFARM_FARMERS.with(|m| m.borrow().get(&id).is_none()), "depleted farmer reaped");
-        assert_eq!(xfarm_active_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_xfarm_unlimited_and_global_cap() {
-        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
-
-        // cap = 0 (the default) ⇒ unlimited: one owner creates 3 farmers.
-        install_staking_test_config(); xfarm_reset(); xfarm_enable(); xfarm_set_admins(alice);
-        set_mock_caller(alice);
-        admin_set_xfarm_wasm(vec![1, 2, 3]).unwrap();
-        assert_eq!(xfarm_config().max_active_farmers, 0, "default cap is 0 = unlimited");
-        for i in 0..3u64 {
-            let q = get_xfarm_quote(1, 7).await.unwrap();
-            set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-            set_mock_ledger_transfer(Ok(100 + i));
-            create_farmer(1, format!("persona {}", i), 7).await.unwrap();
-        }
-        assert_eq!(list_my_farmers().len(), 3, "unlimited farms per owner under cap=0");
-        assert_eq!(xfarm_active_count(), 3);
-
-        // admin can set cap = 0 explicitly (no longer BAD_CAP), and a positive cap
-        // becomes a global brake: a further create is blocked.
-        admin_set_xfarm_config(0).unwrap();
-        admin_set_xfarm_config(2).unwrap();
-        let q = get_xfarm_quote(1, 7).await.unwrap();
-        set_mock_ledger_balance(q.price_e8s + q.fee_e8s);
-        set_mock_ledger_transfer(Ok(200));
-        assert_eq!(create_farmer(1, "blocked".into(), 7).await.unwrap_err(), "MAX_FARMERS_REACHED");
-    }
 
     // ===== Money-path audit (2026-07-02) — coverage for the weakest flows =====
     // Every user-pays flow was mapped to its tests; these close the gaps found:
@@ -28446,193 +25203,13 @@ mod tests {
 
     // ── ANSEM LP rewards (Solana chain fusion) ────────────────────────────
 
-    fn enable_solana_lp() {
-        install_staking_test_config();
-        FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_SOLANA_LP.to_string(), 1u8);
-            m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8);
-        });
-    }
 
-    fn clear_solana_lp() {
-        SOLANA_WALLETS.with(|m| {
-            let keys: Vec<Principal> = m.borrow().iter().map(|e| *e.key()).collect();
-            let mut m = m.borrow_mut();
-            for k in keys { m.remove(&k); }
-        });
-        SOLANA_WALLET_OWNERS.with(|m| {
-            let keys: Vec<SolanaPubkeyKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
-            let mut m = m.borrow_mut();
-            for k in keys { m.remove(&k); }
-        });
-        LP_CLAIMS.with(|m| {
-            let keys: Vec<LpClaimKey> = m.borrow().iter().map(|e| e.key().clone()).collect();
-            let mut m = m.borrow_mut();
-            for k in keys { m.remove(&k); }
-        });
-        LP_POOLS.with(|c| { let _ = c.borrow_mut().set(LpPoolsCfg::default()); });
-        MOCK_LP_BALANCES.with(|m| m.borrow_mut().clear());
-        FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().remove(&FLAG_SOLANA_LP.to_string());
-            m.borrow_mut().remove(&FLAG_LOSSLESS_LOTTERY.to_string());
-        });
-        set_mock_time(None);
-    }
 
-    fn test_signing_key() -> ed25519_dalek::SigningKey {
-        ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
-    }
 
-    fn sign_challenge(user: Principal, round: u64, nonce: u64, expires_ns: u64) -> (Vec<u8>, Vec<u8>) {
-        use ed25519_dalek::Signer;
-        let sk = test_signing_key();
-        let msg = lp_challenge_message(user, round, nonce, expires_ns);
-        (sk.verifying_key().to_bytes().to_vec(), sk.sign(msg.as_bytes()).to_bytes().to_vec())
-    }
 
-    #[test]
-    fn test_solana_ata_derivation_matches_independent_impl() {
-        // Vectors generated by a standalone Python implementation of
-        // find_program_address (sha256 + RFC 8032 decompress) — cross-impl
-        // agreement guards against seed-order and curve-check bugs.
-        let ata = |owner_b58: &str, mint_b58: &str, program_b58: &str| {
-            let owner: [u8; 32] = bs58::decode(owner_b58).into_vec().unwrap().try_into().unwrap();
-            let mint: [u8; 32] = bs58::decode(mint_b58).into_vec().unwrap().try_into().unwrap();
-            let prog: [u8; 32] = bs58::decode(program_b58).into_vec().unwrap().try_into().unwrap();
-            bs58::encode(solana_find_ata(&owner, &mint, &prog).unwrap()).into_string()
-        };
-        assert_eq!(
-            ata("4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", TOKEN_PROGRAM_B58),
-            "F8biqkCRK2tHR6EncrcXDGgVTkGRrtojqyW39w41Qspn"
-        );
-        assert_eq!(
-            ata("4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T", "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump", TOKEN_2022_PROGRAM_B58),
-            "FrNKhh6WNXRG3t8h9NMcj2aaZaFTJnhxEUHACrAK6b69"
-        );
-        assert_eq!(
-            ata("7EcDhSYGxXyscszYEp35KHN8vvw3svAuLKTzXwCFLtV", "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump", TOKEN_2022_PROGRAM_B58),
-            "8geSAWxrJdw5dscfRqK6yqhg1gNPTH9EsTwH5nJrihvm"
-        );
-    }
 
-    #[test]
-    fn test_solana_signature_verification() {
-        use ed25519_dalek::Signer;
-        let sk = test_signing_key();
-        let msg = b"Cycle Burn LP verification test";
-        let sig = sk.sign(msg);
-        assert!(solana_verify_signature(&sk.verifying_key().to_bytes(), &sig.to_bytes(), msg).is_ok());
-        // Tampered message rejected.
-        assert!(solana_verify_signature(&sk.verifying_key().to_bytes(), &sig.to_bytes(), b"tampered").is_err());
-        // Wrong sizes rejected.
-        assert!(solana_verify_signature(&[0u8; 31], &sig.to_bytes(), msg).is_err());
-        assert!(solana_verify_signature(&sk.verifying_key().to_bytes(), &[0u8; 63], msg).is_err());
-    }
 
-    #[test]
-    fn test_lp_wallet_link_gates_and_uniqueness() {
-        enable_solana_lp();
-        set_mock_time(Some(1_700_000_000_000_000_000));
-        let now = current_time();
-        let round = lottery_state().round;
-        set_mock_caller(alice());
 
-        // Fresh valid challenge links.
-        let (pk, sig) = sign_challenge(alice(), round, 42, now + 60_000_000_000);
-        let b58 = link_solana_wallet(pk.clone(), sig.clone(), 42, now + 60_000_000_000).unwrap();
-        assert_eq!(b58, bs58::encode(&pk).into_string());
-
-        // Expired / over-TTL / tampered challenges rejected.
-        assert_eq!(link_solana_wallet(pk.clone(), sig.clone(), 42, now - 1).unwrap_err(), "CHALLENGE_EXPIRED");
-        let (pk2, sig2) = sign_challenge(alice(), round, 43, now + LP_CHALLENGE_MAX_TTL_NS + 10);
-        assert_eq!(link_solana_wallet(pk2, sig2, 43, now + LP_CHALLENGE_MAX_TTL_NS + 10).unwrap_err(), "CHALLENGE_TTL_TOO_LONG");
-        let (pk3, sig3) = sign_challenge(alice(), round, 44, now + 60_000_000_000);
-        assert!(link_solana_wallet(pk3, sig3, 45, now + 60_000_000_000).unwrap_err().contains("SIGNATURE"));
-
-        // Same wallet can't link to a second principal…
-        set_mock_caller(bob());
-        let (pkb, sigb) = sign_challenge(bob(), round, 46, now + 60_000_000_000);
-        assert_eq!(pkb, pk, "same test key");
-        assert_eq!(link_solana_wallet(pkb, sigb, 46, now + 60_000_000_000).unwrap_err(), "WALLET_ALREADY_LINKED");
-        // …until the first principal unlinks.
-        set_mock_caller(alice());
-        unlink_solana_wallet().unwrap();
-        set_mock_caller(bob());
-        let (pkb, sigb) = sign_challenge(bob(), round, 47, now + 60_000_000_000);
-        assert!(link_solana_wallet(pkb, sigb, 47, now + 60_000_000_000).is_ok());
-
-        clear_solana_lp();
-    }
-
-    #[tokio::test]
-    async fn test_lp_claim_flow_and_round_rearm() {
-        enable_solana_lp();
-        set_mock_time(Some(1_700_000_000_000_000_000));
-        let now = current_time();
-        let round = lottery_state().round;
-
-        // Pool config via the admin endpoint (carol seeded as admin).
-        let mut config = CONFIG.with(|c| c.borrow().get().clone());
-        config.admins.push(carol());
-        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
-        set_mock_caller(carol());
-        admin_set_lp_pools(vec![LpPoolView {
-            name: "ANSEM/SOL".into(),
-            lp_mint_b58: "9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump".into(),
-            token_2022: true,
-            min_amount: 100,
-        }]).unwrap();
-        // Bad mints rejected.
-        assert!(admin_set_lp_pools(vec![LpPoolView {
-            name: "bad".into(), lp_mint_b58: "notbase58!!!".into(), token_2022: false, min_amount: 0,
-        }]).is_err());
-
-        // Alice links + stakes.
-        set_mock_caller(alice());
-        let (pk, sig) = sign_challenge(alice(), round, 1, now + 60_000_000_000);
-        link_solana_wallet(pk.clone(), sig, 1, now + 60_000_000_000).unwrap();
-
-        // Owner rule 2026-07-11: NO neuron stake required — the verified LP
-        // balance is the qualification. Alice never stakes in this test; the
-        // only rejection left pre-balance is the floor.
-
-        // Below the floor → NO_QUALIFYING_LP.
-        let owner: [u8; 32] = pk.clone().try_into().unwrap();
-        let mint: [u8; 32] = bs58::decode("9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump").into_vec().unwrap().try_into().unwrap();
-        let prog: [u8; 32] = bs58::decode(TOKEN_2022_PROGRAM_B58).into_vec().unwrap().try_into().unwrap();
-        let ata_b58 = bs58::encode(solana_find_ata(&owner, &mint, &prog).unwrap()).into_string();
-        MOCK_LP_BALANCES.with(|m| { m.borrow_mut().insert(ata_b58.clone(), 99); });
-        assert_eq!(claim_lp_reward().await.unwrap_err(), "NO_QUALIFYING_LP");
-
-        // At the floor → 10 tickets, source-tagged, once per round.
-        MOCK_LP_BALANCES.with(|m| { m.borrow_mut().insert(ata_b58.clone(), 100); });
-        let res = claim_lp_reward().await.unwrap();
-        assert_eq!(res.tickets, LP_TICKETS_PER_ROUND);
-        assert_eq!(res.pool, "ANSEM/SOL");
-        assert_eq!(res.amount, 100);
-        assert_eq!(
-            LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0)),
-            10
-        );
-        let rows = get_my_ticket_breakdown();
-        assert_eq!(rows.iter().find(|r| r.source == "solana_lp").map(|r| r.count), Some(10));
-        assert_eq!(claim_lp_reward().await.unwrap_err(), "ALREADY_CLAIMED_THIS_ROUND");
-
-        // Next drawing (round bump) re-arms the claim — the re-confirmation.
-        let mut st = lottery_state();
-        st.round += 1;
-        set_lottery_state(st);
-        let res2 = claim_lp_reward().await.unwrap();
-        assert_eq!(res2.round, round + 1);
-
-        // No wallet linked → clear error.
-        unlink_solana_wallet().unwrap();
-        assert_eq!(claim_lp_reward().await.unwrap_err(), "NO_WALLET_LINKED");
-
-        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice())); });
-        LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
-        clear_solana_lp();
-    }
 
     // ── ICP LP staking (ICPSwap custody) ──────────────────────────────────
 

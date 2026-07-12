@@ -108,9 +108,6 @@ icp canister call backend admin_set_feature_flag '("arcade_skydive", true)' -e "
 icp canister call backend admin_set_feature_flag '("arcade_bullrun", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # Nav sections (Governance/Community) — enabled locally; dark on mainnet.
 icp canister call backend admin_set_feature_flag '("nav_governance", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-icp canister call backend admin_set_feature_flag '("nav_community", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-# ANSEM LP rewards — enabled locally for testing; ships dark on mainnet.
-icp canister call backend admin_set_feature_flag '("solana_lp_rewards", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # ICPSwap LP staking — enabled locally for testing; ships dark on mainnet.
 icp canister call backend admin_set_feature_flag '("icpswap_lp_stake", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 ok "Early Adopters + arcade_minigolf flags enabled (local); arcade forced OFF (default)"
@@ -177,58 +174,6 @@ icp canister call backend admin_backfill_course_fingerprints '()' -e "$ENV" --id
 # Casino (Crash) is DISABLED pending the SVPP/points redesign. Force the flag
 # OFF (earlier deploys may have turned it on; flags persist across upgrades) and
 ok "Casino (Crash) disabled (local)"
-
-# ── 5c. X-Farm (Stream B): leave the flag dark + upload the Farmer wasm ────────
-# X-Farm ships dark by default (FLAG_X_FARM) and is left dark on local to match
-# the disabled-by-default state. The per-user Farmer canister is factory-
-# installed (NOT top-level deployed), so we build its wasm here and upload it
-# via admin_set_xfarm_wasm — an admin can flip the flag on later without a
-# redeploy. This makes create_farmer's full money path (escrow → 10% treasury
-# → create+ install → 90% CMC topup) exercisable on the local replica once the
-# flag is flipped on. The local replica can't reach the Cloud-Run proxy, so a
-# real Farmer's daily outcall fails every tick (R8 Failed-day → burn skipped);
-# for visible drafts locally use the in-app dev_seed_farmer / dev_seed_drafts
-# controls. Best-effort: a wasm-build or upload failure does NOT abort the
-# deploy (the page + dev seeds still work).
-# Force the flag OFF explicitly so a re-deploy over prior state (which may
-# have stored x_farm=On from an older script) is deterministic.
-icp canister call backend admin_set_feature_flag '("x_farm", false)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
-note "Building + uploading the X-Farm Farmer wasm (factory child canister)…"
-XFARM_ARG="${TMPDIR:-/tmp}/xfarm_wasm.arg"
-XFARM_WASM_UPLOADED=no
-if cargo build -p xfarm_farmer --target wasm32-unknown-unknown --release >/dev/null 2>&1 \
-  && ic-wasm -o target/wasm32-unknown-unknown/release/xfarm_farmer.opt.wasm \
-             target/wasm32-unknown-unknown/release/xfarm_farmer.wasm shrink >/dev/null 2>&1; then
-  FARMER_WASM=target/wasm32-unknown-unknown/release/xfarm_farmer.opt.wasm
-  # Encode the wasm as a candid `(blob "\HH…")` literal — the parens are required
-  # (method args are a tuple). icp --args-file reads the text; the binary sent is
-  # just the ~940KB wasm + a vec header.
-  { printf '(blob "'; xxd -p -c 1000 "$FARMER_WASM" | sed 's/\(..\)/\\&/g' | tr -d '\n'; printf '")\n'; } > "$XFARM_ARG"
-  if icp canister call backend admin_set_xfarm_wasm --args-file "$XFARM_ARG" \
-       -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null 2>&1; then
-    ok "X-Farm flag left dark (default) + Farmer wasm uploaded ($(stat -f%z "$FARMER_WASM") bytes) — flip the flag on to use create_farmer locally"
-    XFARM_WASM_UPLOADED=yes
-  else
-    note "X-Farm flag left dark; Farmer wasm upload failed (flip flag on → create_farmer → WASM_NOT_UPLOADED)"
-  fi
-  rm -f "$XFARM_ARG"
-else
-  note "X-Farm flag left dark; Farmer wasm build/shrink failed (flip flag on → create_farmer → WASM_NOT_UPLOADED)"
-fi
-# Optional: point the backend at Stream A's Cloud-Run proxy. The bearer token is
-# NOT in the repo (Secret Manager) — set XFARM_PROXY_URL + XFARM_PROXY_BEARER to
-# wire it; otherwise a real Farmer's outcall returns PROXY_NOT_CONFIGURED locally
-# (use dev_seed drafts for a visible local dashboard).
-if [[ -n "${XFARM_PROXY_URL:-}" ]]; then
-  icp canister call backend admin_set_xfarm_proxy \
-    "(\"${XFARM_PROXY_URL}\", \"${XFARM_PROXY_BEARER:-}\")" \
-    -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null 2>&1 \
-    && ok "X-Farm proxy wired ($XFARM_PROXY_URL)" \
-    || note "X-Farm proxy wire failed"
-else
-  note "X-Farm proxy not set (XFARM_PROXY_URL empty) — local Farmers use dev_seed drafts"
-fi
-
 # ── 6. Mock data (only seeds what is missing) ────────────────────────────────
 # (Idea Board + Community R&D projects removed 2026-07-07 — no seeding.)
 
@@ -283,7 +228,6 @@ echo "   ckETH ledger:  $CKETH_ID"
 echo "   ckUSDC ledger: $CKUSDC_ID"
 echo "   ckUSDT ledger: $CKUSDT_ID"
 echo "   Feature flags: $(icp canister call backend list_feature_flags '()' --query -e "$ENV" | tr -d '\n' | sed 's/  */ /g')"
-echo "   X-Farm: flag dark (default); Farmer wasm $([ "$XFARM_WASM_UPLOADED" = "yes" ] && echo uploaded || echo NOT-uploaded) — flip flag on to use create_farmer; dev_seed controls in-app"
 echo "   Faucet: in-app tweak panel, or:"
 echo "     icp canister call backend dev_faucet '()' -e local --identity <id>"
 echo "──────────────────────────────────────────────────────────"
