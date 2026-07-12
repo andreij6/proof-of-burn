@@ -2257,9 +2257,9 @@ export default function App() {
           >
             <Icon name="list" size={20} />
           </button>
-          <span className="hide-mobile row" style={{ gap: 10, minWidth: 0 }}>
+          <span className="row" style={{ gap: 10, minWidth: 0 }}>
             <BrandMark size={26} style={{ flexShrink: 0 }} />
-            <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <b className="app-header-title hide-mobile" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               Cycle Burn
             </b>
           </span>
@@ -2268,14 +2268,15 @@ export default function App() {
 
         <div className="row" style={{ gap: 8, alignItems: 'center', flexShrink: 0, position: 'relative' }}>
           {/* Bookmark — reveals the keyboard shortcut (browsers block scripted
-              bookmarking) and copies the app URL as a fallback. */}
+              bookmarking) and copies the app URL as a fallback. Desktop only. */}
           <button
+            className="hide-mobile"
             onClick={handleBookmark}
             aria-label="Bookmark this app"
             title="Bookmark Cycle Burn"
             style={{
               background: 'transparent', border: '1px solid var(--border)', borderRadius: 8,
-              cursor: 'pointer', color: 'var(--fg-2)', padding: 7, display: 'flex',
+              cursor: 'pointer', color: 'var(--fg-2)', padding: 7,
               alignItems: 'center', flexShrink: 0,
             }}
           >
