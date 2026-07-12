@@ -8470,6 +8470,7 @@ fn auto_grant_daily_stake_tickets() {
     }
 }
 
+#[ic_cdk::update]
 fn claim_daily_tickets() -> Result<u64, String> {
     require_authenticated()?;
     require_lottery_enabled()?;
