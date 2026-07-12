@@ -2259,7 +2259,7 @@ export default function App() {
           </button>
           <span className="row" style={{ gap: 10, minWidth: 0 }}>
             <BrandMark size={26} style={{ flexShrink: 0 }} />
-            <b className="app-header-title hide-mobile" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <b className="app-header-title" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               Cycle Burn
             </b>
           </span>
