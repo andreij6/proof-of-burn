@@ -101,7 +101,6 @@ icp canister call backend admin_set_feature_flag '("early_adopters", true)' -e "
 # The Course Marketplace keys off the arcade_minigolf sub-flag (PB-305 A7).
 icp canister call backend admin_set_feature_flag '("arcade_minigolf", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # Luck-Proof (arcade game 3) — enabled locally for testing; ships dark on mainnet.
-icp canister call backend admin_set_feature_flag '("arcade_luckproof", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # Drop Zone (arcade game 4) — enabled locally for testing; ships dark on mainnet.
 icp canister call backend admin_set_feature_flag '("arcade_skydive", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # Bull Run (arcade game 5) — enabled locally for testing; ships dark on mainnet.
