@@ -34,21 +34,19 @@ type ArcadeHoleDef = record {
 // Everything the Arcade UI needs in one caller-aware query.
 type ArcadeInfo = record {
   skin_options : nat8;
-  // Per-game kill switches (only meaningful when `enabled` is true).
-  minigolf_enabled : bool;
   luckproof_enabled : bool;
+  // Per-game kill switches.
+  minigolf_enabled : bool;
   hair_options : nat8;
   // $1.00 in USD e8s — convert with get_arcade_customize_quote.
   customize_fee_usd_e8s : nat64;
   my_character : opt ArcadeCharacter;
   has_stake : bool;
-  // Field Goal kicker persona — fields map hair→helmet, outfit→jersey.
   // Caller may finish full rounds + submit scores (stake or recent vote).
   full_access : bool;
   voted_recently : bool;
   outfit_options : nat8;
 };
-
 type AuditLogEntry = record {
   user : principal;
   amount_e8s : nat64;
@@ -56,12 +54,69 @@ type AuditLogEntry = record {
   timestamp : nat64;
   event_type : text;
 };
-
 type BalanceResult = variant { Ok : nat64; Err : text };
-
-
-
-
+type BondClass = variant {
+  Promo;
+  Backed;
+  // Wraps an ICPSwap LP custody position (owner 2026-07-11). NON-SELLABLE:
+  // no marketplace, no buyback, no transfer, no redeem — LP is instantly
+  // reclaimable via unstake_lp_position, so a market has nothing to solve.
+  // Earns NO voucher-math tickets (the LP grant path pays 40/day/$).
+  LpBacked;
+};
+type BondMarketInfo = record {
+  buyback_fund_e8s : nat64;
+  promo_remaining : nat32;
+  listings : vec BondView;
+  min_wrap_e8s : nat64;
+  market_fee_bps : nat16;
+  enabled : bool;
+  my_bonds : vec BondView;
+  promo_claims_today : nat32;
+  promo_open : bool;
+  buyback_discount_bps : nat16;
+};
+type BondView = record {
+  id : nat64;
+  owner : principal;
+  class : BondClass;
+  tier : StakeTier;
+  amount_e8s : nat64;
+  listed_price_e8s : opt nat64;
+  expires_at : opt nat64;
+  minted_at : nat64;
+};
+type BullRunDailyEntry = record {
+  day : nat32;
+  player : principal;
+  coins : nat32;
+  // Start → arena gate, milliseconds.
+  millis : nat64;
+  submitted_at : nat64;
+};
+type BullRunDailyRow = record {
+  player : principal;
+  coins : nat32;
+  rank : nat32;
+  millis : nat64;
+};
+type BullRunDailyStatus = record {
+  day : nat32;
+  played : bool;
+  players_today : nat32;
+  my_entry : opt BullRunDailyEntry;
+  eligible : bool;
+  hits_limit : nat32;
+};
+type BullRunStart = record {
+  day : nat32;
+  issued_at : nat64;
+  // Client derives the whole street (obstacles, coins, buildings) from this.
+  course_seed : nat64;
+  run_id : nat64;
+  // The run ends at this many obstacle hits.
+  hits_limit : nat32;
+};
 type Commitment = record {
   // PB-125 settlement-split block indices (idempotent retry). Each is set once
   // its ledger transfer succeeds, so a retry skips the transfer:
@@ -112,6 +167,9 @@ type Config = record {
   // ignored — same safety posture as the pinned leader neuron.
   ckbtc_ledger_canister_id : opt principal;
   ckusdt_ledger_canister_id : opt principal;
+  // Stake Voucher NFT canister (okf/ideas/stake-vouchers). Set by
+  // `admin_set_voucher_nft_canister`; None until wired.
+  voucher_nft_canister : opt principal;
   // USD-denominated voting threshold (e8s of USD, i.e. $1 = 100_000_000).
   // When set it supersedes `default_threshold` for new proposals; pots are
   // valued at the cached ICP/USD rate. None = legacy ICP thresholds.
@@ -129,7 +187,6 @@ type Config = record {
   // and by `deploy-local.sh`. None until wired; the backend is the
   // allowlisted minter/custodian on that canister.
   course_nft_canister : opt principal;
-  voucher_nft_canister : opt principal;
   ledger_canister_id : principal;
   min_unstake_e8s : nat64;
   // ── Lossless lottery ──
@@ -164,55 +221,10 @@ type CourseRatingSummary = record {
   avg_x10 : nat32;
   my_stars : opt nat8;
 };
-// Originality pre-check result: which holes of a candidate course duplicate
-// already-minted layouts (canonical fingerprints — mirrored/rotated/shifted
-// copies still match), and whether minting would be blocked (>= limit dups).
-type DuplicateHole = record { hole_index : nat8; token_id : nat64 };
 type CourseUniquenessReport = record {
   duplicates : vec DuplicateHole;
-  would_block : bool;
   limit : nat8;
-};
-
-
-
-
-
-
-type DappListing = record {
-  id : nat64;
-  url : text;
-  // Categories this dapp belongs to (subset of `DAPP_CATEGORIES`). Drives
-  // the Explorer's category filter; not shown on the grid cards.
-  categories : vec text;
-  status : DappStatus;
-  token : opt IdeaToken;
-  submitter : principal;
-  // Optional X/Twitter handle (without the leading @), e.g. "ICPSwap".
-  // Rendered as a link on the card. None = no handle shown.
-  twitter : opt text;
-  days : nat64;
-  name : text;
-  // True for paid community submissions (badged in the UI); false for
-  // admin-curated listings.
-  community : bool;
-  approved_at : opt nat64;
-  description : text;
-  created_at : nat64;
-  // Amount paid in `token`'s smallest unit (0 for admin listings).
-  amount_paid : nat64;
-  // True if the submitter flagged the dapp as "vibe coded" (built largely
-  // with AI assistance). Shown as a badge above the title. Always false for
-  // curated/admin and default-seeded listings.
-  is_vibe_coded : bool;
-  // None = permanent (admin listings). Community listings expire
-  // `days` after approval and are then deleted by the sweep.
-  expires_at : opt nat64;
-};
-type DappStatus = variant {
-  Approved;
-  // Community submission awaiting admin review — never shown publicly.
-  Pending;
+  would_block : bool;
 };
 type DifficultyFilter = variant { Any; Easy; Hard; Medium };
 type DrawStatus = variant {
@@ -221,6 +233,7 @@ type DrawStatus = variant {
   // 5-minute timer retries until it lands. Tickets are already reset.
   PayoutPending;
 };
+type DuplicateHole = record { token_id : nat64; hole_index : nat8 };
 type EarlyAdopterInfo = record {
   min_stake_e8s : nat64;
   early_adopter_count : nat64;
@@ -307,6 +320,9 @@ type EligibilityInfo = record {
 type EscrowKind = variant {
   Stake;
   Explorer;
+  // Voucher-marketplace sale escrow (okf/ideas/stake-vouchers). ICP-only;
+  // `key` = voucher id.
+  StakeVoucher;
   Discussion;
   Project;
   Arcade;
@@ -314,7 +330,6 @@ type EscrowKind = variant {
   Featured;
   EarlyAdopter;
   IdeaPost;
-  StakeVoucher;
 };
 // Everything the Explorer UI needs in one query.
 type ExplorerInfo = record {
@@ -349,43 +364,6 @@ type ExplorerQuote = record {
   expires_at : nat64;
 };
 type ExplorerToken = variant { ICP; CkUSDC; CkUSDT; CkBTC; CkETH };
-type Farmer = record {
-  id : nat64;
-  status : FarmerStatus;
-  owner : principal;
-  // Reported by the Farmer via report_depleted (R9: surfaced in the dashboard).
-  burned_cycles : nat64;
-  tier_id : nat32;
-  // Display only — the cycle balance is the real 7-day timer (D2).
-  expected_depleted_at : nat64;
-  // None under the dev-seed mock path; Some for a real per-user canister.
-  canister_id : opt principal;
-  last_burn_tick_at : nat64;
-  created_at : nat64;
-  last_generation_at : nat64;
-  persona : text;
-  // ICP e8s directed to cycles (the 90% leg, net of the CMC leg fee). A
-  // record of what was burned; the Farmer's own cycle balance is authoritative.
-  budget_cycles : nat64;
-  // Idempotency for the 90% CMC leg (PB-148 class); reset to None on CMC_REFUNDED.
-  burn_block_index : opt nat64;
-  cmc_notified : bool;
-  treasury_block : opt nat64;
-  install_done : bool;
-};
-type FarmerStatus = variant { Failed; Active; Disabled; Depleted };
-type FarmerTier = record {
-  id : nat32;
-  // USD reference price (D1); XRC-quoted to ICP at payment time.
-  price_usd_e8s : nat64;
-  name : text;
-  duration_days : nat32;
-  // D9 premium — tier gets 1 Nano-Banana image/day via the proxy.
-  includes_image : bool;
-  drafts_per_day : nat32;
-};
-
-
 type FeatureFlag = record {
   key : text;
   // Effective for the CALLER (On for everyone, or AdminOn and the caller is an
@@ -394,32 +372,6 @@ type FeatureFlag = record {
   // The raw three-state setting (for the admin panel to display/cycle).
   state : FlagState;
 };
-type FeaturedDapp = record {
-  id : nat64;
-  status : FeaturedStatus;
-  applicant : principal;
-  token : opt IdeaToken;
-  days : nat64;
-  approved_at : opt nat64;
-  created_at : nat64;
-  amount_paid : nat64;
-  payment_block : opt nat64;
-  usd_total_e8s : nat64;
-  listing_id : nat64;
-  expires_at : opt nat64;
-};
-// Everything the Explorer hero needs in one query.
-type FeaturedInfo = record {
-  max_days : nat64;
-  active : vec FeaturedView;
-  slots_total : nat32;
-  min_days : nat64;
-  price_per_day_usd_e8s : nat64;
-  slots_open : nat32;
-};
-type FeaturedStatus = variant { Active; Rejected; Expired; Pending };
-// A featured placement joined to its listing — what the UI renders.
-type FeaturedView = record { listing : DappListing; featured : FeaturedDapp };
 // A feature's three states. `Off` = nobody; `On` = everybody; `AdminOn` =
 // admins only (preview/playtest a feature live without exposing it).
 type FlagState = variant { On; Off; AdminOn };
@@ -446,28 +398,58 @@ type GlobalStats = record {
   pending_burn_e8s : nat64;
   votes_threshold_met : nat64;
 };
-// An idea is implicitly Active while stored; the sweep DELETES ideas whose
-// 30-day no-upvote window has lapsed (no Expired state is kept around).
-type Idea = record {
-  id : nat64;
-  title : text;
-  upvote_count : nat64;
-  total_ckbtc_e8s : nat64;
-  // Detail-view opens by signed-in users (drives "most viewed" sorting).
-  views : nat64;
-  // Filled per-caller at query time: whether the caller has upvoted. Not stored.
-  has_upvoted : bool;
-  description : text;
-  created_at : nat64;
-  detail : text;
-  total_cketh_wei : nat64;
-  // Timestamp of the most recent upvote; equals `created_at` until the
-  // first upvote. Drives the 30-day expiry window.
-  last_upvote_at : nat64;
-  total_icp_e8s : nat64;
-  poster : principal;
+type IcpLpInfo = record {
+  // Caller holds an active ICP stake (tickets are stakers-only).
+  staked : bool;
+  total_harvested_icp_e8s : nat64;
+  my_positions : vec IcpLpPositionView;
+  // Where to send the position on ICPSwap (the custody principal).
+  backend_principal : principal;
+  // Today's grant already landed for the caller.
+  granted_today : bool;
+  enabled : bool;
+  // Reserve-first flow: ids the caller has reserved but not yet registered.
+  my_reservations : vec IcpLpReservationView;
+  // Tickets per day per $1 of staked LP value (proportional).
+  tickets_per_usd_day : nat64;
+  pools : vec IcpLpPoolCfg;
+  round : nat64;
 };
-
+// One qualifying ICPSwap pool (admin-configured; the owner allows
+// ICP/ckUSDC, ICP/ckUSDT, ICP/ckBTC, ICP/ckETH and ckBTC/ckETH pairs).
+type IcpLpPoolCfg = record {
+  token0_ledger : principal;
+  name : text;
+  pool : principal;
+  token1_ledger : principal;
+  token0_symbol : text;
+  token1_symbol : text;
+};
+// One approved pool's live staked-LP totals (positions we hold + value).
+type IcpLpPoolStats = record {
+  name : text;
+  pool : principal;
+  // Valuation error for THIS pool, if any (others still report).
+  error : opt text;
+  token0_amount : nat;
+  token0_symbol : text;
+  token1_amount : nat;
+  token1_symbol : text;
+  usd_e8s : nat64;
+  positions : nat64;
+};
+type IcpLpPositionView = record {
+  pool_name : text;
+  pool : principal;
+  staked_at : nat64;
+  position_id : nat;
+};
+type IcpLpReservationView = record {
+  pool_name : text;
+  pool : principal;
+  expires_at : nat64;
+  position_id : nat;
+};
 type IdeaToken = variant {
   ICP;
   // Payout-record use only (token-vote refunds) — the idea board itself
@@ -496,42 +478,7 @@ type LeaderNeuronInfo = record {
   neuron_id : nat64;
 };
 type LedgerAccount = record { owner : principal; subaccount : opt blob };
-
-// ── Stake Bonds (okf/ideas/stake-vouchers) ──────────────────────────────────
-// Staked positions issued as transferable ICRC-7 Bond NFTs; ICP-only
-// marketplace; instant house buyback at a 15% discount (pays 85%, burns the
-// NFT and dissolves the stake back to the buyback fund). Promo-class bonds (Golden Tickets)
-// are tickets-only claim-campaign trials: soulbound, never redeemable.
-type BondClass = variant { Backed; Promo; LpBacked };
-type BondView = record {
-  id : nat64;
-  class : BondClass;
-  tier : StakeTier;
-  amount_e8s : nat64;
-  owner : principal;
-  // Promo only: earning stops at this instant (claim + 60 days).
-  expires_at : opt nat64;
-  minted_at : nat64;
-  // Live marketplace ask in ICP e8s; null = not listed.
-  listed_price_e8s : opt nat64;
-};
-type BondMarketInfo = record {
-  enabled : bool;
-  min_wrap_e8s : nat64;
-  market_fee_bps : nat16;
-  buyback_discount_bps : nat16;
-  // Live balance of the dedicated buyback fund — the UI disables the buyback
-  // option when it can't cover a bond's 85% payout.
-  buyback_fund_e8s : nat64;
-  my_bonds : vec BondView;
-  listings : vec BondView;
-  promo_open : bool;
-  promo_remaining : nat32;
-  promo_claims_today : nat32;
-};
-
 type ListedFilter = variant { No; Any; Yes };
-
 // Journal for one drawing — persisted before the prize transfer so a trap
 // can't lose (or double-pay) a win. Same idempotency pattern as
 // `settle_burn_split` / `settle_yield_split`.
@@ -589,7 +536,90 @@ type LotteryInfo = record {
   my_tickets : nat64;
   round : nat64;
 };
-
+// One player's daily-challenge result (the board row source).
+type LuckProofDailyEntry = record {
+  day : nat32;
+  player : principal;
+  // Luck track: actual dollar delta from the rolls. Never ranks the EV
+  // board, but the day's TOP CASH is the second winner slot.
+  cash : int64;
+  millis : nat64;
+  // Decisions agreeing with the EV sign (accuracy numerator).
+  correct : nat16;
+  // Skill track: Σ EV of taken gambles, basis points (can be negative).
+  ev_bp : int64;
+  // The full take/decline vector — public, so anyone can replay a run and
+  // verify it against the day's (shared, seed-derived) deal.
+  decisions : vec bool;
+  submitted_at : nat64;
+};
+type LuckProofDailyRow = record {
+  player : principal;
+  // Luck track (dollars) — the top cash of the day is the second winner.
+  cash : int64;
+  rank : nat32;
+  millis : nat64;
+  correct : nat16;
+  ev_bp : int64;
+};
+type LuckProofDailyStatus = record {
+  day : nat32;
+  // Caller already used today's attempt.
+  played : bool;
+  // Entries so far today — the winner's ticket prize equals this count.
+  players_today : nat32;
+  my_entry : opt LuckProofDailyEntry;
+  decisions : nat16;
+  // Caller may enter (staked in the no-loss lottery).
+  eligible : bool;
+};
+// One offered gamble. `reward` is the PROFIT on a win (the risk comes back);
+// declining is worth exactly $0. All dollar values are integer dollars;
+// EV math is done in basis points ($1 = 10_000 bp).
+type LuckProofGamble = record {
+  // Profit on a win, dollars.
+  reward : nat32;
+  // Dollars risked (20..=100).
+  risk : nat32;
+  // Win probability, whole percent (20..=80).
+  odds_pct : nat8;
+};
+// Public replay of one player's daily run: the day's canonical deal
+// (recomputed from the day seed — identical for every player, which is the
+// fairness proof), their decisions, and their outcomes. None if they didn't
+// play that day.
+type LuckProofReplay = record {
+  day : nat32;
+  player : principal;
+  millis : nat64;
+  correct : nat16;
+  ev_bp : int64;
+  outcomes : vec bool;
+  decisions : vec bool;
+  gambles : vec LuckProofGamble;
+};
+type LuckProofResult = record {
+  // Today's rank after submission (1-based).
+  rank : nat32;
+  // Decisions agreeing with the EV sign.
+  correct : nat16;
+  // Skill track (ranked): Σ EV of taken gambles, bp.
+  ev_bp : int64;
+  // Per-hand outcomes (true = took it and won).
+  outcomes : vec bool;
+  // Luck track (never ranked): actual dollar delta from the rolls.
+  bankroll_delta : int64;
+};
+type LuckProofRunStart = record {
+  day : nat32;
+  issued_at : nat64;
+  run_id : nat64;
+  gambles : vec LuckProofGamble;
+  // Per-player outcome rolls (win iff roll < odds·100). Returned up front
+  // so the client charts the luck track LIVE; knowing an outcome early
+  // cannot move the ranked metric (EV is a pure function of the decision).
+  rolls : vec nat16;
+};
 type MarketplaceFilter = record {
   difficulty : DifficultyFilter;
   mine_only : bool;
@@ -622,7 +652,6 @@ type ModerationCandidate = record {
   rating_count : nat32;
   avg_x10 : nat32;
 };
-
 type NeuronFollowStatus = record {
   topics_following_primary : vec int32;
   // Uncollected yield: maturity that hasn't been harvested yet. Tier
@@ -678,6 +707,11 @@ type PendingUnstake = record {
   split_neuron_id : nat64;
   tier : StakeTier;
   user : principal;
+  // Stake-voucher buyback (okf/ideas/stake-vouchers): Some(sub) targets
+  // the disburse at (this canister, sub) — the buyback fund — instead of
+  // the user's wallet, and skips the fee refund + payout record (there is
+  // no user to reimburse; `user` holds the canister's own principal).
+  payout_subaccount : opt blob;
   created_at : nat64;
   // Treasury fee reimbursement (0.0003 ICP) — makes the cycle zero-loss.
   // Set when the refund transfer lands; the sweep retries until it does.
@@ -710,32 +744,6 @@ type PoolNeuron = record {
   neuron_id : nat64;
 };
 type PoolStatus = variant { Inactive; Active; Draft };
-
-// goes 100% to the protocol treasury, which pays for the project's
-// execution. Each project has ONE USD-denominated goal and accepts any
-// supported crypto; contributions (tracked per-token) are valued at the
-// cached USD rate and summed into `raised_usd_e8s` for progress.
-type Project = record {
-  id : nat64;
-  raised_ckbtc_e8s : nat64;
-  title : text;
-  // The single funding goal, in USD e8s ($1 = 100_000_000).
-  goal_usd_e8s : nat64;
-  goal_ckbtc_e8s : nat64;
-  // Filled at query time: per-token raised pots valued in USD e8s. Not stored.
-  raised_usd_e8s : nat64;
-  raised_cketh_wei : nat64;
-  description : text;
-  created_at : nat64;
-  funding_count : nat64;
-  detail : text;
-  accept_ckbtc : bool;
-  accept_cketh : bool;
-  goal_cketh_wei : nat64;
-  accept_icp : bool;
-  goal_icp_e8s : nat64;
-  raised_icp_e8s : nat64;
-};
 type Proposal = record {
   id : nat64;
   status : text;
@@ -778,268 +786,64 @@ type RecordHoleOk = record {
   last_hole : nat8;
   owner_credited : bool;
 };
-// Sklansky Trainer / Luck-Proof (arcade game 3) — the EV-decision trainer.
-// PRACTICE is fully client-side. COMPETITION is one attempt per UTC day of
-// 250 decisions; every player faces the SAME daily deal, ranked by total EV
-// earned (skill track) desc → correct desc → time asc. Stakers-only entry;
-// scoring is recomputed server-side, so results can't be forged.
-type LuckProofGamble = record {
-  // Win chance in whole percent (20..80); risk/reward in whole dollars —
-  // reward is the PROFIT on a win; declining is worth exactly $0.
-  odds_pct : nat8;
-  risk : nat32;
-  reward : nat32;
-};
-type LuckProofRunStart = record {
-  run_id : nat64;
-  day : nat32;
-  gambles : vec LuckProofGamble;
-  // Per-player outcome rolls (win iff roll < odds·100) — returned up front so
-  // the client charts the luck track live; can't influence the ranked metric.
-  rolls : vec nat16;
-  issued_at : nat64;
-};
-type LuckProofResult = record {
-  // Skill track (ranked): sum of taken EV, basis points ($1 = 10_000).
-  ev_bp : int64;
-  correct : nat16;
-  // Luck track (never ranked): actual dollar delta.
-  bankroll_delta : int64;
-  outcomes : vec bool;
-  rank : nat32;
-};
-type LuckProofDailyEntry = record {
-  day : nat32;
-  player : principal;
-  ev_bp : int64;
-  correct : nat16;
-  millis : nat64;
-  submitted_at : nat64;
-  // Full take/decline vector — public for verifiable replays.
-  decisions : vec bool;
-  // Luck-track dollars; the day's top cash is the second winner slot.
-  cash : int64;
-};
-type LuckProofDailyRow = record {
-  rank : nat32;
-  player : principal;
-  ev_bp : int64;
-  correct : nat16;
-  millis : nat64;
-  cash : int64;
-};
-type LuckProofDailyStatus = record {
-  day : nat32;
-  eligible : bool;
-  played : bool;
-  my_entry : opt LuckProofDailyEntry;
-  decisions : nat16;
-  // Entries so far today — the daily winner's lottery-ticket prize equals
-  // this count (settled by the sweep after the day rolls over).
-  players_today : nat32;
-};
-// Verifiable replay: the day's canonical deal (recomputed from the day seed —
-// identical for every player), one player's decisions and outcomes.
-type LuckProofReplay = record {
-  day : nat32;
-  player : principal;
-  gambles : vec LuckProofGamble;
-  decisions : vec bool;
-  outcomes : vec bool;
-  ev_bp : int64;
-  correct : nat16;
-  millis : nat64;
-};
-// One source's share of the caller's current-round lottery tickets
-// ("daily_stake", "course_play", "course_owner", "luckproof_ev",
-// "luckproof_cash", "discussions"). Pre-tracking tickets won't appear.
-type TicketSourceRow = record { source : text; count : nat64 };
-// Drop Zone (arcade game 4) — PUBG/Warzone-style target drop. PRACTICE is
-// client-side; the DAILY mirrors Luck-Proof: once per UTC day, stakers-only,
-// same day-derived scenario for everyone, ranked distance asc then time asc,
-// crashes (chute below the 80 m floor) recorded but ranked last. Physics is
-// client-side; completion is bounds-validated (Field-Goal-parity trust).
-type SkydiveScenario = record {
-  // Decimeters on a 20_000 dm (2 km) square map.
-  target_x_dm : nat32;
-  target_z_dm : nat32;
-  // 0..3: entry corner of the plane's diagonal.
-  plane_dir : nat8;
-  decor_seed : nat64;
-};
-type SkydiveRunStart = record {
-  run_id : nat64;
-  day : nat32;
-  scenario : SkydiveScenario;
-  issued_at : nat64;
-};
+type Result = variant { Ok; Err : text };
+type Result_1 = variant { Ok : nat64; Err : text };
+type Result_10 = variant { Ok : BullRunStart; Err : text };
+type Result_11 = variant { Ok : LuckProofRunStart; Err : text };
+type Result_12 = variant { Ok : StartSessionOk; Err : text };
+type Result_13 = variant { Ok : SkydiveRunStart; Err : text };
+type Result_14 = variant { Ok : bool; Err : text };
+type Result_15 = variant { Ok : WhoamiReply; Err : text };
+type Result_2 = variant { Ok : vec IcpLpPoolStats; Err : text };
+type Result_3 = variant { Ok : nat32; Err : text };
+type Result_4 = variant { Ok : LuckProofResult; Err : text };
+type Result_5 = variant { Ok : CompleteRoundOk; Err : text };
+type Result_6 = variant { Ok : ExplorerQuote; Err : text };
+type Result_7 = variant { Ok : nat64; Err : MintError };
+type Result_8 = variant { Ok : RecordHoleOk; Err : text };
+type Result_9 = variant { Ok : IcpLpPositionView; Err : text };
+type SeenUser = record { last_seen_ns : nat64; first_seen_ns : nat64 };
 type SkydiveDailyEntry = record {
   day : nat32;
   player : principal;
-  distance_dm : nat32;
-  millis : nat64;
+  // Chute deployed above the safety floor. Crashes never rank.
   safe : bool;
+  // Jump → touchdown, milliseconds.
+  millis : nat64;
+  // Horizontal distance from target center at touchdown (decimeters).
+  distance_dm : nat32;
   submitted_at : nat64;
 };
 type SkydiveDailyRow = record {
-  rank : nat32;
   player : principal;
-  distance_dm : nat32;
-  millis : nat64;
+  rank : nat32;
   safe : bool;
+  millis : nat64;
+  distance_dm : nat32;
 };
 type SkydiveDailyStatus = record {
   day : nat32;
-  eligible : bool;
   played : bool;
+  players_today : nat32;
   my_entry : opt SkydiveDailyEntry;
-  players_today : nat32;
-};
-// Bull Run (arcade game 5) — the ENDLESS encierro lane-runner: a black bull
-// charges an ever-harder Spanish street (faster, denser obstacles, thicker
-// crowds blocking the view) collecting coins until it has hit hits_limit
-// obstacles. Course derives client-side from the day seed; ranked coins desc
-// then time asc; coins are plausibility-capped by run length. Daily = once
-// per UTC day (local nets replay freely), stakers-only, same street for all.
-type BullRunStart = record {
-  run_id : nat64;
-  day : nat32;
-  course_seed : nat64;
-  hits_limit : nat32;
-  issued_at : nat64;
-};
-type BullRunDailyEntry = record {
-  day : nat32;
-  player : principal;
-  coins : nat32;
-  millis : nat64;
-  submitted_at : nat64;
-};
-type BullRunDailyRow = record {
-  rank : nat32;
-  player : principal;
-  coins : nat32;
-  millis : nat64;
-};
-type BullRunDailyStatus = record {
-  day : nat32;
   eligible : bool;
-  played : bool;
-  my_entry : opt BullRunDailyEntry;
-  players_today : nat32;
-  hits_limit : nat32;
 };
-// ANSEM LP rewards (Solana chain fusion): prove wallet ownership with a
-// signed challenge (Ed25519, verified in-canister), then once per lottery
-// round read the wallet's LIVE LP balance for the configured pools via the
-// NNS SOL RPC canister; a qualifying balance pays 10 tickets. Claims key on
-// the lottery round — each drawing re-arms them (the re-confirmation).
-// Staking is REQUIRED (stakers-only ticket rule).
-type LpPoolView = record {
-  name : text;
-  // Base58 LP mint (PumpSwap LP mints are Token-2022).
-  lp_mint_b58 : text;
-  token_2022 : bool;
-  // Dust floor in raw LP base units.
-  min_amount : nat;
+type SkydiveRunStart = record {
+  day : nat32;
+  issued_at : nat64;
+  run_id : nat64;
+  scenario : SkydiveScenario;
 };
-type LpRewardInfo = record {
-  enabled : bool;
-  round : nat64;
-  tickets_per_round : nat64;
-  my_wallet_b58 : opt text;
-  claimed_this_round : bool;
-  staked : bool;
-  pools : vec LpPoolView;
+// One day's shared scenario. Distances in DECIMETERS on a 20_000 dm (2 km)
+// square map; the plane flies one of the 4 diagonals at 1_000 m.
+type SkydiveScenario = record {
+  target_z_dm : nat32;
+  // Seed for the client's deterministic scenery (trees/houses/clouds).
+  decor_seed : nat64;
+  // 0..=3: which corner the plane enters from (opposite corner exit).
+  plane_dir : nat8;
+  target_x_dm : nat32;
 };
-type LpClaimResult = record {
-  pool : text;
-  amount : nat;
-  tickets : nat64;
-  round : nat64;
-};
-// ICP LP staking (ICPSwap custody, Model B): stake your ICPSwap position
-// NFT with the backend (transfer it on ICPSwap first — the transfer is the
-// ownership proof, backend_principal in get_icp_lp_info is the destination),
-// earn 10 lottery tickets every round while staked, and the sweep harvests
-// the positions' trading fees: ICP → 50% lottery pot / 25% backend cycles /
-// 25% frontend cycles; every other token → treasury. Unstake returns the
-// position to a principal you name and is NEVER feature-flag-gated.
-type IcpLpPoolCfg = record {
-  name : text;
-  pool : principal;
-  token0_symbol : text;
-  token0_ledger : principal;
-  token1_symbol : text;
-  token1_ledger : principal;
-};
-type IcpLpPositionView = record {
-  pool : principal;
-  pool_name : text;
-  position_id : nat;
-  staked_at : nat64;
-};
-// Reserve-first flow: a reservation binds (pool, position id) to the caller
-// BEFORE they transfer the position on ICPSwap, so an arriving position can
-// only ever be registered by the user who announced it — no sniping.
-type IcpLpReservationView = record {
-  pool : principal;
-  pool_name : text;
-  position_id : nat;
-  expires_at : nat64;
-};
-type IcpLpInfo = record {
-  enabled : bool;
-  round : nat64;
-  // Tickets per day per $1 of staked LP value (proportional to value).
-  tickets_per_usd_day : nat64;
-  staked : bool;
-  backend_principal : principal;
-  my_positions : vec IcpLpPositionView;
-  my_reservations : vec IcpLpReservationView;
-  pools : vec IcpLpPoolCfg;
-  total_harvested_icp_e8s : nat64;
-  granted_today : bool;
-};
-type Result_24 = variant { Ok : IcpLpPositionView; Err : text };
-// Admin custody snapshot per approved ICPSwap pool.
-type IcpLpPoolStats = record {
-  pool : principal;
-  name : text;
-  positions : nat64;
-  token0_symbol : text;
-  token0_amount : nat;
-  token1_symbol : text;
-  token1_amount : nat;
-  usd_e8s : nat64;
-  error : opt text;
-};
-type Result_25 = variant { Ok : vec IcpLpPoolStats; Err : text };
-type Result_21 = variant { Ok : text; Err : text };
-type Result_22 = variant { Ok : LpClaimResult; Err : text };
-type Result_23 = variant { Ok : nat64; Err : text };
-type Result_20 = variant { Ok : BullRunStart; Err : text };
-type Result_18 = variant { Ok : SkydiveRunStart; Err : text };
-type Result_19 = variant { Ok : nat32; Err : text };
-type Result_16 = variant { Ok : LuckProofRunStart; Err : text };
-type Result_17 = variant { Ok : LuckProofResult; Err : text };
-type Result = variant { Ok; Err : text };
-type Result_1 = variant { Ok : nat64; Err : text };
-type Result_10 = variant { Ok : nat64; Err : MintError };
-type Result_11 = variant { Ok : RecordHoleOk; Err : text };
-type Result_12 = variant { Ok : StartSessionOk; Err : text };
-type Result_13 = variant { Ok : bool; Err : text };
-
-type Result_15 = variant { Ok : WhoamiReply; Err : text };
-
-type Result_3 = variant { Ok : CompleteRoundOk; Err : text };
-type Result_4 = variant { Ok : Farmer; Err : text };
-type Result_5 = variant { Ok : nat32; Err : text };
-type Result_6 = variant { Ok : ExplorerQuote; Err : text };
-type Result_7 = variant { Ok : vec XFarmDraft; Err : text };
-type Result_8 = variant { Ok : record { Farmer; nat64; nat64 }; Err : text };
-type Result_9 = variant { Ok : XFarmQuote; Err : text };
-type SeenUser = record { last_seen_ns : nat64; first_seen_ns : nat64 };
 // Fixed staking terms. The 6-month minimum matches the NNS minimum dissolve
 // delay for voting eligibility, so no Mission 70 gate applies. Voting weight
 // and the daily lottery-ticket grant both scale with the same multiplier,
@@ -1066,8 +870,7 @@ type StakingPoolInfo = record {
 };
 type Stance = variant { Reject; Adopt };
 type StartSessionOk = record { server_time : nat64; session_id : nat64 };
-
-
+type TicketSourceRow = record { source : text; count : nat64 };
 // Public state of one tier's pooled neuron.
 type TierPoolInfo = record {
   pending_refresh_e8s : nat64;
@@ -1142,7 +945,6 @@ type UserTierStake = record {
   last_action_at : nat64;
 };
 type Vote = variant { No; Yes; Abstain };
-
 type VoteRecord = record {
   vote : Vote;
   proposal_id : nat64;
@@ -1158,31 +960,6 @@ type WhoamiReply = record {
   "principal" : principal;
   last_seen_ns : nat64;
   first_seen_ns : nat64;
-};
-type XFarmDraft = record {
-  id : nat64;
-  cited_url : opt text;
-  image_url : opt text;
-  "text" : text;
-  created_at : nat64;
-};
-type XFarmInfo = record {
-  wasm_uploaded : bool;
-  tiers : vec FarmerTier;
-  active_count : nat64;
-  enabled : bool;
-  proxy_set : bool;
-  max_active_farmers : nat64;
-};
-type XFarmQuote = record {
-  days : nat32;
-  tier_id : nat32;
-  fee_e8s : nat64;
-  created_at : nat64;
-  rate_usd_e8s : nat64;
-  price_e8s : nat64;
-  usd_e8s : nat64;
-  expires_at : nat64;
 };
 // Saga journal for one yield distribution: the shared yield inbox (fed by
 // all three tier neurons) is drained 50% to the lottery prize pot / 50% to
@@ -1204,14 +981,10 @@ type YieldStatus = variant { Done; InProgress };
 service : (InitPayload) -> {
   add_admin : (principal) -> (Result);
   add_to_commitment : (nat64, nat64) -> (Result);
-  // Admin: add a permanent curated listing (no payment, no badge, no expiry).
-  admin_add_dapp : (text, text, text, vec text) -> (Result_1);
-  // Admin: approve a pending community listing. Its paid `days` window starts
-  // now.
-  admin_approve_dapp : (nat64) -> (Result);
-  // Admin: approve a pending featured application — goes live for `days`.
-  // Synchronous (no await) so the max-3 count-then-set is atomic / race-safe.
-  admin_approve_featured : (nat64) -> (Result);
+  // Backfill the originality index for courses minted before this feature
+  // (their blobs live in the course_nft canister). Safe to re-run; returns how
+  // many courses were fingerprinted.
+  admin_backfill_course_fingerprints : () -> (nat32);
   // Admin-forced burn of ANY course token regardless of owner (PB-3xx). Same
   // destructive marketplace cleanup as `burn_course_nft`, but skips the
   // caller-is-live-owner check (the burn is on admin authority). The course_nft
@@ -1233,22 +1006,24 @@ service : (InitPayload) -> {
   // it was never counted as burned, and we don't count it now). Rejects if the
   // commitment is not in a stuck state, so it can't be misused on active ones.
   admin_close_stuck_commitment : (nat64, principal) -> (Result);
-  admin_disable_farmer : (nat64) -> (Result);
+  // Admin: fund the buyback wallet from the TREASURY (the natural source —
+  // no external wallet dance). Plain internal ledger transfer [1;32] → [10;32].
+  admin_fund_buyback_from_treasury : (nat64) -> (Result);
   // Admin: allocate treasury ICP into the early-adopter neuron (compounds the
   // program's yield; distributed by the normal monthly bands).
   admin_fund_early_adopter_neuron : (nat64, bool) -> (Result);
   // Admin: allocate treasury ICP into a tier pool neuron (boosts its yield —
   // and therefore the lottery pot — without belonging to any staker).
   admin_fund_tier_neuron : (StakeTier, nat64, bool) -> (Result);
-  // Admin: live cycle balance of the course_nft canister via the management
-  // canister (the backend must be a CONTROLLER of it, like the frontend
-  // getter). Errs COURSE_NFT_NOT_CONFIGURED when unwired.
+  // Admin: the COURSE NFT canister's live cycle balance (see
+  // canister_status_cycles). Errs when course_nft isn't wired in Config.
   admin_get_course_nft_cycles : () -> (Result_1);
-  // Admin: the FRONTEND canister's live cycle balance, via the management
-  // canister. Requires this backend to be a controller of the frontend
-  // canister (ops: `icp canister update-settings frontend --add-controller
-  // <backend-id>`); otherwise returns the management canister's rejection.
+  // Admin: the FRONTEND canister's live cycle balance (see canister_status_cycles).
   admin_get_frontend_cycles : () -> (Result_1);
+  // Admin: live staked-LP totals per approved pool (positions counted from
+  // the custody registry; amounts read from each pool's tick math; USD via
+  // the cached XRC rates). Update call — it reads the pools live.
+  admin_get_icp_lp_pool_stats : () -> (Result_2);
   admin_hide_course : (nat64) -> (Result);
   admin_list_moderation_candidates : (nat32) -> (vec ModerationCandidate) query;
   // Admin: every unstake record across all users — the split neurons the
@@ -1270,28 +1045,11 @@ service : (InitPayload) -> {
   admin_refund_stranded_commitments : (principal, ExplorerToken) -> (Result_1);
   // Admin recovery: refund a specific user's stranded x-farm escrow deposit.
   admin_refund_xfarm_escrow : (principal) -> (Result_1);
-  // Admin: upgrade every existing Farmer canister to the currently-uploaded wasm
-  // (preserves each Farmer's stable state via post_upgrade). Rolls out a Farmer-wasm
-  // fix to already-created Farmers. Returns the count upgraded; bounded by live Farmers.
-  admin_reinstall_all_farmers : () -> (Result_1);
-  // Admin: reject a pending community listing. The payment is refunded from
-  // the treasury (minus one ledger fee), then the listing is deleted.
-  // The listing is REMOVED before the refund transfer (and restored if it
-  // fails) so a concurrent second reject — or an interleaved approve — can't
-  // refund the same payment twice across the await (review 2026-06-11).
-  admin_reject_dapp : (nat64) -> (Result);
-  // Admin: reject a pending featured application — refund from the treasury
-  // (claim-before-await so a concurrent reject can't double-refund).
-  admin_reject_featured : (nat64) -> (Result);
-  // Admin: remove any listing outright (no refund — use admin_reject_dapp for
-  // pending submissions that should get their payment back).
-  admin_remove_dapp : (nat64) -> (Result);
-  // Admin: take a live featured placement down early (no refund — the premium was
-  // already earned). Frees its slot immediately.
-  admin_remove_featured : (nat64) -> (Result);
   admin_remove_rating : (nat64, principal) -> (Result);
   // Admin: drop one hole's override, reverting it to the built-in layout.
   admin_reset_arcade_hole : (nat8) -> (Result);
+  // Admin: route any idle EA yield to pot/treasury immediately.
+  admin_route_ea_yield_now : () -> (Result);
   // Admin: trigger one supply sample now and return the value (or the exact error).
   // Diagnostic + manual backfill for the dashboard chart.
   admin_sample_supply_now : () -> (Result_1);
@@ -1303,14 +1061,10 @@ service : (InitPayload) -> {
   // that it always exists from genesis. Admin-gated; callable from deploy-local
   // and prod to recover a no-op seed without another upgrade (B6).
   admin_seed_system_course : () -> (Result_1);
-  // Admin: backfill the originality index for courses minted before the
-  // clone-detection feature (fetches each listed course's blob from the
-  // course_nft canister). Safe to re-run; returns courses fingerprinted.
-  admin_backfill_course_fingerprints : () -> (nat32);
-  // Admin: one-way `deposit_cycles` top-up from the backend's balance into the
-  // course_nft canister — it receives NO burn-share/CMC top-ups of its own.
-  // The 5-min sweep also auto-forwards 0.5T whenever course_nft dips below 1T
-  // while the backend sits at/above its own 7T target.
+  // Admin: move cycles from THIS backend into the course_nft canister — a
+  // one-way `deposit_cycles` top-up. The course_nft canister receives no
+  // burn-share/CMC top-ups of its own (the burn split funds only backend +
+  // frontend), so it depends on this and the sweep's auto-guard below.
   admin_send_cycles_to_course_nft : (nat64) -> (Result);
   // Admin: move cycles from THIS backend into the frontend canister — a one-way
   // `deposit_cycles` top-up; the cycles are deducted from the backend's own
@@ -1319,6 +1073,7 @@ service : (InitPayload) -> {
   // Admin: replace one hole's voxel layout (0-based index). Validated so a
   // typo can't ship an unplayable grid.
   admin_set_arcade_hole : (nat8, ArcadeHoleDef) -> (Result);
+  admin_set_bond_config : (opt nat16, opt nat64) -> (Result);
   admin_set_course_nft_canister : (principal) -> (Result);
   admin_set_default_threshold : (nat64) -> (Result);
   // Admin: change the default voting threshold at any time. Updates the config
@@ -1342,6 +1097,8 @@ service : (InitPayload) -> {
   admin_set_feature_flag_state : (text, FlagState) -> (Result);
   // Admin: set the frontend canister id that receives the 25% cycles share (PB-125).
   admin_set_frontend_canister : (principal) -> (Result);
+  // Admin: configure the qualifying ICPSwap pools.
+  admin_set_icpswap_pools : (vec IcpLpPoolCfg) -> (Result_1);
   // Admin: tune how many tickets a daily login credits.
   admin_set_lottery_config : (opt nat64) -> (Result);
   // Admin: set the minimum number of unique ticket-holders a round needs before a
@@ -1349,13 +1106,14 @@ service : (InitPayload) -> {
   admin_set_lottery_min_holders : (nat64) -> (Result);
   // Admin: set the initiation fee for joining the neuron pool (PB-130).
   admin_set_pool_fee : (nat64) -> (Result);
+  admin_set_promo_campaign : (bool) -> (Result);
   admin_set_proposal_deadline : (nat64, nat64) -> (Result);
   // Admin: tune the staking parameters. Pass null to leave a value unchanged.
   // (Dissolve delays are fixed per tier — 6 months / 1 year / 2 years — and
   // not configurable.)
   admin_set_staking_config : (opt nat64, opt nat64, opt nat64) -> (Result);
   // Admin: wire a vote token to its ICPSwap pool (mainnet swap path).
-  admin_set_swap_pool : (IdeaToken, principal, bool) -> (Result);
+  admin_set_swap_pool : (ExplorerToken, principal, bool) -> (Result);
   // Admin: point ckBTC/ckETH at locally deployed test ledgers. Local-only —
   // mainnet token ledgers are hard-pinned to the canonical canisters.
   admin_set_token_ledger : (IdeaToken, principal) -> (Result);
@@ -1363,12 +1121,7 @@ service : (InitPayload) -> {
   // network has no XRC so this is the only knob there; on mainnet it acts as
   // an emergency seed that the next successful XRC refresh overwrites.
   admin_set_usd_rate : (IdeaToken, nat64) -> (Result);
-  admin_set_xfarm_config : (nat64) -> (Result);
-  admin_set_xfarm_proxy : (text, text) -> (Result);
-  admin_set_xfarm_tiers : (vec FarmerTier) -> (Result);
-  // Upload the Farmer wasm the factory installs (heap-cached; re-upload after an
-  // upgrade). Records the sha256 audit hash. Rotatable by re-calling.
-  admin_set_xfarm_wasm : (blob) -> (Result);
+  admin_set_voucher_nft_canister : (principal) -> (Result);
   admin_trigger_sweep : () -> (Result);
   admin_unhide_course : (nat64) -> (Result);
   // Admin: wallet balances (own default account) for a chunk of principals across
@@ -1385,6 +1138,7 @@ service : (InitPayload) -> {
   // Admin: proposal ids where `user` holds a commitment (any status). Cheap (no
   // ledger calls) — used to target stranded-escrow refunds without a full scan.
   admin_user_commitment_proposals : (principal) -> (vec nat64) query;
+  admin_withdraw_buyback : (principal, nat64) -> (Result);
   // Admin: withdraw ICP from the treasury subaccount to a destination
   // principal. Guarded by the 15 ICP floor unless `override_floor`.
   admin_withdraw_treasury : (principal, nat64, bool) -> (Result);
@@ -1394,11 +1148,28 @@ service : (InitPayload) -> {
   admin_withdraw_treasury_token : (IdeaToken, principal, nat64, bool) -> (
       Result,
     );
-  // Apply to feature an Approved listing you own. Requires a fresh featured quote
-  // and the quoted amount (+ fee) deposited on get_featured_deposit_address. The
-  // premium moves to the treasury; the application is Pending until an admin
-  // approves it (rejection refunds). One active/pending placement per listing.
-  apply_featured : (nat64, IdeaToken, nat64) -> (Result_1);
+  // Credit today's tickets (once per UTC day). Requires an active stake —
+  // the grant scales with the staked tiers (see `user_daily_tickets`). The
+  // frontend calls this on login / page load; returns the caller's
+  // current-round ticket count.
+  // Sweep leg (owner 2026-07-10): daily stake tickets land WITHOUT a visit.
+  // Every staker whose last grant predates today gets their per-day grant —
+  // same guards as the on-visit claim (per_day==0 skip, admin-excluded skip,
+  // stale-round reset, last_claim_day idempotence), so the two paths can
+  // coexist and never double-grant.
+  auto_grant_daily_stake_tickets : () -> ();
+  // Wrap `amount_e8s` of the caller's `tier` stake into a Backed voucher NFT.
+  // The STAKES row is debited (the ICP itself stays in the pooled neuron; the
+  // registry row now carries the claim). Whole-ICP amounts only, so a later
+  // buyback's neuron split stays valid. EA/Booster stakes are NOT wrappable
+  // (separate map, permanent by design).
+  // Auto-issue a voucher for a freshly landed stake (owner 2026-07-10: no
+  // manual wrap — staking IS receiving the NFT). Converts the WHOLE-ICP part
+  // of the caller's plain stake row into a Backed voucher; any sub-ICP
+  // remainder stays a plain row. Best-effort: if the NFT canister is not
+  // configured or the mint fails, the plain stake stands untouched (mainnet-
+  // safe until voucher_nft is wired).
+  auto_issue_voucher : (principal, StakeTier) -> (opt nat64);
   // Owner-initiated burn of a course NFT, with backend marketplace cleanup
   // (PB-3xx). Destructive + a security boundary, so:
   // 1. Reject anonymous.
@@ -1409,31 +1180,41 @@ service : (InitPayload) -> {
   // backend is the allowlisted minter, which the canister also accepts for
   // burn). A "token already gone" reject is treated as success by the
   // wrapper so the path is idempotent.
-  // 4. Clean up backend state: drop the COURSE_LISTINGS row and clear
-  // FEATURED_SLOT if it pointed at this token. Favorites are per-user lists
-  // that already skip missing tokens (list_my_favorite_courses), so they are
-  // left to lazy cleanup rather than scanned here.
+  // 4. Clean up backend state: drop the COURSE_LISTINGS row. Favorites are
+  // per-user lists that already skip missing tokens
+  // (list_my_favorite_courses), so they are left to lazy cleanup rather
+  // than scanned here.
   burn_course_nft : (nat64) -> (Result);
+  // Settle a voucher purchase from the caller's funded escrow. Journaled saga:
+  // seller leg → fee legs (1/3 treasury · 1/3 buyback fund · 1/3 voucher-nft
+  // cycles burn) → ownership move (registry + NFT). Resume-safe per leg.
+  buy_bond : (nat64) -> (Result);
   // Buy a listed-for-sale course (PB-307). Pure-escrow saga (A6/C3):
   // validate → pull buyer's price into escrow → transfer NFT FIRST →
   // pay the 75/10/5/5/5 legs out of escrow. On transfer failure, refund the
   // escrow to the buyer (the treasury never fronts the price).
   buy_course_nft : (nat64) -> (Result);
+  // Instant exit: the CURRENT owner is paid 85% of the claim from the buyback
+  // fund; the NFT burns, the registry row dies, and the underlying stake
+  // splits + dissolves with its principal targeted back at the fund. NOT
+  // flag-gated (it is an exit). Refuses when the fund can't cover the payout.
+  buyback_bond : (nat64) -> (Result_1);
+  // Cancel a listing. NOT flag-gated (withdrawing an offer is an exit).
+  cancel_bond_listing : (nat64) -> (Result);
   cancel_pool_draft : (nat64) -> (Result);
-  // Credit today's tickets (once per UTC day). Requires an active stake —
-  // the grant scales with the staked tiers (see `user_daily_tickets`). The
-  // frontend calls this on login / page load; returns the caller's
-  // current-round ticket count.
-  claim_daily_tickets : () -> (Result_1);
+  // Pre-mint originality check (free, anonymous-callable) so the create flow
+  // can warn BEFORE the user pays the mint fee. The same rule is enforced
+  // server-side in `validate_course_for_mint` — this query is advisory UX.
+  check_course_uniqueness : (blob) -> (CourseUniquenessReport) query;
   // Boosters never pay ICP to users — yield funds the lottery + treasury (70/30 lottery/treasury).
   // Retained as a hard guard against any legacy `claimable_e8s`: it always
   // refuses. Legacy shares are drained to the treasury at the next settlement.
   claim_early_adopter_yield : () -> (Result_1);
-  // Free pre-mint originality check (anonymous-callable): pass a candidate
-  // course_data blob; returns which holes duplicate already-minted layouts and
-  // whether the mint would be rejected. The same rule is enforced inside
-  // mint_course_nft (InvalidCourse "DUPLICATE_HOLES:<n>").
-  check_course_uniqueness : (blob) -> (CourseUniquenessReport) query;
+  // Claim a promo voucher. `target = None` mints to the (authenticated)
+  // caller; `Some(p)` is the PASTE PATH — anonymously callable so Plug/OISY
+  // holders can receive without ever signing in (earning is server-side and
+  // jackpots pay automatically). One per principal; global cap; daily drip.
+  claim_golden_ticket : (opt principal) -> (Result_1);
   commit : (nat64, Stance, nat64) -> (Result);
   // Commit a vote in ANY supported token. The token is ESCROWED — it only
   // converts to ICP if the proposal passes its threshold and the vote is cast
@@ -1442,7 +1223,18 @@ service : (InitPayload) -> {
   // oracle ICP-equivalent at commit time. Fund the per-proposal escrow
   // (get_deposit_address) on the TOKEN's ledger first. $1 minimum.
   commit_token : (nat64, Stance, IdeaToken, nat64) -> (Result);
-  complete_round : (nat64) -> (Result_3);
+  // Submit the finish: coins picked up + start→arena time. Bounds-validated
+  // (coins can never exceed the course's fixed total).
+  complete_bullrun_daily : (nat64, nat32, nat64) -> (Result_3);
+  // Submit the day's decisions. Scored SERVER-SIDE from the stored run; the
+  // result lands on the daily board (EV desc → correct desc → time asc).
+  complete_luckproof_daily : (nat64, vec bool, nat64) -> (Result_4);
+  complete_round : (nat64) -> (Result_5);
+  // Submit the landing. Physics is client-side (continuous), so this is
+  // bounds-validated Field-Goal-parity trust: ownership, TTL, one-shot,
+  // distance/time plausibility. Crashes are recorded (attempt consumed) but
+  // never rank above a safe landing.
+  complete_skydive_daily : (nat64, nat32, nat64, bool) -> (Result_3);
   // Self-attested follow (Option C). We do NOT verify neuron ownership on-chain:
   // because Internet Identity gives this app a per-dapp principal that can't equal
   // the user's NNS principal, and the canister isn't a hotkey on arbitrary neurons,
@@ -1450,14 +1242,9 @@ service : (InitPayload) -> {
   // real skin-in-the-game is the ICP burn itself, so following the leader neuron is
   // encouraged but self-attested. The user confirms in the UI; we record it here.
   confirm_follow : () -> (Result);
-  // Create a Farmer: escrow → 10% treasury → create+install the Farmer canister →
-  // 90% burn-to-cycles funding it (CMC topup, journaled). Reuses settle_burn_split's
-  // CMC leg + submit_dapp's escrow ordering. Per R5 the order is create→install→top-up;
-  // a partial failure leaves a persisted Farmer the sweep can resume or clean up.
-  create_farmer : (nat32, text, nat32) -> (Result_4);
   create_pool_draft : (nat64) -> (Result);
-  // Change the golfer's look (palette indices) for $1, paid in any supported
-  // token (ICP / ckBTC / ckETH / ckUSDC / ckUSDT) at the quoted rate.
+  // Change the golfer's look (palette indices) for a flat 0.5 ICP, split
+  // 50% treasury / 25% backend cycles / 25% course_nft cycles.
   customize_character : (nat8, nat8, nat8, IdeaToken) -> (Result);
   // PB-307 A2: take a course off sale. Flips `for_sale=false`, clears the price.
   // The listing row (and `listed` visibility / ticket accrual) is preserved.
@@ -1469,12 +1256,10 @@ service : (InitPayload) -> {
   // console / How-it-works flows in local testing). Hard-blocked off the local
   // network by `require_local_dev` — this can never run in production.
   dev_become_admin : () -> (Result);
-  // Local-dev: wipe all course listings, ratings, sales, the featured slot, and
-  // favourites referencing removed tokens, so the marketplace shows its empty
-  // state. Returns how many listings were removed.
+  // Local-dev: wipe all course listings, ratings, sales, and favourites
+  // referencing removed tokens, so the marketplace shows its empty state.
+  // Returns how many listings were removed.
   dev_clear_courses : () -> (Result_1);
-  dev_clear_farmers : () -> (Result);
-  dev_clear_featured_dapps : () -> (Result);
   // Local-dev: make a pending unstake disbursable right now (clears both the
   // record's ETA and the mock neuron's dissolve clock).
   dev_fast_forward_dissolve : (nat64) -> (Result);
@@ -1505,18 +1290,17 @@ service : (InitPayload) -> {
   // the 5-minute timer).
   dev_run_staking_sweep : () -> (Result);
   // Local-dev: mint the 3 built-in mock courses (full playable 9-hole
-  // build-instructions blobs). Tops up by name; `count` caps how many.
-  dev_seed_courses : (nat32) -> (Result_5);
-  dev_seed_drafts : (nat64, nat32) -> (Result);
-  dev_seed_farmer : (nat32, text) -> (Result_4);
-  // Local-dev: replace all featured rows with `active` live + `pending` pending
-  // placements, referencing the first approved listings, so every hero/admin
-  // state can be previewed without paying. Local only.
-  dev_seed_featured_dapps : (nat64, nat64) -> (Result_1);
+  // build-instructions blobs). Tops up by name, so re-running only mints
+  // what's missing. `count` is capped at the 3 available mock courses.
+  dev_seed_courses : (nat32) -> (Result_3);
   // Local-dev: seed `count` synthetic unique ticket-holders (1 ticket each) in the
   // current round so the minimum-players gate and the players progress bar can be
   // exercised without real users. Returns the new unique-holder count. Local only.
   dev_seed_lottery_holders : (nat64) -> (Result_1);
+  // Local-dev: populate the marketplace with N mock listed vouchers owned by
+  // synthetic principals so the grid is visualizable. NOT pool-backed — local
+  // nets only (hard is_local guard), admin-gated.
+  dev_seed_mock_bonds : (nat32) -> (Result_3);
   // Local-dev: seed a varied set of mock payout records for the caller so the
   // Profile page has realistic data. No-op if the caller already has payouts.
   dev_seed_payouts : () -> (Result);
@@ -1532,6 +1316,12 @@ service : (InitPayload) -> {
   // 6-month history + a claimable share for the caller, 2 = membership
   // closed (same history plus the 2,000+ ICP month that latched it).
   dev_set_early_adopter_preset : (nat8) -> (Result);
+  // Local/dev: queue mocked claim amounts for a position (one-shot).
+  dev_set_icpswap_mock_claim : (principal, nat, nat64, nat64) -> (Result);
+  // Local/dev: seed the mocked ICPSwap position registry (positions "owned"
+  // by this canister on a pool). Admin-gated; the mock is only consulted on
+  // native tests and local replicas.
+  dev_set_icpswap_mock_positions : (principal, vec nat) -> (Result);
   // Local-dev: set a course's play_count (and cosmetic tickets_distributed).
   dev_set_play_count : (nat64, nat64) -> (Result);
   // Local-dev: insert a finished winning-draw record with the CALLER as the winner
@@ -1552,8 +1342,9 @@ service : (InitPayload) -> {
   // On-chain hole overrides (built-in defaults live in the frontend; only
   // admin-edited holes are stored). Public so the game can merge at load.
   get_arcade_course : () -> (vec ArcadeCourseEntry) query;
-  // Price the $1 customization in `token` at the live oracle rate and lock
-  // it for the caller for 15 minutes (same pattern as Explorer quotes).
+  // Price the customization: a FLAT 0.5 ICP (owner decision 2026-07-04 — was
+  // $1 at the oracle rate, any token). ICP only; no oracle involved. Still
+  // returns an ExplorerQuote (locked 15 min) so the deposit flow is unchanged.
   get_arcade_customize_quote : (IdeaToken) -> (Result_6);
   // The caller's deposit account for arcade fees. Fund it on the ICP ledger
   // with `customize_fee + 0.0001 ICP`, then call `customize_character`.
@@ -1562,6 +1353,14 @@ service : (InitPayload) -> {
   // Returns a page of audit log entries. offset + limit are capped at 10,000
   // to prevent a single query from exhausting cycle budgets.
   get_audit_log : (nat64, nat64) -> (vec AuditLogEntry) query;
+  get_bond_market : () -> (BondMarketInfo) query;
+  // The buyer-specific escrow account for a listing: fund it with
+  // ask + 4 × 0.0001 ICP (the settlement legs' ledger fees), then call
+  // `buy_bond`. Leftovers are reclaimable via `reclaim_escrow(StakeVoucher)`.
+  get_bond_sale_account : (nat64) -> (LedgerAccount) query;
+  // Board for `day` (default today): coins desc → time asc → earlier entry.
+  get_bullrun_daily_board : (opt nat32) -> (vec BullRunDailyRow) query;
+  get_bullrun_daily_status : () -> (BullRunDailyStatus) query;
   get_caller_principal : () -> (principal) query;
   get_config : () -> (Config) query;
   get_course : (nat64) -> (opt CourseCard) query;
@@ -1577,35 +1376,7 @@ service : (InitPayload) -> {
   // Local-dev: where to send mock yield (the neuron's maturity inbox).
   get_early_adopter_yield_inbox_address : () -> (LedgerAccount) query;
   get_eligibility : () -> (EligibilityInfo) query;
-  // The caller's deposit account for Explorer listing fees. Fund it on the
-  // quoted token's ledger with `quote.amount` + one transfer fee, then call
-  // `submit_dapp`.
-  get_explorer_deposit_address : () -> (LedgerAccount) query;
   get_explorer_info : () -> (ExplorerInfo) query;
-  // Price `days` of visibility in `token` at the live USD rate and lock that
-  // price for the caller for 15 minutes. An update (not a query) because the
-  // mainnet path may refresh the rate via the XRC.
-  get_explorer_quote : (IdeaToken, nat64) -> (Result_6);
-  // On-demand generation: the owner viewing a Farmer triggers (throttled to max
-  // 1/day inside the Farmer) a fresh generation, then returns its retained drafts.
-  // Dev-seed Farmers (no canister) just return the seeded mock drafts so the UI works.
-  get_farmer_drafts : (nat64, nat64) -> (Result_7);
-  // Read-only companion to `get_farmer_drafts`: returns the Farmer's currently
-  // STORED drafts WITHOUT triggering generation (no Gemini outcall, no throttle
-  // consumed). The UI calls this first to paint cached drafts instantly, then calls
-  // `get_farmer_drafts` in the background to (maybe) refresh — so a slow or failed
-  // generation never blanks the list the owner already has.
-  get_farmer_drafts_cached : (nat64, nat64) -> (Result_7);
-  // The owner's live Farmer status: cycles remaining, days of budget left, next
-  // generation. Proxies to the Farmer canister for the live cycle balance.
-  get_farmer_status : (nat64) -> (Result_8);
-  // Anonymous-OK query: the active featured set (joined to listings) + slot/price
-  // info. The hero picks one of `active` at random client-side per page load.
-  get_featured_dapps : () -> (FeaturedInfo) query;
-  get_featured_deposit_address : () -> (LedgerAccount) query;
-  // Quote `days` of featured placement in `token` at the live USD rate; locks the
-  // price for the caller for 15 minutes (separate from the listing quote).
-  get_featured_quote : (IdeaToken, nat64) -> (Result_6);
   // App-wide totals: TVL (sum of `total_committed_e8s` over open/met proposals),
   // cumulative ICP burned (sum of `icp_burned_e8s` over all `VoteRecord`s), and
   // the count of distinct NNS proposals this app has cast a vote on.
@@ -1613,6 +1384,7 @@ service : (InitPayload) -> {
   // Pure read over in-memory maps — `O(n)` over proposals + votes. Safe for any
   // reasonable n; documented in the task.
   get_global_stats : () -> (GlobalStats) query;
+  get_icp_lp_info : () -> (IcpLpInfo) query;
   // Dashboard data: the rolling 14-day ICP total-supply history, ascending by time
   // → (timestamp_ns, supply_e8s).
   get_icp_supply_history : () -> (vec record { nat64; nat64 }) query;
@@ -1625,14 +1397,23 @@ service : (InitPayload) -> {
   // The lottery prize-pot account. Anyone may top it up (sweeten the pot) by
   // transferring ICP here — the funds become part of the next jackpots.
   get_lottery_pot_address : () -> (LedgerAccount) query;
+  // Board rows for `day` (default: today), ranked EV desc → correct desc →
+  // time asc → earlier submission.
+  get_luckproof_daily_board : (opt nat32) -> (vec LuckProofDailyRow) query;
+  get_luckproof_daily_replay : (nat32, principal) -> (
+      opt LuckProofReplay,
+    ) query;
+  get_luckproof_daily_status : () -> (LuckProofDailyStatus) query;
   get_mint_deposit_address : () -> (LedgerAccount) query;
   get_my_commitments : () -> (vec Commitment) query;
-  // The caller's own featured applications (any state), joined to their listings.
-  get_my_featured : () -> (vec FeaturedView) query;
   // The caller's payout history, newest first (capped).
   get_my_payouts : () -> (vec Payout) query;
   get_my_pool_neuron : () -> (opt PoolNeuron) query;
   get_my_stake : () -> (UserStakeInfo) query;
+  // The caller's current-round tickets, broken down by where they came from.
+  // (Tickets credited before source tracking shipped won't appear; the UI
+  // shows the remainder as "earlier grants".)
+  get_my_ticket_breakdown : () -> (vec TicketSourceRow) query;
   // The caller's full transaction history — spends AND payouts. Out legs come
   // from the audit log (ICP flows: commits, idea posts, pool fees, stake
   // lockups) plus the token-typed upvote/funding journals; In legs are the
@@ -1642,6 +1423,10 @@ service : (InitPayload) -> {
   get_pool_info : () -> (PoolInfo) query;
   get_proposal : (nat64) -> (opt Proposal) query;
   get_registration_address : () -> (LedgerAccount) query;
+  // Board for `day` (default today): safe landings first (distance asc →
+  // time asc → earlier submission), crashes trail unranked-last.
+  get_skydive_daily_board : (opt nat32) -> (vec SkydiveDailyRow) query;
+  get_skydive_daily_status : () -> (SkydiveDailyStatus) query;
   // The caller's stake-escrow subaccount. Fund it with amount + 0.0001 ICP fee,
   // then call `stake(amount)`.
   get_stake_deposit_address : () -> (LedgerAccount) query;
@@ -1655,24 +1440,15 @@ service : (InitPayload) -> {
   // dollar thresholds and conversion previews. Same source the canister uses
   // for valuations (XRC-cached on mainnet, admin/static locally).
   get_usd_rates : () -> (vec TokenUsdRate) query;
-  get_xfarm_deposit_address : () -> (LedgerAccount) query;
-  get_xfarm_info : () -> (XFarmInfo) query;
-  // USD tier price → ICP at the cached XRC rate; lock the quote for the caller
-  // for 15 minutes (mirrors get_explorer_quote). An update (not a query) because
-  // the mainnet path may refresh the rate via the XRC.
-  get_xfarm_quote : (nat32, nat32) -> (Result_9);
-  get_xfarm_tiers : () -> (vec FarmerTier) query;
   is_favorite : (nat64) -> (bool) query;
   list_active_proposals : () -> (vec Proposal) query;
   list_all_proposals : () -> (vec Proposal) query;
+  list_bond : (nat64, nat64) -> (Result);
   // PB-307 A2/B3: put a (live-owned) course up for fixed-price sale. Sets
   // `for_sale=true` + `price_e8s`. Owner-gated against the LIVE owner
   // (`icrc7_owner_of`), not the cached row. Keeps the course `listed` (playable).
   list_course_for_sale : (nat64, nat64) -> (Result);
   list_course_reviews : (nat64, nat64, nat64) -> (vec Rating) query;
-  // All live (approved, unexpired) listings: admin-curated first in curation
-  // order, then community listings in approval order.
-  list_dapps : () -> (vec DappListing) query;
   // Settlement history, oldest first (chart data: yield per month + share
   // pool balance after each settlement).
   list_early_adopter_rounds : () -> (vec EarlyAdopterRound) query;
@@ -1684,16 +1460,8 @@ service : (InitPayload) -> {
   // Most recent drawings, newest first (capped at 50).
   list_lottery_draws : () -> (vec LotteryDraw) query;
   list_marketplace_courses : (MarketplaceFilter) -> (MarketplacePage) query;
-  // The caller's own submissions in every state — lets the UI show "pending
-  // admin approval" and time remaining.
-  list_my_dapp_submissions : () -> (vec DappListing) query;
-  list_my_farmers : () -> (vec Farmer) query;
   list_my_favorite_courses : () -> (vec CourseCard) query;
   list_my_pending_unstakes : () -> (vec PendingUnstake) query;
-  // Admin: the approval queue, oldest first.
-  list_pending_dapps : () -> (vec DappListing) query;
-  // Admin: pending featured applications awaiting review.
-  list_pending_featured : () -> (vec FeaturedView) query;
   // The last 10 winning drawings, newest first — the public winners board.
   list_recent_winners : () -> (vec LotteryDraw) query;
   list_vote_history : () -> (vec VoteRecord) query;
@@ -1707,11 +1475,7 @@ service : (InitPayload) -> {
   // source must be a child tracked in PENDING_UNSTAKES, and is additionally
   // checked against every platform neuron id before any governance call.
   merge_unstake : (nat64, StakeTier) -> (Result);
-  // Mint a course NFT from a build-instructions blob. Open to any signed-in
-  // user (no tier gate): fund the get_mint_deposit_address escrow with the
-  // 2 ICP fee first (split 50% treasury / 25% backend cycles / 25% course_nft
-  // cycles). Rejects clones (InvalidCourse "DUPLICATE_HOLES:<n>").
-  mint_course_nft : (blob, text) -> (Result_10);
+  mint_course_nft : (blob, text) -> (Result_7);
   my_favorite_ids : () -> (vec nat64) query;
   notify_top_up : (NotifyTopUpArgs) -> (NotifyTopUpResult);
   rate_course : (nat64, nat8, opt text) -> (Result);
@@ -1730,154 +1494,67 @@ service : (InitPayload) -> {
   // (required for those; `KEY_REQUIRED` if missing). The per-principal kinds
   // ignore it.
   reclaim_escrow : (EscrowKind, IdeaToken, opt nat64) -> (BalanceResult);
-  record_hole_event : (nat64, nat8) -> (Result_11);
+  record_hole_event : (nat64, nat8) -> (Result_8);
+  // Redeem = the voucher-native classic unstake (owner 2026-07-10 modal:
+  // "wait for dissolve" choice). Burns the voucher, restores the claim to a
+  // plain stake row, and immediately starts the standard unstake — the FULL
+  // amount pays the owner after the tier's dissolve. Never flag-gated (exit).
+  redeem_stake_bond : (nat64) -> (BalanceResult);
   refresh_course_listing : (nat64) -> (Result);
   refund_registration : () -> (Result);
   // Self-service: refund my own stranded x-farm escrow deposit.
   refund_xfarm_escrow : () -> (BalanceResult);
   remove_admin : (principal) -> (Result);
-  // RENEW: pay again to extend an existing (Active) Farmer's lifespan. Reuses the
-  // create money path — 10% → treasury, 90% → CMC topup to the EXISTING Farmer
-  // canister — then calls the Farmer's `extend(add_budget_cycles, add_days)` to bump
-  // the budget + duration and re-arm the burn timer. The owner gets a fresh quote for
-  // the Farmer's tier first (frontend calls get_xfarm_quote). A depleted/swept Farmer
-  // (no canister) can't be renewed → create a new one.
-  // 
-  // C2 trapped-fund fix (2026-06-20): the CMC leg now journals `burn_block_index` +
-  // clears `cmc_notified` BEFORE the notify call (mirrors `create_farmer`), so a
-  // transient notify failure no longer strands the 90% ICP at the CMC — `xfarm_sweep`
-  // re-notifies the journaled block and recovers it as cycles. `CMC_REFUNDED` drops
-  // the block (the CMC sent the ICP back to the escrow) and the auto-refund wrapper
-  // returns it. Like `create_farmer`, ANY failure auto-refunds the escrow: pre-money
-  // failures refund the full deposit; post-money failures find the escrow drained →
-  // refund no-ops (the CMC leg is journaled, so the sweep recovers those funds).
-  // 
-  // NOTE: the money legs here are NOT guarded the way create's are — the Farmer's
-  // `treasury_block` / `burn_block_index` / `cmc_notified` fields are reused from
-  // create and can't cleanly distinguish "this renew's block" from "create's block"
-  // without per-renew struct fields. So a renew always re-runs the treasury + CMC
-  // transfers (overwriting the historical create blocks). This matches the pre-fix
-  // behavior; the only change is the journaling that lets the sweep recover a notify
-  // failure. The retry-after-extend-failure double-charge this implies is a known
-  // limitation documented in docs/escrow-fix-review-2026-06-20.md (the proper fix is
-  // a per-renew epoch field; deferred — extend failures are rare, the Farmer canister
-  // is controller-owned and the call is local).
-  renew_farmer : (nat64, nat32) -> (Result_4);
-  // Called by a Farmer canister when its cycle balance hits the stop-floor (D2).
-  // Only the Farmer's own canister may report. Sets Depleted so the sweep reaps it.
-  report_depleted : (nat64, nat64) -> (Result);
+  // RESERVE a position id BEFORE transferring it on ICPSwap. The reservation
+  // binds (pool, id) to the caller for ICP_LP_RESERVATION_TTL_NS, and
+  // stake_lp_position only registers the reservation holder — so a position
+  // arriving at our canister can never be claimed by anyone but the user who
+  // announced it first. Nobody should ever transfer without reserving.
+  // Returns the reservation's expiry (ns).
+  reserve_lp_position : (principal, nat) -> (BalanceResult);
   // Set (or clear, with an empty string) the caller's X handle. A leading @
   // is stripped; X's own rules apply (1–15 chars, [A-Za-z0-9_]).
   set_twitter_handle : (text) -> (Result);
   stake : (nat64, StakeTier) -> (Result);
+  // Register a position the caller RESERVED and then transferred to this
+  // canister on ICPSwap. Only the reservation holder can register — the
+  // reserve-first ordering is the anti-sniping guarantee.
+  stake_lp_position : (principal, nat) -> (Result_9);
+  // Enter today's run. One attempt per UTC day off-local (starting consumes
+  // it); stakers only, like the other Play-to-Earn dailies.
+  start_bullrun_daily : () -> (Result_10);
+  // Enter today's competition. One attempt per UTC day; starting CONSUMES the
+  // attempt (abandoning a run does not refund it). Stakers only — the daily
+  // challenge belongs to the no-loss-lottery community.
+  start_luckproof_daily : () -> (Result_11);
   // Pure synchronous update — no `raw_rand`, no inter-canister await (PB-306 A2).
   start_play_session : (nat64) -> (Result_12);
-  // Submit a finished round. Requires full access (the hole-1 preview can't
-  // produce a 9-hole score). Insert-if-better per (game, player); returns the
-  // caller's resulting 1-based rank on that game's board.
-  // Luck-Proof competition: enter today's 250-decision challenge (stakers
-  // only; one attempt per UTC day — starting consumes it)…
-  start_luckproof_daily : () -> (Result_16);
-  // …then submit the decisions; EV is scored server-side onto the daily board.
-  complete_luckproof_daily : (nat64, vec bool, nat64) -> (Result_17);
-  // Today's (or a given day's) board + the caller's eligibility/attempt state.
-  get_luckproof_daily_board : (opt nat32) -> (vec LuckProofDailyRow) query;
-  get_luckproof_daily_status : () -> (LuckProofDailyStatus) query;
-  // Where the caller's current-round lottery tickets came from (largest first).
-  get_my_ticket_breakdown : () -> (vec TicketSourceRow) query;
-  // Drop Zone daily: enter (stakers, once/day) → land → board/status.
-  start_skydive_daily : () -> (Result_18);
-  complete_skydive_daily : (nat64, nat32, nat64, bool) -> (Result_19);
-  get_skydive_daily_board : (opt nat32) -> (vec SkydiveDailyRow) query;
-  get_skydive_daily_status : () -> (SkydiveDailyStatus) query;
-  // Bull Run daily: enter (stakers, once/day) → finish → board/status.
-  start_bullrun_daily : () -> (Result_20);
-  complete_bullrun_daily : (nat64, nat32, nat64) -> (Result_19);
-  get_bullrun_daily_board : (opt nat32) -> (vec BullRunDailyRow) query;
-  get_bullrun_daily_status : () -> (BullRunDailyStatus) query;
-  // ANSEM LP rewards.
-  get_lp_reward_info : () -> (LpRewardInfo) query;
-  // (pubkey 32 bytes, signature 64 bytes, nonce, expires_ns) — the wallet
-  // signed the canonical challenge binding the caller + round + nonce.
-  link_solana_wallet : (blob, blob, nat64, nat64) -> (Result_21);
-  unlink_solana_wallet : () -> (Result);
-  claim_lp_reward : () -> (Result_22);
-  admin_set_lp_pools : (vec LpPoolView) -> (Result_23);
-  // ICP LP staking (ICPSwap custody).
-  get_icp_lp_info : () -> (IcpLpInfo) query;
-  // Register a position ALREADY transferred to the backend on ICPSwap.
-  // Reserve BEFORE transferring on ICPSwap (returns expiry ns; 1h TTL,
-  // max 5 live reservations per user)…
-  reserve_lp_position : (principal, nat) -> (Result_23);
-  // …then register once the transfer has landed. Only the reservation
-  // holder can register.
-  stake_lp_position : (principal, nat) -> (Result_24);
-  // Return a custodied position to `return_to`; staker-only, never flag-gated.
-  unstake_lp_position : (principal, nat, principal) -> (Result);
-  admin_set_icpswap_pools : (vec IcpLpPoolCfg) -> (Result_23);
-  // Live staked-LP totals per approved pool (admin; reads the pools).
-  admin_get_icp_lp_pool_stats : () -> (Result_25);
-  // Local/dev mocks (only consulted on native tests / local replicas).
-  dev_set_icpswap_mock_positions : (principal, vec nat) -> (Result);
-  dev_set_icpswap_mock_claim : (principal, nat, nat64, nat64) -> (Result);
-  // Local/dev only in effect: mocked ATA balances (mock map is only
-  // consulted when is_local).
-  dev_set_lp_mock_balance : (text, nat) -> (Result);
-  // Replays unlock by competing: null unless the CALLER has their own entry
-  // for that day (or is asking for their own run).
-  get_luckproof_daily_replay : (nat32, principal) -> (opt LuckProofReplay) query;
-  // Submit a community listing. Requires a fresh quote for the same token +
-  // days (get_explorer_quote) and the quoted amount (+ one ledger fee)
-  // deposited on get_explorer_deposit_address. The payment moves to the
-  // treasury immediately; the listing stays Pending — invisible to the
-  // public — until an admin approves it. Rejection refunds from the treasury.
-  submit_dapp : (text, text, text, IdeaToken, nat64, vec text, bool) -> (
-      BalanceResult,
-    );
+  // Enter today's drop. One attempt per UTC day; starting consumes it (a
+  // crash or abandoned run does not refund). Stakers only, like Luck-Proof.
+  start_skydive_daily : () -> (Result_13);
   // Toggle a course in the caller's favorites. Returns the NEW state
   // (`Ok(true)` = now favorited, `Ok(false)` = now removed) so the frontend can
   // reconcile its optimistic flip without a follow-up read (PB-311 B2).
-  toggle_favorite_course : (nat64) -> (Result_13);
+  toggle_favorite_course : (nat64) -> (Result_14);
+  // Transfer a voucher to any principal (the wallet's withdraw/deposit rail —
+  // send to your Plug/OISY principal, or back again from there). Owner-only,
+  // Backed + unlisted only; the recipient's ticket stream starts at the next
+  // daily grant. Never flag-gated (custody exit).
+  transfer_bond : (nat64, principal) -> (Result);
   unregister_leader_neuron : (nat64) -> (Result);
   // Split `amount_e8s` off the tier's pool neuron and start dissolving it; the
   // sweep disburses to the caller's wallet once the tier's full term passes.
   // Returns the pending-unstake id. The user nets amount − 0.0002 ICP (split +
   // disburse fees).
   unstake : (nat64, StakeTier) -> (BalanceResult);
-
-  // ── Stake Vouchers ──
-  // Wrap `amount_e8s` of the caller's tier stake into a Backed Bond NFT
-  // (whole ICP, min 1 ICP). Ok = bond id.
-  wrap_stake_bond : (nat64, StakeTier) -> (BalanceResult);
-  // Unwrap back to a plain stake (burns the NFT). Never flag-gated.
+  // Return a custodied position to `return_to` (the staker's ICPSwap
+  // principal). Only the recorded staker; NOT feature-flag-gated — the
+  // custody exit must always work, dark flag or not.
+  unstake_lp_position : (principal, nat, principal) -> (Result);
+  // Unwrap a Backed voucher back into a plain stake row (burns the NFT).
+  // Deliberately NOT flag-gated: it is an exit.
   unwrap_stake_bond : (nat64) -> (Result);
-  // Bond-native classic unstake: burn the bond, dissolve, pay the
-  // owner 100% after the tier's term. Never flag-gated.
-  redeem_stake_bond : (nat64) -> (BalanceResult);
-  // Wallet rail: send a bond to any principal (Plug/OISY and back).
-  transfer_bond : (nat64, principal) -> (Result);
-  dev_seed_mock_bonds : (nat32) -> (variant { Ok : nat32; Err : text });
-  // List / cancel a marketplace ask in ICP e8s.
-  list_bond : (nat64, nat64) -> (Result);
-  cancel_bond_listing : (nat64) -> (Result);
-  // The caller's escrow account for a listing: fund with ask + 4×0.0001 ICP,
-  // then call buy_bond. Leftovers reclaim via reclaim_escrow(StakeVoucher).
-  get_bond_sale_account : (nat64) -> (LedgerAccount) query;
-  buy_bond : (nat64) -> (Result);
-  // Instant house buyback: pays the owner 85% of the claim from the buyback
-  // fund, burns the NFT, dissolves the stake back to the fund. Ok = ICP paid
-  // (e8s). Never flag-gated; refuses (BUYBACK_UNAVAILABLE) when underfunded.
-  buyback_bond : (nat64) -> (BalanceResult);
-  // Promo claim: null = the signed-in caller; opt principal = the PASTE path
-  // (anonymously callable; self-authenticating principals only). Ok = id.
-  claim_golden_ticket : (opt principal) -> (BalanceResult);
-  get_bond_market : () -> (BondMarketInfo) query;
-  admin_withdraw_buyback : (principal, nat64) -> (Result);
-  admin_fund_buyback_from_treasury : (nat64) -> (Result);
-  admin_route_ea_yield_now : () -> (Result);
-  admin_set_bond_config : (opt nat16, opt nat64) -> (Result);
-  admin_set_promo_campaign : (bool) -> (Result);
-  admin_set_voucher_nft_canister : (principal) -> (Result);
   wallet_receive : () -> (Result);
   whoami : () -> (Result_15);
+  wrap_stake_bond : (nat64, StakeTier) -> (BalanceResult);
 }
