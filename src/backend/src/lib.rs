@@ -5307,6 +5307,9 @@ fn get_audit_log(offset: u64, limit: u64) -> Vec<AuditLogEntry> {
 pub const FLAG_LOSSLESS_VOTING: &str = "lossless_voting";
 /// Lossless lottery (Powerball-style draws over the staking-yield lottery
 /// pot). Ships dark — default OFF until an admin flips it on.
+/// ALSO gates Stake Bonds (one product, owner 2026-07-11): bond wrap/list/
+/// buy/Golden-Ticket-claim entry paths check this flag — but unwrap, cancel,
+/// buyback and redeem are exits and are NEVER flag-gated (custody house rule).
 pub const FLAG_LOSSLESS_LOTTERY: &str = "lossless_lottery";
 pub const FLAG_EXPLORER: &str = "dapp_explorer";
 pub const FLAG_EARLY_ADOPTERS: &str = "early_adopters";

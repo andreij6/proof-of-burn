@@ -504,8 +504,8 @@ export default function App() {
   const [voucherXferBusy, setVoucherXferBusy] = useState(false);
   const [voucherXferMsg, setVoucherXferMsg] = useState<string | null>(null);
 
-  // Load the caller's vouchers when the wallet opens (best-effort — empty
-  // when the stake_vouchers flag is off).
+  // Load the caller's bonds when the wallet opens (best-effort — empty
+  // when the lottery flag is off; bonds ride the lossless_lottery flag).
   const loadWalletVouchers = async () => {
     if (!actor) return;
     try {
@@ -707,7 +707,7 @@ export default function App() {
   const bullrunEnabled = featureFlags.find(f => f.key === 'arcade_bullrun')?.enabled ?? false;
   const ansemLpEnabled = featureFlags.find(f => f.key === 'solana_lp_rewards')?.enabled ?? false;
   const icpLpEnabled = featureFlags.find(f => f.key === 'icpswap_lp_stake')?.enabled ?? false;
-  // Bonds live under the lottery flag (owner 2026-07-11): one switch, never separate.
+  // Bonds are part of the lottery product (owner 2026-07-11): one flag, never toggled separately.
   const vouchersEnabled = lotteryEnabled;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
   const xFarmEnabled = featureFlags.find(f => f.key === 'x_farm')?.enabled ?? false;
