@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Terminal Velocity Target</title>
+<style>
+  :root{
+    --cyan:#34e7ff;
+    --green:#3dff9a;
+    --red:#ff4d5e;
+    --amber:#ffc24b;
+    --ink:#e8f6ff;
+    --panel:rgba(10,16,24,0.55);
+    --panel-solid:rgba(8,12,20,0.82);
+    --line:rgba(120,200,255,0.25);
+    --mono:"SF Mono",ui-monospace,"Roboto Mono",Menlo,Consolas,monospace;
+  }
+  html,body{margin:0;overflow:hidden;height:100%;background:#0a1622;color:var(--ink);
+    font-family:var(--mono);-webkit-font-smoothing:antialiased;}
+  *{box-sizing:border-box;}
+  #game{display:block;position:fixed;inset:0;width:100vw;height:100vh;}
+
+  /* HUD layer */
+  #hud{position:fixed;inset:0;pointer-events:none;z-index:10;
+    font-variant-numeric:tabular-nums;letter-spacing:.04em;}
+  #hud .glow{text-shadow:0 0 8px currentColor;}
+
+  /* Timer (top center) */
+  #timer{position:absolute;top:18px;left:50%;transform:translateX(-50%);
+    font-size:34px;font-weight:600;color:var(--cyan);text-shadow:0 0 14px rgba(52,231,255,.5);}
+
+  /* Phase chip (top center, below timer) */
+  #chips{position:absolute;top:64px;left:50%;transform:translateX(-50%);
+    display:flex;gap:10px;align-items:center;}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:999px;
+    padding:5px 12px;font-size:12px;letter-spacing:.12em;text-transform:uppercase;
+    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);color:var(--ink);}
+  .chip b{color:var(--cyan);}
+  .chip.ready{color:var(--green);border-color:rgba(61,255,154,.4);}
+  .chip.used{color:var(--amber);border-color:rgba(255,194,75,.4);}
+
+  /* Altimeter (left) */
+  #alti{position:absolute;left:26px;top:50%;transform:translateY(-50%);
+    display:flex;align-items:center;gap:12px;}
+  #alti-track{position:relative;width:18px;height:54vh;min-height:260px;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    overflow:hidden;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
+  #alti-danger{position:absolute;left:0;right:0;bottom:0;height:0%;
+    background:linear-gradient(180deg,rgba(255,77,94,0) 0%,rgba(255,77,94,.45) 100%);
+    border-top:1px solid rgba(255,77,94,.7);}
+  #alti-fill{position:absolute;left:0;right:0;bottom:0;height:50%;
+    background:linear-gradient(180deg,rgba(52,231,255,.15),rgba(52,231,255,.35));}
+  #alti-marker{position:absolute;left:-3px;right:-3px;height:3px;bottom:50%;
+    background:var(--cyan);box-shadow:0 0 10px var(--cyan);border-radius:2px;}
+  #alti-label{font-size:13px;color:var(--cyan);}
+  #alti-label b{font-size:20px;display:block;}
+
+  /* Speedometer (bottom right) */
+  #speedo{position:absolute;right:26px;bottom:26px;text-align:right;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:12px 16px;backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
+  #speedo .lab{font-size:11px;letter-spacing:.18em;color:rgba(232,246,255,.6);}
+  #speedo .val{font-size:30px;font-weight:600;color:var(--green);}
+  #speedo .val.hot{color:var(--red);text-shadow:0 0 14px rgba(255,77,94,.6);}
+  #speedbar{margin-top:8px;width:160px;height:6px;border-radius:3px;
+    background:rgba(255,255,255,.08);overflow:hidden;}
+  #speedbar > i{display:block;height:100%;width:0%;background:var(--green);transition:width .05s linear;}
+  #speedbar > i.hot{background:var(--red);}
+
+  /* Deploy button (bottom center, clickable control) */
+  #deploy-btn{position:absolute;left:50%;bottom:30px;transform:translateX(-50%);
+    pointer-events:auto;cursor:pointer;font-family:var(--mono);font-size:15px;font-weight:700;
+    letter-spacing:.14em;text-transform:uppercase;color:#04111a;
+    background:linear-gradient(180deg,var(--amber),#e09a1c);border:none;border-radius:999px;
+    padding:14px 30px;box-shadow:0 0 26px rgba(255,194,75,.5);
+    animation:pulse 1.4s ease-in-out infinite;}
+  #deploy-btn.hidden{display:none;}
+  @keyframes pulse{0%,100%{transform:translateX(-50%) scale(1);}50%{transform:translateX(-50%) scale(1.05);}}
+
+  /* Overlays */
+  .overlay{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;
+    pointer-events:auto;background:radial-gradient(120% 100% at 50% 0%,rgba(5,12,22,.35),rgba(3,5,10,.72));}
+  .overlay.hidden{display:none;}
+  .panel{background:var(--panel-solid);border:1px solid var(--line);border-radius:20px;
+    padding:36px 42px;max-width:460px;width:min(92vw,460px);text-align:center;
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    box-shadow:0 24px 80px rgba(0,0,0,.6),0 0 0 1px rgba(120,200,255,.05) inset;}
+  .title{font-size:30px;font-weight:700;letter-spacing:.06em;
+    color:var(--cyan);text-shadow:0 0 18px rgba(52,231,255,.5);margin:0 0 6px;}
+  .pitch{font-size:14px;line-height:1.5;color:rgba(232,246,255,.75);margin:0 0 22px;}
+  .legend{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:0 0 26px;}
+  .legend span{font-size:11px;letter-spacing:.06em;color:rgba(232,246,255,.85);
+    background:rgba(120,200,255,.08);border:1px solid var(--line);border-radius:8px;padding:6px 10px;}
+  .legend span b{color:var(--cyan);}
+  .btn{pointer-events:auto;cursor:pointer;font-family:var(--mono);font-size:16px;font-weight:700;
+    letter-spacing:.18em;text-transform:uppercase;color:#04111a;
+    background:linear-gradient(180deg,var(--cyan),#1bb6d6);border:none;border-radius:12px;
+    padding:14px 40px;box-shadow:0 0 22px rgba(52,231,255,.45);transition:transform .08s ease,box-shadow .15s ease;}
+  .btn:hover{transform:translateY(-1px);box-shadow:0 0 30px rgba(52,231,255,.7);}
+  .btn:active{transform:translateY(1px);}
+
+  /* End overlay specifics */
+  #result-word{font-size:54px;font-weight:800;letter-spacing:.05em;margin:0 0 8px;}
+  #result-word.win{color:var(--green);text-shadow:0 0 26px rgba(61,255,154,.6);}
+  #result-word.crash{color:var(--red);text-shadow:0 0 26px rgba(255,77,94,.6);}
+  #result-word.miss{color:var(--amber);text-shadow:0 0 26px rgba(255,194,75,.6);}
+  #result-reason{font-size:14px;color:rgba(232,246,255,.8);margin:0 0 22px;min-height:18px;}
+  .stats{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin:0 0 26px;text-align:left;}
+  .stat{background:rgba(120,200,255,.06);border:1px solid var(--line);border-radius:10px;padding:10px 12px;}
+  .stat .k{font-size:10px;letter-spacing:.16em;color:rgba(232,246,255,.55);text-transform:uppercase;}
+  .stat .v{font-size:20px;font-weight:600;color:var(--ink);}
+</style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div id="timer" class="glow">00:00.0</div>
+
+    <div id="chips">
+      <div class="chip" id="phase-chip"><b id="phase-txt">FREEFALL</b> · <span id="posture-txt">DIVE</span></div>
+      <div class="chip ready" id="chute-chip">CHUTE READY</div>
+    </div>
+
+    <div id="alti">
+      <div id="alti-track">
+        <div id="alti-danger"></div>
+        <div id="alti-fill"></div>
+        <div id="alti-marker"></div>
+      </div>
+      <div id="alti-label">ALT<b id="alt-val">0</b>m</div>
+    </div>
+
+    <div id="speedo">
+      <div class="lab">V-SPD</div>
+      <div class="val" id="vspd-val">0 <span style="font-size:14px">m/s</span></div>
+      <div id="speedbar"><i id="speedbar-fill"></i></div>
+    </div>
+
+    <button id="deploy-btn" class="hidden">▼ Deploy Chute</button>
+  </div>
+
+  <!-- Start overlay -->
+  <div class="overlay" id="start">
+    <div class="panel">
+      <h1 class="title">TERMINAL VELOCITY TARGET</h1>
+      <p class="pitch">Leap from 4000&nbsp;m, ride the freefall, then flare your canopy onto the bullseye. Land soft, land centered.</p>
+      <div class="legend">
+        <span><b>W</b> dive</span>
+        <span><b>S</b> flare</span>
+        <span><b>A/D</b> steer</span>
+        <span><b>SPACE / click</b> deploy chute</span>
+      </div>
+      <button class="btn" id="start-btn">DROP</button>
+    </div>
+  </div>
+
+  <!-- End overlay -->
+  <div class="overlay hidden" id="end">
+    <div class="panel">
+      <div id="result-word" class="win">VICTORY</div>
+      <div id="result-reason"></div>
+      <div class="stats">
+        <div class="stat"><div class="k">Time</div><div class="v" id="end-time">00:00.0</div></div>
+        <div class="stat"><div class="k">Score</div><div class="v" id="end-score">0</div></div>
+        <div class="stat" id="end-acc-wrap"><div class="k">Accuracy</div><div class="v" id="end-acc">—</div></div>
+        <div class="stat"><div class="k">Landing dist</div><div class="v" id="end-dist">0 m</div></div>
+      </div>
+      <button class="btn" id="again-btn">PLAY AGAIN</button>
+    </div>
+  </div>
+
+<!-- Three.js (UMD build — loads from file:// without a server) -->
+<script src="https://unpkg.com/three@0.149.0/build/three.min.js"></script>
+<script>
+/* ============================================================
+   PHYSICS / GAME LOGIC  (renderer-agnostic simulation)
+   ============================================================ */
+const CONFIG = {
+  START_ALTITUDE: 4000, GRAVITY: 9.81, SAFE_LANDING_SPEED: 8, TARGET_RADIUS: 25,
+  START_OFFSET_MIN: 450, START_OFFSET_MAX: 750,
+  TERMINAL: { dive: 95, neutral: 65, flare: 42, canopy: 5.5 },
+  GLIDE:    { dive: 8,  neutral: 16, flare: 34, canopy: 26 },
+  TURN_RATE:{ freefall: 1.1, canopy: 1.7 },
+  H_INERTIA: 1.6,
+};
+
+function computeDangerAltitude(state) {
+  let v = state && isFinite(state.vSpeed) ? state.vSpeed : 0;
+  if (v <= CONFIG.SAFE_LANDING_SPEED) return 30;
+  const vt = CONFIG.TERMINAL.canopy;
+  const h = 0.05;
+  let dist = 0, steps = 0;
+  while (v > CONFIG.SAFE_LANDING_SPEED && steps < 3000) {
+    const a = CONFIG.GRAVITY * (1 - (v / vt) ** 2);
+    v += a * h;
+    if (!isFinite(v)) break;
+    dist += Math.max(0, v) * h;
+    steps++;
+  }
+  return dist < 30 ? 30 : dist;
+}
+
+function resetState() {
+  const ang = Math.random() * Math.PI * 2;
+  const off = CONFIG.START_OFFSET_MIN + Math.random() * (CONFIG.START_OFFSET_MAX - CONFIG.START_OFFSET_MIN);
+  const x = Math.sin(ang) * off;
+  const z = Math.cos(ang) * off;
+  const toTarget = Math.atan2(-x, -z);
+  const heading = toTarget + (Math.random() - 0.5) * 0.5;
+  const state = {
+    phase: 'freefall', posture: 'neutral', status: 'playing',
+    alt: CONFIG.START_ALTITUDE, vSpeed: 0,
+    x, z, vx: 0, vz: 0, heading,
+    chuteUsed: false, time: 0, dangerAlt: 0, result: null,
+  };
+  state.dangerAlt = computeDangerAltitude(state);
+  return state;
+}
+
+function stepPhysics(state, input, dt) {
+  if (state.status !== 'playing') return;
+  if (!(dt > 0)) return;
+  const inp = input || {};
+
+  if (inp.deployPressed && !state.chuteUsed) {
+    state.chuteUsed = true;
+    state.phase = 'canopy';
+  }
+
+  if (state.phase !== 'canopy') {
+    if (inp.up) state.posture = 'dive';
+    else if (inp.down) state.posture = 'flare';
+    else state.posture = 'neutral';
+  }
+
+  const vt = state.phase === 'canopy' ? CONFIG.TERMINAL.canopy : CONFIG.TERMINAL[state.posture];
+  const subSteps = dt > 0.02 ? Math.ceil(dt / 0.01) : 1;
+  const sdt = dt / subSteps;
+  for (let i = 0; i < subSteps; i++) {
+    const a = CONFIG.GRAVITY * (1 - (state.vSpeed / vt) ** 2);
+    state.vSpeed += a * sdt;
+    if (!isFinite(state.vSpeed)) state.vSpeed = vt;
+    if (state.vSpeed < 0) state.vSpeed = 0;
+    state.alt -= state.vSpeed * sdt;
+    if (state.alt <= 0) { state.alt = 0; break; }
+  }
+
+  const turn = state.phase === 'canopy' ? CONFIG.TURN_RATE.canopy : CONFIG.TURN_RATE.freefall;
+  if (inp.left) state.heading -= turn * dt;
+  if (inp.right) state.heading += turn * dt;
+
+  const glide = state.phase === 'canopy' ? CONFIG.GLIDE.canopy : CONFIG.GLIDE[state.posture];
+  const tvx = Math.sin(state.heading) * glide;
+  const tvz = Math.cos(state.heading) * glide;
+  const k = Math.min(1, CONFIG.H_INERTIA * dt);
+  state.vx += (tvx - state.vx) * k;
+  state.vz += (tvz - state.vz) * k;
+  state.x += state.vx * dt;
+  state.z += state.vz * dt;
+
+  state.time += dt;
+  state.dangerAlt = state.phase === 'canopy' ? 0 : computeDangerAltitude(state);
+
+  if (state.alt <= 0) {
+    state.alt = 0;
+    const dist = Math.hypot(state.x, state.z);
+    const timeSec = state.time;
+    if (state.vSpeed > CONFIG.SAFE_LANDING_SPEED) {
+      state.status = 'crashed';
+      state.result = { reason: "Impact at " + Math.round(state.vSpeed) + " m/s — deploy the chute sooner.", score: 0, accuracy: 0, timeSec, distM: dist };
+    } else if (dist > CONFIG.TARGET_RADIUS) {
+      state.status = 'missed';
+      state.result = { reason: "Safe landing — but " + Math.round(dist) + " m off target.", score: 0, accuracy: 0, timeSec, distM: dist };
+    } else {
+      state.status = 'won';
+      let accuracy = 1 - dist / CONFIG.TARGET_RADIUS;
+      accuracy = Math.max(0, Math.min(1, accuracy));
+      const score = Math.round(Math.max(0, (140 - timeSec)) * 90) + Math.round(accuracy * 2500);
+      state.result = { reason: accuracy > 0.85 ? "Bullseye!" : "Target hit.", score, accuracy, timeSec, distM: dist };
+    }
+  }
+}
+
+/* ============================================================
+   3D WORLD  (Three.js)
+   ============================================================ */
+const canvas = document.getElementById('game');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+const scene = new THREE.Scene();
+const SKY_HORIZON = 0xcfe7ff;
+scene.fog = new THREE.Fog(SKY_HORIZON, 3500, 15000);
+const camera = new THREE.PerspectiveCamera(60, 1, 2, 22000);
+
+// ---- world helpers (shared by terrain + trees + shadow) ----
+function smoothstep(a, b, x) { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
+function hash2(i, j) { const n = Math.sin(i * 127.1 + j * 311.7) * 43758.5453; return n - Math.floor(n); }
+function terrainHeight(x, z) {
+  const flat = smoothstep(0, 240, Math.hypot(x, z)); // landing zone stays flat
+  let h = 0;
+  h += Math.sin(x * 0.0016) * Math.cos(z * 0.0014) * 60;
+  h += Math.sin(x * 0.0041 + 1.3) * Math.cos(z * 0.0037 - 0.7) * 24;
+  h += Math.sin(x * 0.011 - 2.1) * Math.cos(z * 0.009 + 0.5) * 7;
+  return h * flat;
+}
+const FIELD_PALETTE = [
+  [0.42, 0.55, 0.27], [0.49, 0.60, 0.30], [0.60, 0.66, 0.34],
+  [0.78, 0.71, 0.40], [0.66, 0.55, 0.34], [0.36, 0.48, 0.26],
+];
+function fieldColor(x, z, out) {
+  const F = 170;
+  const gi = Math.floor(x / F), gj = Math.floor(z / F);
+  const idx = Math.floor(hash2(gi, gj) * FIELD_PALETTE.length) % FIELD_PALETTE.length;
+  const base = FIELD_PALETTE[idx];
+  let b = 0.88 + hash2(gi + 7, gj - 3) * 0.24;          // per-field brightness
+  // hedgerows: darken near field borders
+  const fx = x / F - gi, fz = z / F - gj;
+  const border = Math.min(fx, 1 - fx, fz, 1 - fz);
+  if (border < 0.045) b *= 0.5;
+  out[0] = Math.min(1, base[0] * b); out[1] = Math.min(1, base[1] * b); out[2] = Math.min(1, base[2] * b);
+}
+
+// ---- sky dome ----
+(function buildSky() {
+  const geo = new THREE.SphereGeometry(16000, 32, 16);
+  const mat = new THREE.ShaderMaterial({
+    side: THREE.BackSide, fog: false, depthWrite: false,
+    uniforms: { top: { value: new THREE.Color(0x2a6fd6) }, bottom: { value: new THREE.Color(0xdcefff) } },
+    vertexShader: 'varying vec3 vP; void main(){ vP=position; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+    fragmentShader: 'varying vec3 vP; uniform vec3 top; uniform vec3 bottom; void main(){ float h=normalize(vP).y*0.5+0.5; vec3 c=mix(bottom,top,smoothstep(0.0,0.65,h)); gl_FragColor=vec4(c,1.0); }',
+  });
+  scene.add(new THREE.Mesh(geo, mat));
+})();
+
+// ---- lights ----
+scene.add(new THREE.HemisphereLight(0xdcefff, 0x4a6b3a, 0.95));
+const sun = new THREE.DirectionalLight(0xfff2d8, 1.05);
+sun.position.set(3000, 5200, 1500);
+scene.add(sun);
+
+// ---- terrain (rolling countryside, patchwork fields) ----
+(function buildTerrain() {
+  const SIZE = 14000, SEG = 180;
+  const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+  const tmp = [0, 0, 0];
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i);
+    pos.setY(i, terrainHeight(x, z));
+    fieldColor(x, z, tmp);
+    colors[i * 3] = tmp[0]; colors[i * 3 + 1] = tmp[1]; colors[i * 3 + 2] = tmp[2];
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1, metalness: 0 });
+  scene.add(new THREE.Mesh(geo, mat));
+})();
+
+// ---- trees (instanced conifers) ----
+(function buildTrees() {
+  const geo = new THREE.ConeGeometry(9, 34, 6); geo.translate(0, 17, 0);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x2f5d34, flatShading: true, roughness: 1 });
+  const N = 220;
+  const mesh = new THREE.InstancedMesh(geo, mat, N);
+  const m = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Quaternion(), s = new THREE.Vector3();
+  let n = 0;
+  for (let i = 0; i < N * 3 && n < N; i++) {
+    const x = (Math.random() - 0.5) * 12000, z = (Math.random() - 0.5) * 12000;
+    if (Math.hypot(x, z) < 220) continue;            // keep the drop zone clear
+    const sc = 0.6 + Math.random() * 1.5;
+    p.set(x, terrainHeight(x, z), z); q.identity(); s.set(sc, sc, sc);
+    m.compose(p, q, s); mesh.setMatrixAt(n++, m);
+  }
+  mesh.count = n; mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+})();
+
+// ---- target bullseye + beacon ----
+let beacon;
+(function buildTarget() {
+  const g = new THREE.Group();
+  function ring(inner, outer, hex) {
+    const rg = new THREE.RingGeometry(inner, outer, 72); rg.rotateX(-Math.PI / 2);
+    const me = new THREE.Mesh(rg, new THREE.MeshBasicMaterial({ color: hex, side: THREE.DoubleSide }));
+    me.position.y = 0.35; g.add(me);
+  }
+  ring(20, 25, 0xffffff); ring(14, 20, 0xff3344); ring(8, 14, 0xffffff);
+  const center = new THREE.Mesh(new THREE.CircleGeometry(8, 48), new THREE.MeshBasicMaterial({ color: 0xff3344, side: THREE.DoubleSide }));
+  center.rotation.x = -Math.PI / 2; center.position.y = 0.35; g.add(center);
+  // vertical beacon so the target is findable from altitude
+  const bg = new THREE.CylinderGeometry(2.2, 2.2, 1800, 14, 1, true);
+  beacon = new THREE.Mesh(bg, new THREE.MeshBasicMaterial({ color: 0x34e7ff, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }));
+  beacon.position.y = 900; g.add(beacon);
+  scene.add(g);
+})();
+
+// ---- skydiver (articulated humanoid) + ram-air parachute ----
+function buildDiver() {
+  const group = new THREE.Group();          // yaws with heading
+  const body = new THREE.Group();           // pitches prone <-> upright
+  group.add(body);
+
+  const suit = new THREE.MeshStandardMaterial({ color: 0x2b3a66, roughness: 0.7, flatShading: true });
+  const suit2 = new THREE.MeshStandardMaterial({ color: 0x1f2b4d, roughness: 0.8, flatShading: true });
+  const helmet = new THREE.MeshStandardMaterial({ color: 0xe8542f, roughness: 0.5, flatShading: true });
+  const boot = new THREE.MeshStandardMaterial({ color: 0x14181f, roughness: 0.9, flatShading: true });
+
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.62, 0.26), suit); torso.position.y = 0; body.add(torso);
+  const pelvis = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.24, 0.26), suit2); pelvis.position.y = -0.42; body.add(pelvis);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.17, 16, 12), helmet); head.position.y = 0.52; body.add(head);
+
+  function limb(ux, uy, lr0, lr1, c0, c1, cap) {
+    const grp = new THREE.Group();
+    const up = new THREE.Mesh(new THREE.CylinderGeometry(ux, uy, lr0, 8), c0); up.position.y = -lr0 / 2; grp.add(up);
+    const lo = new THREE.Mesh(new THREE.CylinderGeometry(uy * 0.85, uy * 0.7, lr1, 8), c1); lo.position.y = -lr0 - lr1 / 2; grp.add(lo);
+    if (cap) { const f = new THREE.Mesh(new THREE.SphereGeometry(uy * 0.9, 8, 6), cap); f.position.y = -lr0 - lr1; grp.add(f); }
+    return grp;
+  }
+  // arms (pivot at shoulder)
+  const armL = limb(0.075, 0.06, 0.34, 0.32, suit, suit); armL.position.set(-0.30, 0.24, 0); body.add(armL);
+  const armR = limb(0.075, 0.06, 0.34, 0.32, suit, suit); armR.position.set(0.30, 0.24, 0); body.add(armR);
+  // legs (pivot at hip)
+  const legL = limb(0.11, 0.085, 0.46, 0.46, suit2, suit2, boot); legL.position.set(-0.13, -0.54, 0); body.add(legL);
+  const legR = limb(0.11, 0.085, 0.46, 0.46, suit2, suit2, boot); legR.position.set(0.13, -0.54, 0); body.add(legR);
+
+  // ---- ram-air parachute rig (scales from the harness when deployed) ----
+  const canopyGroup = new THREE.Group();
+  canopyGroup.position.set(0, 0.35, -0.1);   // harness on upper back
+  const SPAN = 8, CHORD = 2.9, SX = 12, SZ = 3, LIFT = 6.6;
+  const cg = new THREE.PlaneGeometry(SPAN, CHORD, SX, SZ); cg.rotateX(-Math.PI / 2);
+  const cpos = cg.attributes.position;
+  const ccol = new Float32Array(cpos.count * 3);
+  const cA = new THREE.Color(0xe8542f), cB = new THREE.Color(0xf2f2f2);
+  function archY(x) { const u = x / (SPAN / 2); return LIFT - Math.pow(Math.abs(u), 1.7) * 1.7; } // arched canopy
+  for (let i = 0; i < cpos.count; i++) {
+    const x = cpos.getX(i);
+    cpos.setY(i, archY(x));
+    const cell = Math.floor((x + SPAN / 2) / (SPAN / SX) + 0.0001);
+    const c = (cell % 2 === 0) ? cA : cB;
+    ccol[i * 3] = c.r; ccol[i * 3 + 1] = c.g; ccol[i * 3 + 2] = c.b;
+  }
+  cg.setAttribute('color', new THREE.Float32BufferAttribute(ccol, 3));
+  cg.computeVertexNormals();
+  const canopy = new THREE.Mesh(cg, new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.85, metalness: 0 }));
+  canopyGroup.add(canopy);
+  // suspension lines from canopy edge down to the harness (origin)
+  const lp = [];
+  const edges = [[-SPAN / 2, -CHORD / 2], [-SPAN / 4, -CHORD / 2], [0, -CHORD / 2], [SPAN / 4, -CHORD / 2], [SPAN / 2, -CHORD / 2], [-SPAN / 2, CHORD / 2], [0, CHORD / 2], [SPAN / 2, CHORD / 2]];
+  for (const e of edges) { lp.push(e[0], archY(e[0]), e[1], 0, 0, 0); }
+  const lg = new THREE.BufferGeometry(); lg.setAttribute('position', new THREE.Float32BufferAttribute(lp, 3));
+  canopyGroup.add(new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0xe8eef5, transparent: true, opacity: 0.75 })));
+  canopyGroup.scale.setScalar(0.001); canopyGroup.visible = false;
+  group.add(canopyGroup);
+
+  return { group, body, armL, armR, legL, legR, canopyGroup };
+}
+const diver = buildDiver();
+scene.add(diver.group);
+
+// ---- ground shadow blob (depth cue) ----
+const shadow = new THREE.Mesh(
+  new THREE.CircleGeometry(1, 28),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false })
+);
+shadow.rotation.x = -Math.PI / 2;
+scene.add(shadow);
+
+// ---- 3D per-frame update ----
+let deployAnim = 0;       // canopy open progress 0..1
+let camSnap = true;       // snap camera on (re)start
+const _v = new THREE.Vector3(), _d = new THREE.Vector3();
+function easeOutBack(x) { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); }
+const lerp = THREE.MathUtils.lerp;
+
+function render3D(s, now, dt) {
+  const x = s.x, z = s.z, alt = Math.max(0, s.alt), h = s.heading;
+  const canopy = s.phase === 'canopy';
+
+  // place + yaw the diver
+  diver.group.position.set(x, alt + 1.0, z);
+  diver.group.rotation.y = h;
+
+  // pose: prone freefall (belly-down) <-> upright under canopy
+  let pitch = canopy ? 0.20 : -Math.PI / 2;
+  if (!canopy) { if (s.posture === 'dive') pitch -= 0.34; else if (s.posture === 'flare') pitch += 0.40; }
+  const pk = Math.min(1, dt * 4);
+  diver.body.rotation.x = lerp(diver.body.rotation.x, pitch, pk);
+  const armZ = canopy ? 0.45 : 1.25, armX = canopy ? -0.95 : 0.12, legZ = canopy ? 0.06 : 0.30;
+  diver.armL.rotation.z = lerp(diver.armL.rotation.z, armZ, pk);
+  diver.armR.rotation.z = lerp(diver.armR.rotation.z, -armZ, pk);
+  diver.armL.rotation.x = lerp(diver.armL.rotation.x, armX, pk);
+  diver.armR.rotation.x = lerp(diver.armR.rotation.x, armX, pk);
+  diver.legL.rotation.z = lerp(diver.legL.rotation.z, legZ, pk);
+  diver.legR.rotation.z = lerp(diver.legR.rotation.z, -legZ, pk);
+  if (!canopy) { const fl = Math.sin(now * 0.018) * 0.06; diver.armL.rotation.x += fl; diver.armR.rotation.x -= fl; }
+
+  // parachute deploy animation (pops open from the harness)
+  const tgt = canopy ? 1 : 0;
+  deployAnim += (tgt - deployAnim) * Math.min(1, dt * 5);
+  if (deployAnim < 0.002) { diver.canopyGroup.visible = false; }
+  else { diver.canopyGroup.visible = true; diver.canopyGroup.scale.setScalar(Math.max(0.002, easeOutBack(Math.min(1, deployAnim)))); }
+
+  // shadow on the ground beneath the diver
+  const gy = terrainHeight(x, z);
+  shadow.position.set(x, gy + 0.4, z);
+  const sc = 2.5 + (alt / CONFIG.START_ALTITUDE) * 26;
+  shadow.scale.set(sc, sc, sc);
+  shadow.material.opacity = 0.38 * (1 - smoothstep(0, 6000, alt));
+
+  // beacon pulse
+  if (beacon) beacon.material.opacity = 0.08 + 0.07 * (0.5 + 0.5 * Math.sin(now * 0.003));
+
+  // chase camera (behind + above, framerate-independent smoothing)
+  const fwd = _v.set(Math.sin(h), 0, Math.cos(h));
+  const back = canopy ? 13 : 17, up = canopy ? 5.5 : 7;
+  _d.set(x, alt + 1.0, z).addScaledVector(fwd, -back); _d.y += up;
+  if (camSnap) { camera.position.copy(_d); camSnap = false; }
+  else { camera.position.lerp(_d, 1 - Math.pow(0.0016, dt)); }
+  camera.lookAt(x, alt - 2.5, z);
+  const fov = 58 + Math.min(20, s.vSpeed * 0.14);
+  if (Math.abs(camera.fov - fov) > 0.05) { camera.fov = fov; camera.updateProjectionMatrix(); }
+
+  renderer.render(scene, camera);
+}
+
+function resize() {
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  camera.aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ============================================================
+   SHELL  (state, input, HUD, overlays, main loop)
+   ============================================================ */
+let mode = 'menu';            // 'menu' | 'playing' | 'over'
+let state = resetState();     // preview the diver high over the countryside
+let lastT = 0;
+
+const input = { up: false, down: false, left: false, right: false, deployPressed: false };
+
+function setMove(code, down) {
+  switch (code) {
+    case 'KeyW': case 'ArrowUp': input.up = down; break;
+    case 'KeyS': case 'ArrowDown': input.down = down; break;
+    case 'KeyA': case 'ArrowLeft': input.left = down; break;
+    case 'KeyD': case 'ArrowRight': input.right = down; break;
+  }
+}
+function requestDeploy() { if (mode === 'playing' && state && !state.chuteUsed) input.deployPressed = true; }
+
+const PREVENT = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']);
+window.addEventListener('keydown', (e) => {
+  if (PREVENT.has(e.code)) e.preventDefault();
+  if (e.repeat) { setMove(e.code, true); return; }
+  if ((e.code === 'Space' || e.code === 'Enter') && (mode === 'menu' || mode === 'over')) { startGame(); return; }
+  if (e.code === 'Space' && mode === 'playing') requestDeploy();
+  setMove(e.code, true);
+});
+window.addEventListener('keyup', (e) => { if (PREVENT.has(e.code)) e.preventDefault(); setMove(e.code, false); });
+// click / tap the scene also deploys the chute
+canvas.addEventListener('pointerdown', () => { if (mode === 'playing') requestDeploy(); });
+
+// DOM refs
+const elTimer = document.getElementById('timer');
+const elPhaseChip = document.getElementById('phase-chip');
+const elChuteChip = document.getElementById('chute-chip');
+const elAltVal = document.getElementById('alt-val');
+const elAltFill = document.getElementById('alti-fill');
+const elAltDanger = document.getElementById('alti-danger');
+const elAltMarker = document.getElementById('alti-marker');
+const elVspd = document.getElementById('vspd-val');
+const elSpeedFill = document.getElementById('speedbar-fill');
+const elDeploy = document.getElementById('deploy-btn');
+const startOverlay = document.getElementById('start');
+const endOverlay = document.getElementById('end');
+
+document.getElementById('start-btn').addEventListener('click', startGame);
+document.getElementById('again-btn').addEventListener('click', startGame);
+elDeploy.addEventListener('click', (e) => { e.stopPropagation(); requestDeploy(); });
+
+function startGame() {
+  state = resetState();
+  mode = 'playing';
+  deployAnim = 0; camSnap = true;
+  startOverlay.classList.add('hidden');
+  endOverlay.classList.add('hidden');
+  elDeploy.classList.remove('hidden');
+  input.deployPressed = false;
+}
+
+function fmtTime(t) {
+  t = Math.max(0, t || 0);
+  const m = Math.floor(t / 60), s = Math.floor(t % 60), tenths = Math.floor((t * 10) % 10);
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + '.' + tenths;
+}
+
+function updateHUD(s) {
+  const MAX = CONFIG.START_ALTITUDE;
+  elTimer.textContent = fmtTime(s.time);
+
+  const altPct = Math.max(0, Math.min(1, (s.alt || 0) / MAX));
+  elAltFill.style.height = (altPct * 100) + '%';
+  elAltMarker.style.bottom = (altPct * 100) + '%';
+  elAltVal.textContent = Math.max(0, Math.round(s.alt || 0));
+
+  const inFreefall = (s.phase === 'freefall') || !s.chuteUsed;
+  if (inFreefall) {
+    const dPct = Math.max(0, Math.min(1, (s.dangerAlt || 0) / MAX));
+    elAltDanger.style.display = 'block';
+    elAltDanger.style.height = (dPct * 100) + '%';
+  } else { elAltDanger.style.display = 'none'; }
+
+  const vAbs = Math.abs(s.vSpeed || 0);
+  elVspd.innerHTML = Math.round(vAbs) + ' <span style="font-size:14px">m/s</span>';
+  const tooFast = (vAbs > CONFIG.SAFE_LANDING_SPEED) && ((s.alt || 0) < (s.dangerAlt || 0));
+  elVspd.classList.toggle('hot', tooFast);
+  elSpeedFill.style.width = (Math.max(0, Math.min(1, vAbs / 90)) * 100) + '%';
+  elSpeedFill.classList.toggle('hot', tooFast);
+
+  if (s.chuteUsed || s.phase === 'canopy') {
+    elPhaseChip.innerHTML = '<b>CANOPY</b>';
+  } else {
+    elPhaseChip.innerHTML = '<b>FREEFALL</b> · <span>' + (s.posture || 'NEUTRAL').toUpperCase() + '</span>';
+  }
+
+  if (s.chuteUsed) {
+    elChuteChip.textContent = 'CHUTE USED';
+    elChuteChip.classList.remove('ready'); elChuteChip.classList.add('used');
+    elDeploy.classList.add('hidden');
+  } else {
+    elChuteChip.textContent = 'CHUTE READY';
+    elChuteChip.classList.add('ready'); elChuteChip.classList.remove('used');
+  }
+}
+
+function showEnd(s) {
+  const word = document.getElementById('result-word');
+  const r = s.result || {};
+  let label = 'MISSED', cls = 'miss';
+  if (s.status === 'won') { label = 'VICTORY'; cls = 'win'; }
+  else if (s.status === 'crashed') { label = 'CRASHED'; cls = 'crash'; }
+  word.textContent = label; word.className = cls;
+  document.getElementById('result-reason').textContent = r.reason || '';
+  document.getElementById('end-time').textContent = fmtTime(r.timeSec != null ? r.timeSec : s.time);
+  document.getElementById('end-score').textContent = (r.score != null ? Math.round(r.score) : 0);
+  const accWrap = document.getElementById('end-acc-wrap');
+  if (s.status === 'won' && r.accuracy != null) {
+    let acc = r.accuracy; if (acc <= 1) acc *= 100;
+    document.getElementById('end-acc').textContent = Math.round(acc) + '%';
+    accWrap.style.opacity = '1';
+  } else { document.getElementById('end-acc').textContent = '—'; accWrap.style.opacity = '0.5'; }
+  document.getElementById('end-dist').textContent = (r.distM != null ? Math.round(r.distM) : 0) + ' m';
+  elDeploy.classList.add('hidden');
+  endOverlay.classList.remove('hidden');
+}
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (lastT === 0) { lastT = now; render3D(state, now, 0); return; }
+  let dt = (now - lastT) / 1000; lastT = now;
+  if (dt > 0.05) dt = 0.05; if (dt < 0) dt = 0;
+
+  if (mode === 'playing' && state) {
+    stepPhysics(state, input, dt);
+    input.deployPressed = false;     // consume edge
+    updateHUD(state);
+    if (state.status !== 'playing') { mode = 'over'; showEnd(state); }
+  }
+  render3D(state, now, dt);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
