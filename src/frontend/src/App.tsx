@@ -9,7 +9,6 @@ import {
   CommitmentStatus,
   ExplorerToken,
 } from "./bindings/backend";
-import { IdeaToken } from "./tokens";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import type {
   Proposal,
@@ -1162,21 +1161,7 @@ export default function App() {
   };
 
   // Admin: set the default voting threshold at runtime (no redeploy).
-  // Local-dev: faucet for any of the three test tokens.
-  const handleFaucet = async (token: IdeaToken) => {
-    if (!actor) return;
-    try {
-      const res = await actor.dev_faucet_token(token);
-      if (res.__kind__ === "Err") {
-        alert(`Faucet error: ${res.Err}`);
-        return;
-      }
-      await refreshAllData();
-      await fetchTokenBalances();
-    } catch (e: any) {
-      alert(`Faucet failed: ${e.message || e}`);
-    }
-  };
+
 
 
   // Admin: open the Treasury Wallet and refresh the (update-call) balance.
@@ -3372,24 +3357,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Local dev faucet — hidden on mainnet by the backend */}
-          {principal && !principal.isAnonymous() && (
-            <div className="simulator-panel col">
-              <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>Dev Faucet</span>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>Send test tokens to your wallet from the canister.</span>
-              <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                <Btn variant="secondary" sm onClick={() => handleFaucet(IdeaToken.ICP)}>
-                  <Icon name="zap" size={12} stroke="var(--burn-ink)" /> 100 ICP
-                </Btn>
-                <Btn variant="secondary" sm onClick={() => handleFaucet(IdeaToken.CkBTC)}>
-                  <Icon name="zap" size={12} stroke="var(--burn-ink)" /> 0.1 ckBTC
-                </Btn>
-                <Btn variant="secondary" sm onClick={() => handleFaucet(IdeaToken.CkETH)}>
-                  <Icon name="zap" size={12} stroke="var(--burn-ink)" /> 1 ckETH
-                </Btn>
-              </div>
-            </div>
-          )}
 
           {/* Local dev: grab your principal to grant yourself admin via CLI */}
           {principal && !principal.isAnonymous() && !isAdmin && (

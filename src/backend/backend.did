@@ -1206,6 +1206,7 @@ service : (InitPayload) -> {
   // can warn BEFORE the user pays the mint fee. The same rule is enforced
   // server-side in `validate_course_for_mint` — this query is advisory UX.
   check_course_uniqueness : (blob) -> (CourseUniquenessReport) query;
+  claim_daily_tickets : () -> (Result_1);
   // Boosters never pay ICP to users — yield funds the lottery + treasury (70/30 lottery/treasury).
   // Retained as a hard guard against any legacy `claimable_e8s`: it always
   // refuses. Legacy shares are drained to the treasury at the next settlement.
