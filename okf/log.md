@@ -1,5 +1,14 @@
 # Log
 
+## 2026-07-11 late — Mainnet frontend deploy 30e1612 (post-Bond polish)
+
+Frontend-only (backend already on 62cdac7): Your Bonds card on BOTH the
+Stake and Lottery pages; Redeem button no longer scrolled off-screen
+(table minWidth 560→400 now that it's a single action); Admin
+Pools&Users split into Neurons + Users pages; course-editor removed from
+System; mobile header = hamburger · logo · Cycle Burn name, bookmark
+button hidden on mobile, nav drawer opens with the brand up top.
+
 ## 2026-07-11 — Mainnet deploy 62cdac7 (Bond product + LP participant status)
 
 Big batch: LP custody now confers full lottery participant status (no
