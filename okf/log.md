@@ -1,5 +1,21 @@
 # Log
 
+## 2026-07-11 — Mainnet deploy 62cdac7 (Bond product + LP participant status)
+
+Big batch: LP custody now confers full lottery participant status (no
+separate ICP stake — author_is_staked counts STAKED_LP; ANSEM stake gate
+removed); ICPSwap valuation FIXED (getUserPositionsByPrincipal + own
+Uniswap-v3 math — the IC0522 instruction-limit bug is dead, the real LP
+staker starts earning); never-frozen money-op modals; LP bonds = non-
+sellable receipts (LpBacked); Voucher→BOND everywhere (UI + API: 13
+endpoints renamed, claim_golden_ticket, BondClass/BondView; API caveat
+removed from docs); bonds folded under lossless_lottery (stake_vouchers
+flag purged — verified gone); Admin console = 6 self-loading pages
+(Money/Economics/Neurons/Users/System/How-it-works), sections+tables
+not cards, feature-off gating, course-editor removed. Snapshot …2b
+rotated out, …32 created (624 MiB). Post-deploy: bond API answers, old
+voucher endpoints correctly method-not-found, frontend 200.
+
 ## 2026-07-11 — Mainnet deploy 7b1ff07 (polish batch)
 
 First-load indicators across every fetching surface (7 pages had
