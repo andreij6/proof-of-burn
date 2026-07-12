@@ -1,5 +1,21 @@
 # Log
 
+## 2026-07-12 — Mainnet deploy 2e33e7d (feature removal + Bond stack + help panel)
+
+Big deploy. REMOVED: Dapp Explorer, Solana/ANSEM LP, X-Farm (+xfarm_farmer
+canister — never on mainnet, no orphans) — ~45 endpoints gone, flags
+13→9 (dapp_explorer/solana_lp_rewards/x_farm/nav_community purged;
+verified). KEPT get_explorer_info as the wallet token registry + XRC.
+Also shipping the whole Bond stack that had queued: LP participant
+status + ICPSwap valuation fix (Uniswap-v3 math), voucher→BOND API
+rename, single-flag (bonds under lossless_lottery), never-frozen money
+modals, LP bonds, How-it-works panel (desktop always-open / mobile
+right-tab→fullscreen), Bond Exchange bonds row, admin 6-page redo.
+FIX: claim_daily_tickets attribute (dropped in the removal fork; lib.rs
+commit had been missed in ff265ed) — lottery page opens again. Flags:
+nav_governance + arcade_luckproof default OFF. Snapshot …2c rotated,
+…33 created (624 MiB). GCP TODO (owner): delete xfarm-proxy Cloud Run.
+
 ## 2026-07-11 late — Mainnet frontend deploy 30e1612 (post-Bond polish)
 
 Frontend-only (backend already on 62cdac7): Your Bonds card on BOTH the
