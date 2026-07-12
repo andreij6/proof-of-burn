@@ -1397,7 +1397,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           </Section>
 
           <Section icon="wallet" title="Treasury & cycles — how the lights stay on">
-            <Li>Treasury inflows: 50% of burns, 30% of staking + Perm yield, bond-fee thirds, Neuron Syndicate initiation fees, explorer and mini-golf payments.</Li>
+            <Li>Treasury inflows: 50% of burns, 30% of staking + Perm yield, bond-fee thirds, Neuron Syndicate initiation fees, and mini-golf payments.</Li>
             <Li>Cycles: 25% of each burn tops up each canister via the CMC. If the backend dips below 5T cycles, the sweep auto-converts treasury ICP into cycles (two-phase, idempotent).</Li>
             <Li>Withdrawals and neuron allocations are guarded by the 15 ICP floor (override available) — below ~10 ICP the cycle top-up silently stops.</Li>
           </Section>

@@ -61,7 +61,6 @@ const TICKET_SOURCE_LABELS: Record<string, string> = {
   luckproof_ev: 'Luck-Proof daily win — skill (EV)',
   luckproof_cash: 'Luck-Proof daily win — luck (cash)',
   discussions: 'Discussion rewards',
-  solana_lp: 'Solana LP rewards ($ANSEM)',
   icpswap_lp: 'ICPSwap LP staking',
   dev: 'Dev grants (local)',
   test: 'Test grants',

@@ -33,13 +33,10 @@ import { friendlyVoucherErr, isPromo, type BondView } from "./Vouchers";
 import { TIER_META } from "./Staking";
 import DevDocs from "./DevDocs";
 import ClaimPromo from "./ClaimPromo";
-import Explorer from "./Explorer";
-import XFarm from "./XFarm";
 import MiniGolfPage from "./MiniGolfPage";
 import LuckProofPage from "./LuckProofPage";
 import DropZonePage from "./DropZonePage";
 import BullRunPage from "./BullRunPage";
-import AnsemLp from "./AnsemLp";
 import IcpLp from "./IcpLp";
 import Payouts from "./Payouts";
 import Admin from "./Admin";
@@ -55,7 +52,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin' | 'admin_money' | 'admin_economics' | 'admin_neurons' | 'admin_users' | 'admin_system' | 'admin_reference';
+export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'minigolf' | 'course_market' | 'early_adopters' | 'payouts' | 'admin' | 'admin_money' | 'admin_economics' | 'admin_neurons' | 'admin_users' | 'admin_system' | 'admin_reference';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   voting: '/voting',
@@ -72,9 +69,7 @@ export const PAGE_PATH: Record<AppPage, string> = {
   neuronstake: '/neuron-stake',
   // Voucher Exchange — the stake-voucher secondary market.
   exchange: '/exchange',
-  // ANSEM LP rewards (Solana chain fusion) — Stake to Earn nav section.
-  ansemlp: '/ansem-lp',
-  // ICPSwap LP staking — Featured nav, below ANSEM LP.
+  // ICPSwap LP staking — Task 4 Tickets nav.
   icplp: '/icp-lp',
   // Luck-Proof (Sklansky Trainer) has its own nav page below Lottery, gated
   // on the arcade_luckproof per-game flag.
@@ -84,7 +79,6 @@ export const PAGE_PATH: Record<AppPage, string> = {
   dropzone: '/drop-zone',
   // Bull Run (encierro lane-runner) — Play to Earn nav, arcade_bullrun flag.
   bullrun: '/bull-run',
-  explorer: '/explorer',
   // Mini Golf — gated on the arcade_minigolf flag; `#/mini-golf/course/<id>`,
   // `#/mini-golf/spectate/<id>` and `#/mini-golf/play/<id>` deep links resolve
   // here (as do legacy `#/arcade/...` links from before the hub was removed).
@@ -93,7 +87,6 @@ export const PAGE_PATH: Record<AppPage, string> = {
   // deep-linkable alias that redirects to the Mini Golf page (same flag gate).
   course_market: '/courses',
   early_adopters: '/early_adopters',
-  xfarm: '/xfarm',
   payouts: '/profile',
   // Bare /admin is a legacy alias — it redirects to the Money page (the
   // console's four sections are each their own page, owner 2026-07-11).
@@ -706,20 +699,16 @@ export default function App() {
   // Nav-section flags: the core of the app is the No-Loss Lottery — the
   // Governance and Community nav groups ship dark.
   const govNavEnabled = featureFlags.find(f => f.key === 'nav_governance')?.enabled ?? false;
-  const communityNavEnabled = featureFlags.find(f => f.key === 'nav_community')?.enabled ?? false;
-  const explorerEnabled = featureFlags.find(f => f.key === 'dapp_explorer')?.enabled ?? false;
   // Mini Golf has its own nav page (below Lottery), gated on its per-game flag
   // so it shows even when the full Arcade hub flag is off.
   const minigolfEnabled = featureFlags.find(f => f.key === 'arcade_minigolf')?.enabled ?? false;
   const luckproofEnabled = featureFlags.find(f => f.key === 'arcade_luckproof')?.enabled ?? false;
   const dropzoneEnabled = featureFlags.find(f => f.key === 'arcade_skydive')?.enabled ?? false;
   const bullrunEnabled = featureFlags.find(f => f.key === 'arcade_bullrun')?.enabled ?? false;
-  const ansemLpEnabled = featureFlags.find(f => f.key === 'solana_lp_rewards')?.enabled ?? false;
   const icpLpEnabled = featureFlags.find(f => f.key === 'icpswap_lp_stake')?.enabled ?? false;
   // Bonds are part of the lottery product (owner 2026-07-11): one flag, never toggled separately.
   const vouchersEnabled = lotteryEnabled;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
-  const xFarmEnabled = featureFlags.find(f => f.key === 'x_farm')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (earns lottery tickets only).
 
@@ -1290,12 +1279,6 @@ export default function App() {
     if ((page === 'voting' || page === 'earn') && featureFlags.length > 0 && !govNavEnabled) {
       redirect('lottery');
     }
-    if (page === 'explorer' && featureFlags.length > 0 && !(explorerEnabled && communityNavEnabled)) {
-      redirect('lottery');
-    }
-    if (page === 'xfarm' && featureFlags.length > 0 && !(xFarmEnabled && communityNavEnabled)) {
-      redirect('lottery');
-    }
     // The Course Marketplace is the Mini Golf lobby — redirect its alias.
     if (page === 'course_market') {
       redirect('minigolf');
@@ -1312,9 +1295,6 @@ export default function App() {
       redirect('lottery');
     }
     if (page === 'bullrun' && featureFlags.length > 0 && !bullrunEnabled) {
-      redirect('lottery');
-    }
-    if (page === 'ansemlp' && featureFlags.length > 0 && !ansemLpEnabled) {
       redirect('lottery');
     }
     if (page === 'neuronstake' && featureFlags.length > 0 && !(losslessEnabled || earlyAdoptersEnabled)) {
@@ -1341,7 +1321,7 @@ export default function App() {
     if (page === 'payouts' && principal && principal.isAnonymous()) {
       redirect('lottery');
     }
-  }, [page, losslessEnabled, lotteryEnabled, vouchersEnabled, govNavEnabled, communityNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, ansemLpEnabled, icpLpEnabled, vouchersEnabled, explorerEnabled, earlyAdoptersEnabled, xFarmEnabled, principal, featureFlags.length]);
+  }, [page, losslessEnabled, lotteryEnabled, vouchersEnabled, govNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, icpLpEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1926,7 +1906,7 @@ export default function App() {
     const onEarn = (EARN_PAGES as string[]).includes(page);
     return (
       <>
-        {(lotteryEnabled || ansemLpEnabled || icpLpEnabled) && (
+        {(lotteryEnabled || icpLpEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Featured</Eyebrow>
         )}
         {lotteryEnabled && (
@@ -1951,7 +1931,7 @@ export default function App() {
         )}
 
         {/* ── Task 4 Tickets: staking + LP rewards ── */}
-        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled || ansemLpEnabled) && (
+        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Task 4 Tickets</Eyebrow>
         )}
         {(losslessEnabled || earlyAdoptersEnabled) && (
@@ -1966,13 +1946,6 @@ export default function App() {
             Liquidity Provider
           </Btn>
         )}
-        {ansemLpEnabled && (
-          <Btn variant={page === 'ansemlp' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('ansemlp')}>
-            <Icon name="droplet" size={14} stroke={page === 'ansemlp' ? 'var(--char-950)' : 'currentColor'} />
-            ANSEM LP
-          </Btn>
-        )}
-
         {/* ── Listings: the voucher secondary market ── */}
         {vouchersEnabled && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Listings</Eyebrow>
@@ -2027,22 +2000,6 @@ export default function App() {
           </>
         )}
 
-        {communityNavEnabled && (explorerEnabled || xFarmEnabled) && (
-          <Eyebrow style={{ margin: '14px 0 4px' }}>Community</Eyebrow>
-        )}
-        {communityNavEnabled && explorerEnabled && (
-          <Btn variant={page === 'explorer' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('explorer')}>
-            <Icon name="compass" size={14} stroke={page === 'explorer' ? 'var(--char-950)' : 'currentColor'} />
-            Explorer
-          </Btn>
-        )}
-        {communityNavEnabled && xFarmEnabled && (
-          <Btn variant={page === 'xfarm' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('xfarm')}>
-            <Icon name="spark" size={14} stroke={page === 'xfarm' ? 'var(--char-950)' : 'currentColor'} />
-            X-Farm
-            <Chip tone="pending" style={{ marginLeft: 'auto', height: 18, fontSize: 10 }}>experimental</Chip>
-          </Btn>
-        )}
 
         {/* ── Admin: the console's sections, visible to admins only ── */}
         {isAdmin && (
@@ -2214,7 +2171,6 @@ export default function App() {
         flags={featureFlags.length > 0 ? {
           staking: losslessEnabled,
           lottery: lotteryEnabled,
-          explorer: explorerEnabled,
         } : undefined}
         onEnter={() => {
           window.scrollTo(0, 0);
@@ -2564,35 +2520,6 @@ export default function App() {
               onActivity={refreshAllData}
               onGoExchange={() => setPage('exchange')}
               onGoLiquidity={() => setPage('icplp')}
-            />
-          ) : page === 'explorer' ? (
-            <Explorer
-              actor={actor}
-              identity={identity}
-              principal={principal}
-              host={host}
-              rootKey={env?.IC_ROOT_KEY}
-              isAdmin={isAdmin}
-              isLocal={isLocal}
-              onSignIn={handleLogin}
-            />
-          ) : page === 'xfarm' && xFarmEnabled ? (
-            <XFarm
-              actor={actor}
-              identity={identity}
-              principal={principal}
-              host={host}
-              rootKey={env?.IC_ROOT_KEY}
-              isLocal={isLocal}
-              ledgerCanisterId={ledgerCanisterId}
-              onSignIn={handleLogin}
-            />
-          ) : page === 'ansemlp' && ansemLpEnabled ? (
-            <AnsemLp
-              actor={actor}
-              principal={principal}
-              onSignIn={handleLogin}
-              onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'icplp' && icpLpEnabled ? (
             <IcpLp

@@ -25,7 +25,6 @@ type UsdRate = { token: string; rate_usd_e8s: bigint };
 export interface LandingFlags {
   staking: boolean;
   lottery: boolean;
-  explorer: boolean;
 }
 
 interface LandingProps {
