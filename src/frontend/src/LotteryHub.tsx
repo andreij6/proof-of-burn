@@ -31,7 +31,7 @@ export default function LotteryHub({
       <div className="col" style={{ gap: 6 }}>
         <Eyebrow accent>The gist</Eyebrow>
         <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55 }}>
-          <b>Nobody pays in.</b> Staking earns free daily tickets, the prize pool is funded by
+          Staking earns free daily tickets, the prize pool is funded by
           neuron yield, and your ICP always stays yours.
         </p>
       </div>
