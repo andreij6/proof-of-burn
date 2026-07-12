@@ -874,7 +874,7 @@ fn post_upgrade() {
     // stable memory from earlier deploys; no code reads them anymore, but
     // list_feature_flags would still surface them as dead admin toggles.
     for retired in [
-        "poker", "arcade_turborush", "ticker", "fast_lane", "cofounders",
+        "poker", "arcade_turborush", "ticker", "fast_lane", "cofounders", "stake_vouchers",
         // Removed 2026-07-06 (owner): whole features deleted outright.
         "idea_board", "discussions", "crash", "cycles_faucet",
         "arcade", "arcade_fieldgoal", "dashboard", "mission_statement", "fast_lane",
@@ -5327,17 +5327,15 @@ pub const FLAG_NAV_COMMUNITY: &str = "nav_community";
 /// NFTs, ICP marketplace, 15% house buyback, promo claim campaigns. Gates
 /// wrap/list/buy/claim ONLY — unwrap, cancel and buyback are exits and are
 /// NEVER flag-gated (custody house rule).
-pub const FLAG_STAKE_VOUCHERS: &str = "stake_vouchers";
 /// X-Farm: autonomous per-user Farmer canisters burn ICP→cycles to run Gemini
 /// (Cloud-Run proxy) drafting daily pro-ICP tweets the user posts on X. Ships
 /// dark (default OFF) until the owner enables it after a playtest.
 pub const FLAG_X_FARM: &str = "x_farm";
-const KNOWN_FEATURE_FLAGS: [&str; 14] = [
+const KNOWN_FEATURE_FLAGS: [&str; 13] = [
     FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EXPLORER, FLAG_EARLY_ADOPTERS,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN,
     FLAG_SOLANA_LP, FLAG_ICPSWAP_LP, FLAG_X_FARM, FLAG_NAV_GOVERNANCE, FLAG_NAV_COMMUNITY,
-    FLAG_STAKE_VOUCHERS,
-];
+    ];
 
 const MAX_FEATURE_FLAGS: u64 = 64;
 const MAX_FLAG_KEY_LEN: usize = 64;
@@ -5450,7 +5448,6 @@ fn feature_default(key: &str) -> bool {
         FLAG_SOLANA_LP => false,
         FLAG_ICPSWAP_LP => false,
         FLAG_NAV_GOVERNANCE => false,
-        FLAG_STAKE_VOUCHERS => false,
         FLAG_NAV_COMMUNITY => false,
         FLAG_X_FARM => false,
         // Every other SHIPPED feature (Lossless Voting/Lottery, Explorer,
@@ -13745,7 +13742,7 @@ async fn stake_lp_position(pool: Principal, position_id: u128) -> Result<IcpLpPo
 /// blocks an LP stake; None is recorded and the row still confers full
 /// participant status (author_is_staked reads STAKED_LP directly).
 async fn mint_lp_voucher(owner: Principal) -> Option<u64> {
-    if !feature_enabled(FLAG_STAKE_VOUCHERS) || voucher_nft_cid().is_err() {
+    if !feature_enabled(FLAG_LOSSLESS_LOTTERY) || voucher_nft_cid().is_err() {
         return None;
     }
     let id = NEXT_BOND_ID.with(|c| {
@@ -19171,7 +19168,7 @@ fn get_bond_market() -> BondMarketInfo {
     let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
     let claims_today = if campaign.day == today { campaign.claims_today } else { 0 };
     BondMarketInfo {
-        enabled: feature_visible(FLAG_STAKE_VOUCHERS, caller),
+        enabled: feature_visible(FLAG_LOSSLESS_LOTTERY, caller),
         min_wrap_e8s: voucher_config().min_wrap_e8s,
         market_fee_bps: voucher_config().market_fee_bps,
         buyback_discount_bps: BUYBACK_DISCOUNT_BPS as u16,
@@ -19211,7 +19208,7 @@ fn get_bond_market() -> BondMarketInfo {
 /// configured or the mint fails, the plain stake stands untouched (mainnet-
 /// safe until voucher_nft is wired).
 async fn auto_issue_voucher(user: Principal, tier: StakeTier) -> Option<u64> {
-    if !feature_enabled(FLAG_STAKE_VOUCHERS) || voucher_nft_cid().is_err() {
+    if !feature_enabled(FLAG_LOSSLESS_LOTTERY) || voucher_nft_cid().is_err() {
         return None;
     }
     let key = stake_key(tier, user);
@@ -19374,7 +19371,7 @@ async fn redeem_stake_bond(id: u64) -> Result<u64, String> {
 #[ic_cdk::update]
 async fn wrap_stake_bond(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     require_authenticated()?;
-    if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
+    if !feature_visible(FLAG_LOSSLESS_LOTTERY, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     let caller = get_caller();
@@ -19485,7 +19482,7 @@ async fn unwrap_stake_bond(voucher_id: u64) -> Result<(), String> {
 #[ic_cdk::update]
 fn list_bond(voucher_id: u64, price_e8s: u64) -> Result<(), String> {
     require_authenticated()?;
-    if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
+    if !feature_visible(FLAG_LOSSLESS_LOTTERY, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     let caller = get_caller();
@@ -19550,7 +19547,7 @@ fn get_bond_sale_account(voucher_id: u64) -> LedgerAccount {
 #[ic_cdk::update]
 async fn buy_bond(voucher_id: u64) -> Result<(), String> {
     require_authenticated()?;
-    if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
+    if !feature_visible(FLAG_LOSSLESS_LOTTERY, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     let buyer = get_caller();
@@ -19998,7 +19995,7 @@ fn is_self_authenticating(p: &Principal) -> bool {
 /// jackpots pay automatically). One per principal; global cap; daily drip.
 #[ic_cdk::update]
 async fn claim_golden_ticket(target: Option<Principal>) -> Result<u64, String> {
-    if !feature_enabled(FLAG_STAKE_VOUCHERS) {
+    if !feature_enabled(FLAG_LOSSLESS_LOTTERY) {
         return Err("FEATURE_DISABLED".to_string());
     }
     let recipient = match target {
@@ -22823,7 +22820,10 @@ mod tests {
             // DISTINCT from get_canister_id()'s native mock (aaaaa-aa) so
             // split-leg assertions can tell the two CMC subaccounts apart.
             course_nft_canister: Some(p("qoctq-giaaa-aaaaa-aaaea-cai")),
-            voucher_nft_canister: Some(p("qoctq-giaaa-aaaaa-aaaea-cai")),
+            // NOT wired by default: bonds gate on lottery flag + wired NFT
+            // canister, and plain stake/unstake tests exercise the legacy
+            // path. enable_vouchers() wires it for bond tests.
+            voucher_nft_canister: None,
         }
     }
 
@@ -29779,9 +29779,9 @@ mod tests {
             config.admins.push(carol());
         }
         config.is_local = true;
+        config.voucher_nft_canister = Some(p("qoctq-giaaa-aaaaa-aaaea-cai"));
         CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_STAKE_VOUCHERS.to_string(), 1u8);
             m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8);
             m.borrow_mut().insert(FLAG_LOSSLESS_VOTING.to_string(), 1u8);
         });
@@ -29875,7 +29875,7 @@ mod tests {
         assert!(conservation_holds(StakeTier::SixMonths));
 
         // Unwrap works with the FLAG OFF (exits are never gated).
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_STAKE_VOUCHERS.to_string(), 0u8); });
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 0u8); });
         unwrap_stake_bond(id).await.unwrap();
         assert_eq!(
             STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
@@ -29885,7 +29885,7 @@ mod tests {
         assert_eq!(user_daily_tickets(alice), before);
         // …but wrap is gated.
         assert_eq!(wrap_stake_bond(100_000_000, StakeTier::SixMonths).await.unwrap_err(), "FEATURE_DISABLED");
-        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_STAKE_VOUCHERS.to_string(), 1u8); });
+        FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8); });
 
         // Mint failure reverts the debit exactly.
         TEST_MOCK_VOUCHER_MINT_FAIL.with(|c| *c.borrow_mut() = true);

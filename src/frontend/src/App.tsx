@@ -707,7 +707,8 @@ export default function App() {
   const bullrunEnabled = featureFlags.find(f => f.key === 'arcade_bullrun')?.enabled ?? false;
   const ansemLpEnabled = featureFlags.find(f => f.key === 'solana_lp_rewards')?.enabled ?? false;
   const icpLpEnabled = featureFlags.find(f => f.key === 'icpswap_lp_stake')?.enabled ?? false;
-  const vouchersEnabled = featureFlags.find(f => f.key === 'stake_vouchers')?.enabled ?? false;
+  // Bonds live under the lottery flag (owner 2026-07-11): one switch, never separate.
+  const vouchersEnabled = lotteryEnabled;
   const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
   const xFarmEnabled = featureFlags.find(f => f.key === 'x_farm')?.enabled ?? false;
 

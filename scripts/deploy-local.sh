@@ -131,7 +131,6 @@ icp canister call backend admin_set_voucher_nft_canister "(principal \"$VOUCHER_
 icp canister settings update voucher_nft --add-controller "$BACKEND_ID" -e "$ENV" --identity "$DEPLOY_IDENTITY" >/dev/null \
   && ok "backend added as voucher_nft controller" \
   || note "voucher_nft controller add failed (cycle guard will no-op)"
-icp canister call backend admin_set_feature_flag '("stake_vouchers", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # Mock marketplace listings so the grid is visualizable (local-only).
 icp canister call backend dev_seed_mock_bonds '(6 : nat32)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null || true
 icp canister call backend admin_set_promo_campaign '(true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
