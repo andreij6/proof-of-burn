@@ -39,7 +39,7 @@ interface AdminProps {
   section: AdminSection;
 }
 
-export type AdminSection = 'money' | 'economics' | 'pools' | 'system' | 'reference';
+export type AdminSection = 'money' | 'economics' | 'neurons' | 'users' | 'system' | 'reference';
 
 // Columns for the user-balances table: field key on UserBalanceRow + decimals.
 const USER_BAL_COLS = [
@@ -922,7 +922,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
       {/* ════ POOLS & USERS ════ */}
       {/* ════ POOLS & USERS ════ */}
-      {section === 'pools' && (
+      {section === 'neurons' && (
         <>
           <Sec label="Term pools">
             {!staking ? <LiveDot size={8} color="var(--burn-ink)" /> : (
@@ -1036,6 +1036,11 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             </span>
           </Sec>
 
+        </>
+      )}
+
+      {section === 'users' && (
+        <>
           <Sec label="Logged-in principals" right={seenUsers === null ? <LiveDot size={8} color="var(--burn-ink)" /> : undefined}>
             {seenUsers !== null && seenUsers.length === 0 && (
               <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>No signed-in principals yet.</span>

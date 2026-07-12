@@ -55,7 +55,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin' | 'admin_money' | 'admin_economics' | 'admin_pools' | 'admin_system' | 'admin_reference';
+export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin' | 'admin_money' | 'admin_economics' | 'admin_neurons' | 'admin_users' | 'admin_system' | 'admin_reference';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   voting: '/voting',
@@ -100,7 +100,8 @@ export const PAGE_PATH: Record<AppPage, string> = {
   admin: '/admin',
   admin_money: '/admin/money',
   admin_economics: '/admin/economics',
-  admin_pools: '/admin/pools',
+  admin_neurons: '/admin/neurons',
+  admin_users: '/admin/users',
   admin_system: '/admin/system',
   admin_reference: '/admin/reference',
 };
@@ -1903,7 +1904,7 @@ export default function App() {
   // Admin console pages are invisible to non-admins; bounce them once auth
   // AND config have resolved, so a deep link survives the cold load for
   // actual admins. Bare /admin aliases to the Money page.
-  const ADMIN_PAGES: AppPage[] = ['admin_money', 'admin_economics', 'admin_pools', 'admin_system', 'admin_reference'];
+  const ADMIN_PAGES: AppPage[] = ['admin_money', 'admin_economics', 'admin_neurons', 'admin_users', 'admin_system', 'admin_reference'];
   useEffect(() => {
     if (page === 'admin') {
       setPage('admin_money');
@@ -2055,9 +2056,13 @@ export default function App() {
               <Icon name="coins" size={14} stroke={page === 'admin_economics' ? 'var(--char-950)' : 'currentColor'} />
               Economics
             </Btn>
-            <Btn variant={page === 'admin_pools' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_pools')}>
-              <Icon name="list" size={14} stroke={page === 'admin_pools' ? 'var(--char-950)' : 'currentColor'} />
-              Pools &amp; Users
+            <Btn variant={page === 'admin_neurons' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_neurons')}>
+              <Icon name="coins" size={14} stroke={page === 'admin_neurons' ? 'var(--char-950)' : 'currentColor'} />
+              Neurons
+            </Btn>
+            <Btn variant={page === 'admin_users' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_users')}>
+              <Icon name="list" size={14} stroke={page === 'admin_users' ? 'var(--char-950)' : 'currentColor'} />
+              Users
             </Btn>
             <Btn variant={page === 'admin_system' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_system')}>
               <Icon name="info" size={14} stroke={page === 'admin_system' ? 'var(--char-950)' : 'currentColor'} />
@@ -2642,7 +2647,7 @@ export default function App() {
               onSignIn={handleLogin}
               onSignOut={handleLogout}
             />
-          ) : page === 'admin_money' || page === 'admin_economics' || page === 'admin_pools' || page === 'admin_system' || page === 'admin_reference' ? (
+          ) : page === 'admin_money' || page === 'admin_economics' || page === 'admin_neurons' || page === 'admin_users' || page === 'admin_system' || page === 'admin_reference' ? (
             isAdmin ? (
               <Admin
                 actor={actor}
@@ -2654,7 +2659,7 @@ export default function App() {
                 ledgerCanisterId={ledgerCanisterId}
                 onChanged={() => { fetchConfig(); fetchFeatureFlags(); }}
                 openTreasury={openTreasury}
-                section={page === 'admin_money' ? 'money' : page === 'admin_economics' ? 'economics' : page === 'admin_pools' ? 'pools' : page === 'admin_system' ? 'system' : 'reference'}
+                section={page === 'admin_money' ? 'money' : page === 'admin_economics' ? 'economics' : page === 'admin_neurons' ? 'neurons' : page === 'admin_users' ? 'users' : page === 'admin_system' ? 'system' : 'reference'}
               />
             ) : (
               /* Auth/config still resolving (confirmed non-admins are bounced

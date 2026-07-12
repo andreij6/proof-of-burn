@@ -383,7 +383,8 @@ describe('pageFromHash (shareable URL routing)', () => {
     expect(pageFromHash('#/admin')).toBe('admin');
     expect(pageFromHash('#/admin/money')).toBe('admin_money');
     expect(pageFromHash('#/admin/economics')).toBe('admin_economics');
-    expect(pageFromHash('#/admin/pools')).toBe('admin_pools');
+    expect(pageFromHash('#/admin/neurons')).toBe('admin_neurons');
+    expect(pageFromHash('#/admin/users')).toBe('admin_users');
     expect(pageFromHash('#/admin/system')).toBe('admin_system');
     expect(pageFromHash('#/admin/reference')).toBe('admin_reference');
     expect(pageFromHash('#/lottery/anything-else')).toBe('lottery');
