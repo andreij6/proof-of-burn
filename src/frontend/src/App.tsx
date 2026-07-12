@@ -2561,6 +2561,8 @@ export default function App() {
               treasuryCanFront={globalStats?.treasury_can_front_fees ?? true}
               onSignIn={handleLogin}
               onActivity={refreshAllData}
+              onGoExchange={() => setPage('exchange')}
+              onGoLiquidity={() => setPage('icplp')}
             />
           ) : page === 'explorer' ? (
             <Explorer
