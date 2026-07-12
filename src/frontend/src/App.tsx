@@ -4666,10 +4666,15 @@ export default function App() {
 
       {/* ── Mobile Menu Drawer ── */}
       <div className={`mobile-drawer ${mobileMenuOpen ? 'open' : ''}`}>
-        {/* Drawer Header */}
-        <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 16, width: '100%' }}>
+        {/* Drawer Header — the Cycle Burn brand up top, close on the right */}
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, width: '100%' }}>
+          <span className="row" style={{ gap: 9, alignItems: 'center' }}>
+            <BrandMark size={24} style={{ flexShrink: 0 }} />
+            <b style={{ fontSize: 16, color: 'var(--fg)', whiteSpace: 'nowrap' }}>Cycle Burn</b>
+          </span>
           <button
             onClick={() => setMobileMenuOpen(false)}
+            aria-label="Close menu"
             style={{
               background: 'transparent', border: 'none', cursor: 'pointer',
               color: 'var(--fg-2)', padding: 4, display: 'flex', alignItems: 'center'
