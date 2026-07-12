@@ -1,5 +1,5 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { Btn, Eyebrow, Icon, MoreInfo } from './ui';
+import { Btn, Eyebrow, Icon, usePageHelp } from './ui';
 import BullRun from './arcade/BullRun';
 
 // ==========================================
@@ -19,19 +19,8 @@ interface BullRunPageProps {
 export default function BullRunPage({ actor, principal, onSignIn, onGoParticipate, isLocal = false }: BullRunPageProps) {
   const signedIn = !!principal && !principal.isAnonymous();
 
-  return (
-    <div className="dashboard-container">
-      {/* ── Header ── */}
-      <div className="col" style={{ gap: 6 }}>
-        <span className="row" style={{ gap: 8 }}>
-          <Icon name="bull" size={16} stroke="var(--burn-ink)" />
-          <Eyebrow accent>Play &amp; compete</Eyebrow>
-        </span>
-        <b style={{ fontSize: 17 }}>Charge the endless street. Ten hits and it's over.</b>
-        <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
-          You are the bull, horns-first through an ever-harder Spanish street packed
-          with runners in white and red scattering out of your way.{' '}
-          <MoreInfo title="How Bull Run works">
+  usePageHelp(() => (
+    <>
             <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
               <Eyebrow accent>The gist</Eyebrow>
               <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
@@ -61,7 +50,21 @@ export default function BullRunPage({ actor, principal, onSignIn, onGoParticipat
                 <li><b>Daily run:</b> one attempt per UTC day, stakers-only — everyone charges the SAME street, ranked coins → time.</li>
               </ul>
             </div>
-          </MoreInfo>
+    </>
+  ), []);
+
+  return (
+    <div className="dashboard-container">
+      {/* ── Header ── */}
+      <div className="col" style={{ gap: 6 }}>
+        <span className="row" style={{ gap: 8 }}>
+          <Icon name="bull" size={16} stroke="var(--burn-ink)" />
+          <Eyebrow accent>Play &amp; compete</Eyebrow>
+        </span>
+        <b style={{ fontSize: 17 }}>Charge the endless street. Ten hits and it's over.</b>
+        <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
+          You are the bull, horns-first through an ever-harder Spanish street packed
+          with runners in white and red scattering out of your way.
         </span>
       </div>
 

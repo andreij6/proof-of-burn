@@ -24,6 +24,67 @@ export function usePageDevControls(enabled: boolean, render: () => ReactNode, de
 }
 
 // ==========================================
+// Page-help registry
+// Lets the open page register its "How it works" content, which the shell
+// renders in a persistent right-hand panel (desktop, always open) and a
+// collapsible section at the top of the content (mobile). Replaces the
+// per-page `<MoreInfo>` how-it-works modal.
+// ==========================================
+
+export const PageHelpContext = createContext<(node: ReactNode) => void>(() => {});
+
+/** Register this page's "How it works" content while it is mounted. Pass a
+ *  render fn + deps; clears on unmount. The shell decides where to show it. */
+export function usePageHelp(render: () => ReactNode, deps: DependencyList) {
+  const set = useContext(PageHelpContext);
+  useEffect(() => {
+    set(render());
+    return () => set(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [set, ...deps]);
+}
+
+/** Mobile-only collapsible "How it works" header + body. The shell renders
+ *  this above the routed page (show-mobile) when the page registered help;
+ *  desktop uses the persistent side panel instead. Collapsed by default. */
+export function PageHelpMobile({ children }: { children: ReactNode }) {
+  const [open, setOpen] = React.useState(false);
+  if (!children) return null;
+  return (
+    <div className="show-mobile" style={{ margin: '14px 16px 0' }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 8, padding: '11px 14px', borderRadius: open ? '10px 10px 0 0' : 10,
+          border: '1px solid var(--burn)', borderBottom: open ? 'none' : '1px solid var(--burn)',
+          background: 'color-mix(in srgb, var(--burn) 10%, var(--surface))', cursor: 'pointer',
+          color: 'var(--burn-ink)', fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+        }}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+          <Icon name="info" size={13} stroke="var(--burn-ink)" /> How it works
+        </span>
+        <span style={{ display: 'inline-flex', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-fast) var(--ease-out)' }}>
+          <Icon name="chevDown" size={16} stroke="var(--burn-ink)" />
+        </span>
+      </button>
+      {open && (
+        <div className="col" style={{
+          gap: 12, padding: 16, fontSize: 13, color: 'var(--fg-2)', lineHeight: 1.55,
+          border: '1px solid var(--burn)', borderTop: 'none', borderRadius: '0 0 10px 10px',
+          background: 'var(--surface)',
+        }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==========================================
 // Shared design-system primitives
 // (consumed by App.tsx and feature pages)
 // ==========================================

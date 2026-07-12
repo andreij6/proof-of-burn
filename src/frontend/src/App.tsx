@@ -41,7 +41,7 @@ import Payouts from "./Payouts";
 import Admin from "./Admin";
 import Landing from "./Landing";
 // Shared design-system primitives live in ui.tsx.
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, BrandMark, OpenChatMark, OPENCHAT_URL } from './ui';
+import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, PageHelpContext, PageHelpMobile, BrandMark, OpenChatMark, OPENCHAT_URL } from './ui';
 import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient, parseTokenAmount, fmtTokenAmount } from "./tokens";
 import { useErrorImpression } from "./analytics";
 import { countdownShort } from "./hubLogic";
@@ -473,7 +473,6 @@ export default function App() {
   const [myPoolNeuron, setMyPoolNeuron] = useState<PoolNeuron | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [poolDetailsOpen, setPoolDetailsOpen] = useState(false);
-  const [dashControlsOpen, setDashControlsOpen] = useState(false);
   const [confirmLeaveId, setConfirmLeaveId] = useState<bigint | null>(null);
   const [isLeavingPool, setIsLeavingPool] = useState(false);
   const [isPoolWizardOpen, setIsPoolWizardOpen] = useState(false);
@@ -598,6 +597,9 @@ export default function App() {
   // Page-local dev controls registered by the open page (see DevControlsContext)
   // and surfaced in the Dashboard & Controls panel.
   const [pageDevControls, setPageDevControls] = useState<React.ReactNode>(null);
+  // "How it works" content the open page registers (see PageHelpContext),
+  // shown in the persistent right panel (desktop) / collapsible (mobile).
+  const [pageHelp, setPageHelp] = useState<React.ReactNode>(null);
   const [isDetailsOpen, setIsDetailsOpen] = useState<boolean>(false);
 
   // Input states for each proposal
@@ -2180,6 +2182,7 @@ export default function App() {
 
   return (
     <DevControlsContext.Provider value={setPageDevControls}>
+    <PageHelpContext.Provider value={setPageHelp}>
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden', background: 'var(--bg)' }}>
       {/* ── App Header ── */}
       <header className="app-header" style={{
@@ -2303,6 +2306,9 @@ export default function App() {
         {/* Content column. Keyed by page so every page fades/blurs in with the
             expressive transition on navigation. */}
         <main ref={mainScrollRef} style={{ flex: 1, minWidth: 320, overflowY: 'auto' }}>
+          {/* Mobile: the page's "How it works" as a collapsible at the top
+              (desktop uses the persistent right panel instead). */}
+          <PageHelpMobile>{pageHelp}</PageHelpMobile>
           {winBanner && (
             <div role="status" style={{
               display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between',
@@ -3269,131 +3275,124 @@ export default function App() {
         </main>
 
 
-        {/* Right Column: Dashboard & Controls panel — local dev only, every page.
-            Sits to the LEFT of the Account panel (which is rightmost). */}
-        {isLocal && dashControlsOpen && <aside className="hide-mobile" style={{
+        {/* Right Column: "How it works" panel — persistent on desktop, always
+            open, showing the current page's registered help. Hidden on mobile
+            (the collapsible inside <main> serves narrow screens). Rendered only
+            when the page registered help, or when local (for the dev tools). */}
+        {(pageHelp || isLocal) && <aside className="hide-mobile" style={{
           width: 320, padding: 24, borderLeft: '1px solid var(--border)', background: 'var(--bg-alt)',
-          display: 'flex', flexDirection: 'column', gap: 24, flexShrink: 0, overflowY: 'auto'
+          display: 'flex', flexDirection: 'column', gap: 20, flexShrink: 0, overflowY: 'auto'
         }}>
-          {/* Tweak Panel Header */}
-          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
-            <div className="col" style={{ gap: 4 }}>
-              <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: 'var(--burn-ink)', letterSpacing: '0.1em' }}>
-                Local dev
-              </span>
-              <h4 style={{ margin: 0, fontFamily: 'var(--font-display)', color: 'var(--fg)' }}>Dashboard &amp; Controls</h4>
-            </div>
-            <button onClick={() => setDashControlsOpen(false)} title="Close controls"
-              style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-3)', padding: 2, flexShrink: 0 }}>
-              <Icon name="x" size={16} />
-            </button>
-          </div>
-
-          {/* One-click admin (local replica only — dev_become_admin is
-              hard-blocked by require_local_dev, so this can't exist in prod) */}
-          <div className="col" style={{ gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Admin access</span>
-            {isAdmin ? (
-              <Chip tone="ok"><Icon name="check" size={11} /> You are an admin</Chip>
-            ) : (
-              <Btn variant="secondary" sm onClick={async () => {
-                if (!actor) return;
-                const res = await actor.dev_become_admin();
-                if (res.__kind__ === "Err") { alert(`Failed: ${res.Err}`); return; }
-                await fetchConfig();
-              }}>
-                <Icon name="key" size={13} /> Make me admin (local only)
-              </Btn>
-            )}
-          </div>
-
-          {/* Reset the mock proposals so you can vote again (local only) */}
-          <div className="col" style={{ gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Mock proposals</span>
-            <Btn variant="secondary" sm onClick={async () => {
-              if (!actor) return;
-              const res = await actor.dev_reset_proposals();
-              if (res.__kind__ === "Err") { alert(`Failed: ${res.Err}`); return; }
-              await refreshAllData();
-            }}>
-              <Icon name="refresh" size={13} /> Reset proposals (vote again)
-            </Btn>
-            <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
-              Wipes + reseeds the mock proposals and clears your votes/commitments on them.
-            </span>
-          </div>
-
-          {/* Page controls — local/dev controls the open page registered. */}
-          {pageDevControls && (
-            <div className="col" style={{ gap: 8 }}>
-              {pageDevControls}
-            </div>
+          {pageHelp && (
+            <>
+              <div className="col" style={{ gap: 4 }}>
+                <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: 'var(--burn-ink)', letterSpacing: '0.1em' }}>
+                  This page
+                </span>
+                <h4 style={{ margin: 0, fontFamily: 'var(--font-display)', color: 'var(--fg)' }}>How it works</h4>
+              </div>
+              <div className="col" style={{ gap: 12, fontSize: 13, color: 'var(--fg-2)', lineHeight: 1.55 }}>
+                {pageHelp}
+              </div>
+            </>
           )}
 
-          <hr />
+          {/* Local-dev tools — collapsed disclosure, never in prod. */}
+          {isLocal && (
+            <details style={{ marginTop: pageHelp ? 8 : 0, borderTop: pageHelp ? '1px solid var(--border)' : 'none', paddingTop: pageHelp ? 16 : 0 }}>
+              <summary style={{ cursor: 'pointer', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', color: 'var(--fg-3)', letterSpacing: '0.1em', listStyle: 'revert' }}>
+                Dev tools (local only)
+              </summary>
+              <div className="col" style={{ gap: 18, marginTop: 14 }}>
+                {/* One-click admin (local replica only — dev_become_admin is
+                    hard-blocked by require_local_dev, so this can't exist in prod) */}
+                <div className="col" style={{ gap: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Admin access</span>
+                  {isAdmin ? (
+                    <Chip tone="ok"><Icon name="check" size={11} /> You are an admin</Chip>
+                  ) : (
+                    <Btn variant="secondary" sm onClick={async () => {
+                      if (!actor) return;
+                      const res = await actor.dev_become_admin();
+                      if (res.__kind__ === "Err") { alert(`Failed: ${res.Err}`); return; }
+                      await fetchConfig();
+                    }}>
+                      <Icon name="key" size={13} /> Make me admin (local only)
+                    </Btn>
+                  )}
+                </div>
 
-          {/* System Health Section */}
-          <div className="col" style={{ gap: 12 }}>
-            <Eyebrow>System Health</Eyebrow>
-            <div className="col" style={{ gap: 8, fontSize: 13 }}>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--fg-2)' }}>Canister Cycles</span>
-                <span className="mono">
-                  {cycleBalance !== null ? `${(Number(cycleBalance) / 1_000_000_000_000).toFixed(2)} T` : "..."}
-                </span>
-              </div>
-              <div className="row" style={{ justifyContent: 'space-between' }}>
-                <span style={{ color: 'var(--fg-2)' }}>Treasury Balance</span>
-                <span className="mono">
-                  {treasuryBalance !== null ? `${fmtICP(treasuryBalance)} ICP` : "..."}
-                </span>
-              </div>
-              <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
-                <span style={{ color: 'var(--fg-2)', fontSize: 12.5 }}>Status</span>
-                <span className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--sprout-ink)' }}>
-                  <LiveDot color="var(--sprout-ink)" size={6} /> Active / Healthy
-                </span>
-              </div>
-            </div>
-          </div>
+                {/* Reset the mock proposals so you can vote again (local only) */}
+                <div className="col" style={{ gap: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Mock proposals</span>
+                  <Btn variant="secondary" sm onClick={async () => {
+                    if (!actor) return;
+                    const res = await actor.dev_reset_proposals();
+                    if (res.__kind__ === "Err") { alert(`Failed: ${res.Err}`); return; }
+                    await refreshAllData();
+                  }}>
+                    <Icon name="refresh" size={13} /> Reset proposals (vote again)
+                  </Btn>
+                  <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                    Wipes + reseeds the mock proposals and clears your votes/commitments on them.
+                  </span>
+                </div>
 
+                {/* Page controls — local/dev controls the open page registered. */}
+                {pageDevControls && (
+                  <div className="col" style={{ gap: 8 }}>
+                    {pageDevControls}
+                  </div>
+                )}
 
-          {/* Local dev: grab your principal to grant yourself admin via CLI */}
-          {principal && !principal.isAnonymous() && !isAdmin && (
-            <div className="simulator-panel col">
-              <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>Become admin (dev)</span>
-              <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>
-                Copy your principal, then run from the dev1 identity:
-                <span className="mono" style={{ display: 'block', marginTop: 4, color: 'var(--fg-3)', fontSize: 10.5 }}>
-                  icp canister call backend add_admin '(principal "…")' --identity dev1 -e local
-                </span>
-              </span>
-              <Btn variant="secondary" sm onClick={() => {
-                navigator.clipboard.writeText(principal.toString());
-                setHotkeyCopied(true);
-                setTimeout(() => setHotkeyCopied(false), 2000);
-              }}>
-                <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout-ink)" : "var(--burn-ink)"} /> Copy my principal
-              </Btn>
-            </div>
+                {/* System Health Section */}
+                <div className="col" style={{ gap: 12 }}>
+                  <Eyebrow>System Health</Eyebrow>
+                  <div className="col" style={{ gap: 8, fontSize: 13 }}>
+                    <div className="row" style={{ justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--fg-2)' }}>Canister Cycles</span>
+                      <span className="mono">
+                        {cycleBalance !== null ? `${(Number(cycleBalance) / 1_000_000_000_000).toFixed(2)} T` : "..."}
+                      </span>
+                    </div>
+                    <div className="row" style={{ justifyContent: 'space-between' }}>
+                      <span style={{ color: 'var(--fg-2)' }}>Treasury Balance</span>
+                      <span className="mono">
+                        {treasuryBalance !== null ? `${fmtICP(treasuryBalance)} ICP` : "..."}
+                      </span>
+                    </div>
+                    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+                      <span style={{ color: 'var(--fg-2)', fontSize: 12.5 }}>Status</span>
+                      <span className="row" style={{ gap: 6, fontSize: 12.5, color: 'var(--sprout-ink)' }}>
+                        <LiveDot color="var(--sprout-ink)" size={6} /> Active / Healthy
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Local dev: grab your principal to grant yourself admin via CLI */}
+                {principal && !principal.isAnonymous() && !isAdmin && (
+                  <div className="simulator-panel col">
+                    <span className="mono" style={{ fontSize: 10, color: 'var(--fg-3)' }}>Become admin (dev)</span>
+                    <span style={{ fontSize: 11.5, color: 'var(--fg-2)' }}>
+                      Copy your principal, then run from the dev1 identity:
+                      <span className="mono" style={{ display: 'block', marginTop: 4, color: 'var(--fg-3)', fontSize: 10.5 }}>
+                        icp canister call backend add_admin '(principal "…")' --identity dev1 -e local
+                      </span>
+                    </span>
+                    <Btn variant="secondary" sm onClick={() => {
+                      navigator.clipboard.writeText(principal.toString());
+                      setHotkeyCopied(true);
+                      setTimeout(() => setHotkeyCopied(false), 2000);
+                    }}>
+                      <Icon name={hotkeyCopied ? "check" : "copy"} size={12} stroke={hotkeyCopied ? "var(--sprout-ink)" : "var(--burn-ink)"} /> Copy my principal
+                    </Btn>
+                  </div>
+                )}
+              </div>
+            </details>
           )}
         </aside>}
-
-        {/* Collapsed rail for the local-dev Controls panel — in-flow so it
-            can't overlap the Account panel (which is rightmost). A thin
-            vertical bar; click to reopen. */}
-        {isLocal && !dashControlsOpen && (
-          <button onClick={() => setDashControlsOpen(true)} title="Open Dashboard & Controls"
-            className="hide-mobile"
-            style={{
-              width: 40, flexShrink: 0, borderLeft: '1px solid var(--border)', background: 'var(--bg-alt)',
-              cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-              gap: 10, color: 'var(--burn-ink)',
-            }}>
-            <Icon name="zap" size={16} stroke="var(--burn-ink)" />
-            <span style={{ writingMode: 'vertical-rl', fontSize: 10.5, fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--fg-3)' }}>Controls</span>
-          </button>
-        )}
 
       </div>
 
@@ -4582,6 +4581,7 @@ export default function App() {
         {renderDrawerBody(() => setMobileMenuOpen(false))}
       </div>
     </div>
+    </PageHelpContext.Provider>
     </DevControlsContext.Provider>
   );
 }

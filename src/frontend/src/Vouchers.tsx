@@ -325,9 +325,14 @@ export function VouchersBody({
         </div>
       )}
 
-      {section === 'mine' && (<>
-      {/* ── Your vouchers (unlisted + promo) ── */}
-      <div className="card col" style={{ gap: 10 }}>
+      {(section === 'mine' || section === 'exchange') && (<>
+      {/* ── Your bonds + Your listings.
+           On the Exchange (with listings) these sit side-by-side in a row;
+           on the Stake/Lottery pages only "Your bonds" shows, standalone. */}
+      <div className={section === 'exchange' ? 'row' : undefined}
+           style={section === 'exchange' ? { gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' } : undefined}>
+      {(section === 'mine' || section === 'exchange') && (
+      <div className="card col" style={{ gap: 10, flex: section === 'exchange' ? '1 1 320px' : undefined, minWidth: section === 'exchange' ? 300 : undefined }}>
         <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
           <Eyebrow>Your bonds</Eyebrow>
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>every stake arrives here as an NFT</span>
@@ -411,12 +416,11 @@ export function VouchersBody({
           </div>
         )}
       </div>
+      )}
 
-      </>)}
-      {section === 'exchange' && (<>
-      {/* ── Your listings (hidden entirely when none) ── */}
-      {signedIn && myListed.length > 0 && (
-        <div className="card col" style={{ gap: 10 }}>
+      {/* ── Your listings (hidden entirely when none) — beside Your bonds on the Exchange ── */}
+      {section === 'exchange' && signedIn && myListed.length > 0 && (
+        <div className="card col" style={{ gap: 10, flex: '1 1 320px', minWidth: 300 }}>
           <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
             <Eyebrow accent>Your listings</Eyebrow>
             <span className="mono" style={{ fontSize: 10.5, color: 'var(--haze-ink)' }}>ticket earning paused while listed</span>
@@ -452,7 +456,10 @@ export function VouchersBody({
           </div>
         </div>
       )}
+      </div>{/* end Your-bonds / Your-listings row */}
+      </>)}
 
+      {section === 'exchange' && (<>
       {/* ── Marketplace (best deals first) ── */}
       <div className="card col" style={{ gap: 10 }}>
         <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>

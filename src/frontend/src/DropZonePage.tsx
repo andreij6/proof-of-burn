@@ -1,5 +1,5 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { Btn, Eyebrow, Icon, MoreInfo } from './ui';
+import { Btn, Eyebrow, Icon, usePageHelp } from './ui';
 import DropZone from './arcade/DropZone';
 
 // ==========================================
@@ -19,19 +19,8 @@ interface DropZonePageProps {
 export default function DropZonePage({ actor, principal, onSignIn, onGoParticipate, isLocal = false }: DropZonePageProps) {
   const signedIn = !!principal && !principal.isAnonymous();
 
-  return (
-    <div className="dashboard-container">
-      {/* ── Header ── */}
-      <div className="col" style={{ gap: 6 }}>
-        <span className="row" style={{ gap: 8 }}>
-          <Icon name="parachute" size={16} stroke="var(--burn-ink)" />
-          <Eyebrow accent>Play &amp; compete</Eyebrow>
-        </span>
-        <b style={{ fontSize: 17 }}>Jump. Steer. Stick the landing.</b>
-        <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
-          A battle-royale-style target drop in hand-drawn ink: bail out of the plane
-          at the right moment and land as close to the bullseye as you can — alive.{' '}
-          <MoreInfo title="How Drop Zone works">
+  usePageHelp(() => (
+    <>
             <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
               <Eyebrow accent>The gist</Eyebrow>
               <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
@@ -61,7 +50,21 @@ export default function DropZonePage({ actor, principal, onSignIn, onGoParticipa
                 <li><b>Daily drop:</b> one attempt per UTC day, stakers-only — everyone gets the SAME scenario (plane, target, terrain), ranked distance → time.</li>
               </ul>
             </div>
-          </MoreInfo>
+    </>
+  ), []);
+
+  return (
+    <div className="dashboard-container">
+      {/* ── Header ── */}
+      <div className="col" style={{ gap: 6 }}>
+        <span className="row" style={{ gap: 8 }}>
+          <Icon name="parachute" size={16} stroke="var(--burn-ink)" />
+          <Eyebrow accent>Play &amp; compete</Eyebrow>
+        </span>
+        <b style={{ fontSize: 17 }}>Jump. Steer. Stick the landing.</b>
+        <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
+          A battle-royale-style target drop in hand-drawn ink: bail out of the plane
+          at the right moment and land as close to the bullseye as you can — alive.
         </span>
       </div>
 

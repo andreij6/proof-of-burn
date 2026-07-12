@@ -1,5 +1,5 @@
 import { Principal } from '@icp-sdk/core/principal';
-import { Btn, Eyebrow, Icon, MoreInfo } from './ui';
+import { Btn, Eyebrow, Icon, usePageHelp } from './ui';
 import LuckProof from './arcade/LuckProof';
 
 // ==========================================
@@ -19,19 +19,8 @@ interface LuckProofPageProps {
 export default function LuckProofPage({ actor, principal, onSignIn, onGoParticipate }: LuckProofPageProps) {
   const signedIn = !!principal && !principal.isAnonymous();
 
-  return (
-    <div className="dashboard-container">
-      {/* ── Header ── */}
-      <div className="col" style={{ gap: 6 }}>
-        <span className="row" style={{ gap: 8 }}>
-          <Icon name="pokerchip" size={16} stroke="var(--burn-ink)" />
-          <Eyebrow accent>Play &amp; compete</Eyebrow>
-        </span>
-        <b style={{ fontSize: 17 }}>Your results are luck. Your decisions are skill.</b>
-        <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
-          A poker-brain trainer with no cards: take or decline wagers on a 3-second
-          clock, scored purely on the expected value of your decisions.{' '}
-          <MoreInfo title="How Luck-Proof works">
+  usePageHelp(() => (
+    <>
             <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
               <Eyebrow accent>The gist</Eyebrow>
               <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
@@ -61,7 +50,21 @@ export default function LuckProofPage({ actor, principal, onSignIn, onGoParticip
                 <li><b>Scores can't be forged:</b> your decisions are the only client input; the EV is rescored server-side.</li>
               </ul>
             </div>
-          </MoreInfo>
+    </>
+  ), []);
+
+  return (
+    <div className="dashboard-container">
+      {/* ── Header ── */}
+      <div className="col" style={{ gap: 6 }}>
+        <span className="row" style={{ gap: 8 }}>
+          <Icon name="pokerchip" size={16} stroke="var(--burn-ink)" />
+          <Eyebrow accent>Play &amp; compete</Eyebrow>
+        </span>
+        <b style={{ fontSize: 17 }}>Your results are luck. Your decisions are skill.</b>
+        <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
+          A poker-brain trainer with no cards: take or decline wagers on a 3-second
+          clock, scored purely on the expected value of your decisions.
         </span>
       </div>
 

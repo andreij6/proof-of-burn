@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CourseUniquenessReport, MintError } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP } from './ui';
+import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, usePageHelp } from './ui';
 import MiniGolf from './arcade/MiniGolf';
 import CourseOverview from './arcade/CourseOverview';
 import type { CharacterLook } from './arcade/engine';
@@ -128,6 +128,31 @@ function StepTag({ n, done }: { n: number; done: boolean }) {
 export default function CourseCreate({
   actor, identity, host, rootKey, ledgerCanisterId, character, onExit, onMinted,
 }: CourseCreateProps) {
+
+  usePageHelp(() => (
+    <>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>The loop</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>Copy the instructions</b> below — they teach any AI agent the exact course format.</li>
+                  <li><b>Design together:</b> paste them to ChatGPT, Claude, or any agent and describe the 9 holes you want.</li>
+                  <li><b>Upload the JSON</b> it outputs; we validate every hole before anything is paid.</li>
+                  <li><b>Test-play</b> your course in the real engine, free and unscored.</li>
+                  <li><b>Mint</b> it for {fmtICP(MINT_FEE_E8S)} ICP — the JSON itself becomes the NFT's on-chain course data, it's auto-listed on the marketplace, and you earn a lottery ticket every time a player reaches hole 2.</li>
+                </ul>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>Requirements</Eyebrow>
+                <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55 }}>
+                  Anyone signed in can mint — it costs {fmtICP(MINT_FEE_E8S)} ICP
+                  (+ {fmtICP(ICP_LEDGER_FEE_E8S)} ledger fee). Courses must be
+                  original: a design whose holes copy an existing course NFT
+                  (even mirrored or shifted) is rejected at mint. Creators keep a
+                  permanent 10% royalty on every resale.
+                </p>
+              </div>
+    </>
+  ), []);
   // Step 1 — copy the AI instructions.
   const [copied, setCopied] = useState(false);
   const [showPromptFallback, setShowPromptFallback] = useState(false);
@@ -323,30 +348,8 @@ export default function CourseCreate({
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
             Describe your dream course to any AI agent, upload what it builds,
             test it in the real engine — then mint it as an NFT that earns you
-            lottery tickets.{' '}
-            <MoreInfo title="How AI-built courses work">
-              <div className="col" style={{ gap: 6 }}>
-                <Eyebrow accent>The loop</Eyebrow>
-                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                  <li><b>Copy the instructions</b> below — they teach any AI agent the exact course format.</li>
-                  <li><b>Design together:</b> paste them to ChatGPT, Claude, or any agent and describe the 9 holes you want.</li>
-                  <li><b>Upload the JSON</b> it outputs; we validate every hole before anything is paid.</li>
-                  <li><b>Test-play</b> your course in the real engine, free and unscored.</li>
-                  <li><b>Mint</b> it for {fmtICP(MINT_FEE_E8S)} ICP — the JSON itself becomes the NFT's on-chain course data, it's auto-listed on the marketplace, and you earn a lottery ticket every time a player reaches hole 2.</li>
-                </ul>
-              </div>
-              <div className="col" style={{ gap: 6 }}>
-                <Eyebrow accent>Requirements</Eyebrow>
-                <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55 }}>
-                  Anyone signed in can mint — it costs {fmtICP(MINT_FEE_E8S)} ICP
-                  (+ {fmtICP(ICP_LEDGER_FEE_E8S)} ledger fee). Courses must be
-                  original: a design whose holes copy an existing course NFT
-                  (even mirrored or shifted) is rejected at mint. Creators keep a
-                  permanent 10% royalty on every resale.
-                </p>
-              </div>
-            </MoreInfo>
-          </p>
+            lottery tickets.
+                    </p>
         </div>
         <Btn variant="ghost" sm onClick={onExit}>
           <Icon name="chevLeft" size={12} /> Back to arcade

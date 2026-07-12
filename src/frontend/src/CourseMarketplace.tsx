@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
 import type { CourseCard, MarketplaceFilter, CourseRatingSummary } from './bindings/backend';
 import { DifficultyFilter, ListedFilter } from './bindings/backend';
-import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, formatPrincipal, fmtICP, usePageDevControls } from './ui';
+import { Icon, Eyebrow, Chip, Btn, LiveDot, formatPrincipal, fmtICP, usePageDevControls, usePageHelp } from './ui';
 import { useErrorImpression } from './analytics';
 import { parseTokenAmount } from './tokens';
 import { makeApprover } from './minters';
@@ -53,6 +53,38 @@ export default function CourseMarketplace({
   onPlay, onViewNft, onCreate, onGoStaking, onSignIn,
 }: CourseMarketplaceProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
+
+  usePageHelp(() => (
+    <>
+              <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+                <Eyebrow accent>The gist</Eyebrow>
+                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+                  Copy our course-designer instructions into <b>any AI agent</b>, describe the
+                  course you want, and upload the JSON it returns. Test-play it, then mint it
+                  as an NFT for 2 ICP. Staked owners earn lottery tickets from
+                  players — and a creator royalty forever after selling.
+                </p>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>Own &amp; earn</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>AI-designed:</b> each NFT carries the build-instructions JSON the app compiles into its 9 holes.</li>
+                  <li><b>Mint for 2 ICP</b> — anyone signed in can mint; your course is auto-listed on the marketplace.</li>
+                  <li><b>One of a kind:</b> hole layouts are fingerprinted at mint — clones of an existing course (even mirrored or shifted) are rejected.</li>
+                  <li><b>Advertise it:</b> every course has a shareable link (the Share button) that opens it directly.</li>
+                  <li><b>Staked players earn</b> a lottery ticket for completing a round (stake any amount of ICP).</li>
+                  <li><b>Staked owners earn</b> a ticket each time a player reaches hole 2 — buying an NFT without a stake earns nothing.</li>
+                </ul>
+              </div>
+              <div className="col" style={{ gap: 6 }}>
+                <Eyebrow accent>Buy &amp; sell</Eyebrow>
+                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+                  <li><b>List, re-price, or delist</b> at any ICP price; buying transfers the earning rights.</li>
+                  <li><b>Sale split:</b> 75% seller · 10% original creator (permanent royalty) · 15% protocol (cycles + treasury).</li>
+                </ul>
+              </div>
+    </>
+  ), []);
 
   const [difficulty, setDifficulty] = useState<DifficultyFilter>(DifficultyFilter.Any);
   const [listed, setListed] = useState<ListedFilter>(ListedFilter.Any);
@@ -267,38 +299,8 @@ export default function CourseMarketplace({
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560, margin: 0 }}>
             Play any course for fun — and earn lottery tickets when you finish a round.
             Every course is an NFT built by an AI course designer, and you can own,
-            buy, and sell them.{' '}
-            {/* "2 ICP" mirrors the backend's MINT_FEE_E8S (lib.rs) — update together. */}
-            <MoreInfo title="AI-built courses → play → earn → buy/sell">
-              <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
-                <Eyebrow accent>The gist</Eyebrow>
-                <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
-                  Copy our course-designer instructions into <b>any AI agent</b>, describe the
-                  course you want, and upload the JSON it returns. Test-play it, then mint it
-                  as an NFT for 2 ICP. Staked owners earn lottery tickets from
-                  players — and a creator royalty forever after selling.
-                </p>
-              </div>
-              <div className="col" style={{ gap: 6 }}>
-                <Eyebrow accent>Own &amp; earn</Eyebrow>
-                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                  <li><b>AI-designed:</b> each NFT carries the build-instructions JSON the app compiles into its 9 holes.</li>
-                  <li><b>Mint for 2 ICP</b> — anyone signed in can mint; your course is auto-listed on the marketplace.</li>
-                  <li><b>One of a kind:</b> hole layouts are fingerprinted at mint — clones of an existing course (even mirrored or shifted) are rejected.</li>
-                  <li><b>Advertise it:</b> every course has a shareable link (the Share button) that opens it directly.</li>
-                  <li><b>Staked players earn</b> a lottery ticket for completing a round (stake any amount of ICP).</li>
-                  <li><b>Staked owners earn</b> a ticket each time a player reaches hole 2 — buying an NFT without a stake earns nothing.</li>
-                </ul>
-              </div>
-              <div className="col" style={{ gap: 6 }}>
-                <Eyebrow accent>Buy &amp; sell</Eyebrow>
-                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-                  <li><b>List, re-price, or delist</b> at any ICP price; buying transfers the earning rights.</li>
-                  <li><b>Sale split:</b> 75% seller · 10% original creator (permanent royalty) · 15% protocol (cycles + treasury).</li>
-                </ul>
-              </div>
-            </MoreInfo>
-          </p>
+            buy, and sell them.
+                    </p>
         </div>
         <div className="row" style={{ gap: 8 }}>
           {signedIn && (
