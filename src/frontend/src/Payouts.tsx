@@ -6,12 +6,11 @@ import type { TransactionRecord } from "./bindings/backend";
 import { fmtTokenAmount } from "./tokens";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import type { Identity } from "@icp-sdk/core/agent";
-import { ExplorerToken, UnstakeStatus, type Backend, type Config, type FeatureFlag, type PendingUnstake } from "./bindings/backend";
+import { ExplorerToken, UnstakeStatus, type Backend, type PendingUnstake } from "./bindings/backend";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal } from "./ui";
 import { useErrorImpression } from "./analytics";
 import { makeCkbtcMinter, makeApprover, CKBTC_MINTER_ID } from "./minters";
 import { TIER_META, etaLabel } from "./Staking";
-import Admin from "./Admin";
 
 // ==========================================
 // Profile — your wallet (token accounts + on/off-ramps) and the full
@@ -29,15 +28,6 @@ interface PayoutsProps {
   onSignIn: () => void;
   /** Sign out — lives on the Profile page header now (no left-nav Account section). */
   onSignOut: () => void;
-  /** Whether the signed-in principal is an admin (gates the Admin tab). */
-  isAdmin: boolean;
-  /** Tab to open on mount — `admin` opens the Admin tab (only honors when isAdmin). */
-  initialTab?: 'wallet' | 'admin';
-  // Admin console props — only used when the Admin tab is shown.
-  config: Config | null;
-  featureFlags: FeatureFlag[];
-  onChanged: () => void;
-  openTreasury: () => void;
 }
 
 const WALLET_TOKENS_META: { token: ExplorerToken; label: string; decimals: number }[] = [
@@ -95,21 +85,13 @@ function payoutDate(atNs: bigint): string {
   });
 }
 
-export default function Payouts({ actor, principal, identity, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onSignOut, isAdmin, initialTab, config, featureFlags, onChanged, openTreasury }: PayoutsProps) {
+export default function Payouts({ actor, principal, identity, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onSignOut }: PayoutsProps) {
   const signedIn = !!(principal && !principal.isAnonymous());
   const [txs, setTxs] = useState<TransactionRecord[]>([]);
   const [loaded, setLoaded] = useState(false);
 
-  // Tab bar mirrors the Lottery hub: "Wallet & Activity" plus an admin-only
-  // "Admin" tab. Only the Admin tab is conditional, so non-admins see no tab
-  // bar at all (one tab = no bar). initialTab lets a #/admin deep link land on
-  // the Admin tab for admins.
-  const [tab, setTab] = useState<'wallet' | 'admin'>(
-    initialTab === 'admin' && isAdmin ? 'admin' : 'wallet'
-  );
-  useEffect(() => {
-    if (tab === 'admin' && !isAdmin) setTab('wallet');
-  }, [isAdmin, tab]);
+  // The Admin console moved to its own admin-only nav section (2026-07-11);
+  // this page is wallet & activity only.
 
   useEffect(() => {
     (async () => {
@@ -135,10 +117,6 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
     background: 'var(--surface)', padding: 16,
   };
 
-  const tabs: ['wallet' | 'admin', string][] = [
-    ['wallet', 'Wallet & Activity'],
-    ...(isAdmin ? ([['admin', 'Admin']] as ['wallet' | 'admin', string][]) : []),
-  ];
 
   return (
     <>
@@ -159,32 +137,9 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
           <b style={{ fontSize: 17 }}>Your wallet &amp; activity.</b>
         </div>
 
-        {/* ── Tab bar — only when there's more than one tab (admin only) ── */}
-        {signedIn && tabs.length > 1 && (
-          <div className="row" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 2, gap: 16, width: '100%', overflowX: 'auto', scrollbarWidth: 'none', marginTop: 10 }}>
-            {tabs.map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setTab(key)}
-                style={{
-                  background: 'transparent', border: 'none',
-                  color: tab === key ? 'var(--burn-ink)' : 'var(--fg-3)',
-                  fontSize: 14, fontWeight: tab === key ? 600 : 500,
-                  cursor: 'pointer', padding: '6px 4px', position: 'relative', whiteSpace: 'nowrap',
-                  transition: 'color var(--dur-fast) var(--ease-out)',
-                }}
-              >
-                {label}
-                {tab === key && (
-                  <div style={{ position: 'absolute', bottom: -3, left: 0, right: 0, height: 2, background: 'var(--burn)', borderRadius: 999 }} />
-                )}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
 
-      {/* ── Tab content ── */}
+      {/* ── Wallet & activity ── */}
       {!signedIn ? (
         <div className="dashboard-container">
           <div className="col" style={{ ...card, gap: 10, alignItems: 'flex-start' }}>
@@ -196,18 +151,6 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
             </Btn>
           </div>
         </div>
-      ) : tab === 'admin' && isAdmin ? (
-        <Admin
-          actor={actor}
-          config={config}
-          featureFlags={featureFlags}
-          identity={identity}
-          host={host}
-          rootKey={rootKey}
-          ledgerCanisterId={ledgerCanisterId}
-          onChanged={onChanged}
-          openTreasury={openTreasury}
-        />
       ) : (
         <div className="dashboard-container">
           {/* ════ WALLET ════ */}

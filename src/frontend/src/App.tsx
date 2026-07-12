@@ -42,6 +42,7 @@ import BullRunPage from "./BullRunPage";
 import AnsemLp from "./AnsemLp";
 import IcpLp from "./IcpLp";
 import Payouts from "./Payouts";
+import Admin from "./Admin";
 import Landing from "./Landing";
 // Shared design-system primitives live in ui.tsx.
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, BrandMark, OpenChatMark, OPENCHAT_URL } from './ui';
@@ -54,7 +55,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin';
+export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin' | 'admin_money' | 'admin_economics' | 'admin_pools' | 'admin_system';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   voting: '/voting',
@@ -94,7 +95,13 @@ export const PAGE_PATH: Record<AppPage, string> = {
   early_adopters: '/early_adopters',
   xfarm: '/xfarm',
   payouts: '/profile',
+  // Bare /admin is a legacy alias — it redirects to the Money page (the
+  // console's four sections are each their own page, owner 2026-07-11).
   admin: '/admin',
+  admin_money: '/admin/money',
+  admin_economics: '/admin/economics',
+  admin_pools: '/admin/pools',
+  admin_system: '/admin/system',
 };
 /** The Earn page renders for these three (tab = which one is active). */
 const EARN_PAGES: AppPage[] = ['earn'];
@@ -1892,13 +1899,19 @@ export default function App() {
   );
 
 
-  // The Admin page is invisible to non-admins; bounce them if they land on
-  // it — but only once auth AND config have resolved, so a #/admin deep
-  // link survives the cold load for actual admins.
+  // Admin console pages are invisible to non-admins; bounce them once auth
+  // AND config have resolved, so a deep link survives the cold load for
+  // actual admins. Bare /admin aliases to the Money page.
+  const ADMIN_PAGES: AppPage[] = ['admin_money', 'admin_economics', 'admin_pools', 'admin_system'];
   useEffect(() => {
-    if (page === 'admin' && principal && config && !isAdmin) {
-      setPage('voting');
+    if (page === 'admin') {
+      setPage('admin_money');
+      return;
     }
+    if (ADMIN_PAGES.includes(page) && principal && config && !isAdmin) {
+      setPage('lottery');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, isAdmin, principal, config]);
 
   // Single source of truth for site navigation — rendered in the persistent
@@ -2029,6 +2042,29 @@ export default function App() {
           </Btn>
         )}
 
+        {/* ── Admin: the console's sections, visible to admins only ── */}
+        {isAdmin && (
+          <>
+            <Eyebrow style={{ margin: '14px 0 4px' }}>Admin</Eyebrow>
+            <Btn variant={page === 'admin_money' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_money')}>
+              <Icon name="wallet" size={14} stroke={page === 'admin_money' ? 'var(--char-950)' : 'currentColor'} />
+              Money
+            </Btn>
+            <Btn variant={page === 'admin_economics' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_economics')}>
+              <Icon name="coins" size={14} stroke={page === 'admin_economics' ? 'var(--char-950)' : 'currentColor'} />
+              Economics
+            </Btn>
+            <Btn variant={page === 'admin_pools' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_pools')}>
+              <Icon name="list" size={14} stroke={page === 'admin_pools' ? 'var(--char-950)' : 'currentColor'} />
+              Pools &amp; Users
+            </Btn>
+            <Btn variant={page === 'admin_system' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_system')}>
+              <Icon name="info" size={14} stroke={page === 'admin_system' ? 'var(--char-950)' : 'currentColor'} />
+              System
+            </Btn>
+          </>
+        )}
+
       </>
     );
   };
@@ -2037,8 +2073,8 @@ export default function App() {
   // and the mobile drawer. `onNavigate` closes the mobile drawer (no-op on
   // desktop). Navigation up top; Socials pinned to the bottom. There is no
   // Account section — the Wallet button (top bar) opens the Profile page,
-  // Admin is a tab on the Profile page, and Sign out lives on the Profile
-  // page header. Sign in lives in the top bar.
+  // the Admin console is its own admin-only nav group, and Sign out lives
+  // on the Profile page header. Sign in lives in the top bar.
   const renderDrawerBody = (onNavigate?: () => void) => (
     <>
       <div className="col" style={{ gap: 8, width: '100%', marginBottom: 32 }}>
@@ -2588,7 +2624,7 @@ export default function App() {
               onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
-          ) : page === 'payouts' || page === 'admin' ? (
+          ) : page === 'payouts' ? (
             <Payouts
               key={walletRequest}
               actor={actor}
@@ -2600,13 +2636,28 @@ export default function App() {
               isLocal={config?.is_local ?? false}
               onSignIn={handleLogin}
               onSignOut={handleLogout}
-              isAdmin={isAdmin}
-              initialTab={page === 'admin' ? 'admin' : 'wallet'}
-              config={config}
-              featureFlags={featureFlags}
-              onChanged={() => { fetchConfig(); fetchFeatureFlags(); }}
-              openTreasury={openTreasury}
             />
+          ) : page === 'admin_money' || page === 'admin_economics' || page === 'admin_pools' || page === 'admin_system' ? (
+            isAdmin ? (
+              <Admin
+                actor={actor}
+                config={config}
+                featureFlags={featureFlags}
+                identity={identity}
+                host={host}
+                rootKey={env?.IC_ROOT_KEY}
+                ledgerCanisterId={ledgerCanisterId}
+                onChanged={() => { fetchConfig(); fetchFeatureFlags(); }}
+                openTreasury={openTreasury}
+                section={page === 'admin_money' ? 'money' : page === 'admin_economics' ? 'economics' : page === 'admin_pools' ? 'pools' : 'system'}
+              />
+            ) : (
+              /* Auth/config still resolving (confirmed non-admins are bounced
+                 by the guard effect) — show a quiet loading state. */
+              <div className="dashboard-container" style={{ alignItems: 'center', paddingTop: 80 }}>
+                <LiveDot size={10} color="var(--burn-ink)" />
+              </div>
+            )
           ) : (
           <div className="idea-board-container">
 

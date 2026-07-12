@@ -35,16 +35,12 @@ interface AdminProps {
   /** Re-fetch config + flags after a successful change. */
   onChanged: () => void;
   openTreasury: () => void;
+  /** Which console page renders — the NAV is the tab bar now (each section
+   *  is its own page under the admin-only nav group, owner 2026-07-11). */
+  section: AdminSection;
 }
 
-type AdminSection = 'money' | 'economics' | 'pools' | 'system';
-
-const SECTIONS: { key: AdminSection; label: string; icon: string }[] = [
-  { key: 'money', label: 'Money', icon: 'wallet' },
-  { key: 'economics', label: 'Economics', icon: 'scale' },
-  { key: 'pools', label: 'Pools & Users', icon: 'list' },
-  { key: 'system', label: 'System', icon: 'info' },
-];
+export type AdminSection = 'money' | 'economics' | 'pools' | 'system';
 
 // Columns for the user-balances table: field key on UserBalanceRow + decimals.
 const USER_BAL_COLS = [
@@ -122,12 +118,13 @@ const Li = ({ children }: { children: React.ReactNode }) => (
   </span>
 );
 
-export default function Admin({ actor, config, featureFlags, identity, host, rootKey, ledgerCanisterId, onChanged, openTreasury }: AdminProps) {
-  const [section, setSection] = useState<AdminSection>('money');
+export default function Admin({ actor, config, featureFlags, identity, host, rootKey, ledgerCanisterId, onChanged, openTreasury, section }: AdminProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   useErrorImpression(error, 'admin');
+  // Each section is its own page now — moving between them clears banners.
+  useEffect(() => { setError(null); setNotice(null); }, [section]);
 
   // ── dial inputs ──
   const [thresholdInput, setThresholdInput] = useState('');
@@ -603,30 +600,6 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           </Btn>
         </span>
         <b style={{ fontSize: 17 }}>Money first. Everything loads itself.</b>
-      </div>
-
-      {/* ── Section tabs ── */}
-      <div className="row" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 6, gap: 18, width: '100%', overflowX: 'auto', scrollbarWidth: 'thin' }}>
-        {SECTIONS.map(s => (
-          <button
-            key={s.key}
-            onClick={() => { setSection(s.key); setError(null); setNotice(null); }}
-            style={{
-              background: 'transparent', border: 'none', flexShrink: 0,
-              color: section === s.key ? 'var(--burn-ink)' : 'var(--fg-3)',
-              fontSize: 14, fontWeight: section === s.key ? 600 : 500,
-              cursor: 'pointer', padding: '6px 4px', position: 'relative', whiteSpace: 'nowrap',
-              display: 'flex', alignItems: 'center', gap: 6,
-              transition: 'color var(--dur-fast) var(--ease-out)',
-            }}
-          >
-            <Icon name={s.icon} size={13} stroke={section === s.key ? 'var(--burn-ink)' : 'currentColor'} />
-            {s.label}
-            {section === s.key && (
-              <div style={{ position: 'absolute', bottom: -3, left: 0, right: 0, height: 2, background: 'var(--burn)', borderRadius: 999 }} />
-            )}
-          </button>
-        ))}
       </div>
 
       {(error || notice) && (

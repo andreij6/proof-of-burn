@@ -378,6 +378,13 @@ describe('pageFromHash (shareable URL routing)', () => {
     expect(pageFromHash('#/mini-golf/create-course')).toBe('minigolf');
     // The staking tab moved to its own page — old deep links follow it.
     expect(pageFromHash('#/lottery/staking')).toBe('neuronstake');
+    // Admin console: four section pages; bare /admin aliases to Money
+    // (the alias redirect happens in App's guard effect).
+    expect(pageFromHash('#/admin')).toBe('admin');
+    expect(pageFromHash('#/admin/money')).toBe('admin_money');
+    expect(pageFromHash('#/admin/economics')).toBe('admin_economics');
+    expect(pageFromHash('#/admin/pools')).toBe('admin_pools');
+    expect(pageFromHash('#/admin/system')).toBe('admin_system');
     expect(pageFromHash('#/lottery/anything-else')).toBe('lottery');
     expect(pageFromHash('#/lottery/lottery')).toBe('lottery');
     // the bare hub path still resolves to the hub
