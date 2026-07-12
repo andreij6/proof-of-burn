@@ -55,7 +55,7 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin' | 'admin_money' | 'admin_economics' | 'admin_pools' | 'admin_system';
+export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'ansemlp' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'explorer' | 'minigolf' | 'course_market' | 'early_adopters' | 'xfarm' | 'payouts' | 'admin' | 'admin_money' | 'admin_economics' | 'admin_pools' | 'admin_system' | 'admin_reference';
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
   voting: '/voting',
@@ -102,6 +102,7 @@ export const PAGE_PATH: Record<AppPage, string> = {
   admin_economics: '/admin/economics',
   admin_pools: '/admin/pools',
   admin_system: '/admin/system',
+  admin_reference: '/admin/reference',
 };
 /** The Earn page renders for these three (tab = which one is active). */
 const EARN_PAGES: AppPage[] = ['earn'];
@@ -1902,7 +1903,7 @@ export default function App() {
   // Admin console pages are invisible to non-admins; bounce them once auth
   // AND config have resolved, so a deep link survives the cold load for
   // actual admins. Bare /admin aliases to the Money page.
-  const ADMIN_PAGES: AppPage[] = ['admin_money', 'admin_economics', 'admin_pools', 'admin_system'];
+  const ADMIN_PAGES: AppPage[] = ['admin_money', 'admin_economics', 'admin_pools', 'admin_system', 'admin_reference'];
   useEffect(() => {
     if (page === 'admin') {
       setPage('admin_money');
@@ -2061,6 +2062,10 @@ export default function App() {
             <Btn variant={page === 'admin_system' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_system')}>
               <Icon name="info" size={14} stroke={page === 'admin_system' ? 'var(--char-950)' : 'currentColor'} />
               System
+            </Btn>
+            <Btn variant={page === 'admin_reference' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('admin_reference')}>
+              <Icon name="bulb" size={14} stroke={page === 'admin_reference' ? 'var(--char-950)' : 'currentColor'} />
+              How it works
             </Btn>
           </>
         )}
@@ -2637,7 +2642,7 @@ export default function App() {
               onSignIn={handleLogin}
               onSignOut={handleLogout}
             />
-          ) : page === 'admin_money' || page === 'admin_economics' || page === 'admin_pools' || page === 'admin_system' ? (
+          ) : page === 'admin_money' || page === 'admin_economics' || page === 'admin_pools' || page === 'admin_system' || page === 'admin_reference' ? (
             isAdmin ? (
               <Admin
                 actor={actor}
@@ -2649,7 +2654,7 @@ export default function App() {
                 ledgerCanisterId={ledgerCanisterId}
                 onChanged={() => { fetchConfig(); fetchFeatureFlags(); }}
                 openTreasury={openTreasury}
-                section={page === 'admin_money' ? 'money' : page === 'admin_economics' ? 'economics' : page === 'admin_pools' ? 'pools' : 'system'}
+                section={page === 'admin_money' ? 'money' : page === 'admin_economics' ? 'economics' : page === 'admin_pools' ? 'pools' : page === 'admin_system' ? 'system' : 'reference'}
               />
             ) : (
               /* Auth/config still resolving (confirmed non-admins are bounced

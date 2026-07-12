@@ -385,6 +385,7 @@ describe('pageFromHash (shareable URL routing)', () => {
     expect(pageFromHash('#/admin/economics')).toBe('admin_economics');
     expect(pageFromHash('#/admin/pools')).toBe('admin_pools');
     expect(pageFromHash('#/admin/system')).toBe('admin_system');
+    expect(pageFromHash('#/admin/reference')).toBe('admin_reference');
     expect(pageFromHash('#/lottery/anything-else')).toBe('lottery');
     expect(pageFromHash('#/lottery/lottery')).toBe('lottery');
     // the bare hub path still resolves to the hub
