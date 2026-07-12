@@ -51,36 +51,68 @@ export function PageHelpMobile({ children }: { children: ReactNode }) {
   const [open, setOpen] = React.useState(false);
   if (!children) return null;
   return (
-    <div className="show-mobile" style={{ margin: '14px 16px 0' }}>
+    <>
+      {/* Mobile: a fixed tab on the RIGHT edge of the screen; opens a
+          full-screen help modal. Desktop uses the persistent right panel. */}
       <button
         type="button"
-        onClick={() => setOpen(o => !o)}
-        aria-expanded={open}
+        className="show-mobile"
+        onClick={() => setOpen(true)}
+        aria-label="How it works"
         style={{
-          width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          gap: 8, padding: '11px 14px', borderRadius: open ? '10px 10px 0 0' : 10,
-          border: '1px solid var(--burn)', borderBottom: open ? 'none' : '1px solid var(--burn)',
-          background: 'color-mix(in srgb, var(--burn) 10%, var(--surface))', cursor: 'pointer',
-          color: 'var(--burn-ink)', fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+          position: 'fixed', right: 0, top: '42%', zIndex: 70,
+          display: 'flex', alignItems: 'center', gap: 6,
+          padding: '10px 12px 10px 14px', borderRadius: '12px 0 0 12px',
+          border: '1px solid var(--burn)', borderRight: 'none',
+          background: 'var(--burn)', color: 'var(--char-950)',
+          fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer',
+          boxShadow: '0 4px 14px rgba(0,0,0,0.25)',
+          writingMode: 'vertical-rl', textOrientation: 'mixed',
         }}
       >
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-          <Icon name="info" size={13} stroke="var(--burn-ink)" /> How it works
-        </span>
-        <span style={{ display: 'inline-flex', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-fast) var(--ease-out)' }}>
-          <Icon name="chevDown" size={16} stroke="var(--burn-ink)" />
-        </span>
+        <Icon name="info" size={13} stroke="var(--char-950)" /> How it works
       </button>
+
       {open && (
-        <div className="col" style={{
-          gap: 12, padding: 16, fontSize: 13, color: 'var(--fg-2)', lineHeight: 1.55,
-          border: '1px solid var(--burn)', borderTop: 'none', borderRadius: '0 0 10px 10px',
-          background: 'var(--surface)',
-        }}>
-          {children}
+        <div
+          className="show-mobile"
+          onClick={() => setOpen(false)}
+          style={{ position: 'fixed', inset: 0, zIndex: 95, background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}
+        >
+          <div
+            className="row"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              justifyContent: 'space-between', alignItems: 'center',
+              padding: 'calc(env(safe-area-inset-top, 0px) + 14px) 16px 14px',
+              borderBottom: '1px solid var(--border)', flexShrink: 0,
+            }}
+          >
+            <span className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <Icon name="info" size={16} stroke="var(--burn-ink)" />
+              <b style={{ fontSize: 16, color: 'var(--fg)' }}>How it works</b>
+            </span>
+            <button
+              onClick={() => setOpen(false)}
+              aria-label="Close"
+              style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--fg-2)', padding: 4, display: 'flex' }}
+            >
+              <Icon name="x" size={18} />
+            </button>
+          </div>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="col"
+            style={{
+              gap: 14, padding: '18px 16px calc(env(safe-area-inset-bottom, 0px) + 24px)',
+              overflowY: 'auto', fontSize: 13.5, color: 'var(--fg-2)', lineHeight: 1.6,
+            }}
+          >
+            {children}
+          </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 

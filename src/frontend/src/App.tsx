@@ -2306,8 +2306,8 @@ export default function App() {
         {/* Content column. Keyed by page so every page fades/blurs in with the
             expressive transition on navigation. */}
         <main ref={mainScrollRef} style={{ flex: 1, minWidth: 320, overflowY: 'auto' }}>
-          {/* Mobile: the page's "How it works" as a collapsible at the top
-              (desktop uses the persistent right panel instead). */}
+          {/* Mobile: a fixed "How it works" tab on the right edge → full-
+              screen modal (desktop uses the persistent right panel). */}
           <PageHelpMobile>{pageHelp}</PageHelpMobile>
           {winBanner && (
             <div role="status" style={{
