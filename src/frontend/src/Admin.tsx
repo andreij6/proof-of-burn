@@ -8,7 +8,6 @@ import type { ModerationCandidate, UserBalanceRow, SeenUser } from "./bindings/b
 import { Principal } from "@icp-sdk/core/principal";
 import { Icon, Eyebrow, Btn, Chip, LiveDot, MoreInfo, fmtICP, formatPrincipal } from "./ui";
 import { useErrorImpression } from "./analytics";
-import CourseEditor from "./arcade/CourseEditor";
 
 // ==========================================
 // Admin console — four tabs, money first (owner redo 2026-07-10):
@@ -1336,13 +1335,6 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             </span>
           </Sec>
 
-          <Sec label="Mini Golf — course editor">
-            <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-              Repaint any hole's voxel layout cell by cell. Saving stores the layout on-chain and
-              replaces the built-in hole for every player immediately; Reset reverts to the built-in.
-            </span>
-            <CourseEditor actor={actor} />
-          </Sec>
         </>
       )}
 
