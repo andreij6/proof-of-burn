@@ -94,7 +94,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
         actor.get_lottery_info().catch(() => null),
         actor.list_recent_winners().catch(() => [] as LotteryDraw[]),
         actor.get_usd_rates().catch(() => [] as UsdRate[]),
-        actor.get_voucher_market().catch(() => null),
+        actor.get_bond_market().catch(() => null),
       ]);
       if (cancelled) return;
       setInfo(i);

@@ -100,65 +100,63 @@ info.min_pot_e8s;      // draw gate: pot must reach this
 info.min_unique_holders; // draw gate: distinct players needed`;
 
 const UNSTAKE_SNIPPET = `// Exits are BOND-NATIVE: staking auto-issued a Stake Bond — start there.
-// (The on-chain API keeps its original 'voucher' naming — Bond is the product name.)
 // (unstake(amount, tier) only drains legacy plain-stake rows.)
-const m = await cycleBurn.get_voucher_market();
-const voucher = m.my_vouchers[0];
+const m = await cycleBurn.get_bond_market();
+const bond = m.my_bonds[0];
 
 // 100% after the tier's dissolve — pays the owner automatically:
-const out = await cycleBurn.redeem_stake_voucher(voucher.id);
+const out = await cycleBurn.redeem_stake_bond(bond.id);
 if ('Err' in out) throw new Error(out.Err);
 
 // or instant 85% (refuses with BUYBACK_UNAVAILABLE when the fund is short):
-// await cycleBurn.buyback_voucher(voucher.id);
-// or list it at your price: await cycleBurn.list_voucher(voucher.id, askE8s);`;
+// await cycleBurn.buyback_bond(bond.id);
+// or list it at your price: await cycleBurn.list_bond(bond.id, askE8s);`;
 
 const VOUCHER_CANDID_SNIPPET = `// Stake Bonds — an NFT claim on a staked position. Tickets follow the
 // bond's CURRENT owner; buying one makes the buyer a staker. (The API keeps
-// its original 'voucher' naming — Bond is the product name.)
-type VoucherClass = variant { Backed; Promo };
-type VoucherView = record {
-  id : nat64; class : VoucherClass; tier : StakeTier; amount_e8s : nat64;
+type BondClass = variant { Backed; Promo };
+type BondView = record {
+  id : nat64; class : BondClass; tier : StakeTier; amount_e8s : nat64;
   owner : principal; minted_at : nat64; expires_at : opt nat64;
   listed_price_e8s : opt nat64;
 };
 
 service additions : {
-  wrap_stake_voucher : (nat64, StakeTier) -> (variant { Ok : nat64; Err : text });
-  unwrap_stake_voucher : (nat64) -> (variant { Ok; Err : text });
-  list_voucher : (nat64, nat64) -> (variant { Ok; Err : text });      // (id, ask e8s)
-  cancel_voucher_listing : (nat64) -> (variant { Ok; Err : text });
-  get_voucher_sale_account : (nat64) -> (LedgerAccount) query;        // buyer escrow
-  buy_voucher : (nat64) -> (variant { Ok; Err : text });
-  buyback_voucher : (nat64) -> (variant { Ok : nat64; Err : text });  // Ok = e8s paid
-  redeem_stake_voucher : (nat64) -> (BalanceResult);                  // burn -> dissolve -> 100%
-  transfer_voucher : (nat64, principal) -> (variant { Ok; Err : text }); // send to another wallet
-  claim_promo_voucher : (opt principal) -> (variant { Ok : nat64; Err : text });
-  get_voucher_market : () -> (VoucherMarketInfo) query;
+  wrap_stake_bond : (nat64, StakeTier) -> (variant { Ok : nat64; Err : text });
+  unwrap_stake_bond : (nat64) -> (variant { Ok; Err : text });
+  list_bond : (nat64, nat64) -> (variant { Ok; Err : text });      // (id, ask e8s)
+  cancel_bond_listing : (nat64) -> (variant { Ok; Err : text });
+  get_bond_sale_account : (nat64) -> (LedgerAccount) query;        // buyer escrow
+  buy_bond : (nat64) -> (variant { Ok; Err : text });
+  buyback_bond : (nat64) -> (variant { Ok : nat64; Err : text });  // Ok = e8s paid
+  redeem_stake_bond : (nat64) -> (BalanceResult);                  // burn -> dissolve -> 100%
+  transfer_bond : (nat64, principal) -> (variant { Ok; Err : text }); // send to another wallet
+  claim_golden_ticket : (opt principal) -> (variant { Ok : nat64; Err : text });
+  get_bond_market : () -> (BondMarketInfo) query;
 }`;
 
 const VOUCHER_FLOW_SNIPPET = `// Instant exit (house buyback): 85% now instead of 100% after dissolve.
 // The 15% discount is an express-exit FEE — principal is never at risk on
 // the classic path (unwrap → unstake → 100%).
-const id = (await cycleBurn.wrap_stake_voucher(100_000_000n, { SixMonths: null })).Ok;
+const id = (await cycleBurn.wrap_stake_bond(100_000_000n, { SixMonths: null })).Ok;
 
-const market = await cycleBurn.get_voucher_market();
+const market = await cycleBurn.get_bond_market();
 const quote = 100_000_000n * BigInt(10_000 - market.buyback_discount_bps) / 10_000n;
 if (market.buyback_fund_e8s >= quote) {           // balance-gated: refuses when
-  const paid = await cycleBurn.buyback_voucher(id); // the fund can't cover it
+  const paid = await cycleBurn.buyback_bond(id); // the fund can't cover it
 }
 
 // Marketplace (asks in ICP only): escrow the EXACT ask, then settle.
-await cycleBurn.list_voucher(id, 90_000_000n);      // seller lists at 0.9 ICP
-const escrow = await cycleBurn.get_voucher_sale_account(id);
+await cycleBurn.list_bond(id, 90_000_000n);      // seller lists at 0.9 ICP
+const escrow = await cycleBurn.get_bond_sale_account(id);
 await ledger.icrc1_transfer({ to: escrow, amount: 90_000_000n, fee: [], memo: [], from_subaccount: [], created_at_time: [] });
-await cycleBurn.buy_voucher(id);                    // buyer becomes the staker
+await cycleBurn.buy_bond(id);                    // buyer becomes the staker
 
 // Golden Ticket claim (promo class — tickets ONLY, 1/day for 60 days):
 // null → mints to the caller; a principal → mints to that wallet and works
 // ANONYMOUSLY (paste-a-wallet flow on /#/claim). Golden Tickets can never
 // redeem ICP, never sell, never buy back — they only earn tickets.
-await cycleBurn.claim_promo_voucher(null);`;
+await cycleBurn.claim_golden_ticket(null);`;
 
 function AgentCopyButton() {
   const [copied, setCopied] = useState(false);
@@ -346,11 +344,9 @@ export default function DevDocs() {
           marketplace, take the instant house buyback at <b>85% of principal</b>{' '}
           (the 15% discount is an express-exit fee, balance-gated by the buyback
           fund), or redeem for 100% after the dissolve. Holders can also{' '}
-          <b>transfer_voucher</b> it to another wallet's principal (the ticket
+          <b>transfer_bond</b> it to another wallet's principal (the ticket
           stream follows). A bond <b>listed for sale earns no tickets until
-          delisted</b>. Note: <b>the on-chain API keeps the original{' '}
-          <span className="mono">voucher</span> naming</b> (wrap_stake_voucher,
-          buy_voucher, …) — Bond is the product name. Same identity rule as
+          delisted</b>. Same identity rule as
           everything else: <b>every call is keyed to the caller's principal</b>{' '}
           — integrate with your user's identity, never a proxy.
         </span>

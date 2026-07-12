@@ -218,7 +218,7 @@ export default function Staking({
   const handleConvert = (t: StakeTier, amountE8s: bigint) => run(`convert-${t}`, async () => {
     const whole = (amountE8s / E8S) * E8S;
     if (whole < E8S) { setError('Nothing to convert — under 1 ICP folds into your next stake.'); return; }
-    const res = await actor.wrap_stake_voucher(whole, t);
+    const res = await actor.wrap_stake_bond(whole, t);
     if (res.__kind__ === 'Err') { setError(`Convert failed: ${res.Err}`); return; }
     setNotice(`Converted ${fmtICP(whole)} ICP of ${TIER_META[t].label} stake into a bond — manage it below.`);
     await refresh();

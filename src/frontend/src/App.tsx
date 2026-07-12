@@ -29,7 +29,7 @@ import type {
 import LotteryHub from "./LotteryHub";
 import NeuronStakePage from "./NeuronStakePage";
 import VoucherExchange from "./VoucherExchange";
-import { friendlyVoucherErr, isPromo, type VoucherView } from "./Vouchers";
+import { friendlyVoucherErr, isPromo, type BondView } from "./Vouchers";
 import { TIER_META } from "./Staking";
 import DevDocs from "./DevDocs";
 import ClaimPromo from "./ClaimPromo";
@@ -498,7 +498,7 @@ export default function App() {
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
   const [withdrawSuccess, setWithdrawSuccess] = useState(false);
   // Wallet voucher rail (withdraw a voucher to another wallet principal).
-  const [walletVouchers, setWalletVouchers] = useState<VoucherView[]>([]);
+  const [walletVouchers, setWalletVouchers] = useState<BondView[]>([]);
   const [voucherXferId, setVoucherXferId] = useState<bigint | null>(null);
   const [voucherXferTo, setVoucherXferTo] = useState("");
   const [voucherXferBusy, setVoucherXferBusy] = useState(false);
@@ -509,8 +509,8 @@ export default function App() {
   const loadWalletVouchers = async () => {
     if (!actor) return;
     try {
-      const info = await actor.get_voucher_market();
-      setWalletVouchers(info?.my_vouchers ?? []);
+      const info = await actor.get_bond_market();
+      setWalletVouchers(info?.my_bonds ?? []);
     } catch { setWalletVouchers([]); }
   };
   useEffect(() => {
@@ -527,7 +527,7 @@ export default function App() {
         to = Principal.fromText(voucherXferTo.trim());
         if (to.isAnonymous()) throw new Error();
       } catch { setVoucherXferMsg(friendlyVoucherErr('INVALID_PRINCIPAL')); return; }
-      const res = await actor.transfer_voucher(id, to);
+      const res = await actor.transfer_bond(id, to);
       if (res.__kind__ === 'Err') { setVoucherXferMsg(friendlyVoucherErr(res.Err)); return; }
       setVoucherXferId(null); setVoucherXferTo("");
       setVoucherXferMsg(`Bond #${id} sent — it now lives in ${voucherXferTo.trim().slice(0, 8)}… and earns tickets there.`);

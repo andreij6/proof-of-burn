@@ -83,9 +83,8 @@ Also: get_my_stake() (per-tier positions), get_my_ticket_breakdown() (ticket
 sources), list_recent_winners() (winners feed).
 
 ## Bond note (2026-07-10)
-Staking AUTO-ISSUES a Stake Bond NFT — the bond IS the stake. (The on-chain
-API keeps the original `voucher` naming — Bond is the product name.) The
-holder redeems via redeem_stake_voucher (100% after dissolve), sells it on
+Staking AUTO-ISSUES a Stake Bond NFT — the bond IS the stake. The
+holder redeems via redeem_stake_bond (100% after dissolve), sells it on
 the marketplace, or takes the instant 15%-discount buyback. Tickets always
 follow the bond's current owner; buying a bond grants ITS daily
 tickets to the buyer instantly (once per bond per UTC day).
@@ -94,80 +93,80 @@ tickets to the buyer instantly (once per bond per UTC day).
 Since staking auto-issues a Stake Bond, the exit starts from the bond — NOT
 from unstake(amount, tier), which returns NO_STAKE for bond-held positions
 (it only drains legacy plain rows).
-1. Find the user's bond: const m = await cycleBurn.get_voucher_market();
-   const voucher = m.my_vouchers[0]; // Backed, unlisted (API keeps 'voucher' names)
+1. Find the user's bond: const m = await cycleBurn.get_bond_market();
+   const bond = m.my_bonds[0]; // Backed, unlisted
 2. Exit one of three ways:
-   - 100% after dissolve: const out = await cycleBurn.redeem_stake_voucher(voucher.id);
+   - 100% after dissolve: const out = await cycleBurn.redeem_stake_bond(bond.id);
      Ok is a pending-unstake id; the ICP pays the OWNER automatically once the
      tier's neuron finishes dissolving (6mo/1y/2y). Nothing to claim.
-   - Instant 85%: await cycleBurn.buyback_voucher(voucher.id); // Ok = ICP paid now
+   - Instant 85%: await cycleBurn.buyback_bond(bond.id); // Ok = ICP paid now
      Refuses with BUYBACK_UNAVAILABLE when the buyback fund can't cover it.
-   - Market price: list_voucher(voucher.id, askE8s) — a buyer takes the position.
+   - Market price: list_bond(bond.id, askE8s) — a buyer takes the position.
 - Tickets void only when the user's LAST position empties; listed bonds
   pause earning until sold or delisted.
 
 ## Stake Bonds (exit liquidity + marketplace)
 Staking AUTO-ISSUES a STAKE BOND — an NFT claim on the staked ICP (the stake
-IS the bond; wrap_stake_voucher remains for legacy/remainder rows). NOTE: the
-on-chain API keeps the original `voucher` naming (wrap_stake_voucher,
-buy_voucher, …) — Bond is the product name. Tickets
+IS the bond; wrap_stake_bond remains for legacy/remainder rows). Tickets
 follow the bond's current owner (server-side daily grants); buying a
 bond makes the buyer a staker. A bond LISTED FOR SALE earns no tickets
 until delisted. All calls are caller-keyed: make
 them with the END USER's identity, same rule as staking.
 
 Candid additions:
-type VoucherClass = variant { Backed; Promo };
-type VoucherView = record {
-  id : nat64; class : VoucherClass; tier : StakeTier; amount_e8s : nat64;
+type BondClass = variant { Backed; Promo; LpBacked };
+// LpBacked = LP-custody receipt (non-sellable: rejected by list/buy/buyback/
+// redeem/transfer with LP_NOT_ALLOWED; manage the LP position itself instead).
+type BondView = record {
+  id : nat64; class : BondClass; tier : StakeTier; amount_e8s : nat64;
   owner : principal; minted_at : nat64; expires_at : opt nat64;
   listed_price_e8s : opt nat64;
 };
-type VoucherMarketInfo = record {
+type BondMarketInfo = record {
   enabled : bool; min_wrap_e8s : nat64; market_fee_bps : nat16;
   buyback_discount_bps : nat16; buyback_fund_e8s : nat64;
-  my_vouchers : vec VoucherView; listings : vec VoucherView;
+  my_bonds : vec BondView; listings : vec BondView;
   promo_open : bool; promo_remaining : nat32; promo_claims_today : nat32;
 };
 service additions : {
-  wrap_stake_voucher : (nat64, StakeTier) -> (variant { Ok : nat64; Err : text });
-  unwrap_stake_voucher : (nat64) -> (variant { Ok; Err : text });
-  list_voucher : (nat64, nat64) -> (variant { Ok; Err : text });      // (id, ask e8s)
-  cancel_voucher_listing : (nat64) -> (variant { Ok; Err : text });
-  get_voucher_sale_account : (nat64) -> (LedgerAccount) query;        // buyer escrow
-  buy_voucher : (nat64) -> (variant { Ok; Err : text });
-  redeem_stake_voucher : (nat64) -> (BalanceResult); // burn voucher -> dissolve -> 100% to owner
-  buyback_voucher : (nat64) -> (variant { Ok : nat64; Err : text });  // Ok = ICP e8s paid
-  transfer_voucher : (nat64, principal) -> (variant { Ok; Err : text }); // send to another wallet (Backed, unlisted); ticket stream follows
-  claim_promo_voucher : (opt principal) -> (variant { Ok : nat64; Err : text });
-  get_voucher_market : () -> (VoucherMarketInfo) query;
+  wrap_stake_bond : (nat64, StakeTier) -> (variant { Ok : nat64; Err : text });
+  unwrap_stake_bond : (nat64) -> (variant { Ok; Err : text });
+  list_bond : (nat64, nat64) -> (variant { Ok; Err : text });      // (id, ask e8s)
+  cancel_bond_listing : (nat64) -> (variant { Ok; Err : text });
+  get_bond_sale_account : (nat64) -> (LedgerAccount) query;        // buyer escrow
+  buy_bond : (nat64) -> (variant { Ok; Err : text });
+  redeem_stake_bond : (nat64) -> (BalanceResult); // burn bond -> dissolve -> 100% to owner
+  buyback_bond : (nat64) -> (variant { Ok : nat64; Err : text });  // Ok = ICP e8s paid
+  transfer_bond : (nat64, principal) -> (variant { Ok; Err : text }); // send to another wallet (Backed, unlisted); ticket stream follows
+  claim_golden_ticket : (opt principal) -> (variant { Ok : nat64; Err : text });
+  get_bond_market : () -> (BondMarketInfo) query;
 }
 
 Flow A — wrap + instant exit (house buyback):
-1. await cycleBurn.wrap_stake_voucher(100_000_000n, { SixMonths: null });
+1. await cycleBurn.wrap_stake_bond(100_000_000n, { SixMonths: null });
    // Wraps 1 ICP of the caller's existing 6-month stake into a Bond NFT.
    // Minimum wrap: min_wrap_e8s (1 ICP). Tickets keep flowing to the holder.
-2. await cycleBurn.buyback_voucher(voucherId);
+2. await cycleBurn.buyback_bond(bondId);
    // Pays the owner 85% of principal in ICP IMMEDIATELY (the 15% discount is
    // an express-exit fee — the buyback_discount_bps field), burns the NFT,
    // and the canister dissolves the underlying stake. Refuses with
    // BUYBACK_UNAVAILABLE when the buyback fund can't cover the quote — check
    // buyback_fund_e8s >= amount_e8s * 85% first.
-   // Alternative: unwrap_stake_voucher(id) turns it back into a plain stake;
+   // Alternative: unwrap_stake_bond(id) turns it back into a plain stake;
    // classic unstake then returns 100% after the tier's dissolve.
 
 Flow B — marketplace (asks in ICP only):
-1. Seller: await cycleBurn.list_voucher(voucherId, askE8s); (cancel anytime
-   with cancel_voucher_listing.)
-2. Buyer: const escrow = await cycleBurn.get_voucher_sale_account(voucherId);
+1. Seller: await cycleBurn.list_bond(bondId, askE8s); (cancel anytime
+   with cancel_bond_listing.)
+2. Buyer: const escrow = await cycleBurn.get_bond_sale_account(bondId);
    await ledger.icrc1_transfer({ to: escrow, amount: askE8s, ... }); // EXACT ask
-   await cycleBurn.buy_voucher(voucherId);
+   await cycleBurn.buy_bond(bondId);
    // Seller receives ask minus the market_fee_bps fee; the NFT + claim move
    // to the buyer; the buyer starts earning tickets at the next daily grant.
    // An unfinished purchase's escrow is always reclaimable.
 
 Flow C — promo "Golden Ticket" claim (campaign page: /#/claim):
-await cycleBurn.claim_promo_voucher(destOrNull);
+await cycleBurn.claim_golden_ticket(destOrNull);
 // null → mints to the CALLER (signed-in claim). Some(principal) → mints to
 // that principal and works ANONYMOUSLY (paste-a-wallet flow; must be a
 // self-authenticating user principal — not anonymous, not a canister id).

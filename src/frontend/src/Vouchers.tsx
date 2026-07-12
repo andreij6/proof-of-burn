@@ -26,8 +26,8 @@ export function friendlyVoucherErr(code: string): string {
     case 'DAILY_LIMIT': return 'Today\'s Golden Tickets are gone — more unlock tomorrow. Come back then!';
     case 'ALREADY_CLAIMED': return 'This account already claimed its Golden Ticket (one per account).';
     case 'INVALID_PRINCIPAL': return 'That doesn\'t look like a wallet principal — paste the principal shown in your wallet (not an account id, not a canister).';
-    case 'NOT_YOUR_VOUCHER': return 'Only the bond\'s current owner can do that.';
-    case 'VOUCHER_LISTED': return 'That bond is listed for sale — cancel the listing first.';
+    case 'NOT_YOUR_BOND': return 'Only the bond\'s current owner can do that.';
+    case 'BOND_LISTED': return 'That bond is listed for sale — cancel the listing first.';
     case 'PROMO_NOT_ALLOWED': return 'Golden Tickets earn tickets only — they can\'t be sold, redeemed, transferred, or bought back.';
     case 'INSUFFICIENT_STAKE': return 'You don\'t have that much unwrapped stake in that tier.';
     case 'BELOW_MINIMUM': return 'The minimum bond is 1 ICP of staked principal.';
@@ -78,7 +78,7 @@ export function parsePriceIcp(text: string): bigint | null {
   return v > 0 ? BigInt(v) : null;
 }
 
-type VoucherClass =
+type BondClass =
   | 'Backed' | 'Promo' | 'LpBacked'
   | { Backed: null } | { Promo: null } | { LpBacked: null };
 /** The wrapper bindings decode unit variants as enum STRINGS ("Promo"), not
@@ -86,26 +86,26 @@ type VoucherClass =
  *  either layer (the 'in'-on-string crash shipped once; never again). All
  *  three helpers are TOTAL over unknown class strings: anything that isn't
  *  recognized is treated as display-only (no money actions). */
-export function isPromo(c: VoucherClass | { Promo?: null } | string): boolean {
+export function isPromo(c: BondClass | { Promo?: null } | string): boolean {
   if (typeof c === 'string') return c === 'Promo';
   return typeof c === 'object' && c !== null && 'Promo' in c;
 }
 /** LP-custody receipt voucher — managed on the Liquidity Provider page,
  *  never sellable or redeemable here. */
-export function isLpBacked(c: VoucherClass | { LpBacked?: null } | string): boolean {
+export function isLpBacked(c: BondClass | { LpBacked?: null } | string): boolean {
   if (typeof c === 'string') return c === 'LpBacked';
   return typeof c === 'object' && c !== null && 'LpBacked' in c;
 }
 /** ONLY plain Backed vouchers get money actions (sell/redeem/buy) — promos,
  *  LP receipts, and any future/unknown class are display-only. */
-export function isBacked(c: VoucherClass | object | string): boolean {
+export function isBacked(c: BondClass | object | string): boolean {
   if (typeof c === 'string') return c === 'Backed';
   return typeof c === 'object' && c !== null && 'Backed' in c;
 }
 
-export interface VoucherView {
+export interface BondView {
   id: bigint;
-  class: VoucherClass;
+  class: BondClass;
   tier: StakeTier;
   amount_e8s: bigint;
   owner: Principal;
@@ -117,7 +117,7 @@ export interface VoucherView {
 /** Marketplace listings ordered BEST DEAL FIRST — ascending ask/value ratio,
  *  so the biggest discount vs principal sits on top. Stable for ties (id
  *  ascending). Pure; unit-tested. */
-export function sortListingsBestDeal(listings: VoucherView[]): VoucherView[] {
+export function sortListingsBestDeal(listings: BondView[]): BondView[] {
   return [...listings].sort((a, b) => {
     const ra = a.amount_e8s > 0n ? Number(a.listed_price_e8s ?? 0n) / Number(a.amount_e8s) : Infinity;
     const rb = b.amount_e8s > 0n ? Number(b.listed_price_e8s ?? 0n) / Number(b.amount_e8s) : Infinity;
@@ -126,14 +126,14 @@ export function sortListingsBestDeal(listings: VoucherView[]): VoucherView[] {
   });
 }
 
-export interface VoucherMarketInfo {
+export interface BondMarketInfo {
   enabled: boolean;
   min_wrap_e8s: bigint;
   market_fee_bps: number;
   buyback_discount_bps: number;
   buyback_fund_e8s: bigint;
-  my_vouchers: VoucherView[];
-  listings: VoucherView[];
+  my_bonds: BondView[];
+  listings: BondView[];
   promo_open: boolean;
   promo_remaining: number;
   promo_claims_today: number;
@@ -160,13 +160,13 @@ interface VouchersBodyProps {
   bare?: boolean;
 }
 
-const ticketsPerDay = (v: VoucherView) => Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8));
+const ticketsPerDay = (v: BondView) => Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8));
 
 export function VouchersBody({
   actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, section, onGoExchange, onGoLiquidity, bare,
 }: VouchersBodyProps) {
   const signedIn = !!principal && !principal.isAnonymous();
-  const [info, setInfo] = useState<VoucherMarketInfo | null>(null);
+  const [info, setInfo] = useState<BondMarketInfo | null>(null);
   const [icpUsdE8s, setIcpUsdE8s] = useState<bigint>(0n);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -188,7 +188,7 @@ export function VouchersBody({
     if (!actor) return;
     try {
       const [i, rates] = await Promise.all([
-        actor.get_voucher_market(),
+        actor.get_bond_market(),
         actor.get_usd_rates().catch(() => [] as { token: string; rate_usd_e8s: bigint }[]),
       ]);
       setInfo(i);
@@ -232,8 +232,8 @@ export function VouchersBody({
     } finally { setBusy(null); }
   };
 
-  const redeem = (v: VoucherView) => runOp(`redeem-${v.id}`, 'Starting the dissolve…', async () => {
-    const res = await actor.redeem_stake_voucher(v.id);
+  const redeem = (v: BondView) => runOp(`redeem-${v.id}`, 'Starting the dissolve…', async () => {
+    const res = await actor.redeem_stake_bond(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
     return {
       title: 'Dissolve started',
@@ -242,10 +242,10 @@ export function VouchersBody({
     };
   });
 
-  const list = (v: VoucherView) => runOp(`list-${v.id}`, 'Listing your bond on the Exchange…', async () => {
+  const list = (v: BondView) => runOp(`list-${v.id}`, 'Listing your bond on the Exchange…', async () => {
     const price = parsePriceIcp(priceText);
     if (!price) throw new Error('Enter an ask in ICP (up to 4 decimals).');
-    const res = await actor.list_voucher(v.id, price);
+    const res = await actor.list_bond(v.id, price);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
     return {
       title: `Listed at ${fmtICP(price)} ICP`,
@@ -254,16 +254,16 @@ export function VouchersBody({
     };
   });
 
-  const cancelListing = (v: VoucherView) => run(`cancel-${v.id}`, async () => {
-    const res = await actor.cancel_voucher_listing(v.id);
+  const cancelListing = (v: BondView) => run(`cancel-${v.id}`, async () => {
+    const res = await actor.cancel_bond_listing(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
     return `Listing for bond #${v.id} cancelled — it's earning tickets again.`;
   });
 
-  const buyback = (v: VoucherView) => {
+  const buyback = (v: BondView) => {
     const quote = buybackQuoteE8s(v.amount_e8s, info?.buyback_discount_bps ?? 1500);
     return runOp(`buyback-${v.id}`, `Paying you ${fmtICP(quote)} ICP from the buyback fund…`, async () => {
-      const res = await actor.buyback_voucher(v.id);
+      const res = await actor.buyback_bond(v.id);
       if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
       return {
         title: `${fmtICP(res.Ok)} ICP paid to your wallet`,
@@ -273,10 +273,10 @@ export function VouchersBody({
     });
   };
 
-  const buy = (v: VoucherView) => runOp(`buy-${v.id}`, 'Sending your payment to escrow…', async () => {
+  const buy = (v: BondView) => runOp(`buy-${v.id}`, 'Sending your payment to escrow…', async () => {
     if (v.listed_price_e8s == null) throw new Error(friendlyVoucherErr('NOT_LISTED'));
     // 1. Fund the sale escrow with EXACTLY the ask, 2. settle the purchase.
-    const escrow = await actor.get_voucher_sale_account(v.id);
+    const escrow = await actor.get_bond_sale_account(v.id);
     const ledger = createLedgerActor(ledgerCanisterId, { agentOptions: { host, identity, rootKey } });
     const xfer = await ledger.icrc1_transfer({
       to: { owner: escrow.owner, subaccount: escrow.subaccount },
@@ -286,7 +286,7 @@ export function VouchersBody({
       throw new Error(`Payment transfer failed: ${JSON.stringify(xfer.Err, (_k, val) => typeof val === 'bigint' ? val.toString() : val)}`);
     }
     setOpPhase({ kind: 'processing', text: 'Payment escrowed — settling the purchase…' });
-    const res = await actor.buy_voucher(v.id);
+    const res = await actor.buy_bond(v.id);
     if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
     return {
       title: `Bond #${v.id} is yours`,
@@ -303,7 +303,7 @@ export function VouchersBody({
   const payPct = ((10_000 - discountBps) / 100).toFixed(0);
   const feePct = ((info?.market_fee_bps ?? 250) / 100).toFixed(1);
 
-  const mine = info?.my_vouchers ?? [];
+  const mine = info?.my_bonds ?? [];
   const myUnlisted = mine.filter((v) => v.listed_price_e8s == null);
   const myListed = mine.filter((v) => v.listed_price_e8s != null && !isPromo(v.class));
   const listings = sortListingsBestDeal(info?.listings ?? []);

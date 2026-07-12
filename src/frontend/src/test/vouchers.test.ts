@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   friendlyVoucherErr, buybackQuoteE8s, buybackAvailable, listingDeltaPct,
   promoDaysLeft, parseWrapIcp, parsePriceIcp, isPromo,
-  sortListingsBestDeal, type VoucherView, isLpBacked, isBacked,
+  sortListingsBestDeal, type BondView, isLpBacked, isBacked,
 } from '../Vouchers';
 import { Principal } from '@icp-sdk/core/principal';
 import { validateClaimPrincipal } from '../ClaimPromo';
@@ -16,8 +16,8 @@ describe('friendlyVoucherErr', () => {
     expect(friendlyVoucherErr('DAILY_LIMIT')).toContain('tomorrow');
     expect(friendlyVoucherErr('ALREADY_CLAIMED')).toContain('one per account');
     expect(friendlyVoucherErr('INVALID_PRINCIPAL')).toContain('principal');
-    expect(friendlyVoucherErr('NOT_YOUR_VOUCHER')).toContain('current owner');
-    expect(friendlyVoucherErr('VOUCHER_LISTED')).toContain('cancel the listing');
+    expect(friendlyVoucherErr('NOT_YOUR_BOND')).toContain('current owner');
+    expect(friendlyVoucherErr('BOND_LISTED')).toContain('cancel the listing');
     expect(friendlyVoucherErr('PROMO_NOT_ALLOWED')).toContain('tickets only');
     expect(friendlyVoucherErr('INSUFFICIENT_STAKE')).toContain('unwrapped stake');
     expect(friendlyVoucherErr('BELOW_MINIMUM')).toContain('1 ICP');
@@ -179,7 +179,7 @@ describe('validateClaimPrincipal (paste-a-wallet claims)', () => {
 });
 
 describe('sortListingsBestDeal', () => {
-  const mk = (id: number, amount: bigint, price: bigint): VoucherView => ({
+  const mk = (id: number, amount: bigint, price: bigint): BondView => ({
     id: BigInt(id), class: 'Backed', tier: 0 as any, amount_e8s: amount,
     owner: Principal.anonymous(), minted_at: 0n, expires_at: null, listed_price_e8s: price,
   });

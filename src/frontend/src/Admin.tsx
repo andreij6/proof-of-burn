@@ -170,7 +170,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   const loadVoucherMarket = async () => {
     if (!actor) return;
     try {
-      const m = await actor.get_voucher_market();
+      const m = await actor.get_bond_market();
       setVoucherMkt(m);
       setBuybackFundE8s(m.buyback_fund_e8s);
     } catch { /* surfaced by dash */ }
@@ -183,7 +183,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     const minWrap = vMinWrapInput ? parseUnits(vMinWrapInput, 8) : null;
     if (fee === null && minWrap === null) throw new Error('Enter a fee % and/or a minimum wrap.');
     if (fee !== null && (!isFinite(fee) || fee < 0 || fee > 100)) throw new Error('Fee must be 0-100%.');
-    const res = await actor.admin_set_voucher_config(fee !== null ? Math.round(fee * 100) : null, minWrap);
+    const res = await actor.admin_set_bond_config(fee !== null ? Math.round(fee * 100) : null, minWrap);
     if (res.__kind__ === 'Err') throw new Error(res.Err);
     setVFeeInput(''); setVMinWrapInput('');
     await loadVoucherMarket();

@@ -61,7 +61,7 @@ export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: Clai
   const refresh = async () => {
     if (!actor) return;
     try {
-      const i = await actor.get_voucher_market();
+      const i = await actor.get_bond_market();
       setInfo({ promo_open: i.promo_open, promo_remaining: i.promo_remaining });
     } catch { /* best-effort */ }
   };
@@ -71,7 +71,7 @@ export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: Clai
     if (busy) return;
     setBusy(label); setErr(null);
     try {
-      const res = await actor.claim_promo_voucher(dest);
+      const res = await actor.claim_golden_ticket(dest);
       if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
       setClaimed({
         id: res.Ok,

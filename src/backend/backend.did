@@ -497,15 +497,15 @@ type LeaderNeuronInfo = record {
 };
 type LedgerAccount = record { owner : principal; subaccount : opt blob };
 
-// ── Stake Vouchers (okf/ideas/stake-vouchers) ────────────────────────────────
-// Wrap staked positions into transferable ICRC-7 voucher NFTs; ICP-only
+// ── Stake Bonds (okf/ideas/stake-vouchers) ──────────────────────────────────
+// Staked positions issued as transferable ICRC-7 Bond NFTs; ICP-only
 // marketplace; instant house buyback at a 15% discount (pays 85%, burns the
-// NFT and dissolves the stake back to the buyback fund). Promo-class vouchers
+// NFT and dissolves the stake back to the buyback fund). Promo-class bonds (Golden Tickets)
 // are tickets-only claim-campaign trials: soulbound, never redeemable.
-type VoucherClass = variant { Backed; Promo; LpBacked };
-type VoucherView = record {
+type BondClass = variant { Backed; Promo; LpBacked };
+type BondView = record {
   id : nat64;
-  class : VoucherClass;
+  class : BondClass;
   tier : StakeTier;
   amount_e8s : nat64;
   owner : principal;
@@ -515,16 +515,16 @@ type VoucherView = record {
   // Live marketplace ask in ICP e8s; null = not listed.
   listed_price_e8s : opt nat64;
 };
-type VoucherMarketInfo = record {
+type BondMarketInfo = record {
   enabled : bool;
   min_wrap_e8s : nat64;
   market_fee_bps : nat16;
   buyback_discount_bps : nat16;
   // Live balance of the dedicated buyback fund — the UI disables the buyback
-  // option when it can't cover a voucher's 85% payout.
+  // option when it can't cover a bond's 85% payout.
   buyback_fund_e8s : nat64;
-  my_vouchers : vec VoucherView;
-  listings : vec VoucherView;
+  my_bonds : vec BondView;
+  listings : vec BondView;
   promo_open : bool;
   promo_remaining : nat32;
   promo_claims_today : nat32;
@@ -1846,36 +1846,36 @@ service : (InitPayload) -> {
   unstake : (nat64, StakeTier) -> (BalanceResult);
 
   // ── Stake Vouchers ──
-  // Wrap `amount_e8s` of the caller's tier stake into a Backed voucher NFT
-  // (whole ICP, min 1 ICP). Ok = voucher id.
-  wrap_stake_voucher : (nat64, StakeTier) -> (BalanceResult);
+  // Wrap `amount_e8s` of the caller's tier stake into a Backed Bond NFT
+  // (whole ICP, min 1 ICP). Ok = bond id.
+  wrap_stake_bond : (nat64, StakeTier) -> (BalanceResult);
   // Unwrap back to a plain stake (burns the NFT). Never flag-gated.
-  unwrap_stake_voucher : (nat64) -> (Result);
-  // Voucher-native classic unstake: burn the voucher, dissolve, pay the
+  unwrap_stake_bond : (nat64) -> (Result);
+  // Bond-native classic unstake: burn the bond, dissolve, pay the
   // owner 100% after the tier's term. Never flag-gated.
-  redeem_stake_voucher : (nat64) -> (BalanceResult);
-  // Wallet rail: send a voucher to any principal (Plug/OISY and back).
-  transfer_voucher : (nat64, principal) -> (Result);
-  dev_seed_mock_vouchers : (nat32) -> (variant { Ok : nat32; Err : text });
+  redeem_stake_bond : (nat64) -> (BalanceResult);
+  // Wallet rail: send a bond to any principal (Plug/OISY and back).
+  transfer_bond : (nat64, principal) -> (Result);
+  dev_seed_mock_bonds : (nat32) -> (variant { Ok : nat32; Err : text });
   // List / cancel a marketplace ask in ICP e8s.
-  list_voucher : (nat64, nat64) -> (Result);
-  cancel_voucher_listing : (nat64) -> (Result);
+  list_bond : (nat64, nat64) -> (Result);
+  cancel_bond_listing : (nat64) -> (Result);
   // The caller's escrow account for a listing: fund with ask + 4×0.0001 ICP,
-  // then call buy_voucher. Leftovers reclaim via reclaim_escrow(StakeVoucher).
-  get_voucher_sale_account : (nat64) -> (LedgerAccount) query;
-  buy_voucher : (nat64) -> (Result);
+  // then call buy_bond. Leftovers reclaim via reclaim_escrow(StakeVoucher).
+  get_bond_sale_account : (nat64) -> (LedgerAccount) query;
+  buy_bond : (nat64) -> (Result);
   // Instant house buyback: pays the owner 85% of the claim from the buyback
   // fund, burns the NFT, dissolves the stake back to the fund. Ok = ICP paid
   // (e8s). Never flag-gated; refuses (BUYBACK_UNAVAILABLE) when underfunded.
-  buyback_voucher : (nat64) -> (BalanceResult);
+  buyback_bond : (nat64) -> (BalanceResult);
   // Promo claim: null = the signed-in caller; opt principal = the PASTE path
   // (anonymously callable; self-authenticating principals only). Ok = id.
-  claim_promo_voucher : (opt principal) -> (BalanceResult);
-  get_voucher_market : () -> (VoucherMarketInfo) query;
+  claim_golden_ticket : (opt principal) -> (BalanceResult);
+  get_bond_market : () -> (BondMarketInfo) query;
   admin_withdraw_buyback : (principal, nat64) -> (Result);
   admin_fund_buyback_from_treasury : (nat64) -> (Result);
   admin_route_ea_yield_now : () -> (Result);
-  admin_set_voucher_config : (opt nat16, opt nat64) -> (Result);
+  admin_set_bond_config : (opt nat16, opt nat64) -> (Result);
   admin_set_promo_campaign : (bool) -> (Result);
   admin_set_voucher_nft_canister : (principal) -> (Result);
   wallet_receive : () -> (Result);

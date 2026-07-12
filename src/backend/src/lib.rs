@@ -708,7 +708,7 @@ fn inspect_message() {
     // an inter-canister ledger-balance call, which forces it to be an update —
     // anonymous visitors still need it to see the pot + next drawing.
     let method = ic_cdk::api::call::method_name();
-    const ANON_OK: [&str; 3] = ["wallet_receive", "get_lottery_info", "claim_promo_voucher"];
+    const ANON_OK: [&str; 3] = ["wallet_receive", "get_lottery_info", "claim_golden_ticket"];
     if caller == Principal::anonymous() && !ANON_OK.contains(&method.as_str()) {
         ic_cdk::trap("Anonymous callers are not permitted");
     }
@@ -5131,7 +5131,7 @@ fn setup_timers() {
             cycle_topup_check().await;
             course_nft_cycle_guard().await; // forward surplus cycles when the NFT canister runs low
             voucher_nft_cycle_guard().await; // same guard for the voucher canister
-            let _ = refresh_buyback_fund_cache().await; // keep get_voucher_market's fund number honest
+            let _ = refresh_buyback_fund_cache().await; // keep get_bond_market's fund number honest
         }
     });
 }
@@ -7565,10 +7565,10 @@ fn get_staking_pool_info() -> StakingPoolInfo {
                     .map(|e| e.key().user)
                     .collect()
             });
-            VOUCHERS.with(|m| {
+            BONDS.with(|m| {
                 for e in m.borrow().iter() {
                     let v = e.value();
-                    if v.class == VoucherClass::Backed && v.tier == tier.idx() {
+                    if v.class == BondClass::Backed && v.tier == tier.idx() {
                         who.insert(v.owner);
                     }
                 }
@@ -8436,7 +8436,7 @@ fn auto_grant_daily_stake_tickets() {
     // Voucher owners earn too: Backed = wrapped stake, Promo = 1/day trial
     // (okf/ideas/stake-vouchers). Expired promos contribute 0 and drop out
     // via the per_day == 0 skip.
-    VOUCHERS.with(|m| {
+    BONDS.with(|m| {
         for e in m.borrow().iter() {
             stakers.insert(e.value().owner);
         }
@@ -10925,7 +10925,7 @@ async fn reclaim_escrow(
             }
             let voucher_id = key.ok_or_else(|| "KEY_REQUIRED: voucher_id".to_string())?;
             // The caller's own in-flight sale still draws from this escrow.
-            let in_flight = VOUCHER_SALES
+            let in_flight = BOND_SALES
                 .with(|m| m.borrow().get(&voucher_id))
                 .map(|sale| sale.buyer == caller)
                 .unwrap_or(false);
@@ -13748,19 +13748,19 @@ async fn mint_lp_voucher(owner: Principal) -> Option<u64> {
     if !feature_enabled(FLAG_STAKE_VOUCHERS) || voucher_nft_cid().is_err() {
         return None;
     }
-    let id = NEXT_VOUCHER_ID.with(|c| {
+    let id = NEXT_BOND_ID.with(|c| {
         let id = *c.borrow().get();
         c.borrow_mut().set(id + 1);
         id
     });
-    if let Err(e) = voucher_nft_mint(id, owner, VoucherClass::LpBacked, 0, 0, None).await {
+    if let Err(e) = voucher_nft_mint(id, owner, BondClass::LpBacked, 0, 0, None).await {
         canister_print(&format!("mint_lp_voucher: {}", e));
         return None;
     }
-    VOUCHERS.with(|m| {
-        m.borrow_mut().insert(id, VoucherRecord {
+    BONDS.with(|m| {
+        m.borrow_mut().insert(id, BondRecord {
             id,
-            class: VoucherClass::LpBacked,
+            class: BondClass::LpBacked,
             tier: 0,
             amount_e8s: 0,
             owner,
@@ -13794,7 +13794,7 @@ async fn unstake_lp_position(pool: Principal, position_id: u128, return_to: Prin
     // Burn the companion LpBacked voucher (best-effort — the exit NEVER
     // blocks on the NFT canister).
     if let Some(vid) = record.voucher_id {
-        VOUCHERS.with(|m| { m.borrow_mut().remove(&vid); });
+        BONDS.with(|m| { m.borrow_mut().remove(&vid); });
         if voucher_nft_burn(vid).await.is_err() {
             canister_print(&format!("lp voucher burn failed for #{vid} (registry row removed)"));
         }
@@ -18768,7 +18768,7 @@ fn dev_clear_farmers() -> Result<(), String> {
 //
 // Staked positions wrap into transferable ICRC-7 voucher NFTs on the
 // dedicated voucher_nft canister (backend = sole minter/burner/transfer
-// authority — the VOUCHERS registry here is the ownership source of truth
+// authority — the BONDS registry here is the ownership source of truth
 // and the NFT mirrors it). Three exits: sell on the ICP-only marketplace,
 // instant house buyback at a 15% discount (pay 85% → burn NFT → delete
 // registry row → immediately split + dissolve, principal redeems to the
@@ -18787,7 +18787,7 @@ fn dev_clear_farmers() -> Result<(), String> {
 const BUYBACK_SUBACCOUNT: [u8; 32] = [10u8; 32];
 /// Buyback price: owner receives amount × (10_000 − 1_500) / 10_000 = 85%.
 const BUYBACK_DISCOUNT_BPS: u64 = 1_500;
-/// Marketplace fee default (admin-tunable via admin_set_voucher_config).
+/// Marketplace fee default (admin-tunable via admin_set_bond_config).
 const VOUCHER_FEE_BPS_DEFAULT: u16 = 250;
 /// Minimum wrap (matches the first-stake minimum; admin-tunable).
 const VOUCHER_MIN_WRAP_E8S_DEFAULT: u64 = ONE_ICP_E8S;
@@ -18803,7 +18803,7 @@ const PROMO_TICKETS_PER_DAY: u64 = 1;
 const VOUCHER_SALE_TAG: u64 = u64::MAX - 411;
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VoucherClass {
+pub enum BondClass {
     Backed,
     Promo,
     /// Wraps an ICPSwap LP custody position (owner 2026-07-11). NON-SELLABLE:
@@ -18815,9 +18815,9 @@ pub enum VoucherClass {
 
 /// Registry row — the authoritative claim record (NFT mirrors it).
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct VoucherRecord {
+pub struct BondRecord {
     pub id: u64,
-    pub class: VoucherClass,
+    pub class: BondClass,
     /// StakeTier::idx(); Promo rows carry 0 (unused).
     pub tier: u8,
     /// Backed: staked-ICP claim (e8s). Promo: 0.
@@ -18838,7 +18838,7 @@ pub struct VoucherRecord {
 /// Marketplace sale saga journal — persisted between legs so an interrupted
 /// buy resumes without repeating a block-indexed transfer.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct VoucherSale {
+pub struct BondSale {
     pub voucher_id: u64,
     pub buyer: Principal,
     pub seller: Principal,
@@ -18885,33 +18885,33 @@ pub struct PromoCampaign {
 
 /// Admin-tunable knobs (MemoryId 133).
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct VoucherConfig {
+pub struct BondConfig {
     pub market_fee_bps: u16,
     pub min_wrap_e8s: u64,
 }
 
-impl Default for VoucherConfig {
+impl Default for BondConfig {
     fn default() -> Self {
-        VoucherConfig { market_fee_bps: VOUCHER_FEE_BPS_DEFAULT, min_wrap_e8s: VOUCHER_MIN_WRAP_E8S_DEFAULT }
+        BondConfig { market_fee_bps: VOUCHER_FEE_BPS_DEFAULT, min_wrap_e8s: VOUCHER_MIN_WRAP_E8S_DEFAULT }
     }
 }
 
-impl_storable!(VoucherRecord);
-impl_storable!(VoucherSale);
+impl_storable!(BondRecord);
+impl_storable!(BondSale);
 impl_storable!(BuybackJob);
 impl_storable!(PromoCampaign);
-impl_storable!(VoucherConfig);
+impl_storable!(BondConfig);
 
 thread_local! {
     // 128 — voucher registry (id → record; the ownership source of truth)
-    static VOUCHERS: RefCell<StableBTreeMap<u64, VoucherRecord, Memory>> =
+    static BONDS: RefCell<StableBTreeMap<u64, BondRecord, Memory>> =
         MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(128)))));
     // 129 — next voucher id (ids start at 1; never reused, burns retire them)
-    static NEXT_VOUCHER_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
+    static NEXT_BOND_ID: RefCell<StableCell<u64, Memory>> = MEMORY_MANAGER.with(|mm| {
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(129)), 1u64))
     });
     // 130 — marketplace sale journals (voucher id → saga)
-    static VOUCHER_SALES: RefCell<StableBTreeMap<u64, VoucherSale, Memory>> =
+    static BOND_SALES: RefCell<StableBTreeMap<u64, BondSale, Memory>> =
         MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(130)))));
     // 131 — buyback saga journals (voucher id → job; kept until spread routed)
     static BUYBACK_JOBS: RefCell<StableBTreeMap<u64, BuybackJob, Memory>> =
@@ -18921,15 +18921,15 @@ thread_local! {
         RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(132)), PromoCampaign::default()))
     });
     // 133 — voucher config (fee bps / min wrap)
-    static VOUCHER_CONFIG: RefCell<StableCell<VoucherConfig, Memory>> = MEMORY_MANAGER.with(|mm| {
-        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(133)), VoucherConfig::default()))
+    static VOUCHER_CONFIG: RefCell<StableCell<BondConfig, Memory>> = MEMORY_MANAGER.with(|mm| {
+        RefCell::new(StableCell::init(mm.borrow().get(MemoryId::new(133)), BondConfig::default()))
     });
     // 134 — promo claimed set (principal → 1; one voucher per principal)
     static PROMO_CLAIMED: RefCell<StableBTreeMap<Principal, u8, Memory>> =
         MEMORY_MANAGER.with(|mm| RefCell::new(StableBTreeMap::init(mm.borrow().get(MemoryId::new(134)))));
 }
 
-fn voucher_config() -> VoucherConfig {
+fn voucher_config() -> BondConfig {
     VOUCHER_CONFIG.with(|c| c.borrow().get().clone())
 }
 
@@ -18950,7 +18950,7 @@ fn voucher_nft_cid() -> Result<Principal, String> {
 /// Backed voucher e8s a user holds in one tier (their wrapped stake).
 /// One voucher's daily ticket rate: base × tier multiplier × whole ICP
 /// (sub-1-ICP floors to one base unit) — the same math the daily grant uses.
-fn voucher_daily_rate(v: &VoucherRecord) -> u64 {
+fn voucher_daily_rate(v: &BondRecord) -> u64 {
     let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
     let tier = tier_from_idx(v.tier);
     let whole_icp = (v.amount_e8s / ONE_ICP_E8S).max(1);
@@ -18958,14 +18958,14 @@ fn voucher_daily_rate(v: &VoucherRecord) -> u64 {
 }
 
 fn voucher_backed_e8s(user: Principal, tier: StakeTier) -> u64 {
-    VOUCHERS.with(|m| {
+    BONDS.with(|m| {
         m.borrow()
             .iter()
             .filter(|e| {
                 let v = e.value();
                 // Owner rule (2026-07-10): a voucher LISTED FOR SALE is not
                 // lottery-eligible — its ticket stream pauses until delisted.
-                v.class == VoucherClass::Backed && v.owner == user && v.tier == tier.idx()
+                v.class == BondClass::Backed && v.owner == user && v.tier == tier.idx()
                     && v.listed_price_e8s.is_none()
             })
             .map(|e| e.value().amount_e8s)
@@ -18976,12 +18976,12 @@ fn voucher_backed_e8s(user: Principal, tier: StakeTier) -> u64 {
 /// Promo tickets/day for a user: 1 per unexpired promo voucher they hold.
 fn promo_daily_tickets(user: Principal) -> u64 {
     let now = current_time();
-    VOUCHERS.with(|m| {
+    BONDS.with(|m| {
         m.borrow()
             .iter()
             .filter(|e| {
                 let v = e.value();
-                v.class == VoucherClass::Promo
+                v.class == BondClass::Promo
                     && v.owner == user
                     && v.expires_at.map(|x| now < x).unwrap_or(false)
             })
@@ -19002,7 +19002,7 @@ fn total_daily_tickets(user: Principal) -> u64 {
 async fn voucher_nft_mint(
     token_id: u64,
     to: Principal,
-    class: VoucherClass,
+    class: BondClass,
     tier: u8,
     amount_e8s: u64,
     expires_at: Option<u64>,
@@ -19011,7 +19011,7 @@ async fn voucher_nft_mint(
     struct MintArgs {
         token_id: u64,
         to: Principal,
-        class: VoucherClass,
+        class: BondClass,
         tier: u8,
         amount_e8s: u64,
         expires_at: Option<u64>,
@@ -19063,7 +19063,7 @@ thread_local! {
 async fn voucher_nft_mint(
     token_id: u64,
     to: Principal,
-    _class: VoucherClass,
+    _class: BondClass,
     _tier: u8,
     _amount_e8s: u64,
     _expires_at: Option<u64>,
@@ -19100,9 +19100,9 @@ async fn voucher_nft_burn(token_id: u64) -> Result<(), String> {
 // ── Candid views ────────────────────────────────────────────────────────────
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct VoucherView {
+pub struct BondView {
     pub id: u64,
-    pub class: VoucherClass,
+    pub class: BondClass,
     pub tier: StakeTier,
     pub amount_e8s: u64,
     pub owner: Principal,
@@ -19119,8 +19119,8 @@ fn tier_from_idx(idx: u8) -> StakeTier {
     }
 }
 
-fn voucher_view(v: &VoucherRecord) -> VoucherView {
-    VoucherView {
+fn voucher_view(v: &BondRecord) -> BondView {
+    BondView {
         id: v.id,
         class: v.class,
         tier: tier_from_idx(v.tier),
@@ -19133,21 +19133,21 @@ fn voucher_view(v: &VoucherRecord) -> VoucherView {
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
-pub struct VoucherMarketInfo {
+pub struct BondMarketInfo {
     pub enabled: bool,
     pub min_wrap_e8s: u64,
     pub market_fee_bps: u16,
     pub buyback_discount_bps: u16,
     pub buyback_fund_e8s: u64,
-    pub my_vouchers: Vec<VoucherView>,
-    pub listings: Vec<VoucherView>,
+    pub my_bonds: Vec<BondView>,
+    pub listings: Vec<BondView>,
     pub promo_open: bool,
     pub promo_remaining: u32,
     pub promo_claims_today: u32,
 }
 
 /// Cached buyback-fund balance (heap; refreshed by the sweep + every fund
-/// mutation) so `get_voucher_market` stays a QUERY.
+/// mutation) so `get_bond_market` stays a QUERY.
 thread_local! {
     static CACHED_BUYBACK_FUND_E8S: RefCell<u64> = const { RefCell::new(0) };
 }
@@ -19165,25 +19165,25 @@ async fn refresh_buyback_fund_cache() -> u64 {
 }
 
 #[ic_cdk::query]
-fn get_voucher_market() -> VoucherMarketInfo {
+fn get_bond_market() -> BondMarketInfo {
     let caller = get_caller();
     let campaign = promo_campaign();
     let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
     let claims_today = if campaign.day == today { campaign.claims_today } else { 0 };
-    VoucherMarketInfo {
+    BondMarketInfo {
         enabled: feature_visible(FLAG_STAKE_VOUCHERS, caller),
         min_wrap_e8s: voucher_config().min_wrap_e8s,
         market_fee_bps: voucher_config().market_fee_bps,
         buyback_discount_bps: BUYBACK_DISCOUNT_BPS as u16,
         buyback_fund_e8s: CACHED_BUYBACK_FUND_E8S.with(|c| *c.borrow()),
-        my_vouchers: VOUCHERS.with(|m| {
+        my_bonds: BONDS.with(|m| {
             m.borrow()
                 .iter()
                 .filter(|e| e.value().owner == caller)
                 .map(|e| voucher_view(&e.value()))
                 .collect()
         }),
-        listings: VOUCHERS.with(|m| {
+        listings: BONDS.with(|m| {
             m.borrow()
                 .iter()
                 .filter(|e| e.value().listed_price_e8s.is_some())
@@ -19222,7 +19222,7 @@ async fn auto_issue_voucher(user: Principal, tier: StakeTier) -> Option<u64> {
         return None;
     }
     let now = current_time();
-    let id = NEXT_VOUCHER_ID.with(|c| {
+    let id = NEXT_BOND_ID.with(|c| {
         let id = *c.borrow().get();
         c.borrow_mut().set(id + 1);
         id
@@ -19237,17 +19237,17 @@ async fn auto_issue_voucher(user: Principal, tier: StakeTier) -> Option<u64> {
     } else {
         STAKES.with(|m| { m.borrow_mut().insert(key.clone(), debited); });
     }
-    if let Err(e) = voucher_nft_mint(id, user, VoucherClass::Backed, tier.idx(), whole, None).await {
+    if let Err(e) = voucher_nft_mint(id, user, BondClass::Backed, tier.idx(), whole, None).await {
         canister_print(&format!("auto_issue_voucher: mint failed, stake stays plain: {}", e));
         if let Some(orig) = stake_backup {
             STAKES.with(|m| { m.borrow_mut().insert(key, orig); });
         }
         return None;
     }
-    VOUCHERS.with(|m| {
-        m.borrow_mut().insert(id, VoucherRecord {
+    BONDS.with(|m| {
+        m.borrow_mut().insert(id, BondRecord {
             id,
-            class: VoucherClass::Backed,
+            class: BondClass::Backed,
             tier: tier.idx(),
             amount_e8s: whole,
             owner: user,
@@ -19265,7 +19265,7 @@ async fn auto_issue_voucher(user: Principal, tier: StakeTier) -> Option<u64> {
 /// synthetic principals so the grid is visualizable. NOT pool-backed — local
 /// nets only (hard is_local guard), admin-gated.
 #[ic_cdk::update]
-async fn dev_seed_mock_vouchers(n: u32) -> Result<u32, String> {
+async fn dev_seed_mock_bonds(n: u32) -> Result<u32, String> {
     require_admin()?;
     let config = CONFIG.with(|c| c.borrow().get().clone());
     if !config.is_local {
@@ -19274,7 +19274,7 @@ async fn dev_seed_mock_vouchers(n: u32) -> Result<u32, String> {
     let now = current_time();
     let mut made = 0u32;
     for i in 0..n.min(24) {
-        let id = NEXT_VOUCHER_ID.with(|c| {
+        let id = NEXT_BOND_ID.with(|c| {
             let id = *c.borrow().get();
             c.borrow_mut().set(id + 1);
             id
@@ -19288,12 +19288,12 @@ async fn dev_seed_mock_vouchers(n: u32) -> Result<u32, String> {
         let amount = ONE_ICP_E8S * [2u64, 5, 10, 25, 3, 7][i as usize % 6];
         // Asks scatter around principal: some discounted, some premium.
         let ask = amount * [88u64, 95, 100, 104, 92, 110][i as usize % 6] / 100;
-        if voucher_nft_mint(id, owner, VoucherClass::Backed, tier_idx, amount, None).await.is_err() {
+        if voucher_nft_mint(id, owner, BondClass::Backed, tier_idx, amount, None).await.is_err() {
             continue;
         }
-        VOUCHERS.with(|m| {
-            m.borrow_mut().insert(id, VoucherRecord {
-                id, class: VoucherClass::Backed, tier: tier_idx, amount_e8s: amount,
+        BONDS.with(|m| {
+            m.borrow_mut().insert(id, BondRecord {
+                id, class: BondClass::Backed, tier: tier_idx, amount_e8s: amount,
                 owner, minted_at: now, expires_at: None, listed_price_e8s: Some(ask), last_purchase_grant_day: 0,
             });
         });
@@ -19307,28 +19307,28 @@ async fn dev_seed_mock_vouchers(n: u32) -> Result<u32, String> {
 /// Backed + unlisted only; the recipient's ticket stream starts at the next
 /// daily grant. Never flag-gated (custody exit).
 #[ic_cdk::update]
-async fn transfer_voucher(id: u64, to: Principal) -> Result<(), String> {
+async fn transfer_bond(id: u64, to: Principal) -> Result<(), String> {
     require_authenticated()?;
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
     if to == Principal::anonymous() || to == get_canister_id() {
         return Err("INVALID_PRINCIPAL".to_string());
     }
-    let v = VOUCHERS.with(|m| m.borrow().get(&id)).ok_or("NOT_YOUR_VOUCHER")?;
+    let v = BONDS.with(|m| m.borrow().get(&id)).ok_or("NOT_YOUR_BOND")?;
     if v.owner != caller {
-        return Err("NOT_YOUR_VOUCHER".to_string());
+        return Err("NOT_YOUR_BOND".to_string());
     }
-    if matches!(v.class, VoucherClass::Promo) {
+    if matches!(v.class, BondClass::Promo) {
         return Err("PROMO_NOT_ALLOWED".to_string());
     }
-    if matches!(v.class, VoucherClass::LpBacked) {
+    if matches!(v.class, BondClass::LpBacked) {
         return Err("LP_NOT_ALLOWED".to_string());
     }
     if v.listed_price_e8s.is_some() {
-        return Err("VOUCHER_LISTED".to_string());
+        return Err("BOND_LISTED".to_string());
     }
     voucher_nft_transfer(caller, to, id).await?;
-    VOUCHERS.with(|m| {
+    BONDS.with(|m| {
         let mut reg = m.borrow_mut();
         if let Some(mut rec) = reg.get(&id) {
             rec.owner = to;
@@ -19344,27 +19344,27 @@ async fn transfer_voucher(id: u64, to: Principal) -> Result<(), String> {
 /// plain stake row, and immediately starts the standard unstake — the FULL
 /// amount pays the owner after the tier's dissolve. Never flag-gated (exit).
 #[ic_cdk::update]
-async fn redeem_stake_voucher(id: u64) -> Result<u64, String> {
+async fn redeem_stake_bond(id: u64) -> Result<u64, String> {
     require_authenticated()?;
     let caller = get_caller();
-    let v = VOUCHERS.with(|m| m.borrow().get(&id)).ok_or("NOT_YOUR_VOUCHER")?;
+    let v = BONDS.with(|m| m.borrow().get(&id)).ok_or("NOT_YOUR_BOND")?;
     if v.owner != caller {
-        return Err("NOT_YOUR_VOUCHER".to_string());
+        return Err("NOT_YOUR_BOND".to_string());
     }
-    if matches!(v.class, VoucherClass::Promo) {
+    if matches!(v.class, BondClass::Promo) {
         return Err("PROMO_NOT_ALLOWED".to_string());
     }
-    if matches!(v.class, VoucherClass::LpBacked) {
+    if matches!(v.class, BondClass::LpBacked) {
         return Err("LP_NOT_ALLOWED".to_string());
     }
     if v.listed_price_e8s.is_some() {
-        return Err("VOUCHER_LISTED".to_string());
+        return Err("BOND_LISTED".to_string());
     }
     let tier = tier_from_idx(v.tier);
     let amount = v.amount_e8s;
     // Leg 1: voucher → plain row (burn NFT; restore STAKES). Same-caller
     // call into the unwrap endpoint fn keeps registry/NFT in lockstep.
-    unwrap_stake_voucher(id).await?;
+    unwrap_stake_bond(id).await?;
     // Leg 2: the classic unstake (split + dissolve, pays the owner 100%).
     // If this leg fails (pool constraints), the claim safely REMAINS a plain
     // stake row — the user can retry or restake; nothing is lost.
@@ -19372,7 +19372,7 @@ async fn redeem_stake_voucher(id: u64) -> Result<u64, String> {
 }
 
 #[ic_cdk::update]
-async fn wrap_stake_voucher(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
+async fn wrap_stake_bond(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     require_authenticated()?;
     if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
@@ -19393,7 +19393,7 @@ async fn wrap_stake_voucher(amount_e8s: u64, tier: StakeTier) -> Result<u64, Str
     }
 
     let now = current_time();
-    let id = NEXT_VOUCHER_ID.with(|c| {
+    let id = NEXT_BOND_ID.with(|c| {
         let id = *c.borrow().get();
         c.borrow_mut().set(id + 1);
         id
@@ -19410,7 +19410,7 @@ async fn wrap_stake_voucher(amount_e8s: u64, tier: StakeTier) -> Result<u64, Str
         STAKES.with(|m| { m.borrow_mut().insert(key.clone(), stake.clone()); });
     }
 
-    if let Err(e) = voucher_nft_mint(id, caller, VoucherClass::Backed, tier.idx(), amount_e8s, None).await {
+    if let Err(e) = voucher_nft_mint(id, caller, BondClass::Backed, tier.idx(), amount_e8s, None).await {
         // Revert: restore the exact pre-debit row.
         if let Some(orig) = stake_backup {
             STAKES.with(|m| { m.borrow_mut().insert(key, orig); });
@@ -19418,10 +19418,10 @@ async fn wrap_stake_voucher(amount_e8s: u64, tier: StakeTier) -> Result<u64, Str
         return Err(e);
     }
 
-    VOUCHERS.with(|m| {
-        m.borrow_mut().insert(id, VoucherRecord {
+    BONDS.with(|m| {
+        m.borrow_mut().insert(id, BondRecord {
             id,
-            class: VoucherClass::Backed,
+            class: BondClass::Backed,
             tier: tier.idx(),
             amount_e8s,
             owner: caller,
@@ -19438,24 +19438,24 @@ async fn wrap_stake_voucher(amount_e8s: u64, tier: StakeTier) -> Result<u64, Str
 /// Unwrap a Backed voucher back into a plain stake row (burns the NFT).
 /// Deliberately NOT flag-gated: it is an exit.
 #[ic_cdk::update]
-async fn unwrap_stake_voucher(voucher_id: u64) -> Result<(), String> {
+async fn unwrap_stake_bond(voucher_id: u64) -> Result<(), String> {
     require_authenticated()?;
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
-    let v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+    let v = BONDS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
     if v.owner != caller {
-        return Err("NOT_YOUR_VOUCHER".to_string());
+        return Err("NOT_YOUR_BOND".to_string());
     }
-    if matches!(v.class, VoucherClass::LpBacked) {
+    if matches!(v.class, BondClass::LpBacked) {
         return Err("LP_NOT_ALLOWED".to_string());
     }
-    if v.class != VoucherClass::Backed {
+    if v.class != BondClass::Backed {
         return Err("PROMO_NOT_REDEEMABLE".to_string());
     }
     if v.listed_price_e8s.is_some() {
         return Err("LISTED: cancel the listing first".to_string());
     }
-    if VOUCHER_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
+    if BOND_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
         return Err("SALE_IN_PROGRESS".to_string());
     }
     if BUYBACK_JOBS.with(|m| m.borrow().contains_key(&voucher_id)) {
@@ -19475,7 +19475,7 @@ async fn unwrap_stake_voucher(voucher_id: u64) -> Result<(), String> {
     stake.amount_e8s = stake.amount_e8s.saturating_add(v.amount_e8s);
     stake.last_action_at = now;
     STAKES.with(|m| { m.borrow_mut().insert(key, stake); });
-    VOUCHERS.with(|m| { m.borrow_mut().remove(&voucher_id); });
+    BONDS.with(|m| { m.borrow_mut().remove(&voucher_id); });
     staking_audit("voucher_unwrap", caller, v.amount_e8s, voucher_id);
     Ok(())
 }
@@ -19483,61 +19483,61 @@ async fn unwrap_stake_voucher(voucher_id: u64) -> Result<(), String> {
 // ── Marketplace (ICP asks only) ─────────────────────────────────────────────
 
 #[ic_cdk::update]
-fn list_voucher(voucher_id: u64, price_e8s: u64) -> Result<(), String> {
+fn list_bond(voucher_id: u64, price_e8s: u64) -> Result<(), String> {
     require_authenticated()?;
     if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
     }
     let caller = get_caller();
-    let mut v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+    let mut v = BONDS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
     if v.owner != caller {
-        return Err("NOT_YOUR_VOUCHER".to_string());
+        return Err("NOT_YOUR_BOND".to_string());
     }
-    if matches!(v.class, VoucherClass::LpBacked) {
+    if matches!(v.class, BondClass::LpBacked) {
         return Err("LP_NOT_ALLOWED".to_string());
     }
-    if v.class != VoucherClass::Backed {
+    if v.class != BondClass::Backed {
         return Err("PROMO_NOT_LISTABLE".to_string());
     }
     if price_e8s < VOUCHER_MIN_LIST_E8S {
         return Err("PRICE_TOO_LOW".to_string());
     }
-    if VOUCHER_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
+    if BOND_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
         return Err("SALE_IN_PROGRESS".to_string());
     }
     if BUYBACK_JOBS.with(|m| m.borrow().contains_key(&voucher_id)) {
         return Err("BUYBACK_IN_PROGRESS".to_string());
     }
     v.listed_price_e8s = Some(price_e8s);
-    VOUCHERS.with(|m| { m.borrow_mut().insert(voucher_id, v); });
+    BONDS.with(|m| { m.borrow_mut().insert(voucher_id, v); });
     Ok(())
 }
 
 /// Cancel a listing. NOT flag-gated (withdrawing an offer is an exit).
 #[ic_cdk::update]
-fn cancel_voucher_listing(voucher_id: u64) -> Result<(), String> {
+fn cancel_bond_listing(voucher_id: u64) -> Result<(), String> {
     require_authenticated()?;
     let caller = get_caller();
-    let mut v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+    let mut v = BONDS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
     if v.owner != caller {
-        return Err("NOT_YOUR_VOUCHER".to_string());
+        return Err("NOT_YOUR_BOND".to_string());
     }
-    if VOUCHER_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
+    if BOND_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
         return Err("SALE_IN_PROGRESS".to_string());
     }
     if v.listed_price_e8s.is_none() {
         return Err("NOT_LISTED".to_string());
     }
     v.listed_price_e8s = None;
-    VOUCHERS.with(|m| { m.borrow_mut().insert(voucher_id, v); });
+    BONDS.with(|m| { m.borrow_mut().insert(voucher_id, v); });
     Ok(())
 }
 
 /// The buyer-specific escrow account for a listing: fund it with
 /// ask + 4 × 0.0001 ICP (the settlement legs' ledger fees), then call
-/// `buy_voucher`. Leftovers are reclaimable via `reclaim_escrow(StakeVoucher)`.
+/// `buy_bond`. Leftovers are reclaimable via `reclaim_escrow(StakeVoucher)`.
 #[ic_cdk::query]
-fn get_voucher_sale_account(voucher_id: u64) -> LedgerAccount {
+fn get_bond_sale_account(voucher_id: u64) -> LedgerAccount {
     LedgerAccount {
         owner: get_canister_id(),
         subaccount: Some(derive_subaccount(&get_caller(), VOUCHER_SALE_TAG ^ voucher_id)),
@@ -19548,7 +19548,7 @@ fn get_voucher_sale_account(voucher_id: u64) -> LedgerAccount {
 /// seller leg → fee legs (1/3 treasury · 1/3 buyback fund · 1/3 voucher-nft
 /// cycles burn) → ownership move (registry + NFT). Resume-safe per leg.
 #[ic_cdk::update]
-async fn buy_voucher(voucher_id: u64) -> Result<(), String> {
+async fn buy_bond(voucher_id: u64) -> Result<(), String> {
     require_authenticated()?;
     if !feature_visible(FLAG_STAKE_VOUCHERS, get_caller()) {
         return Err("FEATURE_DISABLED".to_string());
@@ -19556,20 +19556,20 @@ async fn buy_voucher(voucher_id: u64) -> Result<(), String> {
     let buyer = get_caller();
     let _guard = CallerGuard::new(buyer)?;
 
-    let mut sale = match VOUCHER_SALES.with(|m| m.borrow().get(&voucher_id)) {
+    let mut sale = match BOND_SALES.with(|m| m.borrow().get(&voucher_id)) {
         Some(existing) if existing.buyer == buyer => existing,
         Some(_) => return Err("SALE_IN_PROGRESS".to_string()),
         None => {
-            let v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+            let v = BONDS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
             let price_e8s = v.listed_price_e8s.ok_or("NOT_LISTED")?;
             if v.owner == buyer {
                 return Err("CANNOT_BUY_OWN_VOUCHER".to_string());
             }
-            if v.class != VoucherClass::Backed {
+            if v.class != BondClass::Backed {
                 return Err("PROMO_NOT_LISTABLE".to_string());
             }
             let fee_e8s = price_e8s.saturating_mul(voucher_config().market_fee_bps as u64) / 10_000;
-            VoucherSale {
+            BondSale {
                 voucher_id,
                 buyer,
                 seller: v.owner,
@@ -19585,14 +19585,14 @@ async fn buy_voucher(voucher_id: u64) -> Result<(), String> {
             }
         }
     };
-    VOUCHER_SALES.with(|m| { m.borrow_mut().insert(voucher_id, sale.clone()); });
+    BOND_SALES.with(|m| { m.borrow_mut().insert(voucher_id, sale.clone()); });
 
     let result = run_voucher_sale_saga(&mut sale).await;
-    VOUCHER_SALES.with(|m| { m.borrow_mut().insert(voucher_id, sale.clone()); });
+    BOND_SALES.with(|m| { m.borrow_mut().insert(voucher_id, sale.clone()); });
     result?;
 
     // Success: move the registry row, clear the listing + journal.
-    VOUCHERS.with(|m| {
+    BONDS.with(|m| {
         let mut map = m.borrow_mut();
         if let Some(mut v) = map.get(&voucher_id) {
             v.owner = sale.buyer;
@@ -19600,15 +19600,15 @@ async fn buy_voucher(voucher_id: u64) -> Result<(), String> {
             map.insert(voucher_id, v);
         }
     });
-    VOUCHER_SALES.with(|m| { m.borrow_mut().remove(&voucher_id); });
+    BOND_SALES.with(|m| { m.borrow_mut().remove(&voucher_id); });
     // Owner rule (2026-07-10): buying a voucher rewards the buyer with THAT
     // voucher's daily tickets immediately, entering the upcoming draw — once
     // per voucher per UTC day, so a wash-traded voucher can't be farmed.
     let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
-    let granted = VOUCHERS.with(|m| {
+    let granted = BONDS.with(|m| {
         let mut reg = m.borrow_mut();
         match reg.get(&voucher_id) {
-            Some(mut rec) if rec.class == VoucherClass::Backed && rec.last_purchase_grant_day < today => {
+            Some(mut rec) if rec.class == BondClass::Backed && rec.last_purchase_grant_day < today => {
                 rec.last_purchase_grant_day = today;
                 let rate = voucher_daily_rate(&rec);
                 reg.insert(voucher_id, rec);
@@ -19625,7 +19625,7 @@ async fn buy_voucher(voucher_id: u64) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_voucher_sale_saga(sale: &mut VoucherSale) -> Result<(), String> {
+async fn run_voucher_sale_saga(sale: &mut BondSale) -> Result<(), String> {
     let config = CONFIG.with(|c| c.borrow().get().clone());
     let ledger = config.ledger_canister_id;
     let escrow_sub = derive_subaccount(&sale.buyer, VOUCHER_SALE_TAG ^ sale.voucher_id);
@@ -19638,7 +19638,7 @@ async fn run_voucher_sale_saga(sale: &mut VoucherSale) -> Result<(), String> {
         let required = sale.price_e8s + 4 * ICP_FEE_E8S;
         if balance < required {
             // Nothing moved yet — drop the journal so the listing stays open.
-            VOUCHER_SALES.with(|m| { m.borrow_mut().remove(&sale.voucher_id); });
+            BOND_SALES.with(|m| { m.borrow_mut().remove(&sale.voucher_id); });
             return Err("ESCROW_NOT_FUNDED".to_string());
         }
     }
@@ -19731,7 +19731,7 @@ async fn run_voucher_sale_saga(sale: &mut VoucherSale) -> Result<(), String> {
 /// splits + dissolves with its principal targeted back at the fund. NOT
 /// flag-gated (it is an exit). Refuses when the fund can't cover the payout.
 #[ic_cdk::update]
-async fn buyback_voucher(voucher_id: u64) -> Result<u64, String> {
+async fn buyback_bond(voucher_id: u64) -> Result<u64, String> {
     require_authenticated()?;
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
@@ -19750,20 +19750,20 @@ async fn buyback_voucher(voucher_id: u64) -> Result<u64, String> {
         return Err("BUYBACK_IN_PROGRESS".to_string());
     }
 
-    let v = VOUCHERS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
+    let v = BONDS.with(|m| m.borrow().get(&voucher_id)).ok_or("VOUCHER_NOT_FOUND")?;
     if v.owner != caller {
-        return Err("NOT_YOUR_VOUCHER".to_string());
+        return Err("NOT_YOUR_BOND".to_string());
     }
-    if matches!(v.class, VoucherClass::LpBacked) {
+    if matches!(v.class, BondClass::LpBacked) {
         return Err("LP_NOT_ALLOWED".to_string());
     }
-    if v.class != VoucherClass::Backed {
+    if v.class != BondClass::Backed {
         return Err("PROMO_NOT_REDEEMABLE".to_string());
     }
     if v.listed_price_e8s.is_some() {
         return Err("LISTED: cancel the listing first".to_string());
     }
-    if VOUCHER_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
+    if BOND_SALES.with(|m| m.borrow().contains_key(&voucher_id)) {
         return Err("SALE_IN_PROGRESS".to_string());
     }
 
@@ -19826,7 +19826,7 @@ async fn advance_buyback_job(job: &mut BuybackJob) -> Result<(), String> {
             .map_err(|e| format!("BUYBACK_PAY_XFER: {}", e))?;
         job.pay_block = Some(b);
         // The claim is consumed the instant the owner is paid.
-        VOUCHERS.with(|m| { m.borrow_mut().remove(&job.voucher_id); });
+        BONDS.with(|m| { m.borrow_mut().remove(&job.voucher_id); });
         BUYBACK_JOBS.with(|m| { m.borrow_mut().insert(job.voucher_id, job.clone()); });
         staking_audit("voucher_buyback_paid", job.owner, job.pay_e8s, job.voucher_id);
         let _ = refresh_buyback_fund_cache().await;
@@ -19997,7 +19997,7 @@ fn is_self_authenticating(p: &Principal) -> bool {
 /// holders can receive without ever signing in (earning is server-side and
 /// jackpots pay automatically). One per principal; global cap; daily drip.
 #[ic_cdk::update]
-async fn claim_promo_voucher(target: Option<Principal>) -> Result<u64, String> {
+async fn claim_golden_ticket(target: Option<Principal>) -> Result<u64, String> {
     if !feature_enabled(FLAG_STAKE_VOUCHERS) {
         return Err("FEATURE_DISABLED".to_string());
     }
@@ -20036,18 +20036,18 @@ async fn claim_promo_voucher(target: Option<Principal>) -> Result<u64, String> {
         return Err("DAILY_LIMIT".to_string());
     }
 
-    let id = NEXT_VOUCHER_ID.with(|c| {
+    let id = NEXT_BOND_ID.with(|c| {
         let id = *c.borrow().get();
         c.borrow_mut().set(id + 1);
         id
     });
     let expires_at = now.saturating_add(PROMO_EXPIRY_NS);
-    voucher_nft_mint(id, recipient, VoucherClass::Promo, 0, 0, Some(expires_at)).await?;
+    voucher_nft_mint(id, recipient, BondClass::Promo, 0, 0, Some(expires_at)).await?;
 
-    VOUCHERS.with(|m| {
-        m.borrow_mut().insert(id, VoucherRecord {
+    BONDS.with(|m| {
+        m.borrow_mut().insert(id, BondRecord {
             id,
-            class: VoucherClass::Promo,
+            class: BondClass::Promo,
             tier: 0,
             amount_e8s: 0,
             owner: recipient,
@@ -20098,7 +20098,7 @@ async fn admin_withdraw_buyback(to: Principal, amount_e8s: u64) -> Result<(), St
 }
 
 #[ic_cdk::update]
-fn admin_set_voucher_config(fee_bps: Option<u16>, min_wrap_e8s: Option<u64>) -> Result<(), String> {
+fn admin_set_bond_config(fee_bps: Option<u16>, min_wrap_e8s: Option<u64>) -> Result<(), String> {
     require_admin()?;
     let mut cfg = voucher_config();
     if let Some(bps) = fee_bps {
@@ -28672,20 +28672,20 @@ mod tests {
         let count = LOTTERY_TICKETS.with(|m| m.borrow().get(&dave).map(|e| e.count).unwrap_or(0));
         assert_eq!(count, ICP_LP_TICKETS_PER_USD_DAY, "$1 → 40/day with no neuron stake");
         // 3) LpBacked companion voucher exists, is ticket-inert and sell-proof.
-        let vid = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == dave).map(|e| *e.key()))
+        let vid = BONDS.with(|m| m.borrow().iter().find(|e| e.value().owner == dave).map(|e| *e.key()))
             .expect("LP stake minted a companion voucher");
-        let v = VOUCHERS.with(|m| m.borrow().get(&vid)).unwrap();
-        assert_eq!(v.class, VoucherClass::LpBacked);
+        let v = BONDS.with(|m| m.borrow().get(&vid)).unwrap();
+        assert_eq!(v.class, BondClass::LpBacked);
         assert_eq!(v.amount_e8s, 0, "never a principal claim");
         assert_eq!(user_daily_tickets(dave), 0, "no voucher-math tickets — LP path pays instead");
-        assert_eq!(list_voucher(vid, 100_000_000).unwrap_err(), "LP_NOT_ALLOWED");
-        assert_eq!(buyback_voucher(vid).await.unwrap_err(), "LP_NOT_ALLOWED");
-        assert_eq!(redeem_stake_voucher(vid).await.unwrap_err(), "LP_NOT_ALLOWED");
-        assert_eq!(transfer_voucher(vid, alice()).await.unwrap_err(), "LP_NOT_ALLOWED");
-        assert_eq!(unwrap_stake_voucher(vid).await.unwrap_err(), "LP_NOT_ALLOWED");
+        assert_eq!(list_bond(vid, 100_000_000).unwrap_err(), "LP_NOT_ALLOWED");
+        assert_eq!(buyback_bond(vid).await.unwrap_err(), "LP_NOT_ALLOWED");
+        assert_eq!(redeem_stake_bond(vid).await.unwrap_err(), "LP_NOT_ALLOWED");
+        assert_eq!(transfer_bond(vid, alice()).await.unwrap_err(), "LP_NOT_ALLOWED");
+        assert_eq!(unwrap_stake_bond(vid).await.unwrap_err(), "LP_NOT_ALLOWED");
         // 4) Unstake burns the voucher and status reverts.
         unstake_lp_position(pool, 41, dave).await.unwrap();
-        assert!(VOUCHERS.with(|m| m.borrow().get(&vid).is_none()), "voucher burned at unstake");
+        assert!(BONDS.with(|m| m.borrow().get(&vid).is_none()), "voucher burned at unstake");
         assert!(!author_is_staked(dave));
         clear_icp_lp();
         clear_vouchers();
@@ -29789,10 +29789,10 @@ mod tests {
     }
 
     fn clear_vouchers() {
-        let ids: Vec<u64> = VOUCHERS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-        VOUCHERS.with(|m| { let mut m = m.borrow_mut(); for id in &ids { m.remove(id); } });
-        let sales: Vec<u64> = VOUCHER_SALES.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
-        VOUCHER_SALES.with(|m| { let mut m = m.borrow_mut(); for id in &sales { m.remove(id); } });
+        let ids: Vec<u64> = BONDS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        BONDS.with(|m| { let mut m = m.borrow_mut(); for id in &ids { m.remove(id); } });
+        let sales: Vec<u64> = BOND_SALES.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        BOND_SALES.with(|m| { let mut m = m.borrow_mut(); for id in &sales { m.remove(id); } });
         let jobs: Vec<u64> = BUYBACK_JOBS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
         BUYBACK_JOBS.with(|m| { let mut m = m.borrow_mut(); for id in &jobs { m.remove(id); } });
         let claimed: Vec<Principal> = PROMO_CLAIMED.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
@@ -29815,9 +29815,9 @@ mod tests {
         let plain: u64 = STAKES.with(|m| {
             m.borrow().iter().filter(|e| e.key().tier == tier.idx()).map(|e| e.value().amount_e8s).sum()
         });
-        let backed: u64 = VOUCHERS.with(|m| {
+        let backed: u64 = BONDS.with(|m| {
             m.borrow().iter()
-                .filter(|e| e.value().class == VoucherClass::Backed && e.value().tier == tier.idx())
+                .filter(|e| e.value().class == BondClass::Backed && e.value().tier == tier.idx())
                 .map(|e| e.value().amount_e8s).sum()
         });
         tier_pool(tier).total_staked_e8s == plain + backed
@@ -29838,21 +29838,21 @@ mod tests {
         assert!(conservation_holds(StakeTier::SixMonths));
         let before = user_daily_tickets(alice);
         assert!(before > 0);
-        let auto_id = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).expect("stake auto-issued a voucher");
-        assert_eq!(VOUCHERS.with(|m| m.borrow().get(&auto_id).unwrap().amount_e8s), 500_000_000);
+        let auto_id = BONDS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).expect("stake auto-issued a voucher");
+        assert_eq!(BONDS.with(|m| m.borrow().get(&auto_id).unwrap().amount_e8s), 500_000_000);
         assert!(STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).is_none()),
             "whole stake moved into the voucher");
 
         // Unwrap back to a plain row (legacy path), then the manual-wrap
         // guard gauntlet still holds, then re-wrap 3 of the 5 ICP.
-        unwrap_stake_voucher(auto_id).await.unwrap();
+        unwrap_stake_bond(auto_id).await.unwrap();
         assert!(conservation_holds(StakeTier::SixMonths));
         assert_eq!(user_daily_tickets(alice), before, "unwrap is grant-neutral");
-        assert_eq!(wrap_stake_voucher(50_000_000, StakeTier::SixMonths).await.unwrap_err(), "BELOW_MINIMUM");
-        assert_eq!(wrap_stake_voucher(150_000_000, StakeTier::SixMonths).await.unwrap_err(), "WHOLE_ICP_ONLY");
-        assert_eq!(wrap_stake_voucher(600_000_000, StakeTier::SixMonths).await.unwrap_err(), "INSUFFICIENT_STAKE");
-        assert_eq!(wrap_stake_voucher(100_000_000, StakeTier::TwoYears).await.unwrap_err(), "NO_STAKE");
-        let id = wrap_stake_voucher(300_000_000, StakeTier::SixMonths).await.unwrap();
+        assert_eq!(wrap_stake_bond(50_000_000, StakeTier::SixMonths).await.unwrap_err(), "BELOW_MINIMUM");
+        assert_eq!(wrap_stake_bond(150_000_000, StakeTier::SixMonths).await.unwrap_err(), "WHOLE_ICP_ONLY");
+        assert_eq!(wrap_stake_bond(600_000_000, StakeTier::SixMonths).await.unwrap_err(), "INSUFFICIENT_STAKE");
+        assert_eq!(wrap_stake_bond(100_000_000, StakeTier::TwoYears).await.unwrap_err(), "NO_STAKE");
+        let id = wrap_stake_bond(300_000_000, StakeTier::SixMonths).await.unwrap();
         assert_eq!(
             STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
             200_000_000
@@ -29868,7 +29868,7 @@ mod tests {
 
         // Wrap the REST — the plain row disappears but eligibility survives
         // through the Backed voucher.
-        wrap_stake_voucher(200_000_000, StakeTier::SixMonths).await.unwrap();
+        wrap_stake_bond(200_000_000, StakeTier::SixMonths).await.unwrap();
         assert!(STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).is_none()));
         assert_eq!(user_daily_tickets(alice), before);
         assert!(author_is_staked(alice));
@@ -29876,7 +29876,7 @@ mod tests {
 
         // Unwrap works with the FLAG OFF (exits are never gated).
         FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_STAKE_VOUCHERS.to_string(), 0u8); });
-        unwrap_stake_voucher(id).await.unwrap();
+        unwrap_stake_bond(id).await.unwrap();
         assert_eq!(
             STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
             300_000_000
@@ -29884,12 +29884,12 @@ mod tests {
         assert!(conservation_holds(StakeTier::SixMonths));
         assert_eq!(user_daily_tickets(alice), before);
         // …but wrap is gated.
-        assert_eq!(wrap_stake_voucher(100_000_000, StakeTier::SixMonths).await.unwrap_err(), "FEATURE_DISABLED");
+        assert_eq!(wrap_stake_bond(100_000_000, StakeTier::SixMonths).await.unwrap_err(), "FEATURE_DISABLED");
         FEATURE_FLAGS.with(|m| { m.borrow_mut().insert(FLAG_STAKE_VOUCHERS.to_string(), 1u8); });
 
         // Mint failure reverts the debit exactly.
         TEST_MOCK_VOUCHER_MINT_FAIL.with(|c| *c.borrow_mut() = true);
-        assert!(wrap_stake_voucher(100_000_000, StakeTier::SixMonths).await.is_err());
+        assert!(wrap_stake_bond(100_000_000, StakeTier::SixMonths).await.is_err());
         assert_eq!(
             STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::SixMonths, alice)).unwrap().amount_e8s),
             300_000_000
@@ -29910,26 +29910,26 @@ mod tests {
         set_tier_pool(StakeTier::OneYear, pool);
         set_mock_caller(alice());
         set_mock_ledger_transfer(Ok(1));
-        let id = wrap_stake_voucher(200_000_000, StakeTier::OneYear).await.unwrap();
+        let id = wrap_stake_bond(200_000_000, StakeTier::OneYear).await.unwrap();
 
         // Listing guards.
-        assert_eq!(list_voucher(id, 1_000).unwrap_err(), "PRICE_TOO_LOW");
-        assert_eq!(cancel_voucher_listing(id).unwrap_err(), "NOT_LISTED");
+        assert_eq!(list_bond(id, 1_000).unwrap_err(), "PRICE_TOO_LOW");
+        assert_eq!(cancel_bond_listing(id).unwrap_err(), "NOT_LISTED");
         set_mock_caller(bob());
-        assert_eq!(list_voucher(id, 100_000_000).unwrap_err(), "NOT_YOUR_VOUCHER");
+        assert_eq!(list_bond(id, 100_000_000).unwrap_err(), "NOT_YOUR_BOND");
         set_mock_caller(alice());
-        list_voucher(id, 100_000_000).unwrap(); // ask: 1 ICP
+        list_bond(id, 100_000_000).unwrap(); // ask: 1 ICP
 
         // Buyer escrow underfunded → ESCROW_NOT_FUNDED, listing intact.
         acct_reset();
         set_mock_caller(bob());
-        assert_eq!(buy_voucher(id).await.unwrap_err(), "ESCROW_NOT_FUNDED");
-        assert!(VOUCHERS.with(|m| m.borrow().get(&id).unwrap().listed_price_e8s.is_some()));
+        assert_eq!(buy_bond(id).await.unwrap_err(), "ESCROW_NOT_FUNDED");
+        assert!(BONDS.with(|m| m.borrow().get(&id).unwrap().listed_price_e8s.is_some()));
 
         // Fund escrow with ask + 4 fees + some dust the buyer later reclaims.
         let escrow_sub = derive_subaccount(&bob(), VOUCHER_SALE_TAG ^ id);
         acct_set(self_id, Some(escrow_sub), 100_000_000 + 4 * ICP_FEE_E8S + 55_000);
-        buy_voucher(id).await.unwrap();
+        buy_bond(id).await.unwrap();
 
         // Money: fee = 2.5% of 1 ICP = 2_500_000. thirds: fund 833_333,
         // cmc 833_333, treasury 833_334 (remainder). Seller: 97_500_000.
@@ -29945,11 +29945,11 @@ mod tests {
         );
 
         // Ownership: registry + NFT mirror moved; listing cleared; journal gone.
-        let v = VOUCHERS.with(|m| m.borrow().get(&id)).unwrap();
+        let v = BONDS.with(|m| m.borrow().get(&id)).unwrap();
         assert_eq!(v.owner, bob());
         assert!(v.listed_price_e8s.is_none());
         assert_eq!(TEST_MOCK_VOUCHER_OWNER.with(|m| m.borrow().get(&id).copied()), Some(bob()));
-        assert!(VOUCHER_SALES.with(|m| m.borrow().get(&id).is_none()));
+        assert!(BOND_SALES.with(|m| m.borrow().get(&id).is_none()));
 
         // Tickets follow the owner: buyer earns from the claim now, seller's
         // last stake left with the sale → no longer staked, earns nothing.
@@ -29960,16 +29960,16 @@ mod tests {
 
         // Re-buy of an unlisted voucher → NOT_LISTED; buyer reclaims dust.
         set_mock_caller(alice());
-        assert_eq!(buy_voucher(id).await.unwrap_err(), "NOT_LISTED");
+        assert_eq!(buy_bond(id).await.unwrap_err(), "NOT_LISTED");
         set_mock_caller(bob());
         let reclaimed = reclaim_escrow(EscrowKind::StakeVoucher, ExplorerToken::ICP, Some(id)).await.unwrap();
         assert_eq!(reclaimed, 55_000 - ICP_FEE_E8S, "leftover escrow minus the reclaim fee");
 // Owner rule: purchase grants THIS voucher's daily rate INSTANTLY into
         // the current round (source voucher_purchase), once per voucher per day.
         {
-            let vid_now = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == bob()).map(|e| *e.key()));
+            let vid_now = BONDS.with(|m| m.borrow().iter().find(|e| e.value().owner == bob()).map(|e| *e.key()));
             if let Some(vid_now) = vid_now {
-                let v = VOUCHERS.with(|m| m.borrow().get(&vid_now)).unwrap();
+                let v = BONDS.with(|m| m.borrow().get(&vid_now)).unwrap();
                 let rate = voucher_daily_rate(&v);
                 let count = LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0));
                 assert!(count >= rate, "instant grant landed: {} >= {}", count, rate);
@@ -29991,27 +29991,27 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
         stake(300_000_000, StakeTier::SixMonths).await.unwrap();
-        let vid = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
+        let vid = BONDS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
         let earning = user_daily_tickets(alice);
         assert!(earning > 0);
 
         // Owner rule: LISTED ⇒ not lottery-eligible until delisted.
-        list_voucher(vid, 250_000_000).unwrap();
+        list_bond(vid, 250_000_000).unwrap();
         assert_eq!(user_daily_tickets(alice), 0, "listed voucher earns nothing");
-        cancel_voucher_listing(vid).unwrap();
+        cancel_bond_listing(vid).unwrap();
         assert_eq!(user_daily_tickets(alice), earning, "delisting resumes the stream");
 
         // Wallet rail: transfer moves the claim AND the ticket stream.
-        assert_eq!(transfer_voucher(vid, Principal::anonymous()).await.unwrap_err(), "INVALID_PRINCIPAL");
-        list_voucher(vid, 250_000_000).unwrap();
-        assert_eq!(transfer_voucher(vid, dave).await.unwrap_err(), "VOUCHER_LISTED");
-        cancel_voucher_listing(vid).unwrap();
-        transfer_voucher(vid, dave).await.unwrap();
-        assert_eq!(VOUCHERS.with(|m| m.borrow().get(&vid).unwrap().owner), dave);
+        assert_eq!(transfer_bond(vid, Principal::anonymous()).await.unwrap_err(), "INVALID_PRINCIPAL");
+        list_bond(vid, 250_000_000).unwrap();
+        assert_eq!(transfer_bond(vid, dave).await.unwrap_err(), "BOND_LISTED");
+        cancel_bond_listing(vid).unwrap();
+        transfer_bond(vid, dave).await.unwrap();
+        assert_eq!(BONDS.with(|m| m.borrow().get(&vid).unwrap().owner), dave);
         assert_eq!(user_daily_tickets(alice), 0);
         assert_eq!(user_daily_tickets(dave), earning, "stream follows the voucher");
         // Only the new owner can send it onward.
-        assert_eq!(transfer_voucher(vid, alice).await.unwrap_err(), "NOT_YOUR_VOUCHER");
+        assert_eq!(transfer_bond(vid, alice).await.unwrap_err(), "NOT_YOUR_BOND");
         clear_vouchers();
     }
 
@@ -30034,9 +30034,9 @@ mod tests {
 
         // Owner model: staking IS receiving the NFT — no wrap step.
         stake(400_000_000, StakeTier::OneYear).await.unwrap();
-        let vid = VOUCHERS.with(|m| m.borrow().iter().filter(|e| e.value().owner == alice).map(|e| *e.key()).max())
+        let vid = BONDS.with(|m| m.borrow().iter().filter(|e| e.value().owner == alice).map(|e| *e.key()).max())
             .expect("voucher issued at stake time");
-        let v = VOUCHERS.with(|m| m.borrow().get(&vid)).unwrap();
+        let v = BONDS.with(|m| m.borrow().get(&vid)).unwrap();
         assert_eq!(v.amount_e8s, 400_000_000);
         assert!(STAKES.with(|m| m.borrow().get(&stake_key(StakeTier::OneYear, alice)).is_none()));
         assert!(user_daily_tickets(alice) > 0, "voucher earns like the stake it is");
@@ -30050,8 +30050,8 @@ mod tests {
 
         // Redeem (the modal's "wait for dissolve" path): voucher burns, a
         // pending unstake for the FULL amount pays the OWNER.
-        let pid = redeem_stake_voucher(vid).await.unwrap();
-        assert!(VOUCHERS.with(|m| m.borrow().get(&vid).is_none()), "voucher consumed");
+        let pid = redeem_stake_bond(vid).await.unwrap();
+        assert!(BONDS.with(|m| m.borrow().get(&vid).is_none()), "voucher consumed");
         let pending = PENDING_UNSTAKES.with(|m| m.borrow().get(&pid)).unwrap();
         assert_eq!(pending.user, alice);
         assert_eq!(pending.amount_e8s, 400_000_000);
@@ -30062,8 +30062,8 @@ mod tests {
         set_mock_caller(carol());
         admin_set_promo_campaign(true).unwrap();
         set_mock_caller(alice);
-        let promo_id = claim_promo_voucher(None).await.unwrap();
-        assert_eq!(redeem_stake_voucher(promo_id).await.unwrap_err(), "PROMO_NOT_ALLOWED");
+        let promo_id = claim_golden_ticket(None).await.unwrap();
+        assert_eq!(redeem_stake_bond(promo_id).await.unwrap_err(), "PROMO_NOT_ALLOWED");
         clear_vouchers();
     }
 
@@ -30078,9 +30078,9 @@ mod tests {
         set_mock_ledger_transfer(Ok(1));
         stake(500_000_000, StakeTier::SixMonths).await.unwrap(); // 5 ICP, pool Ready
         // stake auto-issues a 5-ICP voucher; unwrap it and re-wrap a 2-ICP slice.
-        let auto = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
-        unwrap_stake_voucher(auto).await.unwrap();
-        let id = wrap_stake_voucher(200_000_000, StakeTier::SixMonths).await.unwrap(); // 2 ICP claim
+        let auto = BONDS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
+        unwrap_stake_bond(auto).await.unwrap();
+        let id = wrap_stake_bond(200_000_000, StakeTier::SixMonths).await.unwrap(); // 2 ICP claim
 
         // Money sim on: fund the buyback wallet + treasury (front + refills).
         acct_reset();
@@ -30090,12 +30090,12 @@ mod tests {
         acct_set(self_id, Some(MOCK_STAKE_SUBACCOUNT), 1_000_000_000);
 
         // Listed vouchers can't be bought back.
-        list_voucher(id, 150_000_000).unwrap();
-        assert!(buyback_voucher(id).await.unwrap_err().starts_with("LISTED"));
-        cancel_voucher_listing(id).unwrap();
+        list_bond(id, 150_000_000).unwrap();
+        assert!(buyback_bond(id).await.unwrap_err().starts_with("LISTED"));
+        cancel_bond_listing(id).unwrap();
 
         // The saga: alice is paid 85% of 2 ICP = 1.7 ICP from the fund.
-        let paid = buyback_voucher(id).await.unwrap();
+        let paid = buyback_bond(id).await.unwrap();
         assert_eq!(paid, 170_000_000);
         assert_eq!(acct_get(alice, None), 170_000_000);
         assert_eq!(
@@ -30104,7 +30104,7 @@ mod tests {
             "fund paid out 85% + one ledger fee"
         );
         // Registry + NFT gone; a pending unstake targets the fund.
-        assert!(VOUCHERS.with(|m| m.borrow().get(&id).is_none()));
+        assert!(BONDS.with(|m| m.borrow().get(&id).is_none()));
         assert!(TEST_MOCK_VOUCHER_OWNER.with(|m| m.borrow().get(&id).is_none()));
         let job = BUYBACK_JOBS.with(|m| m.borrow().get(&id)).unwrap();
         let pid = job.pending_unstake_id.unwrap();
@@ -30115,7 +30115,7 @@ mod tests {
         assert!(conservation_holds(StakeTier::SixMonths));
 
         // Owner already paid → the same voucher can't be bought back again.
-        assert_eq!(buyback_voucher(id).await.unwrap_err(), "BUYBACK_IN_PROGRESS");
+        assert_eq!(buyback_bond(id).await.unwrap_err(), "BUYBACK_IN_PROGRESS");
 
         // Dissolve completes → principal redeems to the FUND, and the 15%
         // spread (0.3 ICP) routes: 1/3 treasury, 1/3 stays, 1/3 cycles burn.
@@ -30153,12 +30153,12 @@ mod tests {
         // auto-issue swept the ENTIRE row (fresh 3 + part-1's plain 3 = 6 ICP
         // voucher); unwrap it and wrap the original scenario's 3-ICP slice so
         // the pool-floor arithmetic matches (6-ICP buyback would floor out).
-        let auto2 = VOUCHERS.with(|m| m.borrow().iter().filter(|e| e.value().owner == alice).map(|e| *e.key()).max()).unwrap();
-        unwrap_stake_voucher(auto2).await.unwrap();
-        let id2 = wrap_stake_voucher(300_000_000, StakeTier::SixMonths).await.unwrap();
+        let auto2 = BONDS.with(|m| m.borrow().iter().filter(|e| e.value().owner == alice).map(|e| *e.key()).max()).unwrap();
+        unwrap_stake_bond(auto2).await.unwrap();
+        let id2 = wrap_stake_bond(300_000_000, StakeTier::SixMonths).await.unwrap();
         acct_set(self_id, Some(BUYBACK_SUBACCOUNT), 1_000_000); // 0.01 ICP
-        assert_eq!(buyback_voucher(id2).await.unwrap_err(), "BUYBACK_UNAVAILABLE");
-        assert!(VOUCHERS.with(|m| m.borrow().get(&id2).is_some()), "claim untouched when refused");
+        assert_eq!(buyback_bond(id2).await.unwrap_err(), "BUYBACK_UNAVAILABLE");
+        assert!(BONDS.with(|m| m.borrow().get(&id2).is_some()), "claim untouched when refused");
         clear_vouchers();
     }
 
@@ -30172,9 +30172,9 @@ mod tests {
         set_mock_ledger_balance(100_000_000_000);
         set_mock_ledger_transfer(Ok(1));
         stake(300_000_000, StakeTier::SixMonths).await.unwrap();
-        let auto_j = VOUCHERS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
-        unwrap_stake_voucher(auto_j).await.unwrap();
-        let id = wrap_stake_voucher(200_000_000, StakeTier::SixMonths).await.unwrap();
+        let auto_j = BONDS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
+        unwrap_stake_bond(auto_j).await.unwrap();
+        let id = wrap_stake_bond(200_000_000, StakeTier::SixMonths).await.unwrap();
 
         acct_reset();
         acct_set(self_id, Some(BUYBACK_SUBACCOUNT), 300_000_000);
@@ -30183,9 +30183,9 @@ mod tests {
         // NFT burn rejects mid-saga: the owner is PAID, the claim is consumed,
         // the job parks after the pay leg.
         TEST_MOCK_VOUCHER_BURN_FAIL.with(|c| *c.borrow_mut() = true);
-        assert!(buyback_voucher(id).await.is_err());
+        assert!(buyback_bond(id).await.is_err());
         assert_eq!(acct_get(alice, None), 170_000_000, "pay leg landed");
-        assert!(VOUCHERS.with(|m| m.borrow().get(&id).is_none()), "claim consumed at pay");
+        assert!(BONDS.with(|m| m.borrow().get(&id).is_none()), "claim consumed at pay");
         let job = BUYBACK_JOBS.with(|m| m.borrow().get(&id)).unwrap();
         assert!(job.pay_block.is_some());
         assert!(!job.nft_burned);
@@ -30207,34 +30207,34 @@ mod tests {
         clear_vouchers();
         // Closed campaign (probe as a NON-admin: the admin check fires first).
         set_mock_caller(alice());
-        assert_eq!(claim_promo_voucher(None).await.unwrap_err(), "CAMPAIGN_CLOSED");
+        assert_eq!(claim_golden_ticket(None).await.unwrap_err(), "CAMPAIGN_CLOSED");
         set_mock_caller(carol());
         admin_set_promo_campaign(true).unwrap();
         // Admins never earn.
-        assert_eq!(claim_promo_voucher(None).await.unwrap_err(), "ADMINS_EXCLUDED");
+        assert_eq!(claim_golden_ticket(None).await.unwrap_err(), "ADMINS_EXCLUDED");
 
         // Signed-in claim path.
         set_mock_caller(alice());
-        let id = claim_promo_voucher(None).await.unwrap();
-        let v = VOUCHERS.with(|m| m.borrow().get(&id)).unwrap();
-        assert_eq!(v.class, VoucherClass::Promo);
+        let id = claim_golden_ticket(None).await.unwrap();
+        let v = BONDS.with(|m| m.borrow().get(&id)).unwrap();
+        assert_eq!(v.class, BondClass::Promo);
         assert_eq!(v.amount_e8s, 0);
         assert_eq!(v.expires_at, Some(current_time() + PROMO_EXPIRY_NS));
-        assert_eq!(claim_promo_voucher(None).await.unwrap_err(), "ALREADY_CLAIMED");
+        assert_eq!(claim_golden_ticket(None).await.unwrap_err(), "ALREADY_CLAIMED");
 
         // Paste path: ANONYMOUS caller mints to a self-authenticating wallet.
         set_mock_caller(Principal::anonymous());
         let wallet = p("lsx3o-3lihd-6hhv3-lb4tc-gfb3q-gyzu7-wctui-vdigp-htdlc-f5maf-mae");
-        let id2 = claim_promo_voucher(Some(wallet)).await.unwrap();
-        assert_eq!(VOUCHERS.with(|m| m.borrow().get(&id2)).unwrap().owner, wallet);
-        assert_eq!(claim_promo_voucher(Some(wallet)).await.unwrap_err(), "ALREADY_CLAIMED");
+        let id2 = claim_golden_ticket(Some(wallet)).await.unwrap();
+        assert_eq!(BONDS.with(|m| m.borrow().get(&id2)).unwrap().owner, wallet);
+        assert_eq!(claim_golden_ticket(Some(wallet)).await.unwrap_err(), "ALREADY_CLAIMED");
         // Canister ids and the anonymous principal are rejected.
         assert_eq!(
-            claim_promo_voucher(Some(p("qoctq-giaaa-aaaaa-aaaea-cai"))).await.unwrap_err(),
+            claim_golden_ticket(Some(p("qoctq-giaaa-aaaaa-aaaea-cai"))).await.unwrap_err(),
             "INVALID_PRINCIPAL"
         );
         assert_eq!(
-            claim_promo_voucher(Some(Principal::anonymous())).await.unwrap_err(),
+            claim_golden_ticket(Some(Principal::anonymous())).await.unwrap_err(),
             "INVALID_PRINCIPAL"
         );
 
@@ -30244,9 +30244,9 @@ mod tests {
         c2.claims_today = PROMO_DAILY_DRIP;
         set_promo_campaign(c2);
         let wallet2 = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
-        assert_eq!(claim_promo_voucher(Some(wallet2)).await.unwrap_err(), "DAILY_LIMIT");
+        assert_eq!(claim_golden_ticket(Some(wallet2)).await.unwrap_err(), "DAILY_LIMIT");
         set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
-        claim_promo_voucher(Some(wallet2)).await.unwrap();
+        claim_golden_ticket(Some(wallet2)).await.unwrap();
 
         // Global cap → CAMPAIGN_EXHAUSTED (promo_open stays true per contract).
         let mut c2 = promo_campaign();
@@ -30254,12 +30254,12 @@ mod tests {
         set_promo_campaign(c2);
         set_mock_caller(Principal::anonymous());
         let fresh = p("i3ptn-w5i4d-zwvvn-kxgy4-zkx5d-ukatp-3jbje-vtb6d-y5zmj-kpj33-xae");
-        assert_eq!(claim_promo_voucher(Some(fresh)).await.unwrap_err(), "CAMPAIGN_EXHAUSTED");
+        assert_eq!(claim_golden_ticket(Some(fresh)).await.unwrap_err(), "CAMPAIGN_EXHAUSTED");
         // Kill switch.
         set_mock_caller(carol());
         admin_set_promo_campaign(false).unwrap();
         set_mock_caller(Principal::anonymous());
-        assert_eq!(claim_promo_voucher(Some(fresh)).await.unwrap_err(), "CAMPAIGN_CLOSED");
+        assert_eq!(claim_golden_ticket(Some(fresh)).await.unwrap_err(), "CAMPAIGN_CLOSED");
         clear_vouchers();
     }
 
@@ -30270,7 +30270,7 @@ mod tests {
         set_mock_caller(carol());
         admin_set_promo_campaign(true).unwrap();
         set_mock_caller(alice());
-        let id = claim_promo_voucher(None).await.unwrap();
+        let id = claim_golden_ticket(None).await.unwrap();
 
         // Promo-only holder (NO stake): the sweep grants exactly 1/day with
         // its own source tag — the stakers-only bypass in action.
@@ -30296,14 +30296,14 @@ mod tests {
         assert_eq!(count(alice()), 2, "expired promos grant nothing");
 
         // Money paths hard-reject the class.
-        assert_eq!(list_voucher(id, 100_000_000).unwrap_err(), "PROMO_NOT_LISTABLE");
-        assert_eq!(buyback_voucher(id).await.unwrap_err(), "PROMO_NOT_REDEEMABLE");
-        assert_eq!(unwrap_stake_voucher(id).await.unwrap_err(), "PROMO_NOT_REDEEMABLE");
+        assert_eq!(list_bond(id, 100_000_000).unwrap_err(), "PROMO_NOT_LISTABLE");
+        assert_eq!(buyback_bond(id).await.unwrap_err(), "PROMO_NOT_REDEEMABLE");
+        assert_eq!(unwrap_stake_bond(id).await.unwrap_err(), "PROMO_NOT_REDEEMABLE");
 
         // Admin-held promo rows never earn (belt over the claim-time reject).
-        VOUCHERS.with(|m| {
-            m.borrow_mut().insert(9_999, VoucherRecord {
-                id: 9_999, class: VoucherClass::Promo, tier: 0, amount_e8s: 0,
+        BONDS.with(|m| {
+            m.borrow_mut().insert(9_999, BondRecord {
+                id: 9_999, class: BondClass::Promo, tier: 0, amount_e8s: 0,
                 owner: carol(), minted_at: current_time(),
                 expires_at: Some(current_time() + PROMO_EXPIRY_NS), listed_price_e8s: None,
             last_purchase_grant_day: 0,
@@ -30320,13 +30320,13 @@ mod tests {
         clear_vouchers();
         set_mock_caller(carol());
         admin_set_promo_campaign(true).unwrap();
-        admin_set_voucher_config(Some(300), Some(2 * ONE_ICP_E8S)).unwrap();
-        assert_eq!(admin_set_voucher_config(Some(9_999), None).unwrap_err(), "FEE_TOO_HIGH");
+        admin_set_bond_config(Some(300), Some(2 * ONE_ICP_E8S)).unwrap();
+        assert_eq!(admin_set_bond_config(Some(9_999), None).unwrap_err(), "FEE_TOO_HIGH");
 
-        // Anonymous-safe: my_vouchers empty, campaign numbers visible.
+        // Anonymous-safe: my_bonds empty, campaign numbers visible.
         set_mock_caller(Principal::anonymous());
-        let info = get_voucher_market();
-        assert!(info.my_vouchers.is_empty());
+        let info = get_bond_market();
+        assert!(info.my_bonds.is_empty());
         assert!(info.promo_open);
         assert_eq!(info.promo_remaining, PROMO_CAP);
         assert_eq!(info.market_fee_bps, 300);
@@ -30335,7 +30335,7 @@ mod tests {
 
         // Restore defaults for other tests.
         set_mock_caller(carol());
-        admin_set_voucher_config(Some(VOUCHER_FEE_BPS_DEFAULT), Some(VOUCHER_MIN_WRAP_E8S_DEFAULT)).unwrap();
+        admin_set_bond_config(Some(VOUCHER_FEE_BPS_DEFAULT), Some(VOUCHER_MIN_WRAP_E8S_DEFAULT)).unwrap();
         clear_vouchers();
     }
 
