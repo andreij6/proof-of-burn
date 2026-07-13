@@ -32,6 +32,7 @@ import { friendlyVoucherErr, isPromo, type BondView } from "./Vouchers";
 import { TIER_META } from "./Staking";
 import DevDocs from "./DevDocs";
 import ClaimPromo from "./ClaimPromo";
+import AuthGate from "./AuthGate";
 import MiniGolfPage from "./MiniGolfPage";
 import LuckProofPage from "./LuckProofPage";
 import DropZonePage from "./DropZonePage";
@@ -51,9 +52,17 @@ import { countdownShort } from "./hubLogic";
 // The 'earn' page is now just Pool Neurons. Staking and Boosters (formerly
 // Early Adopters) live on the 'lottery' page. 'staking' and 'early_adopters'
 // are kept as route aliases that redirect to 'lottery' so old links work.
-export type AppPage = 'landing' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'minigolf' | 'course_market' | 'early_adopters' | 'payouts' | 'admin' | 'admin_money' | 'admin_economics' | 'admin_neurons' | 'admin_users' | 'admin_system' | 'admin_reference';
+export type AppPage = 'landing' | 'auth' | 'voting' | 'earn' | 'staking' | 'lottery' | 'devdocs' | 'claim' | 'neuronstake' | 'exchange' | 'icplp' | 'luckproof' | 'dropzone' | 'bullrun' | 'minigolf' | 'course_market' | 'early_adopters' | 'payouts' | 'admin' | 'admin_money' | 'admin_economics' | 'admin_neurons' | 'admin_users' | 'admin_system' | 'admin_reference';
+
+// The only pages an unauthenticated visitor can see. Everything else bounces
+// to #/auth (which remembers the destination and continues there after
+// Internet Identity completes) — so in-app pages never render signed-out.
+export const PUBLIC_PAGES: AppPage[] = ['landing', 'claim', 'auth'];
+
 export const PAGE_PATH: Record<AppPage, string> = {
   landing: '/',
+  // The sign-in gate — the one page whose job is authentication.
+  auth: '/auth',
   voting: '/voting',
   earn: '/earn',
   staking: '/staking',
@@ -271,41 +280,6 @@ function HeatBar({ pct = 0, committed, req, met }: { pct?: number; committed?: s
   );
 }
 
-// ── Gate (renders real content, then blurs + locks per state) ─
-function Gate({ children, hint, next, height, gating }: { children: React.ReactNode; hint: string; next?: boolean; height?: number; gating: string }) {
-  const lockTone = next ? 'burn' : 'muted';
-  const overlay = (
-    <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2 }}>
-      <Chip tone={lockTone} style={{ height: 24, boxShadow: '0 2px 8px rgba(0,0,0,0.4)' }}>
-        <Icon name={next ? 'spark' : 'lock'} size={12} /> {hint}
-      </Chip>
-    </div>
-  );
-
-  if (gating === 'skeleton') {
-    return (
-      <div style={{ position: 'relative', minHeight: height }}>
-        {overlay}
-        <div style={{ filter: 'grayscale(1)', opacity: 0.18, pointerEvents: 'none', userSelect: 'none' }}>{children}</div>
-      </div>
-    );
-  }
-  if (gating === 'faded') {
-    return (
-      <div style={{ position: 'relative', minHeight: height }}>
-        {overlay}
-        <div style={{ opacity: 0.28, pointerEvents: 'none', userSelect: 'none' }}>{children}</div>
-      </div>
-    );
-  }
-  // default: blur
-  return (
-    <div style={{ position: 'relative', minHeight: height }}>
-      {overlay}
-      <div style={{ filter: 'blur(5px) saturate(0.6)', opacity: 0.5, pointerEvents: 'none', userSelect: 'none' }}>{children}</div>
-    </div>
-  );
-}
 
 function Reveal({ delay = 0, children, style, motion }: { delay?: number; children: React.ReactNode; style?: React.CSSProperties; motion: string }) {
   const [shown, setShown] = useState(motion === 'off');
@@ -588,10 +562,9 @@ export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try { return localStorage.getItem('theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
   });
-  // Visual presentation is now fixed (the per-style selectors were removed from
-  // the Dashboard & Controls panel): gating blurs locked content, AI review is
-  // off by default, and motion is always the expressive page-transition style.
-  const gating: string = 'blur';
+  // Visual presentation is now fixed (the per-style selectors were removed
+  // from the Dashboard & Controls panel): AI review is off by default, and
+  // motion is always the expressive page-transition style.
   const aiMode: string = 'hidden';
   const motion: string = 'expressive';
   // Page-local dev controls registered by the open page (see DevControlsContext)
@@ -1301,14 +1274,32 @@ export default function App() {
     if (page === 'early_adopters') {
       redirect('lottery');
     }
-    // Profile is account-scoped: bounce signed-out visitors — but only once
-    // auth has resolved (principal === null means AuthClient is still
-    // initializing; bouncing then killed #/profile deep links for
-    // signed-in users — review 2026-06-11).
-    if (page === 'payouts' && principal && principal.isAnonymous()) {
-      redirect('lottery');
-    }
   }, [page, losslessEnabled, lotteryEnabled, vouchersEnabled, govNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, icpLpEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
+
+  // ── The auth gate ──
+  // Everything beyond the landing + claim pages requires a signed-in
+  // principal. Unauthenticated visitors bounce to #/auth, which remembers
+  // where they were headed and continues there after Internet Identity
+  // completes. Only bounce once auth has resolved (principal === null means
+  // AuthClient is still initializing; bouncing then killed deep links for
+  // signed-in users — review 2026-06-11).
+  const pendingAuthPageRef = useRef<AppPage | null>(null);
+  useEffect(() => {
+    if (PUBLIC_PAGES.includes(page)) return;
+    if (principal && principal.isAnonymous()) {
+      pendingAuthPageRef.current = page;
+      redirect('auth');
+    }
+  }, [page, principal]);
+  // Signed in on the gate (fresh login OR a signed-in deep link to #/auth) →
+  // continue to the remembered destination, defaulting to the app.
+  useEffect(() => {
+    if (page === 'auth' && principal && !principal.isAnonymous()) {
+      const dest = pendingAuthPageRef.current ?? 'lottery';
+      pendingAuthPageRef.current = null;
+      redirect(dest);
+    }
+  }, [page, principal]);
 
   // Lossless lottery: the daily ticket grant is tied to logging in, so claim
   // as soon as a signed-in actor exists (the Lottery page also claims for
@@ -1441,6 +1432,9 @@ export default function App() {
   const handleLogout = async () => {
     if (!authClient) return;
     await authClient.logout();
+    // Land on the public landing page — staying on a members-only page would
+    // just bounce the fresh sign-out straight onto the #/auth gate.
+    redirect('landing');
     setPrincipal(Principal.anonymous());
     setIdentity(null);
     setActor(createBackendActor(backendCanisterId, {
@@ -2144,8 +2138,8 @@ export default function App() {
   );
 
   // First contact: the landing page renders full-bleed with no app chrome.
-  // "Go to App" drops the visitor on the voting dashboard (works for
-  // anonymous visitors too — they browse view-only until they sign in).
+  // "Go to App" heads for the lottery; anonymous visitors bounce off the
+  // auth gate (#/auth) on the way and land there after signing in.
   if (page === 'landing') {
     return (
       <Landing
@@ -2177,6 +2171,30 @@ export default function App() {
         onSignIn={handleLogin}
         onEnter={() => { window.scrollTo(0, 0); setPage('lottery'); }}
       />
+    );
+  }
+
+  // The sign-in gate — standalone full-bleed page, no app chrome.
+  if (page === 'auth') {
+    return (
+      <AuthGate
+        onSignIn={handleLogin}
+        isSigningIn={isSigningIn}
+        onGoLanding={() => redirect('landing')}
+      />
+    );
+  }
+
+  // Every page from here on is members-only. While AuthClient is still
+  // resolving (principal === null) — or on the single paint before the gate
+  // effect bounces an anonymous visitor to #/auth — render a neutral shell
+  // instead of the page, so in-app pages NEVER mount signed-out and carry no
+  // signed-out UI states.
+  if (!principal || principal.isAnonymous()) {
+    return (
+      <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, background: 'var(--bg)', color: 'var(--fg-3)', fontSize: 14 }}>
+        <LiveDot size={8} /> Loading…
+      </div>
     );
   }
 
@@ -2255,39 +2273,21 @@ export default function App() {
             <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} />
           </button>
 
-          {/* Auth + wallet affordance in the top bar — reachable on every page.
-              Signed out: Sign in. Signed in: Wallet (opens the Profile page).
-              Sign out lives on the Profile page header (no left-nav Account
-              section). */}
-          {!principal || principal.isAnonymous() ? (
-            <button
-              onClick={handleLogin}
-              disabled={isSigningIn}
-              title="Sign in with Internet Identity"
-              style={{
-                background: 'var(--burn)', border: '1px solid var(--burn)', borderRadius: 8,
-                cursor: isSigningIn ? 'default' : 'pointer', color: 'var(--char-950)',
-                padding: '7px 12px', display: 'flex', alignItems: 'center', gap: 6,
-                fontSize: 12.5, fontWeight: 600, flexShrink: 0, opacity: isSigningIn ? 0.7 : 1,
-              }}
-            >
-              {isSigningIn ? <LiveDot size={7} color="var(--char-950)" /> : <Icon name="key" size={14} stroke="var(--char-950)" />}
-              {isSigningIn ? "Opening II…" : "Sign in"}
-            </button>
-          ) : (
-            <button
-              onClick={() => { setPage('payouts'); setWalletRequest(n => n + 1); }}
-              title="Open your wallet"
-              style={{
-                background: 'var(--burn)', border: '1px solid var(--burn)', borderRadius: 8,
-                cursor: 'pointer', color: 'var(--char-950)',
-                padding: '7px 12px', display: 'flex', alignItems: 'center', gap: 6,
-                fontSize: 12.5, fontWeight: 600, flexShrink: 0,
-              }}
-            >
-              <Icon name="wallet" size={14} stroke="var(--char-950)" /> Wallet
-            </button>
-          )}
+          {/* Wallet affordance in the top bar — reachable on every page. The
+              app chrome only ever renders signed-in (the #/auth gate owns
+              sign-in); sign out lives on the Profile page header. */}
+          <button
+            onClick={() => { setPage('payouts'); setWalletRequest(n => n + 1); }}
+            title="Open your wallet"
+            style={{
+              background: 'var(--burn)', border: '1px solid var(--burn)', borderRadius: 8,
+              cursor: 'pointer', color: 'var(--char-950)',
+              padding: '7px 12px', display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 12.5, fontWeight: 600, flexShrink: 0,
+            }}
+          >
+            <Icon name="wallet" size={14} stroke="var(--char-950)" /> Wallet
+          </button>
         </div>
       </header>
 
@@ -2478,7 +2478,6 @@ export default function App() {
               rootKey={env?.IC_ROOT_KEY}
               ledgerCanisterId={ledgerCanisterId}
               isLocal={config?.is_local ?? false}
-              onSignIn={handleLogin}
               onGoNeuronStake={() => setPage('neuronstake')}
               onGoExchange={() => setPage('exchange')}
               onGoLiquidity={() => setPage('icplp')}
@@ -2493,7 +2492,6 @@ export default function App() {
               host={host}
               rootKey={env?.IC_ROOT_KEY}
               ledgerCanisterId={ledgerCanisterId}
-              onSignIn={handleLogin}
             />
           ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
             <NeuronStakePage
@@ -2507,7 +2505,6 @@ export default function App() {
               boostersEnabled={earlyAdoptersEnabled}
               isAdmin={isAdmin}
               treasuryCanFront={globalStats?.treasury_can_front_fees ?? true}
-              onSignIn={handleLogin}
               onActivity={refreshAllData}
               onGoExchange={() => setPage('exchange')}
               onGoLiquidity={() => setPage('icplp')}
@@ -2515,30 +2512,22 @@ export default function App() {
           ) : page === 'icplp' && icpLpEnabled ? (
             <IcpLp
               actor={actor}
-              principal={principal}
-              onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'luckproof' && luckproofEnabled ? (
             <LuckProofPage
               actor={actor}
-              principal={principal}
-              onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'dropzone' && dropzoneEnabled ? (
             <DropZonePage
               actor={actor}
-              principal={principal}
-              onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
               isLocal={config?.is_local ?? false}
             />
           ) : page === 'bullrun' && bullrunEnabled ? (
             <BullRunPage
               actor={actor}
-              principal={principal}
-              onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
               isLocal={config?.is_local ?? false}
             />
@@ -2546,13 +2535,11 @@ export default function App() {
             <MiniGolfPage
               actor={actor}
               identity={identity}
-              principal={principal}
               host={host}
               rootKey={env?.IC_ROOT_KEY}
               ledgerCanisterId={ledgerCanisterId}
               backendCanisterId={backendCanisterId}
               isLocal={config?.is_local ?? false}
-              onSignIn={handleLogin}
               onGoParticipate={() => setPage(losslessEnabled ? 'neuronstake' : 'voting')}
             />
           ) : page === 'payouts' ? (
@@ -2565,7 +2552,6 @@ export default function App() {
               rootKey={env?.IC_ROOT_KEY}
               ledgerCanisterId={ledgerCanisterId}
               isLocal={config?.is_local ?? false}
-              onSignIn={handleLogin}
               onSignOut={handleLogout}
             />
           ) : page === 'admin_money' || page === 'admin_economics' || page === 'admin_neurons' || page === 'admin_users' || page === 'admin_system' || page === 'admin_reference' ? (
@@ -2727,15 +2713,9 @@ export default function App() {
                     <Icon name="coins" size={13} /> Join the Neuron Syndicate
                   </Btn>
                   {!isFollowing ? (
-                    !principal || principal.isAnonymous() ? (
-                      <span className="row" style={{ gap: 6, color: 'var(--burn-ink)', fontSize: 12.5, whiteSpace: 'nowrap' }}>
-                        <Icon name="arrowUp" size={13} stroke="var(--burn-ink)" /> Sign in to follow
-                      </span>
-                    ) : (
-                      <Btn variant="primary" sm onClick={() => { setNnsOpened(false); setIsFollowModalOpen(true); }}>
-                        <Icon name="checkCircle" size={13} stroke="var(--char-950)" /> Follow neuron
-                      </Btn>
-                    )
+                    <Btn variant="primary" sm onClick={() => { setNnsOpened(false); setIsFollowModalOpen(true); }}>
+                      <Icon name="checkCircle" size={13} stroke="var(--char-950)" /> Follow neuron
+                    </Btn>
                   ) : (
                     <span className="row" style={{ gap: 6, color: 'var(--sprout-ink)', fontSize: 12.5 }}>
                       <Icon name="checkCircle" size={13} stroke="var(--sprout-ink)" /> Following
@@ -2841,7 +2821,6 @@ export default function App() {
                       <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No open proposals right now.</div>
                     )}
                     {openProposals.map((p, i) => {
-                      const showBurn = tier >= 1;
                       const proposalIdStr = p.id.toString();
                       const aiReview = aiReviews[proposalIdStr];
                       const aiOpen = aiOpenMap[proposalIdStr] || (aiMode === 'expanded' && i === 0);
@@ -2942,35 +2921,26 @@ export default function App() {
                                 <Chip tone="muted" style={{ height: 22 }}>
                                   <Icon name="clock" size={11} /> {deadlineStr}
                                 </Chip>
-                                {tier >= 1 && statusChip}
-                                {showBurn && flipLabel}
+                                {statusChip}
+                                {flipLabel}
                               </div>
                             </div>
 
-                            {/* Balance of power + burn progress (gated for anonymous).
-                                Voting is burn-only — the bar and threshold both
-                                reflect burned ICP. */}
-                            {showBurn ? (
-                              <div className="col" style={{ gap: 10 }}>
-                                <BalanceOfPowerBar
-                                  adopt={p.adopt_pot_e8s}
-                                  reject={p.reject_pot_e8s}
-                                />
-                                <HeatBar pct={pct} committed={committedLabel} req={reqLabel} met={met} />
-                              </div>
-                            ) : (
-                              <Gate hint="Sign in to unlock" height={70} gating={gating}>
-                                <div className="col" style={{ gap: 10 }}>
-                                  <BalanceOfPowerBar adopt={48n} reject={52n} />
-                                  <HeatBar pct={48} committed="●●● ICP committed" req="●● of ●●● ICP" />
-                                </div>
-                              </Gate>
-                            )}
+                            {/* Balance of power + burn progress. Voting is
+                                burn-only — the bar and threshold both reflect
+                                burned ICP. */}
+                            <div className="col" style={{ gap: 10 }}>
+                              <BalanceOfPowerBar
+                                adopt={p.adopt_pot_e8s}
+                                reject={p.reject_pot_e8s}
+                              />
+                              <HeatBar pct={pct} committed={committedLabel} req={reqLabel} met={met} />
+                            </div>
 
                             {/* Action zone */}
-                            {tier >= 1 && <div style={{ borderTop: '1px solid var(--border)' }} />}
+                            <div style={{ borderTop: '1px solid var(--border)' }} />
 
-                            {tier >= 1 && (
+                            {(
                               <div className="col" style={{ gap: 10 }}>
                                 {treasuryCanFront ? (
                                 <div className="row" style={{ gap: 8 }}>
@@ -3182,11 +3152,7 @@ export default function App() {
                       </div>
                     </Reveal>
 
-                    {tier < 1 ? (
-                      <Gate hint="Sign in to unlock" height={80} gating={gating}>
-                        <div style={{ height: 60 }} />
-                      </Gate>
-                    ) : displayedPastItems.length === 0 ? (
+                    {displayedPastItems.length === 0 ? (
                       <div style={{ padding: '12px 0', color: 'var(--fg-3)', fontSize: 13 }}>No settled proposals yet.</div>
                     ) : (
                       <>
@@ -4214,11 +4180,6 @@ export default function App() {
                   const canSubmit = tier >= 2 && hasAmount && !belowMin && !insufficient && treasuryCanFront;
                   return (
                   <div className="col" style={{ gap: 8 }}>
-                    {tier < 2 && (
-                      <span style={{ fontSize: 11.5, color: 'var(--haze-ink)' }}>
-                        Sign in to burn and cast your vote.
-                      </span>
-                    )}
                     {!treasuryCanFront && tier >= 2 && (
                       <span style={{ fontSize: 11.5, color: 'var(--haze-ink)' }}>
                         Voting is paused — the treasury can't currently cover the ledger fees a commitment needs at settlement. Try again shortly.

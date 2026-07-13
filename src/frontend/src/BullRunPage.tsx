@@ -1,5 +1,4 @@
-import { Principal } from '@icp-sdk/core/principal';
-import { Btn, Eyebrow, Icon, usePageHelp } from './ui';
+import { Eyebrow, Icon, usePageHelp } from './ui';
 import BullRun from './arcade/BullRun';
 
 // ==========================================
@@ -9,15 +8,13 @@ import BullRun from './arcade/BullRun';
 
 interface BullRunPageProps {
   actor: any;
-  principal: Principal | null;
-  onSignIn: () => void;
   /** Navigate to staking — the daily competition's gate CTA. */
   onGoParticipate: () => void;
   isLocal?: boolean;
 }
 
-export default function BullRunPage({ actor, principal, onSignIn, onGoParticipate, isLocal = false }: BullRunPageProps) {
-  const signedIn = !!principal && !principal.isAnonymous();
+// Members-only (the #/auth gate guarantees a signed-in caller).
+export default function BullRunPage({ actor, onGoParticipate, isLocal = false }: BullRunPageProps) {
 
   usePageHelp(() => (
     <>
@@ -69,20 +66,7 @@ export default function BullRunPage({ actor, principal, onSignIn, onGoParticipat
       </div>
 
       {/* ── The game ── */}
-      {signedIn ? (
-        <BullRun actor={actor} onGoParticipate={onGoParticipate} isLocal={isLocal} />
-      ) : (
-        <div className="card col" style={{ gap: 10, alignItems: 'flex-start' }}>
-          <b style={{ fontSize: 14 }}>Sign in to play</b>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-            Practice runs are free for every signed-in player. Stakers can enter the
-            daily run.
-          </span>
-          <Btn variant="primary" onClick={onSignIn}>
-            <Icon name="zap" size={13} stroke="var(--char-950)" /> Sign in to play
-          </Btn>
-        </div>
-      )}
+      <BullRun actor={actor} onGoParticipate={onGoParticipate} isLocal={isLocal} />
     </div>
   );
 }

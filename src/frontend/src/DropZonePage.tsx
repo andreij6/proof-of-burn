@@ -1,5 +1,4 @@
-import { Principal } from '@icp-sdk/core/principal';
-import { Btn, Eyebrow, Icon, usePageHelp } from './ui';
+import { Eyebrow, Icon, usePageHelp } from './ui';
 import DropZone from './arcade/DropZone';
 
 // ==========================================
@@ -9,15 +8,13 @@ import DropZone from './arcade/DropZone';
 
 interface DropZonePageProps {
   actor: any;
-  principal: Principal | null;
-  onSignIn: () => void;
   /** Navigate to staking — the daily competition's gate CTA. */
   onGoParticipate: () => void;
   isLocal?: boolean;
 }
 
-export default function DropZonePage({ actor, principal, onSignIn, onGoParticipate, isLocal = false }: DropZonePageProps) {
-  const signedIn = !!principal && !principal.isAnonymous();
+// Members-only (the #/auth gate guarantees a signed-in caller).
+export default function DropZonePage({ actor, onGoParticipate, isLocal = false }: DropZonePageProps) {
 
   usePageHelp(() => (
     <>
@@ -69,20 +66,7 @@ export default function DropZonePage({ actor, principal, onSignIn, onGoParticipa
       </div>
 
       {/* ── The game ── */}
-      {signedIn ? (
-        <DropZone actor={actor} onGoParticipate={onGoParticipate} isLocal={isLocal} />
-      ) : (
-        <div className="card col" style={{ gap: 10, alignItems: 'flex-start' }}>
-          <b style={{ fontSize: 14 }}>Sign in to play</b>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-            Practice jumps are free for every signed-in player. Stakers can enter the
-            daily drop.
-          </span>
-          <Btn variant="primary" onClick={onSignIn}>
-            <Icon name="zap" size={13} stroke="var(--char-950)" /> Sign in to play
-          </Btn>
-        </div>
-      )}
+      <DropZone actor={actor} onGoParticipate={onGoParticipate} isLocal={isLocal} />
     </div>
   );
 }

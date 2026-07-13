@@ -62,14 +62,12 @@ interface IcpLpInfo {
 
 interface IcpLpProps {
   actor: any;
-  principal: Principal | null;
-  onSignIn: () => void;
   /** Kept for App.tsx call-site stability; LP no longer needs an ICP stake. */
   onGoParticipate?: () => void;
 }
 
-export default function IcpLp({ actor, principal, onSignIn }: IcpLpProps) {
-  const signedIn = !!principal && !principal.isAnonymous();
+// Members-only (the #/auth gate guarantees a signed-in caller).
+export default function IcpLp({ actor }: IcpLpProps) {
   const [info, setInfo] = useState<IcpLpInfo | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -91,7 +89,7 @@ export default function IcpLp({ actor, principal, onSignIn }: IcpLpProps) {
       if (!poolText && i.pools.length > 0) setPoolText(i.pools[0].pool.toString());
     } catch { /* best-effort */ }
   };
-  useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor, signedIn]);
+  useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor]);
 
   const copyPrincipal = async () => {
     if (!info) return;
@@ -165,7 +163,7 @@ export default function IcpLp({ actor, principal, onSignIn }: IcpLpProps) {
         <p style={{ margin: 0, fontSize: 13, lineHeight: 1.55 }}>
           <b>Your liquidity keeps working — and earns lottery tickets on top.</b>{' '}
           Stake an ICPSwap position here and collect{' '}
-          {Number(info?.tickets_per_usd_day ?? 40n)} tickets a day for every $1 of
+          {Number(info?.tickets_per_usd_day ?? 15n)} tickets a day for every $1 of
           LP value, hands-free. Reclaim it any time.
         </p>
       </div>
@@ -180,7 +178,7 @@ export default function IcpLp({ actor, principal, onSignIn }: IcpLpProps) {
       <div className="col" style={{ gap: 6 }}>
         <Eyebrow accent>Earning tickets</Eyebrow>
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-          <li><b>Scales with value:</b> {Number(info?.tickets_per_usd_day ?? 40n)} tickets per day per $1 of LP — $25 of LP is {Number(info?.tickets_per_usd_day ?? 40n) * 25} tickets every day.</li>
+          <li><b>Scales with value:</b> {Number(info?.tickets_per_usd_day ?? 15n)} tickets per day per $1 of LP — $25 of LP is {Number(info?.tickets_per_usd_day ?? 15n) * 25} tickets every day.</li>
           <li><b>Valued live, daily:</b> your position is re-priced each day from the pool itself and live USD rates.</li>
           <li><b>Your LP is the entry:</b> a staked position earns by itself — no separate ICP stake needed.</li>
         </ul>
@@ -206,21 +204,13 @@ export default function IcpLp({ actor, principal, onSignIn }: IcpLpProps) {
         <b style={{ fontSize: 17 }}>Stake your ICPSwap LP. Earn lottery tickets.</b>
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)', maxWidth: 660 }}>
           Transfer an ICPSwap position to the app and earn{' '}
-          <b>{Number(info?.tickets_per_usd_day ?? 40n)} lottery tickets a day for every $1
+          <b>{Number(info?.tickets_per_usd_day ?? 15n)} lottery tickets a day for every $1
           of LP value</b> — automatically, and you can reclaim your LP whenever you
           like.
         </span>
       </div>
 
-      {!signedIn ? (
-        <div className="card col" style={{ gap: 10, alignItems: 'flex-start' }}>
-          <b style={{ fontSize: 14 }}>Sign in to stake</b>
-          <Btn variant="primary" onClick={onSignIn}>
-            <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
-          </Btn>
-        </div>
-      ) : (
-        <>
+      <>
           {notice && (
             <div className="row" style={{ gap: 8, border: '1px solid var(--sprout)', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, color: 'var(--sprout-ink)' }}>
               <Icon name="checkCircle" size={14} stroke="var(--sprout-ink)" /> {notice}
@@ -391,8 +381,7 @@ export default function IcpLp({ actor, principal, onSignIn }: IcpLpProps) {
               ))
             )}
           </div>
-        </>
-      )}
+      </>
     </div>
   );
 }

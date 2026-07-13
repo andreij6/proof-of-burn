@@ -25,7 +25,6 @@ import {
 
 interface CourseMarketplaceProps {
   actor: any;
-  principal: Principal | null;
   identity: any;
   host: string;
   rootKey?: Uint8Array;
@@ -42,17 +41,15 @@ interface CourseMarketplaceProps {
   onCreate: () => void;
   /** Navigate to staking — owners must stake to earn tickets (2026-07-04). */
   onGoStaking: () => void;
-  onSignIn: () => void;
 }
 
 const ICP_E8S = 8;
 const ICP_FEE_E8S = 10_000n;
 
 export default function CourseMarketplace({
-  actor, principal, identity, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal,
-  onPlay, onViewNft, onCreate, onGoStaking, onSignIn,
+  actor, identity, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal,
+  onPlay, onViewNft, onCreate, onGoStaking,
 }: CourseMarketplaceProps) {
-  const signedIn = !!(principal && !principal.isAnonymous());
 
   usePageHelp(() => (
     <>
@@ -132,7 +129,7 @@ export default function CourseMarketplace({
   // Favorites: read the id set once (signed in), and the resolved cards for the
   // quick-replay strip / Favorites filter (PB-311 B7).
   const refreshFavorites = async () => {
-    if (!actor || !signedIn) { setFavoriteIds(new Set()); setFavCards([]); return; }
+    if (!actor) { setFavoriteIds(new Set()); setFavCards([]); return; }
     try {
       const ids: bigint[] = Array.from(await actor.my_favorite_ids());
       setFavoriteIds(new Set(ids));
@@ -149,7 +146,7 @@ export default function CourseMarketplace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [actor, difficulty, listed, mineOnly]);
 
-  useEffect(() => { refreshFavorites(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor, signedIn]);
+  useEffect(() => { refreshFavorites(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor]);
 
   // The Favorites filter re-rolls the shuffle + resets paging like other pills.
   const setFavFilter = (on: boolean) => {
@@ -183,7 +180,6 @@ export default function CourseMarketplace({
 
   // Heart toggle: optimistic flip → reconcile to the returned boolean (PB-311 A3).
   const onToggleFavorite = async (card: CourseCard) => {
-    if (!signedIn) { onSignIn(); return; }
     const tid = card.token_id;
     const optimistic = toggleFavoriteId(tid, favoriteIds);
     setFavoriteIds(optimistic);
@@ -225,7 +221,7 @@ export default function CourseMarketplace({
   };
   const needTid = (): bigint => { const t = devTokenId(); if (t === null) { setError('Dev: enter a numeric token id.'); throw new Error('bad token id'); } return t; };
 
-  usePageDevControls(isLocal && signedIn, () => (
+  usePageDevControls(isLocal, () => (
     <div className="col" style={{ gap: 8 }}>
       <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Course NFT · marketplace states</span>
       <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
@@ -253,12 +249,12 @@ export default function CourseMarketplace({
         Local only. Mutates marketplace state directly (no burns / approves / bids) so you can eyeball each card state. Re-seed tops up to the target count.
       </span>
     </div>
-  ), [isLocal, signedIn, devBusy, devToken, devPrice, devPlays]);
+  ), [isLocal, devBusy, devToken, devPrice, devPlays]);
 
   return (
     <div className="col" style={{ gap: 16 }}>
       {/* ── Quick-replay strip (PB-311 A5) — signed in + ≥1 favorite ── */}
-      {signedIn && favCards.length > 0 && !onlyFavs && (
+      {favCards.length > 0 && !onlyFavs && (
         <div className="card col" style={{ gap: 8 }}>
           <span className="row" style={{ gap: 6, alignItems: 'center' }}>
             <Icon name="heart" size={13} stroke="var(--burn-ink)" fill="var(--burn)" />
@@ -303,12 +299,10 @@ export default function CourseMarketplace({
                     </p>
         </div>
         <div className="row" style={{ gap: 8 }}>
-          {signedIn && (
-            <Btn variant={mineOnly ? 'primary' : 'ghost'} sm onClick={() => setMineOnly((v) => !v)}>
-              <Icon name="list" size={12} stroke={mineOnly ? 'var(--char-950)' : 'currentColor'} /> My courses
-            </Btn>
-          )}
-          <Btn variant="primary" sm onClick={() => (signedIn ? onCreate() : onSignIn())}>
+          <Btn variant={mineOnly ? 'primary' : 'ghost'} sm onClick={() => setMineOnly((v) => !v)}>
+            <Icon name="list" size={12} stroke={mineOnly ? 'var(--char-950)' : 'currentColor'} /> My courses
+          </Btn>
+          <Btn variant="primary" sm onClick={onCreate}>
             <Icon name="spark" size={12} stroke="var(--char-950)" /> Create a course
           </Btn>
         </div>
@@ -326,12 +320,10 @@ export default function CourseMarketplace({
             <Pill key={o.label} active={listed === o.value} onClick={() => setListed(o.value)}>{o.label}</Pill>
           ))}
         </PillGroup>
-        {signedIn && (
-          <PillGroup label="Favorites">
-            <Pill active={!onlyFavs} onClick={() => setFavFilter(false)}>All</Pill>
-            <Pill active={onlyFavs} onClick={() => setFavFilter(true)}>Only favorites</Pill>
-          </PillGroup>
-        )}
+        <PillGroup label="Favorites">
+          <Pill active={!onlyFavs} onClick={() => setFavFilter(false)}>All</Pill>
+          <Pill active={onlyFavs} onClick={() => setFavFilter(true)}>Only favorites</Pill>
+        </PillGroup>
       </div>
 
       {error && (
@@ -361,7 +353,6 @@ export default function CourseMarketplace({
                 key={card.token_id.toString()}
                 actor={actor}
                 card={card}
-                principal={principal}
                 isFav={favoriteIds.has(card.token_id)}
                 onPlay={onPlay}
                 onViewNft={onViewNft}
@@ -369,7 +360,6 @@ export default function CourseMarketplace({
                 onBuy={setBuyCard}
                 onBurn={setBurnCard}
                 onToggleFavorite={onToggleFavorite}
-                onSignIn={onSignIn}
               />
             ))}
           </div>
@@ -482,10 +472,9 @@ function CourseArt({ tokenId, height }: { tokenId: bigint; height: number }) {
 }
 
 // ── Course card ──
-function CourseCardView({ actor, card, principal, isFav, onPlay, onViewNft, onManage, onBuy, onBurn, onToggleFavorite, onSignIn }: {
+function CourseCardView({ actor, card, isFav, onPlay, onViewNft, onManage, onBuy, onBurn, onToggleFavorite }: {
   actor: any;
   card: CourseCard;
-  principal: Principal | null;
   isFav: boolean;
   onPlay: (c: CourseCard) => void;
   onViewNft: (c: CourseCard) => void;
@@ -493,9 +482,7 @@ function CourseCardView({ actor, card, principal, isFav, onPlay, onViewNft, onMa
   onBuy: (c: CourseCard) => void;
   onBurn: (c: CourseCard) => void;
   onToggleFavorite: (c: CourseCard) => void;
-  onSignIn: () => void;
 }) {
-  const signedIn = !!(principal && !principal.isAnonymous());
   const par = card.par_total;
   const diff = difficultyBucket(par);
   const forSale = card.for_sale && card.price_e8s > 0n;
@@ -538,13 +525,11 @@ function CourseCardView({ actor, card, principal, isFav, onPlay, onViewNft, onMa
             )}
           </span>
           <button
-            onClick={() => (signedIn ? onToggleFavorite(card) : onSignIn())}
-            title={signedIn ? (isFav ? 'Remove from favorites' : 'Add to favorites') : 'Sign in to save favorites'}
-            disabled={!signedIn}
+            onClick={() => onToggleFavorite(card)}
+            title={isFav ? 'Remove from favorites' : 'Add to favorites'}
             style={{
               background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 999,
-              padding: 5, cursor: signedIn ? 'pointer' : 'not-allowed',
-              opacity: signedIn ? 1 : 0.5, display: 'flex', alignItems: 'center',
+              padding: 5, cursor: 'pointer', display: 'flex', alignItems: 'center',
             }}
           >
             <Icon name="heart" size={14} stroke={isFav ? 'var(--burn-ink)' : 'var(--fg-3)'} fill={isFav ? 'var(--burn)' : 'none'} />
@@ -602,10 +587,10 @@ function CourseCardView({ actor, card, principal, isFav, onPlay, onViewNft, onMa
           </Btn>
         )}
         {forSale && !card.is_caller_owner && (
-          <Btn variant="secondary" sm onClick={() => (signedIn ? onBuy(card) : onSignIn())}>Buy — {fmtICP(card.price_e8s)} ICP</Btn>
+          <Btn variant="secondary" sm onClick={() => onBuy(card)}>Buy — {fmtICP(card.price_e8s)} ICP</Btn>
         )}
-        <Btn variant="primary" sm onClick={() => (signedIn ? onPlay(card) : onSignIn())}>
-          <Icon name="flame" size={11} stroke="var(--char-950)" /> {signedIn ? 'Play' : 'Sign in to play'}
+        <Btn variant="primary" sm onClick={() => onPlay(card)}>
+          <Icon name="flame" size={11} stroke="var(--char-950)" /> Play
         </Btn>
         </div>
       </div>

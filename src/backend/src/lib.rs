@@ -5107,7 +5107,7 @@ fn setup_timers() {
         retry_failed_settlements().await;
         luckproof_daily_award(); // pay yesterday's Sklansky Trainer winner (tickets = player count)
         sweep_game_retention(); // 1-day game-data retention (owner 2026-07-06)
-        icpswap_lp_grant_daily_tickets().await; // ICP LP: 40 tickets/day per $1 of LP value
+        icpswap_lp_grant_daily_tickets().await; // ICP LP: 15 tickets/day per $1 of LP value
         harvest_icpswap_lp().await; // claim + route ICPSwap LP yield (throttled 1h internally)
         resume_voucher_buybacks().await; // stake vouchers: finish interrupted buybacks + route spreads
         staking_sweep().await; // bootstrap/unstakes every sweep; maturity+inbox hourly inside
@@ -11693,10 +11693,11 @@ async fn admin_get_icp_lp_pool_stats() -> Result<Vec<IcpLpPoolStats>, String> {
 }
 
 const ICPSWAP_LP_YIELD_SUBACCOUNT: [u8; 32] = [9u8; 32];
-/// Owner formula (2026-07-05): 40 tickets per DAY per $1 of staked LP value
-/// (proportional — $2.50 of LP = 100 tickets/day), valued live at grant time
-/// from the position's tick-math token amounts × the cached XRC USD rates.
-const ICP_LP_TICKETS_PER_USD_DAY: u64 = 40;
+/// Owner formula (2026-07-05, rate revised 2026-07-13): 15 tickets per DAY per
+/// $1 of staked LP value (proportional — $2 of LP = 30 tickets/day), valued
+/// live at grant time from the position's tick-math token amounts × the cached
+/// XRC USD rates.
+const ICP_LP_TICKETS_PER_USD_DAY: u64 = 15;
 /// Reservations live this long — plenty for the ICPSwap transfer round-trip.
 const ICP_LP_RESERVATION_TTL_NS: u64 = 60 * 60 * 1_000_000_000;
 /// Active reservations per user (griefing cap).
@@ -25251,7 +25252,7 @@ mod tests {
         MOCK_ICPSWAP_AMOUNTS.with(|m| { m.borrow_mut().insert((pool, 41), (1_000_000, 0)); }); // $1
         icpswap_lp_grant_daily_tickets().await;
         let count = LOTTERY_TICKETS.with(|m| m.borrow().get(&dave).map(|e| e.count).unwrap_or(0));
-        assert_eq!(count, ICP_LP_TICKETS_PER_USD_DAY, "$1 → 40/day with no neuron stake");
+        assert_eq!(count, ICP_LP_TICKETS_PER_USD_DAY, "$1 → 15/day with no neuron stake");
         // 3) LpBacked companion voucher exists, is ticket-inert and sell-proof.
         let vid = BONDS.with(|m| m.borrow().iter().find(|e| e.value().owner == dave).map(|e| *e.key()))
             .expect("LP stake minted a companion voucher");
@@ -25559,26 +25560,26 @@ mod tests {
         reserve_lp_position(pool, 2).unwrap();
         stake_lp_position(pool, 2).await.unwrap();
 
-        // Alice's position: $5.00 of LP (2.5 + 2.5) → 40 × 5 = 200/day.
+        // Alice's position: $5.00 of LP (2.5 + 2.5) → 15 × 5 = 75/day.
         MOCK_ICPSWAP_AMOUNTS.with(|m| {
             m.borrow_mut().insert((pool, 1), (2_500_000, 2_500_000));
             m.borrow_mut().insert((pool, 2), (10_000_000, 0)); // bob: $10
         });
         icpswap_lp_grant_daily_tickets().await;
         let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
-        assert_eq!(count(alice()), 200, "40 tickets per $1 per day, proportional");
+        assert_eq!(count(alice()), 5 * ICP_LP_TICKETS_PER_USD_DAY, "15 tickets per $1 per day, proportional");
         // Owner rule 2026-07-11: LP custody IS a stake — bob earns at HIS
-        // value ($10 → 400) with NO separate neuron stake.
-        assert_eq!(count(bob()), 400, "LP custody alone qualifies");
+        // value ($10 → 150) with NO separate neuron stake.
+        assert_eq!(count(bob()), 10 * ICP_LP_TICKETS_PER_USD_DAY, "LP custody alone qualifies");
         set_mock_caller(alice());
         assert!(get_icp_lp_info().granted_today);
         let rows = get_my_ticket_breakdown();
-        assert_eq!(rows.iter().find(|r| r.source == "icpswap_lp").map(|r| r.count), Some(200));
+        assert_eq!(rows.iter().find(|r| r.source == "icpswap_lp").map(|r| r.count), Some(5 * ICP_LP_TICKETS_PER_USD_DAY));
 
         // Same day: no double grant for either.
         icpswap_lp_grant_daily_tickets().await;
-        assert_eq!(count(alice()), 200);
-        assert_eq!(count(bob()), 400);
+        assert_eq!(count(alice()), 5 * ICP_LP_TICKETS_PER_USD_DAY);
+        assert_eq!(count(bob()), 10 * ICP_LP_TICKETS_PER_USD_DAY);
 
         // Next UTC day: fresh valuation — alice's LP halved → half the tickets.
         MOCK_ICPSWAP_AMOUNTS.with(|m| {
@@ -25586,7 +25587,8 @@ mod tests {
         });
         set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
         icpswap_lp_grant_daily_tickets().await;
-        assert_eq!(count(alice()), 200 + 100, "revalued daily: $2.50 → 100 tickets");
+        // $2.50 → 2.5 × rate, rounded down by the integer math.
+        assert_eq!(count(alice()), 5 * ICP_LP_TICKETS_PER_USD_DAY + (5 * ICP_LP_TICKETS_PER_USD_DAY) / 2, "revalued daily: half the LP value → half the tickets");
         assert!(
             ICP_LP_ROUND_GRANTS.with(|m| m.borrow().contains_key(&IcpLpRoundKey { round: day + 1, user: alice() }))
         );

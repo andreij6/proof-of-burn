@@ -25,7 +25,6 @@ interface LotteryProps {
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   isLocal: boolean;
-  onSignIn: () => void;
   /** Jump to the Staking tab of the Earn page — where tickets come from. */
   onGoStaking: () => void;
   /** After listing a voucher, jump to the Voucher Exchange. */
@@ -68,8 +67,8 @@ const TICKET_SOURCE_LABELS: Record<string, string> = {
   voucher_purchase: 'Bond purchases',
 };
 
-export default function Lottery({ actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onGoStaking, onGoExchange, onGoLiquidity }: LotteryProps) {
-  const signedIn = !!(principal && !principal.isAnonymous());
+// Members-only (the #/auth gate guarantees a signed-in caller).
+export default function Lottery({ actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onGoStaking, onGoExchange, onGoLiquidity }: LotteryProps) {
 
   const [info, setInfo] = useState<LotteryInfo | null>(null);
   const [breakdown, setBreakdown] = useState<{ source: string; count: bigint }[]>([]);
@@ -120,7 +119,7 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
   // Daily ticket grant: claim automatically the first time the signed-in,
   // staked user opens the page on a new UTC day (App also claims on login).
   useEffect(() => {
-    if (!actor || !signedIn || !info || !info.enabled || !info.eligible || info.claimed_today) return;
+    if (!actor || !info || !info.enabled || !info.eligible || info.claimed_today) return;
     (async () => {
       try {
         const res = await actor.claim_daily_tickets();
@@ -130,7 +129,7 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
         }
       } catch { /* already claimed elsewhere / flag raced off — harmless */ }
     })();
-  }, [actor, signedIn, info?.enabled, info?.eligible, info?.claimed_today]);
+  }, [actor, info?.enabled, info?.eligible, info?.claimed_today]);
 
   const run = async (label: string, fn: () => Promise<void>) => {
     if (!actor || busy) return;
@@ -203,7 +202,7 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
   });
 
   // Surface the lottery's local-dev controls in App's Dashboard & Controls panel.
-  usePageDevControls(isLocal && signedIn, () => (
+  usePageDevControls(isLocal, () => (
     <div className="col" style={{ gap: 8 }}>
       <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Lottery · tickets & drawings</span>
       <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
@@ -339,11 +338,7 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
 
         {/* One CTA */}
         <div className="col" style={{ alignItems: 'center', gap: 10, marginTop: 30 }}>
-          {!signedIn ? (
-            <Btn variant="primary" onClick={onSignIn} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
-              Get tickets
-            </Btn>
-          ) : info && !info.eligible && (info.my_tickets ?? 0n) === 0n && !info.admin_excluded ? (
+          {info && !info.eligible && (info.my_tickets ?? 0n) === 0n && !info.admin_excluded ? (
             <Btn variant="primary" onClick={onGoStaking} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
               Get tickets
             </Btn>
@@ -371,19 +366,10 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
             <Eyebrow>Your tickets</Eyebrow>
             {info?.claimed_today && <Chip tone="ok"><Icon name="check" size={11} /> Claimed today</Chip>}
           </span>
-          {signedIn && loading && !info ? (
+          {loading && !info ? (
             <div className="col" style={{ gap: 8 }} aria-busy="true" aria-label="Loading your tickets">
               <Skeleton width={140} height={22} />
               <Skeleton width="70%" height={12} />
-            </div>
-          ) : !signedIn ? (
-            <div className="col" style={{ gap: 10, alignItems: 'flex-start' }}>
-              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Sign in and stake to collect daily tickets.
-              </span>
-              <Btn variant="primary" sm onClick={onSignIn}>
-                <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
-              </Btn>
             </div>
           ) : info?.admin_excluded && (info?.my_tickets ?? 0n) === 0n ? (
             <div className="col" style={{ gap: 8, alignItems: 'flex-start' }}>
@@ -455,7 +441,6 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
           host={host}
           rootKey={rootKey}
           ledgerCanisterId={ledgerCanisterId}
-          onSignIn={onSignIn}
           section="mine"
           onGoExchange={onGoExchange}
           onGoLiquidity={onGoLiquidity}

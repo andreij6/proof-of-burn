@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Icon, Eyebrow, Chip, MoreInfo } from './ui';
+import { Icon, Eyebrow, MoreInfo } from './ui';
 // The single source of truth for the machine-readable guide — served as-is
 // at /llms.txt and copied whole by the "Copy for your AI agent" button.
 import llmsTxt from '../public/llms.txt?raw';
@@ -230,7 +230,6 @@ export default function DevDocs() {
         <span className="row" style={{ gap: 10, width: '100%', flexWrap: 'wrap' }}>
           <Icon name="edit" size={22} stroke="var(--burn-ink)" />
           <h4 style={{ margin: 0 }}>Developer Docs</h4>
-          <Chip tone="muted"><span className="mono">mainnet</span></Chip>
           <MoreInfo
             title="Why embed the No-Loss Lottery"
             style={{

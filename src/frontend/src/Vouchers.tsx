@@ -146,7 +146,6 @@ interface VouchersBodyProps {
   host: string;
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
-  onSignIn: () => void;
   /** Which sections render: 'mine' = the holder's vouchers (Neuron Stake
    *  page, above the stake form); 'exchange' = your listings + the
    *  best-deals grid (the Voucher Exchange page). */
@@ -163,9 +162,8 @@ interface VouchersBodyProps {
 const ticketsPerDay = (v: BondView) => Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8));
 
 export function VouchersBody({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, onSignIn, section, onGoExchange, onGoLiquidity, bare,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, section, onGoExchange, onGoLiquidity, bare,
 }: VouchersBodyProps) {
-  const signedIn = !!principal && !principal.isAnonymous();
   const [info, setInfo] = useState<BondMarketInfo | null>(null);
   const [icpUsdE8s, setIcpUsdE8s] = useState<bigint>(0n);
   const [busy, setBusy] = useState<string | null>(null);
@@ -196,7 +194,7 @@ export function VouchersBody({
       setIcpUsdE8s(icp?.rate_usd_e8s ?? 0n);
     } catch { /* best-effort */ }
   };
-  useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor, signedIn]);
+  useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor]);
 
   const run = async (label: string, fn: () => Promise<string>) => {
     if (busy) return;
@@ -337,9 +335,7 @@ export function VouchersBody({
           <Eyebrow>Your bonds</Eyebrow>
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--fg-3)' }}>every stake arrives here as an NFT</span>
         </span>
-        {!signedIn ? (
-          <span style={{ fontSize: 12.5, color: 'var(--fg-3)' }}>Sign in to see your bonds.</span>
-        ) : info === null ? (
+        {info === null ? (
           <div className="col" style={{ gap: 8 }} aria-busy="true" aria-label="Loading your bonds">
             <Skeleton width="100%" height={16} />
             <Skeleton width="86%" height={16} />
@@ -419,7 +415,7 @@ export function VouchersBody({
       )}
 
       {/* ── Your listings (hidden entirely when none) — beside Your bonds on the Exchange ── */}
-      {section === 'exchange' && signedIn && myListed.length > 0 && (
+      {section === 'exchange' && myListed.length > 0 && (
         <div className="card col" style={{ gap: 10, flex: '1 1 320px', minWidth: 300 }}>
           <span className="row" style={{ gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
             <Eyebrow accent>Your listings</Eyebrow>
@@ -480,7 +476,7 @@ export function VouchersBody({
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
             {listings.map((v) => {
               const delta = listingDeltaPct(v.listed_price_e8s ?? 0n, v.amount_e8s);
-              const isMine = signedIn && principal && v.owner.toString() === principal.toString();
+              const isMine = principal && v.owner.toString() === principal.toString();
               return (
                 <div key={String(v.id)} className="col" style={{ gap: 8, padding: 12, borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)' }}>
                   <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
@@ -507,13 +503,9 @@ export function VouchersBody({
                     <Btn variant="secondary" sm onClick={() => cancelListing(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
                       {busy === `cancel-${v.id}` ? <LiveDot size={7} /> : null} Cancel listing
                     </Btn>
-                  ) : signedIn ? (
+                  ) : (
                     <Btn variant="primary" sm onClick={() => { setOpPhase(null); setBuyModal(v.id); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
                       <Icon name="coins" size={12} stroke="var(--char-950)" /> Buy
-                    </Btn>
-                  ) : (
-                    <Btn variant="secondary" sm onClick={onSignIn} style={{ alignSelf: 'flex-start' }}>
-                      <Icon name="key" size={12} /> Sign in to buy
                     </Btn>
                   )}
                 </div>

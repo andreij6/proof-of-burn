@@ -16,7 +16,6 @@ interface LotteryHubProps {
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   isLocal: boolean;
-  onSignIn: () => void;
   /** Stake CTAs navigate to the Neuron Stake page. */
   onGoNeuronStake: () => void;
   onGoExchange: () => void;
@@ -24,7 +23,7 @@ interface LotteryHubProps {
 }
 
 export default function LotteryHub({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onGoNeuronStake, onGoExchange, onGoLiquidity,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, onGoNeuronStake, onGoExchange, onGoLiquidity,
 }: LotteryHubProps) {
   usePageHelp(() => (
     <>
@@ -81,7 +80,6 @@ export default function LotteryHub({
         rootKey={rootKey}
         ledgerCanisterId={ledgerCanisterId}
         isLocal={isLocal}
-        onSignIn={onSignIn}
         onGoStaking={onGoNeuronStake}
         onGoExchange={onGoExchange}
         onGoLiquidity={onGoLiquidity}

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { useHashScreen } from './nav';
-import { Principal } from "@icp-sdk/core/principal";
 import { ExplorerToken } from "./bindings/backend";
 import type { ArcadeInfo, ExplorerInfo, ExplorerQuote } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
@@ -45,13 +44,11 @@ const MODAL_OVERLAY: React.CSSProperties = {
 interface MiniGolfPageProps {
   actor: any;
   identity: any;
-  principal: Principal | null;
   host: string;
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   backendCanisterId: string;
   isLocal: boolean;
-  onSignIn: () => void;
   onGoParticipate: () => void;
 }
 
@@ -129,8 +126,8 @@ function payTokenFee(token: ExplorerToken, exp: ExplorerInfo | null): bigint {
   }
 }
 
-export default function MiniGolfPage({ actor, identity, principal, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal, onSignIn, onGoParticipate }: MiniGolfPageProps) {
-  const signedIn = !!(principal && !principal.isAnonymous());
+// Members-only (the #/auth gate guarantees a signed-in caller).
+export default function MiniGolfPage({ actor, identity, host, rootKey, ledgerCanisterId, backendCanisterId, isLocal, onGoParticipate }: MiniGolfPageProps) {
 
   const [info, setInfo] = useState<ArcadeInfo | null>(null);
   const [expInfo, setExpInfo] = useState<ExplorerInfo | null>(null);
@@ -186,7 +183,7 @@ export default function MiniGolfPage({ actor, identity, principal, host, rootKey
 
   // Live $1 quote in the chosen token while the editor is open.
   useEffect(() => {
-    if (!isEditorOpen || !signedIn || !actor) { setPayQuote(null); return; }
+    if (!isEditorOpen || !actor) { setPayQuote(null); return; }
     let cancelled = false;
     setIsQuoting(true);
     setPayQuote(null);
@@ -199,7 +196,7 @@ export default function MiniGolfPage({ actor, identity, principal, host, rootKey
       .catch((err: any) => { if (!cancelled) setEditorError(err.message || String(err)); })
       .finally(() => { if (!cancelled) setIsQuoting(false); });
     return () => { cancelled = true; };
-  }, [isEditorOpen, payToken, signedIn, actor]);
+  }, [isEditorOpen, payToken, actor]);
 
   const refreshAll = async (currentActor = actor) => {
     if (!currentActor) return;
@@ -220,7 +217,7 @@ export default function MiniGolfPage({ actor, identity, principal, host, rootKey
   useEffect(() => {
     setIsLoading(true);
     refreshAll(actor);
-  }, [actor, signedIn]);
+  }, [actor]);
 
   const myLook: CharacterLook = info?.my_character
     ? { hair: info.my_character.hair, skin: info.my_character.skin, outfit: info.my_character.outfit }
@@ -228,7 +225,6 @@ export default function MiniGolfPage({ actor, identity, principal, host, rootKey
   const fullAccess = info?.full_access ?? false;
 
   const openEditor = () => {
-    if (!signedIn) { onSignIn(); return; }
     setDraft(myLook);
     setEditorError(null);
     setEditorStep('');
@@ -371,7 +367,7 @@ export default function MiniGolfPage({ actor, identity, principal, host, rootKey
             <h4 style={{ margin: 0 }}>Mini Golf</h4>
           </span>
           <p style={{ fontSize: 13, color: 'var(--fg-2)', maxWidth: 560 }}>
-            Skill games — sign in and play everything, free. Staked players also earn
+            Skill games — play everything, free. Staked players also earn
             lottery tickets while they play.
           </p>
         </div>
@@ -425,7 +421,6 @@ export default function MiniGolfPage({ actor, identity, principal, host, rootKey
 
           <CourseMarketplace
             actor={actor}
-            principal={principal}
             identity={identity}
             host={host}
             rootKey={rootKey}
@@ -436,7 +431,6 @@ export default function MiniGolfPage({ actor, identity, principal, host, rootKey
             onViewNft={(card) => { setPlayCard(card); setView(`spectate/${card.token_id}`); }}
             onCreate={() => setView('create-course')}
             onGoStaking={onGoParticipate}
-            onSignIn={onSignIn}
           />
         </>
       )}

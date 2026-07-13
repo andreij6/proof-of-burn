@@ -35,14 +35,9 @@ const info = {
 
 const actor = { get_icp_lp_info: async () => info };
 
-function signedInPrincipal(): Principal {
-  // A non-anonymous principal so the page renders the full signed-in view.
-  return Principal.fromText('p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe');
-}
-
 async function renderPage() {
   const utils = render(
-    <IcpLp actor={actor} principal={signedInPrincipal()} onSignIn={() => {}} onGoParticipate={() => {}} />
+    <IcpLp actor={actor} onGoParticipate={() => {}} />
   );
   // Wait for the info fetch to land (backend principal appears in step 2
   // and again in the pools card, so findAll).

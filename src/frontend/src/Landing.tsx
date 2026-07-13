@@ -299,7 +299,11 @@ export default function Landing({ onEnter, actor }: LandingProps) {
             <p style={{ color: 'var(--fg-2)', fontSize: 15, lineHeight: 1.55, margin: '0 0 22px' }}>No one funds the prize but the network. Every pooled neuron's maturity yield flows into one pot — nobody's stake is ever spent, only the yield is at stake.</p>
             <div style={{ display: 'grid', gap: 14 }}>
               {[
-                { k: 'Paid out to date', v: info ? `${fmt2(info.total_paid_e8s)} ICP` : '—', c: 'var(--sprout)' },
+                // "Paid out to date" reads as emptiness while it's still 0 —
+                // hidden until the first prize actually pays out.
+                ...(info && info.total_paid_e8s > 0n
+                  ? [{ k: 'Paid out to date', v: `${fmt2(info.total_paid_e8s)} ICP`, c: 'var(--sprout)' }]
+                  : []),
                 { k: "This draw's prize", v: info ? `${poolStr} ICP` : '—', c: 'var(--burn)' },
               ].map(r => (
                 <div key={r.k} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', borderTop: '1px solid var(--char-800)', paddingTop: 14 }}>

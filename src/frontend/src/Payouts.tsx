@@ -25,7 +25,6 @@ interface PayoutsProps {
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   isLocal: boolean;
-  onSignIn: () => void;
   /** Sign out — lives on the Profile page header now (no left-nav Account section). */
   onSignOut: () => void;
 }
@@ -85,8 +84,8 @@ function payoutDate(atNs: bigint): string {
   });
 }
 
-export default function Payouts({ actor, principal, identity, host, rootKey, ledgerCanisterId, isLocal, onSignIn, onSignOut }: PayoutsProps) {
-  const signedIn = !!(principal && !principal.isAnonymous());
+// Members-only (the #/auth gate guarantees a signed-in caller).
+export default function Payouts({ actor, principal, identity, host, rootKey, ledgerCanisterId, isLocal, onSignOut }: PayoutsProps) {
   const [txs, setTxs] = useState<TransactionRecord[]>([]);
   const [loaded, setLoaded] = useState(false);
 
@@ -95,7 +94,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
 
   useEffect(() => {
     (async () => {
-      if (!actor || !signedIn) { setTxs([]); setLoaded(false); return; }
+      if (!actor) { setTxs([]); setLoaded(false); return; }
       try {
         let mine = await actor.get_my_transactions();
         // Local dev: seed a varied mock history on first visit so the page
@@ -110,7 +109,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
         console.error("Failed to fetch transactions:", err);
       }
     })();
-  }, [actor, principal, signedIn, isLocal]);
+  }, [actor, principal, isLocal]);
 
   const card: React.CSSProperties = {
     border: '1px solid var(--border)', borderRadius: 10,
@@ -128,11 +127,9 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
               <Icon name="wallet" size={16} stroke="var(--burn-ink)" />
               <Eyebrow accent>Profile</Eyebrow>
             </span>
-            {signedIn && (
-              <Btn variant="danger" sm onClick={onSignOut}>
-                <Icon name="x" size={13} stroke="var(--ember)" /> Sign out
-              </Btn>
-            )}
+            <Btn variant="danger" sm onClick={onSignOut}>
+              <Icon name="x" size={13} stroke="var(--ember)" /> Sign out
+            </Btn>
           </span>
           <b style={{ fontSize: 17 }}>Your wallet &amp; activity.</b>
         </div>
@@ -140,19 +137,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
       </div>
 
       {/* ── Wallet & activity ── */}
-      {!signedIn ? (
-        <div className="dashboard-container">
-          <div className="col" style={{ ...card, gap: 10, alignItems: 'flex-start' }}>
-            <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-              Sign in to use your wallet and see your transaction history.
-            </span>
-            <Btn variant="primary" sm onClick={onSignIn}>
-              <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
-            </Btn>
-          </div>
-        </div>
-      ) : (
-        <div className="dashboard-container">
+      <div className="dashboard-container">
           {/* ════ WALLET ════ */}
           <WalletSection
             actor={actor}
@@ -209,8 +194,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
               </div>
             )}
           </div>
-        </div>
-      )}
+      </div>
     </>
   );
 }

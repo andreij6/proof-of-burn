@@ -1,5 +1,4 @@
-import { Principal } from '@icp-sdk/core/principal';
-import { Btn, Eyebrow, Icon, usePageHelp } from './ui';
+import { Eyebrow, Icon, usePageHelp } from './ui';
 import LuckProof from './arcade/LuckProof';
 
 // ==========================================
@@ -10,15 +9,12 @@ import LuckProof from './arcade/LuckProof';
 
 interface LuckProofPageProps {
   actor: any;
-  principal: Principal | null;
-  onSignIn: () => void;
   /** Navigate to staking — the daily competition's gate CTA. */
   onGoParticipate: () => void;
 }
 
-export default function LuckProofPage({ actor, principal, onSignIn, onGoParticipate }: LuckProofPageProps) {
-  const signedIn = !!principal && !principal.isAnonymous();
-
+// Members-only (the #/auth gate guarantees a signed-in caller).
+export default function LuckProofPage({ actor, onGoParticipate }: LuckProofPageProps) {
   usePageHelp(() => (
     <>
             <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
@@ -69,20 +65,7 @@ export default function LuckProofPage({ actor, principal, onSignIn, onGoParticip
       </div>
 
       {/* ── The game ── */}
-      {signedIn ? (
-        <LuckProof actor={actor} onGoParticipate={onGoParticipate} />
-      ) : (
-        <div className="card col" style={{ gap: 10, alignItems: 'flex-start' }}>
-          <b style={{ fontSize: 14 }}>Sign in to play</b>
-          <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-            Practice is free for every signed-in player. Stakers can enter the daily
-            50-decision competition.
-          </span>
-          <Btn variant="primary" onClick={onSignIn}>
-            <Icon name="zap" size={13} stroke="var(--char-950)" /> Sign in to play
-          </Btn>
-        </div>
-      )}
+      <LuckProof actor={actor} onGoParticipate={onGoParticipate} />
     </div>
   );
 }

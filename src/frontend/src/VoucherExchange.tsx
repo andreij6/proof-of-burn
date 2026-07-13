@@ -15,7 +15,6 @@ interface VoucherExchangeProps {
   host: string;
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
-  onSignIn: () => void;
 }
 
 export default function VoucherExchange(props: VoucherExchangeProps) {

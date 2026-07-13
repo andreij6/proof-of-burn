@@ -22,7 +22,6 @@ interface NeuronStakePageProps {
   boostersEnabled: boolean;
   isAdmin: boolean;
   treasuryCanFront: boolean;
-  onSignIn: () => void;
   onActivity: () => void;
   onGoExchange: () => void;
   onGoLiquidity: () => void;
@@ -30,7 +29,7 @@ interface NeuronStakePageProps {
 
 export default function NeuronStakePage({
   actor, identity, principal, host, rootKey, ledgerCanisterId,
-  isLocal, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity, onGoExchange, onGoLiquidity,
+  isLocal, boostersEnabled, isAdmin, treasuryCanFront, onActivity, onGoExchange, onGoLiquidity,
 }: NeuronStakePageProps) {
   usePageHelp(() => (
     <>
@@ -94,7 +93,6 @@ export default function NeuronStakePage({
         host={host}
         rootKey={rootKey}
         ledgerCanisterId={ledgerCanisterId}
-        onSignIn={onSignIn}
         section="mine"
         onGoExchange={onGoExchange}
         onGoLiquidity={onGoLiquidity}
@@ -111,7 +109,6 @@ export default function NeuronStakePage({
         boostersEnabled={boostersEnabled}
         isAdmin={isAdmin}
         treasuryCanFront={treasuryCanFront}
-        onSignIn={onSignIn}
         onActivity={onActivity}
       />
 

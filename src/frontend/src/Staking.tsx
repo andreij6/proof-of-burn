@@ -34,7 +34,6 @@ interface StakingProps {
   isAdmin: boolean;
   /** Treasury can front the ledger fee unstaking needs; false hides/blocks it. */
   treasuryCanFront: boolean;
-  onSignIn: () => void;
   /** Called after stake/unstake so the app shell can refresh balances. */
   onActivity: () => void;
 }
@@ -78,9 +77,8 @@ function bootstrapChip(b: StakingBootstrap) {
 }
 
 export default function Staking({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, isAdmin, treasuryCanFront, onSignIn, onActivity,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, isAdmin, treasuryCanFront, onActivity,
 }: StakingProps) {
-  const signedIn = !!(principal && !principal.isAnonymous());
   void treasuryCanFront; // unstake UI removed — exits are voucher-native now
 
   const [pool, setPool] = useState<StakingPoolInfo | null>(null);
@@ -106,8 +104,8 @@ export default function Staking({
     try {
       const [poolInfo, mine, pending, dists, ea] = await Promise.all([
         actor.get_staking_pool_info(),
-        signedIn ? actor.get_my_stake() : Promise.resolve(null),
-        signedIn ? actor.list_my_pending_unstakes() : Promise.resolve([]),
+        actor.get_my_stake(),
+        actor.list_my_pending_unstakes(),
         actor.list_yield_distributions(),
         boostersEnabled && isAdmin ? actor.get_early_adopter_info().catch(() => null) : Promise.resolve(null),
       ]);
@@ -262,7 +260,7 @@ export default function Staking({
   });
 
   // Surface the staking simulator in App's Dashboard & Controls panel.
-  usePageDevControls(isLocal && signedIn, () => (
+  usePageDevControls(isLocal, () => (
     <div className="col" style={{ gap: 8 }}>
       <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--fg-2)' }}>Staking simulator</span>
       <div className="col" style={{ gap: 8 }}>
@@ -349,7 +347,7 @@ export default function Staking({
       )}
 
       {/* ── Pending unstakes ── */}
-      {signedIn && unstakes.filter(u => u.status !== UnstakeStatus.Merged).length > 0 && (
+      {unstakes.filter(u => u.status !== UnstakeStatus.Merged).length > 0 && (
         <div className="col" style={{ ...card, gap: 10 }}>
           <Eyebrow>Your unstakes</Eyebrow>
           <div className="col" style={{ gap: 8 }}>
@@ -491,17 +489,7 @@ export default function Staking({
             )}
           </span>
 
-          {!signedIn ? (
-            <div className="col" style={{ gap: 10, alignItems: 'flex-start' }}>
-              <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
-                Sign in to stake and earn daily lottery tickets.
-              </span>
-              <Btn variant="primary" sm onClick={onSignIn}>
-                <Icon name="key" size={13} stroke="var(--char-950)" /> Sign in
-              </Btn>
-            </div>
-          ) : (
-            <>
+          <>
               <div className="row" style={{ gap: 6 }}>
                 {TIER_ORDER.map(tierTab)}
                 {boostersEnabled && isAdmin && boosterTab}
@@ -554,7 +542,7 @@ export default function Staking({
                 </>
               ) : (
               <>
-              {signedIn && myStake === null ? (
+              {myStake === null ? (
                 <div className="row" style={{ gap: 10, alignItems: 'baseline' }} aria-busy="true" aria-label="Loading your stake">
                   <Skeleton width={110} height={24} />
                 </div>
@@ -610,8 +598,7 @@ export default function Staking({
               </div>
               </>
               )}
-            </>
-          )}
+          </>
         </div>
 
         {/* ── Term pools — one public NNS neuron per term ── */}
