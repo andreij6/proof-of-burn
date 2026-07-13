@@ -1543,10 +1543,12 @@ service : (InitPayload) -> {
   // daily grant. Never flag-gated (custody exit).
   transfer_bond : (nat64, principal) -> (Result);
   unregister_leader_neuron : (nat64) -> (Result);
-  // Split `amount_e8s` off the tier's pool neuron and start dissolving it; the
-  // sweep disburses to the caller's wallet once the tier's full term passes.
-  // Returns the pending-unstake id. The user nets amount − 0.0002 ICP (split +
-  // disburse fees).
+  // LEGACY FALLBACK ONLY — exits are bond-native: redeem_stake_bond is the
+  // way out (wrap_stake_bond first for a pre-bond plain row). While the bond
+  // system is wired this endpoint refuses with BOND_EXIT_ONLY; it only works
+  // on networks with no voucher canister configured, so a plain stake row
+  // can never be stranded. Splits `amount_e8s` off the tier's pool neuron
+  // and starts dissolving; the sweep disburses after the full term.
   unstake : (nat64, StakeTier) -> (BalanceResult);
   // Return a custodied position to `return_to` (the staker's ICPSwap
   // principal). Only the recorded staker; NOT feature-flag-gated — the

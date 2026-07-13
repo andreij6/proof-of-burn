@@ -23,8 +23,8 @@ type LedgerAccount = record { owner : principal; subaccount : opt blob };
 service : {
   // Staking (calls are keyed to the CALLER's principal)
   get_stake_deposit_address : () -> (LedgerAccount) query;
-  stake : (nat64, StakeTier) -> (Result);          // amount in e8s
-  unstake : (nat64, StakeTier) -> (BalanceResult); // amount in e8s
+  stake : (nat64, StakeTier) -> (Result);           // amount in e8s
+  redeem_stake_bond : (nat64) -> (BalanceResult);   // the exit (bond id)
   get_my_stake : () -> (UserStakeInfo) query;
 
   // Lottery state
@@ -53,7 +53,7 @@ export const idlFactory = ({ IDL }) => {
   return IDL.Service({
     get_stake_deposit_address: IDL.Func([], [LedgerAccount], ['query']),
     stake: IDL.Func([IDL.Nat64, StakeTier], [Result], []),
-    unstake: IDL.Func([IDL.Nat64, StakeTier], [BalanceResult], []),
+    redeem_stake_bond: IDL.Func([IDL.Nat64], [BalanceResult], []),
     get_lottery_info: IDL.Func([], [LotteryInfo], ['query']),
   });
 };`;
@@ -99,8 +99,8 @@ info.eligible;         // caller holds an active stake
 info.min_pot_e8s;      // draw gate: pot must reach this
 info.min_unique_holders; // draw gate: distinct players needed`;
 
-const UNSTAKE_SNIPPET = `// Exits are BOND-NATIVE: staking auto-issued a Stake Bond — start there.
-// (unstake(amount, tier) only drains legacy plain-stake rows.)
+const UNSTAKE_SNIPPET = `// Exits are BOND-NATIVE: staking auto-issued a Stake Bond — the bond IS
+// the stake, and redeeming it is the ONLY way out (never flag-gated).
 const m = await cycleBurn.get_bond_market();
 const bond = m.my_bonds[0];
 
@@ -137,7 +137,7 @@ service additions : {
 
 const VOUCHER_FLOW_SNIPPET = `// Instant exit (house buyback): 85% now instead of 100% after dissolve.
 // The 15% discount is an express-exit FEE — principal is never at risk on
-// the classic path (unwrap → unstake → 100%).
+// the classic path (redeem_stake_bond → 100% after the dissolve).
 const id = (await cycleBurn.wrap_stake_bond(100_000_000n, { SixMonths: null })).Ok;
 
 const market = await cycleBurn.get_bond_market();
@@ -259,6 +259,21 @@ export default function DevDocs() {
         </span>
       </div>
 
+      {/* ── The gist — the whole page in one card ── */}
+      <div className="card col" style={{ gap: 8, borderColor: 'var(--burn)', background: 'color-mix(in srgb, var(--burn) 12%, var(--surface))' }}>
+        <Eyebrow accent>The gist</Eyebrow>
+        <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6 }}>
+          <b>Add a lottery your users can't lose to your dapp</b> — a handful of calls
+          against our backend canister, no token, no bridge, no custody code.
+        </p>
+        <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
+          <li><b>Stake:</b> <span className="mono">get_stake_deposit_address</span> → exact-amount ICP transfer → <span className="mono">stake</span>. Staking mints a <b>Stake Bond NFT</b> (the bond IS the stake) and free tickets land daily, server-side.</li>
+          <li><b>Read:</b> <span className="mono">get_lottery_info</span> drives your whole UI — pot, countdown, the caller's tickets and eligibility.</li>
+          <li><b>Exit (bond-native, never gated):</b> <span className="mono">redeem_stake_bond</span> pays 100% after the tier's dissolve — or take the instant 85% buyback, or sell the bond at your price.</li>
+          <li><b>Caller-keyed:</b> every call runs with your <i>user's</i> identity — their principal owns the stake, the tickets, and any jackpot; your app never touches the money path.</li>
+        </ul>
+      </div>
+
       {/* ── Hand it to an agent ── */}
       <div className="col" style={{ border: '1px solid var(--burn)', borderRadius: 10, background: 'color-mix(in srgb, var(--burn) 10%, var(--surface))', padding: 16, gap: 8 }}>
         <Eyebrow accent>Building with an AI agent?</Eyebrow>
@@ -298,7 +313,7 @@ export default function DevDocs() {
         {h('01', 'The interface')}
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
           Seven methods cover the whole integration. Queries are free and fast; the
-          two update calls (<span className="mono">stake</span>, <span className="mono">unstake</span>) go through consensus.
+          two update calls (<span className="mono">stake</span>, <span className="mono">redeem_stake_bond</span>) go through consensus.
         </span>
         <CodeBlock code={CANDID_SNIPPET} />
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
@@ -329,9 +344,9 @@ export default function DevDocs() {
         </span>
       </div>
 
-      {/* ── Unstake ── */}
+      {/* ── Exit ── */}
       <div className="col" style={{ ...card, gap: 10 }}>
-        {h('04', 'Unstake — the exit is always open')}
+        {h('04', 'Exit — always open, and bond-native')}
         <CodeBlock code={UNSTAKE_SNIPPET} />
       </div>
 
@@ -365,7 +380,7 @@ export default function DevDocs() {
         {h('06', 'Rules your UI should reflect')}
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12.5, lineHeight: 1.55, color: 'var(--fg-1)' }}>
           <li><b>Tickets need a position, not a visit:</b> staked ICP (a Stake Bond) or a custodied LP position both qualify, and tickets land automatically every day, server-side — your users never need to visit anyone's app to earn.</li>
-          <li><b>Full unstake voids tickets instantly</b> — partial unstake keeps the rest earning.</li>
+          <li><b>Exits never void tickets</b> — already-earned tickets ride until the next drawing; the daily grant simply stops once the last position is gone.</li>
           <li><b>The transfer must land before <span className="mono">stake()</span></b> — send exactly the amount you pass to <span className="mono">stake</span>; the treasury covers ledger fees.</li>
           <li><b>Drawings pay winners directly</b> — 65% to the winner, 30% seeds the next pot, 5% burns to cycles. Your app never touches prize money.</li>
           <li><b>Questions?</b> Find us on OpenChat or X (links in the footer of the landing page).</li>

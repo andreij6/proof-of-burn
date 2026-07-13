@@ -32,8 +32,9 @@ summed across the tiers you hold a stake in:
 * 1-year stake → 10 tickets/day
 * 2-year stake → 20 tickets/day
 Admins are excluded (`ADMINS_EXCLUDED`) — the house never holds tickets.
-Eligibility is live: if you fully unstake (all tiers), tickets you already
-hold this round are voided immediately — stay staked through the drawings.
+Exiting never voids tickets you already hold — they ride until the next
+drawing; the daily grant simply stops once your last position is gone. (The
+only ticket reset is winning; a draw starts everyone's next round at zero.)
 
 To stake (full staking instructions in `/llms-prod.txt`):
 ```bash

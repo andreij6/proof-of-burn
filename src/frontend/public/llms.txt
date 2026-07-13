@@ -22,7 +22,7 @@ burns 5% to cycles.
   calls with the END USER's identity (their wallet / Internet Identity
   session). Never call from your backend or a proxy identity — a proxy would
   own every stake it creates.
-- Queries are free and fast. stake/unstake are update calls (~2s consensus).
+- Queries are free and fast. stake/redeem_stake_bond are update calls (~2s consensus).
 
 ## Candid interface (the integration surface)
 type StakeTier = variant { SixMonths; OneYear; TwoYears };
@@ -32,7 +32,7 @@ type LedgerAccount = record { owner : principal; subaccount : opt blob };
 service : {
   get_stake_deposit_address : () -> (LedgerAccount) query;
   stake : (nat64, StakeTier) -> (Result); // ALSO auto-issues a Stake Bond NFT
-  unstake : (nat64, StakeTier) -> (BalanceResult);
+  redeem_stake_bond : (nat64) -> (BalanceResult); // the exit (bond id)
   get_my_stake : () -> (UserStakeInfo) query;
   get_lottery_info : () -> (LotteryInfo) query;
   get_my_ticket_breakdown : () -> (vec TicketSourceRow) query;
@@ -57,7 +57,7 @@ export const idlFactory = ({ IDL }) => {
   return IDL.Service({
     get_stake_deposit_address: IDL.Func([], [LedgerAccount], ['query']),
     stake: IDL.Func([IDL.Nat64, StakeTier], [Result], []),
-    unstake: IDL.Func([IDL.Nat64, StakeTier], [BalanceResult], []),
+    redeem_stake_bond: IDL.Func([IDL.Nat64], [BalanceResult], []),
     get_lottery_info: IDL.Func([], [LotteryInfo], ['query']),
   });
 };
@@ -90,9 +90,9 @@ follow the bond's current owner; buying a bond grants ITS daily
 tickets to the buyer instantly (once per bond per UTC day).
 
 ## Flow 3 — Exit (the exit is always open, and it is BOND-NATIVE)
-Since staking auto-issues a Stake Bond, the exit starts from the bond — NOT
-from unstake(amount, tier), which returns NO_STAKE for bond-held positions
-(it only drains legacy plain rows).
+Staking auto-issues a Stake Bond, and the bond is the ONLY exit — there is no
+direct amount-based unstake call (the legacy unstake endpoint refuses with
+BOND_EXIT_ONLY).
 1. Find the user's bond: const m = await cycleBurn.get_bond_market();
    const bond = m.my_bonds[0]; // Backed, unlisted
 2. Exit one of three ways:
@@ -102,8 +102,9 @@ from unstake(amount, tier), which returns NO_STAKE for bond-held positions
    - Instant 85%: await cycleBurn.buyback_bond(bond.id); // Ok = ICP paid now
      Refuses with BUYBACK_UNAVAILABLE when the buyback fund can't cover it.
    - Market price: list_bond(bond.id, askE8s) — a buyer takes the position.
-- Tickets void only when the user's LAST position empties; listed bonds
-  pause earning until sold or delisted.
+- Exits never void already-earned tickets — they ride until the next drawing;
+  the daily grant simply stops once the user's last position empties. Listed
+  bonds pause earning until sold or delisted.
 
 ## Stake Bonds (exit liquidity + marketplace)
 Staking AUTO-ISSUES a STAKE BOND — an NFT claim on the staked ICP (the stake
@@ -152,8 +153,8 @@ Flow A — wrap + instant exit (house buyback):
    // and the canister dissolves the underlying stake. Refuses with
    // BUYBACK_UNAVAILABLE when the buyback fund can't cover the quote — check
    // buyback_fund_e8s >= amount_e8s * 85% first.
-   // Alternative: unwrap_stake_bond(id) turns it back into a plain stake;
-   // classic unstake then returns 100% after the tier's dissolve.
+   // Alternative: redeem_stake_bond(id) is the classic path — it returns
+   // 100% after the tier's dissolve.
 
 Flow B — marketplace (asks in ICP only):
 1. Seller: await cycleBurn.list_bond(bondId, askE8s); (cancel anytime

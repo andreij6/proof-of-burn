@@ -6955,10 +6955,28 @@ async fn fund_pool_neuron_from_treasury(
 /// sweep disburses to the caller's wallet once the tier's full term passes.
 /// Returns the pending-unstake id. The user nets amount − 0.0002 ICP (split +
 /// disburse fees).
+///
+/// Exits are BOND-NATIVE (owner 2026-07-13): while the bond system is wired
+/// (voucher_nft canister configured) this endpoint refuses with
+/// BOND_EXIT_ONLY — wrap the plain row (`wrap_stake_bond`) and redeem the
+/// bond (`redeem_stake_bond`) instead. It stays callable as the FALLBACK
+/// exit when no voucher canister is configured (auto-wrap can't mint there),
+/// so a plain stake row is never stranded — exits are never gated.
 #[ic_cdk::update]
 async fn unstake(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     require_authenticated()?;
     require_lossless_enabled()?;
+    if voucher_nft_cid().is_ok() {
+        return Err("BOND_EXIT_ONLY: exits are bond-native — redeem your Stake Bond (redeem_stake_bond), or wrap this stake first (wrap_stake_bond).".to_string());
+    }
+    unstake_plain_row(amount_e8s, tier).await
+}
+
+/// The classic split-and-dissolve exit mechanics, shared by the public
+/// fallback endpoint above and `redeem_stake_bond` (which must work even
+/// when the public endpoint refuses — and, being an exit, is never
+/// flag-gated, so the lossless flag check stays out of here).
+async fn unstake_plain_row(amount_e8s: u64, tier: StakeTier) -> Result<u64, String> {
     let caller = get_caller();
     let _guard = CallerGuard::new(caller)?;
     let _lock = StakingLock::new()?;
@@ -16992,10 +17010,13 @@ async fn redeem_stake_bond(id: u64) -> Result<u64, String> {
     // Leg 1: voucher → plain row (burn NFT; restore STAKES). Same-caller
     // call into the unwrap endpoint fn keeps registry/NFT in lockstep.
     unwrap_stake_bond(id).await?;
-    // Leg 2: the classic unstake (split + dissolve, pays the owner 100%).
-    // If this leg fails (pool constraints), the claim safely REMAINS a plain
-    // stake row — the user can retry or restake; nothing is lost.
-    unstake(amount, tier).await.map_err(|e| format!("UNSTAKE_AFTER_REDEEM: {}", e))
+    // Leg 2: the classic unstake mechanics (split + dissolve, pays the owner
+    // 100%). Calls the inner fn directly: the public endpoint refuses while
+    // the bond system is live (BOND_EXIT_ONLY), and redeem — an exit — must
+    // also keep working regardless of feature flags. If this leg fails (pool
+    // constraints), the claim safely REMAINS a plain stake row — the user
+    // can retry or restake; nothing is lost.
+    unstake_plain_row(amount, tier).await.map_err(|e| format!("UNSTAKE_AFTER_REDEEM: {}", e))
 }
 
 #[ic_cdk::update]
@@ -26648,6 +26669,41 @@ mod tests {
         let promo_id = claim_golden_ticket(None).await.unwrap();
         assert_eq!(redeem_stake_bond(promo_id).await.unwrap_err(), "PROMO_NOT_ALLOWED");
         clear_vouchers();
+    }
+
+    /// Owner 2026-07-13: exits are bond-native. While the voucher canister is
+    /// configured the public `unstake` endpoint refuses (BOND_EXIT_ONLY) —
+    /// redeem_stake_bond is the exit. Once the canister is un-configured (the
+    /// pre-bond world where auto-wrap can't mint), the classic endpoint still
+    /// works, so a plain stake row can never be stranded.
+    #[tokio::test]
+    async fn test_unstake_refuses_while_bond_system_live() {
+        enable_vouchers();
+        clear_vouchers();
+        let alice = p("rrkah-fqaaa-aaaaa-aaaaq-cai");
+        let dave = p("qoctq-giaaa-aaaaa-aaaea-cai");
+        set_mock_caller(dave);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        stake(200_000_000, StakeTier::SixMonths).await.unwrap();
+        set_mock_caller(alice);
+        stake(500_000_000, StakeTier::SixMonths).await.unwrap();
+        // Unwrap the auto-issued bond so a plain row exists — even then, the
+        // public endpoint refuses while bonds are live.
+        let auto = BONDS.with(|m| m.borrow().iter().find(|e| e.value().owner == alice).map(|e| *e.key())).unwrap();
+        unwrap_stake_bond(auto).await.unwrap();
+        let err = unstake(200_000_000, StakeTier::SixMonths).await.unwrap_err();
+        assert!(err.starts_with("BOND_EXIT_ONLY"), "got: {}", err);
+
+        // Fallback world: no voucher canister configured → classic exit works.
+        let mut config = CONFIG.with(|c| c.borrow().get().clone());
+        config.voucher_nft_canister = None;
+        CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+        let id = unstake(200_000_000, StakeTier::SixMonths).await.unwrap();
+        assert!(PENDING_UNSTAKES.with(|m| m.borrow().get(&id)).is_some());
+        clear_vouchers();
+        STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice)); });
+        PENDING_UNSTAKES.with(|m| { m.borrow_mut().remove(&id); });
     }
 
     #[tokio::test]
