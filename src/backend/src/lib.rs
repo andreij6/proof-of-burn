@@ -12443,7 +12443,7 @@ fn admin_set_icpswap_pools(pools: Vec<IcpLpPoolCfg>) -> Result<u64, String> {
 /// position earns ICP_LP_TICKETS_PER_ROUND tickets once per lottery round.
 /// The guard row is only written when tickets actually land, so an unstaked
 /// user who stakes ICP later in the round still collects.
-/// Daily ticket grant: 40 tickets per $1 of staked LP value, per user, per
+/// Daily ticket grant: ICP_LP_TICKETS_PER_USD_DAY tickets per $1 of staked LP value, per user, per
 /// UTC day. The value is read LIVE (the pool's own tick-math amounts × the
 /// cached XRC USD rates), so tickets track the position through price moves.
 /// A failed valuation leaves the day's guard unwritten — retried next sweep.
