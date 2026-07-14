@@ -85,9 +85,18 @@ function payoutDate(atNs: bigint): string {
 }
 
 // Members-only (the #/auth gate guarantees a signed-in caller).
+type WalletTab = 'balance' | 'deposit' | 'withdraw' | 'history';
+const WALLET_TABS: { key: WalletTab; label: string; icon: string }[] = [
+  { key: 'balance', label: 'Balance', icon: 'wallet' },
+  { key: 'deposit', label: 'Deposit', icon: 'coins' },
+  { key: 'withdraw', label: 'Withdraw', icon: 'arrowUp' },
+  { key: 'history', label: 'History', icon: 'list' },
+];
+
 export default function Payouts({ actor, principal, identity, host, rootKey, ledgerCanisterId, isLocal, onSignOut }: PayoutsProps) {
   const [txs, setTxs] = useState<TransactionRecord[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState<WalletTab>('balance');
 
   // The Admin console moved to its own admin-only nav section (2026-07-11);
   // this page is wallet & activity only.
@@ -138,21 +147,48 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
 
       {/* ── Wallet & activity ── */}
       <div className="dashboard-container">
-          {/* ════ WALLET ════ */}
-          <WalletSection
-            actor={actor}
-            principal={principal!}
-            identity={identity}
-            host={host}
-            rootKey={rootKey}
-            ledgerCanisterId={ledgerCanisterId}
-            isLocal={isLocal}
-          />
+          {/* ════ WALLET TABS (Staking tier-tab idiom) ════ */}
+          <div className="row" style={{ gap: 6 }}>
+            {WALLET_TABS.map(({ key, label, icon }) => {
+              const active = tab === key;
+              return (
+                <button
+                  key={key}
+                  onClick={() => setTab(key)}
+                  style={{
+                    flex: 1, padding: '7px 4px', borderRadius: 7, cursor: 'pointer', fontSize: 12,
+                    fontWeight: active ? 700 : 500, fontFamily: 'inherit',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
+                    background: active ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
+                    color: active ? 'var(--burn-ink)' : 'var(--fg-2)',
+                  }}
+                >
+                  <Icon name={icon} size={12} stroke="currentColor" /> {label}
+                </button>
+              );
+            })}
+          </div>
 
-          {/* ════ DISSOLVING NEURONS ════ */}
+          {/* ════ WALLET (balance / deposit / withdraw tabs) ════ */}
+          {tab !== 'history' && (
+            <WalletSection
+              actor={actor}
+              principal={principal!}
+              identity={identity}
+              host={host}
+              rootKey={rootKey}
+              ledgerCanisterId={ledgerCanisterId}
+              isLocal={isLocal}
+              section={tab}
+            />
+          )}
+
+          {/* ════ DISSOLVING NEURONS ════ (own section, below whichever tab) */}
           <DissolvingNeurons actor={actor} principal={principal!} isLocal={isLocal} />
 
-          {/* ════ ACTIVITY ════ */}
+          {/* ════ ACTIVITY (History tab) ════ */}
+          {tab === 'history' && (
           <div className="col" style={{ ...card, gap: 10 }}>
             <Eyebrow>Transaction history</Eyebrow>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
@@ -194,6 +230,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
               </div>
             )}
           </div>
+          )}
       </div>
     </>
   );
@@ -204,7 +241,7 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
 // ck-token balances live on the user's own principal across the five
 // ledgers; native ramps talk to DFINITY's minters (mainnet only).
 // ==========================================
-function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanisterId, isLocal }: {
+function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanisterId, isLocal, section }: {
   actor: Backend;
   principal: Principal;
   identity: unknown;
@@ -212,6 +249,9 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   isLocal: boolean;
+  /** Which wallet tab renders — the component stays mounted across the
+   *  balance/deposit/withdraw tabs so balances and notices persist. */
+  section: 'balance' | 'deposit' | 'withdraw';
 }) {
   const card: React.CSSProperties = {
     border: '1px solid var(--border)', borderRadius: 10,
@@ -396,6 +436,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
       )}
 
       {/* Balances */}
+      {section === 'balance' && (
       <div className="col" style={{ ...card, gap: 10 }}>
         <span className="row" style={{ gap: 8, justifyContent: 'space-between' }}>
           <Eyebrow>Balances</Eyebrow>
@@ -416,8 +457,10 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
           ))}
         </div>
       </div>
+      )}
 
-      {/* Deposit — first, above withdrawals */}
+      {/* Deposit */}
+      {section === 'deposit' && (
       <div className="col" style={{ ...card, gap: 12 }}>
         <Eyebrow>Deposit</Eyebrow>
 
@@ -473,8 +516,10 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
           </div>
         )}
       </div>
+      )}
 
       {/* Withdraw */}
+      {section === 'withdraw' && (
       <div className="col" style={{ ...card, gap: 12 }}>
         <Eyebrow>Withdraw</Eyebrow>
         <div className="col" style={{ gap: 8 }}>
@@ -515,6 +560,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
           </div>
         )}
       </div>
+      )}
     </>
   );
 }
