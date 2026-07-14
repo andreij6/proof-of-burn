@@ -114,6 +114,10 @@ export interface BondView {
   minted_at: bigint;
   expires_at: bigint | null;
   listed_price_e8s: bigint | null;
+  /** Age bonus (1%→25% over 10 years, travels with the NFT; decays while
+   *  listed after a 3-day grace). Backend-computed, effective right now. */
+  age_bonus_bps: bigint;
+  age_bonus_daily: bigint;
 }
 
 /** Marketplace listings ordered BEST DEAL FIRST — ascending ask/value ratio,
@@ -161,7 +165,11 @@ interface VouchersBodyProps {
   bare?: boolean;
 }
 
-const ticketsPerDay = (v: BondView) => Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8));
+const ticketsPerDay = (v: BondView) =>
+  Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8))
+  + Number(v.age_bonus_daily ?? 0n);
+/** "+7.3%" — the bond's live age bonus, one decimal. */
+export const ageBonusPct = (v: BondView) => `+${(Number(v.age_bonus_bps ?? 0n) / 100).toFixed(1)}%`;
 
 export function VouchersBody({
   actor, identity, principal, host, rootKey, ledgerCanisterId, section, onGoExchange, onGoLiquidity, bare,
@@ -503,7 +511,10 @@ export function VouchersBody({
                     {delta < 0 ? `${Math.abs(delta)}% under value` : delta > 0 ? `${delta}% over value` : 'at value'}
                   </Chip>
                   <span style={{ fontSize: 11, color: 'var(--fg-2)' }}>
-                    Earns {ticketsPerDay(v)} tickets/day.
+                    Earns {ticketsPerDay(v)} tickets/day
+                    {Number(v.age_bonus_bps ?? 0n) > 100
+                      ? <> — includes a <b style={{ color: 'var(--haze-ink)' }}>{ageBonusPct(v)} age bonus</b> that transfers with the bond.</>
+                      : '.'}
                   </span>
                   {isMine ? (
                     <Btn variant="secondary" sm onClick={() => cancelListing(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>

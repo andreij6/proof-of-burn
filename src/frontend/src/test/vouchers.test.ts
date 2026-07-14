@@ -183,6 +183,7 @@ describe('sortListingsBestDeal', () => {
   const mk = (id: number, amount: bigint, price: bigint): BondView => ({
     id: BigInt(id), class: 'Backed', tier: 0 as any, amount_e8s: amount,
     owner: Principal.anonymous(), minted_at: 0n, expires_at: null, listed_price_e8s: price,
+    age_bonus_bps: 100n, age_bonus_daily: 0n,
   });
   it('orders discounts before par before premiums (by ask/value ratio)', () => {
     const premium = mk(1, 100_000_000n, 110_000_000n); // +10%

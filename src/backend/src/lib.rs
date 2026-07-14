@@ -8476,7 +8476,8 @@ fn auto_grant_daily_stake_tickets() {
         }
         let stake_part = user_daily_tickets(user);
         let promo_part = promo_daily_tickets(user);
-        let per_day = stake_part.saturating_add(promo_part);
+        let age_part = user_age_bonus_daily(user);
+        let per_day = stake_part.saturating_add(promo_part).saturating_add(age_part);
         if per_day == 0 {
             continue;
         }
@@ -8501,6 +8502,9 @@ fn auto_grant_daily_stake_tickets() {
         if promo_part > 0 {
             note_ticket_source(user, "promo_voucher", promo_part, state.round);
         }
+        if age_part > 0 {
+            note_ticket_source(user, "age_bonus", age_part, state.round);
+        }
         granted_any = true;
     }
     if granted_any {
@@ -8523,7 +8527,8 @@ fn claim_daily_tickets() -> Result<u64, String> {
     let today = now / 1_000_000_000 / SECS_PER_DAY;
     let stake_part = user_daily_tickets(caller);
     let promo_part = promo_daily_tickets(caller);
-    let per_day = stake_part.saturating_add(promo_part);
+    let age_part = user_age_bonus_daily(caller);
+    let per_day = stake_part.saturating_add(promo_part).saturating_add(age_part);
     if per_day == 0 {
         return Err("NOT_STAKED".to_string());
     }
@@ -8553,6 +8558,9 @@ fn claim_daily_tickets() -> Result<u64, String> {
     }
     if promo_part > 0 {
         note_ticket_source(caller, "promo_voucher", promo_part, state.round);
+    }
+    if age_part > 0 {
+        note_ticket_source(caller, "age_bonus", age_part, state.round);
     }
     set_lottery_state(state);
     Ok(entry.count)
@@ -12410,6 +12418,8 @@ async fn mint_lp_voucher(owner: Principal) -> Option<u64> {
             expires_at: None,
             listed_price_e8s: None,
             last_purchase_grant_day: 0,
+            listed_at: None,
+            age_decay_ns: 0,
         });
     });
     staking_audit("lp_voucher_mint", owner, 0, id);
@@ -16501,6 +16511,15 @@ pub struct BondRecord {
     /// same-day wash-trade farming).
     #[serde(default)]
     pub last_purchase_grant_day: u64,
+    /// When the CURRENT listing started (age-bonus decay clock); None when
+    /// not listed. Set by list_bond, banked+cleared on delist/settle.
+    #[serde(default)]
+    pub listed_at: Option<u64>,
+    /// Effective-age nanoseconds already decayed away by PAST listings
+    /// (owner 2026-07-14: a listed bond's age bonus decays, after a 3-day
+    /// grace, at the same rate it grows).
+    #[serde(default)]
+    pub age_decay_ns: u64,
 }
 
 /// Marketplace sale saga journal — persisted between legs so an interrupted
@@ -16617,12 +16636,106 @@ fn voucher_nft_cid() -> Result<Principal, String> {
 
 /// Backed voucher e8s a user holds in one tier (their wrapped stake).
 /// One voucher's daily ticket rate: the tier's per-ICP rate × whole ICP
-/// (sub-1-ICP floors to one base unit) — the same math the daily grant uses.
+/// (sub-1-ICP floors to one base unit) — the same math the daily grant uses —
+/// PLUS the bond's age bonus (so buying a vintage bond grants its boosted
+/// rate immediately).
 fn voucher_daily_rate(v: &BondRecord) -> u64 {
     let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
+    voucher_base_rate(v, base).saturating_add(bond_age_bonus_daily(v, base, current_time()))
+}
+
+/// The bond's un-bonused daily rate (tier per-ICP rate × whole ICP).
+fn voucher_base_rate(v: &BondRecord, base: u64) -> u64 {
     let tier = tier_from_idx(v.tier);
     let whole_icp = (v.amount_e8s / ONE_ICP_E8S).max(1);
     tier.daily_tickets_per_icp(base).saturating_mul(whole_icp)
+}
+
+// ── Age bonus (owner 2026-07-14) ────────────────────────────────────────────
+// A Backed bond's daily tickets grow smoothly with the BOND's age: +1% the
+// day it's minted, rising linearly to +25% at 10 years, plateau after. The
+// age belongs to the NFT — `minted_at` travels with transfers and sales, so
+// a vintage bond is worth more to a buyer; redeem/buyback burns the age with
+// the bond, and unwrap→rewrap mints a NEW bond (age resets — warned in UI).
+// Small bonds floor to 0 extra tickets until the percentage bites.
+const AGE_BONUS_START_BPS: u64 = 100; // 1% at mint
+const AGE_BONUS_MAX_BPS: u64 = 2_500; // 25% at the plateau
+const AGE_BONUS_PLATEAU_NS: u64 = 10 * 365 * 86_400 * 1_000_000_000; // 10 years
+/// A listing gets this long before its age bonus starts decaying.
+const AGE_DECAY_GRACE_NS: u64 = 3 * 86_400 * 1_000_000_000; // 3 days
+
+/// Age adjustment accrued by the CURRENT listing. Semantics: a listed bond
+/// stops aging the moment it's listed (frozen through the 3-day grace), then
+/// its effective age DECAYS at the same 1× rate it grows. Since wall-clock
+/// age keeps growing underneath, the adjustment is listed-time (cancels the
+/// growth) plus the post-grace decay on top.
+fn live_listing_decay_ns(v: &BondRecord, now: u64) -> u64 {
+    match (v.listed_price_e8s, v.listed_at) {
+        (Some(_), Some(t)) => {
+            let listed = now.saturating_sub(t);
+            listed.saturating_add(listed.saturating_sub(AGE_DECAY_GRACE_NS))
+        }
+        _ => 0,
+    }
+}
+
+/// The bond's EFFECTIVE age: wall-clock age minus everything decayed away by
+/// listings (banked past listings + the live one). Floors at 0 — the bonus
+/// can fall back to its 1% mint floor, never below.
+fn bond_effective_age_ns(v: &BondRecord, now: u64) -> u64 {
+    now.saturating_sub(v.minted_at)
+        .saturating_sub(v.age_decay_ns)
+        .saturating_sub(live_listing_decay_ns(v, now))
+}
+
+fn age_bonus_bps_from_age(age_ns: u64) -> u64 {
+    let age = age_ns.min(AGE_BONUS_PLATEAU_NS);
+    AGE_BONUS_START_BPS
+        + ((AGE_BONUS_MAX_BPS - AGE_BONUS_START_BPS) as u128 * age as u128
+            / AGE_BONUS_PLATEAU_NS as u128) as u64
+}
+
+fn bond_age_bonus_bps(v: &BondRecord, now: u64) -> u64 {
+    age_bonus_bps_from_age(bond_effective_age_ns(v, now))
+}
+
+/// Extra daily tickets one Backed bond earns from its age (floored).
+fn bond_age_bonus_daily(v: &BondRecord, base: u64, now: u64) -> u64 {
+    if v.class != BondClass::Backed {
+        return 0;
+    }
+    let rate = voucher_base_rate(v, base) as u128;
+    ((rate * bond_age_bonus_bps(v, now) as u128) / 10_000) as u64
+}
+
+/// Bank the decay a finished listing accrued and stop its clock. Call at
+/// delist and at sale settlement (the buyer inherits the decayed age).
+/// Capped so effective age banks at worst to 0 — a long-forgotten listing
+/// costs the accumulated age, never future aging.
+fn bank_listing_decay(v: &mut BondRecord, now: u64) {
+    let raw_age = now.saturating_sub(v.minted_at);
+    v.age_decay_ns = v
+        .age_decay_ns
+        .saturating_add(live_listing_decay_ns(v, now))
+        .min(raw_age);
+    v.listed_at = None;
+}
+
+/// A user's total daily age bonus across their unlisted Backed bonds —
+/// listed bonds pause ALL earning, bonus included (same rule as the base
+/// stream in `voucher_backed_e8s`).
+fn user_age_bonus_daily(user: Principal) -> u64 {
+    let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
+    let now = current_time();
+    BONDS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| {
+                let v = e.value();
+                v.class == BondClass::Backed && v.owner == user && v.listed_price_e8s.is_none()
+            })
+            .fold(0u64, |acc, e| acc.saturating_add(bond_age_bonus_daily(&e.value(), base, now)))
+    })
 }
 
 fn voucher_backed_e8s(user: Principal, tier: StakeTier) -> u64 {
@@ -16661,7 +16774,9 @@ fn promo_daily_tickets(user: Principal) -> u64 {
 /// grant paths and the lottery info must agree on (a mismatch would let the
 /// lower path stamp `last_claim_day` and under-grant the higher one).
 fn total_daily_tickets(user: Principal) -> u64 {
-    user_daily_tickets(user).saturating_add(promo_daily_tickets(user))
+    user_daily_tickets(user)
+        .saturating_add(promo_daily_tickets(user))
+        .saturating_add(user_age_bonus_daily(user))
 }
 
 // ── voucher_nft inter-canister seams (mock pair for native tests) ──────────
@@ -16777,6 +16892,10 @@ pub struct BondView {
     pub minted_at: u64,
     pub expires_at: Option<u64>,
     pub listed_price_e8s: Option<u64>,
+    /// Age bonus this bond carries right now (1%→25% over 10 years,
+    /// travels with the NFT). Basis points + the extra tickets/day it pays.
+    pub age_bonus_bps: u64,
+    pub age_bonus_daily: u64,
 }
 
 fn tier_from_idx(idx: u8) -> StakeTier {
@@ -16789,6 +16908,8 @@ fn tier_from_idx(idx: u8) -> StakeTier {
 }
 
 fn voucher_view(v: &BondRecord) -> BondView {
+    let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
+    let now = current_time();
     BondView {
         id: v.id,
         class: v.class,
@@ -16798,6 +16919,8 @@ fn voucher_view(v: &BondRecord) -> BondView {
         minted_at: v.minted_at,
         expires_at: v.expires_at,
         listed_price_e8s: v.listed_price_e8s,
+        age_bonus_bps: if v.class == BondClass::Backed { bond_age_bonus_bps(v, now) } else { 0 },
+        age_bonus_daily: bond_age_bonus_daily(v, base, now),
     }
 }
 
@@ -16924,6 +17047,8 @@ async fn auto_issue_voucher(user: Principal, tier: StakeTier) -> Option<u64> {
             expires_at: None,
             listed_price_e8s: None,
             last_purchase_grant_day: 0,
+            listed_at: None,
+            age_decay_ns: 0,
         });
     });
     staking_audit("voucher_auto_issue", user, whole, id);
@@ -16964,6 +17089,8 @@ async fn dev_seed_mock_bonds(n: u32) -> Result<u32, String> {
             m.borrow_mut().insert(id, BondRecord {
                 id, class: BondClass::Backed, tier: tier_idx, amount_e8s: amount,
                 owner, minted_at: now, expires_at: None, listed_price_e8s: Some(ask), last_purchase_grant_day: 0,
+                listed_at: None,
+                age_decay_ns: 0,
             });
         });
         made += 1;
@@ -17101,6 +17228,8 @@ async fn wrap_stake_bond(amount_e8s: u64, tier: StakeTier) -> Result<u64, String
             expires_at: None,
             listed_price_e8s: None,
             last_purchase_grant_day: 0,
+            listed_at: None,
+            age_decay_ns: 0,
         });
     });
     staking_audit("voucher_wrap", caller, amount_e8s, id);
@@ -17181,6 +17310,7 @@ fn list_bond(voucher_id: u64, price_e8s: u64) -> Result<(), String> {
         return Err("BUYBACK_IN_PROGRESS".to_string());
     }
     v.listed_price_e8s = Some(price_e8s);
+    v.listed_at = Some(current_time());
     BONDS.with(|m| { m.borrow_mut().insert(voucher_id, v); });
     Ok(())
 }
@@ -17200,6 +17330,7 @@ fn cancel_bond_listing(voucher_id: u64) -> Result<(), String> {
     if v.listed_price_e8s.is_none() {
         return Err("NOT_LISTED".to_string());
     }
+    bank_listing_decay(&mut v, current_time());
     v.listed_price_e8s = None;
     BONDS.with(|m| { m.borrow_mut().insert(voucher_id, v); });
     Ok(())
@@ -17263,10 +17394,13 @@ async fn buy_bond(voucher_id: u64) -> Result<(), String> {
     BOND_SALES.with(|m| { m.borrow_mut().insert(voucher_id, sale.clone()); });
     result?;
 
-    // Success: move the registry row, clear the listing + journal.
+    // Success: move the registry row, clear the listing + journal. The time
+    // spent listed (past its grace) has decayed the bond's effective age —
+    // bank it so the buyer inherits the honest, decayed vintage.
     BONDS.with(|m| {
         let mut map = m.borrow_mut();
         if let Some(mut v) = map.get(&voucher_id) {
+            bank_listing_decay(&mut v, current_time());
             v.owner = sale.buyer;
             v.listed_price_e8s = None;
             map.insert(voucher_id, v);
@@ -17727,6 +17861,8 @@ async fn claim_golden_ticket(target: Option<Principal>) -> Result<u64, String> {
             expires_at: Some(expires_at),
             listed_price_e8s: None,
             last_purchase_grant_day: 0,
+            listed_at: None,
+            age_decay_ns: 0,
         });
     });
     campaign.claimed += 1;
@@ -20768,6 +20904,76 @@ mod tests {
     /// The 2-week taster tier (owner 2026-07-14): 1 ticket per ICP per day
     /// through the same sweep grant, scaling with whole ICP, stacking with
     /// other tiers.
+    /// Age bonus (owner 2026-07-14): 1% at mint → 25% at 10y, smooth; the
+    /// bonus lands as its own breakdown source; listed bonds decay (after a
+    /// 3-day grace) at the growth rate; sale banks the decay for the buyer.
+    #[test]
+    fn test_age_bonus_curve_and_decay() {
+        const YEAR_NS: u64 = 365 * 86_400 * 1_000_000_000;
+        assert_eq!(age_bonus_bps_from_age(0), 100, "1% the day it's minted");
+        assert_eq!(age_bonus_bps_from_age(5 * YEAR_NS), 1_300, "midpoint: 13%");
+        assert_eq!(age_bonus_bps_from_age(10 * YEAR_NS), 2_500, "25% at 10 years");
+        assert_eq!(age_bonus_bps_from_age(30 * YEAR_NS), 2_500, "plateau holds");
+
+        let mk = |listed_at: Option<u64>, listed_price: Option<u64>, decay: u64| BondRecord {
+            id: 1, class: BondClass::Backed, tier: StakeTier::TwoYears.idx(),
+            amount_e8s: 500_000_000, owner: alice(), minted_at: 0, expires_at: None,
+            listed_price_e8s: listed_price, last_purchase_grant_day: 0,
+            listed_at, age_decay_ns: decay,
+        };
+        // 5 ICP × 2yr tier at base 5 = 100/day base; at 5 years old → +13%.
+        let v = mk(None, None, 0);
+        assert_eq!(bond_age_bonus_daily(&v, 5, 5 * YEAR_NS), 13);
+        // Listing freezes aging: within the 3-day grace the age holds still…
+        let listed = mk(Some(5 * YEAR_NS), Some(1), 0);
+        assert_eq!(bond_effective_age_ns(&listed, 5 * YEAR_NS + 2 * 86_400_000_000_000), 5 * YEAR_NS);
+        // …after grace it decays 1:1: a year on the shelf ≈ a year of age lost.
+        let one_year_listed = 5 * YEAR_NS + YEAR_NS;
+        assert_eq!(
+            bond_effective_age_ns(&listed, one_year_listed),
+            4 * YEAR_NS + AGE_DECAY_GRACE_NS, // 5y frozen − (1y − grace) decay
+        );
+        // Decay floors at zero effective age (bonus back to the 1% floor).
+        let ancient_listing = mk(Some(YEAR_NS), Some(1), 0);
+        assert_eq!(bond_effective_age_ns(&ancient_listing, 40 * YEAR_NS), 0);
+        assert_eq!(bond_age_bonus_bps(&ancient_listing, 40 * YEAR_NS), 100);
+        // Banking on delist/settle: the decayed ns persist, clock stops.
+        let mut banked = mk(Some(5 * YEAR_NS), Some(1), 0);
+        bank_listing_decay(&mut banked, 6 * YEAR_NS);
+        // Listed 1y: cancels the year of growth + decays (1y − grace) on top.
+        assert_eq!(banked.age_decay_ns, 2 * YEAR_NS - AGE_DECAY_GRACE_NS);
+        assert!(banked.listed_at.is_none());
+        assert_eq!(bond_effective_age_ns(&banked, 6 * YEAR_NS), 4 * YEAR_NS + AGE_DECAY_GRACE_NS);
+        // A forgotten multi-decade listing banks at worst to age 0 — aging
+        // resumes immediately after delisting.
+        let mut forgotten = mk(Some(YEAR_NS), Some(1), 0);
+        bank_listing_decay(&mut forgotten, 40 * YEAR_NS);
+        assert_eq!(bond_effective_age_ns(&forgotten, 40 * YEAR_NS), 0);
+        assert_eq!(bond_effective_age_ns(&forgotten, 41 * YEAR_NS), YEAR_NS, "aging resumed");
+
+        // Grant integration: an aged bond's bonus lands as its own source.
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        enable_lottery();
+        let now = 1_700_000_000_000_000_000u64;
+        set_mock_time(Some(now));
+        BONDS.with(|m| {
+            m.borrow_mut().insert(77, BondRecord {
+                id: 77, class: BondClass::Backed, tier: StakeTier::TwoYears.idx(),
+                amount_e8s: 500_000_000, owner: alice(), minted_at: now - 5 * YEAR_NS,
+                expires_at: None, listed_price_e8s: None, last_purchase_grant_day: 0,
+                listed_at: None, age_decay_ns: 0,
+            });
+        });
+        auto_grant_daily_stake_tickets();
+        let count = LOTTERY_TICKETS.with(|m| m.borrow().get(&alice()).map(|e| e.count).unwrap_or(0));
+        assert_eq!(count, 100 + 13, "base 100/day + 13% age bonus");
+        let bonus_row = TICKET_SOURCES.with(|m| m.borrow().get(&TicketSourceKey { user: alice(), source: "age_bonus".to_string() }).map(|t| t.count));
+        assert_eq!(bonus_row, Some(13), "bonus is its own breakdown row");
+
+        BONDS.with(|m| { m.borrow_mut().remove(&77); });
+        LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
+    }
+
     #[test]
     fn test_two_week_tier_grants_one_ticket_per_icp_per_day() {
         CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
@@ -27007,6 +27213,8 @@ mod tests {
                 owner: carol(), minted_at: current_time(),
                 expires_at: Some(current_time() + PROMO_EXPIRY_NS), listed_price_e8s: None,
             last_purchase_grant_day: 0,
+            listed_at: None,
+            age_decay_ns: 0,
         });
         });
         auto_grant_daily_stake_tickets();

@@ -120,6 +120,8 @@ type BondView = record {
   id : nat64; class : BondClass; tier : StakeTier; amount_e8s : nat64;
   owner : principal; minted_at : nat64; expires_at : opt nat64;
   listed_price_e8s : opt nat64;
+  age_bonus_bps : nat64;   // +1% at mint -> +25% at 10y; travels with the NFT
+  age_bonus_daily : nat64; // extra tickets/day it pays right now
 };
 
 service additions : {

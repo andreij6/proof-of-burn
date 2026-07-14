@@ -76,6 +76,11 @@ type BondMarketInfo = record {
   promo_open : bool;
   buyback_discount_bps : nat16;
 };
+// age_bonus_* (2026-07-14): a Backed bond's daily tickets grow with the
+// BOND's age — 1% at mint → 25% at 10 years (smooth, plateau after). The age
+// travels with the NFT on transfer/sale; while LISTED the bonus decays (after
+// a 3-day grace) at the same rate it grows, floored at the 1% mint level;
+// redeem/buyback burns the age; unwrap→rewrap mints a new bond (age resets).
 type BondView = record {
   id : nat64;
   owner : principal;
@@ -85,6 +90,8 @@ type BondView = record {
   listed_price_e8s : opt nat64;
   expires_at : opt nat64;
   minted_at : nat64;
+  age_bonus_bps : nat64;
+  age_bonus_daily : nat64;
 };
 type BullRunDailyEntry = record {
   day : nat32;

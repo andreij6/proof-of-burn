@@ -32,7 +32,7 @@ export default function VoucherExchange(props: VoucherExchangeProps) {
         <Eyebrow accent>Buying</Eyebrow>
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
           <li><b>Value vs Asking:</b> Value is the bond's staked principal; Asking is the seller's price. Below-value asks are marked as deals.</li>
-          <li><b>Tickets follow the bond</b> — you earn its daily tickets from the next grant after buying.</li>
+          <li><b>Tickets follow the bond</b> — you earn its daily tickets from the next grant after buying, <b>including its age bonus</b>: bonds earn +1% at mint growing to +25% at 10 years old, and the age travels with the NFT.</li>
           <li><b>Redeem anytime:</b> wait out the dissolve for 100%, take the instant 85% exit, or re-list it here.</li>
         </ul>
       </div>
@@ -40,7 +40,7 @@ export default function VoucherExchange(props: VoucherExchangeProps) {
         <Eyebrow accent>Selling</Eyebrow>
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
           <li><b>List from your bonds</b> right here or on the Stake page — you set the ask in ICP.</li>
-          <li><b>Listed bonds pause ticket earning</b> until sold or delisted.</li>
+          <li><b>Listed bonds pause ticket earning</b> until sold or delisted — and after a 3-day grace the age bonus slowly decays (at the same rate it grows), so price to sell rather than to sit.</li>
           <li>A small marketplace fee comes out of the sale.</li>
         </ul>
       </div>

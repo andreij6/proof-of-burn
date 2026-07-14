@@ -66,6 +66,7 @@ export const TICKET_SOURCE_LABELS: Record<string, string> = {
   test: 'Test grants',
   promo_voucher: 'Golden Ticket',
   voucher_purchase: 'Bond purchases',
+  age_bonus: 'Bond age bonus',
 };
 
 // Members-only (the #/auth gate guarantees a signed-in caller).

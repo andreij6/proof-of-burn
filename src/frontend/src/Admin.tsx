@@ -1391,6 +1391,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
 
           <Section icon="star" title="Stake Bonds — the stake as an NFT">
             <Li>Staking auto-issues a Backed bond NFT for the position; tickets follow the bond's current owner (day-keyed grants — wash-trading earns nothing).</Li>
+            <Li><b>Age bonus:</b> a Backed bond's daily tickets grow with the bond's age — +1% at mint → +25% at 10 years, smooth, plateau after. The age travels with the NFT on sale/transfer; while listed it decays after a 3-day grace at the growth rate (floors at the 1% mint level); redeem/buyback burns the age; unwrap→rewrap mints a new bond (age resets). Granted daily under its own breakdown source ("age_bonus").</Li>
             <Li>Exits: sell on the Bond Exchange (fee splits 1/3 treasury · 1/3 buyback fund · 1/3 bond-canister cycles burn), instant 85% house buyback (balance-gated by the buyback wallet; burns the NFT and dissolves the claim back to the fund), or redeem (dissolve for 100%).</Li>
             <Li>Golden Tickets (promo class) are tickets-only: 1/day for 60 days, soulbound, never redeemable, never buyback-eligible.</Li>
           </Section>

@@ -83,12 +83,18 @@ const info = await cycleBurn.get_lottery_info();
 Also: get_my_stake() (per-tier positions), get_my_ticket_breakdown() (ticket
 sources), list_recent_winners() (winners feed).
 
-## Bond note (2026-07-10)
+## Bond note (2026-07-10; age bonus 2026-07-14)
 Staking AUTO-ISSUES a Stake Bond NFT — the bond IS the stake. The
 holder redeems via redeem_stake_bond (100% after dissolve), sells it on
 the marketplace, or takes the instant 15%-discount buyback. Tickets always
 follow the bond's current owner; buying a bond grants ITS daily
 tickets to the buyer instantly (once per bond per UTC day).
+AGE BONUS: a Backed bond's daily tickets grow with the bond's age — +1% at
+mint rising smoothly to +25% at 10 years (plateau). The age belongs to the
+NFT and transfers with it (vintage bonds are worth more). While LISTED the
+bonus decays after a 3-day grace at the same rate it grows (floor: the 1%
+mint level). Redeem/buyback burns the age; BondView.age_bonus_bps /
+age_bonus_daily report the live values.
 
 ## Flow 3 — Exit (the exit is always open, and it is BOND-NATIVE)
 Staking auto-issues a Stake Bond, and the bond is the ONLY exit — there is no
