@@ -8,8 +8,9 @@ describe('friendlyIcpLpErr', () => {
     expect(friendlyIcpLpErr('POSITION_NOT_TRANSFERRED')).toContain('Transfer Position');
     expect(friendlyIcpLpErr('POSITION_ALREADY_STAKED')).toContain('already registered');
     expect(friendlyIcpLpErr('NOT_YOUR_POSITION')).toContain('staked this position');
-    // Unknown codes pass through verbatim.
-    expect(friendlyIcpLpErr('SOMETHING_ELSE')).toBe('SOMETHING_ELSE');
+    // Unknown codes read as the shared plain-English fallback (owner 2026-07-14);
+    // the raw code still lands in the error log.
+    expect(friendlyIcpLpErr('SOMETHING_ELSE')).toBe('Something went wrong. Please try again.');
   });
 });
 

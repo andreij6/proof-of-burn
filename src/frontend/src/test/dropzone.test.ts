@@ -139,6 +139,6 @@ describe('friendlyDropErr', () => {
   it('maps gate codes to actionable copy', () => {
     expect(friendlyDropErr('NOT_STAKED')).toContain('stake');
     expect(friendlyDropErr('ALREADY_PLAYED_TODAY')).toContain('00:00 UTC');
-    expect(friendlyDropErr('OTHER')).toBe('OTHER');
+    expect(friendlyDropErr('OTHER')).toBe('Something went wrong. Please try again.');
   });
 });

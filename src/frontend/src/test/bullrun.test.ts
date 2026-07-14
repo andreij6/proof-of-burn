@@ -182,6 +182,6 @@ describe('friendlyBullErr', () => {
   it('maps gate codes to actionable copy', () => {
     expect(friendlyBullErr('NOT_STAKED')).toContain('stake');
     expect(friendlyBullErr('ALREADY_PLAYED_TODAY')).toContain('00:00 UTC');
-    expect(friendlyBullErr('OTHER')).toBe('OTHER');
+    expect(friendlyBullErr('OTHER')).toBe('Something went wrong. Please try again.');
   });
 });

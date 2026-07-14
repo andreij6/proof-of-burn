@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Btn, Chip, Icon } from '../ui';
 import { useErrorImpression } from '../analytics';
+import { backendErr, toFriendly } from '../errors';
 import {
   COURSE, GRID_W, GRID_H, CELL, CellType, WALKABLE, HOLES_PER_ROUND,
   holeToBackend, type BackendHole,
@@ -154,11 +155,11 @@ export default function CourseEditor({ actor }: { actor: any }) {
     setError(null);
     try {
       const res = await actor.admin_set_arcade_hole(holeIdx, draftToBackend(draft));
-      if (res.__kind__ === 'Err') throw new Error(res.Err);
+      if (res.__kind__ === 'Err') throw backendErr(res.Err, 'course-editor');
       await loadOverrides();
       setStatus(`Hole ${holeIdx + 1} saved on-chain — live for all players.`);
     } catch (err: any) {
-      setError(err.message || String(err));
+      setError(toFriendly(err, 'course-editor'));
     } finally {
       setBusy(false);
     }
@@ -171,13 +172,13 @@ export default function CourseEditor({ actor }: { actor: any }) {
     try {
       if (overrides.has(holeIdx)) {
         const res = await actor.admin_reset_arcade_hole(holeIdx);
-        if (res.__kind__ === 'Err') throw new Error(res.Err);
+        if (res.__kind__ === 'Err') throw backendErr(res.Err, 'course-editor');
       }
       const map = (await loadOverrides()) ?? new Map();
       loadHole(holeIdx, map);
       setStatus(`Hole ${holeIdx + 1} reverted to the built-in layout.`);
     } catch (err: any) {
-      setError(err.message || String(err));
+      setError(toFriendly(err, 'course-editor'));
     } finally {
       setBusy(false);
     }

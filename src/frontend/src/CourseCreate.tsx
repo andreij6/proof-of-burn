@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CourseUniquenessReport, MintError } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
 import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, usePageHelp } from './ui';
+import { FriendlyError, toFriendly } from './errors';
 import MiniGolf from './arcade/MiniGolf';
 import CourseOverview from './arcade/CourseOverview';
 import type { CharacterLook } from './arcade/engine';
@@ -252,16 +253,16 @@ export default function CourseCreate({
         amount: MINT_FEE_E8S,
       });
       if (transferResult.__kind__ === 'Err') {
-        throw new Error(transferErrMessage(transferResult.Err));
+        throw new FriendlyError(transferErrMessage(transferResult.Err), transferResult.Err, 'course-create:pay');
       }
 
       setStep('Step 2/2: Minting your course NFT…');
       // The NFT carries the user's original JSON document as its course_data blob.
       const res = await actor.mint_course_nft(new TextEncoder().encode(jsonText.trim()), finalName);
-      if (res.__kind__ === 'Err') throw new Error(mintErrMessage(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(mintErrMessage(res.Err), res.Err, 'course-create:mint');
       setMintedId(res.Ok);
     } catch (e: any) {
-      setMintErr(e?.message || String(e));
+      setMintErr(toFriendly(e, 'course-create'));
     } finally {
       setBusy(false);
     }

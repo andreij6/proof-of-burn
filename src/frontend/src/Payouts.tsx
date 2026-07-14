@@ -13,6 +13,7 @@ import { makeCkbtcMinter, makeApprover, CKBTC_MINTER_ID } from "./minters";
 import { TIER_META, etaLabel } from "./Staking";
 import { VouchersBody } from "./Vouchers";
 import { TICKET_SOURCE_LABELS } from "./Lottery";
+import { backendErr, toFriendly } from './errors';
 
 // ==========================================
 // Profile — your wallet (token accounts + on/off-ramps) and the full
@@ -370,7 +371,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
       const msg = await fn();
       if (msg) setNotice(msg);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(toFriendly(err, 'wallet'));
     } finally {
       setBusy(null);
     }
@@ -452,7 +453,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
     const l = createLedgerActor(map[wToken], { agentOptions: agentOpts });
     const res = await l.icrc1_transfer({ to: { owner: dest, subaccount: undefined }, amount });
     if (res.__kind__ === 'Err') {
-      throw new Error(JSON.stringify(res.Err, (_k, v) => typeof v === 'bigint' ? v.toString() : v));
+      throw backendErr(res.Err, 'wallet:withdraw');
     }
     setWAmount('');
     await refreshBalances();
@@ -480,7 +481,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
       }
       const err = res.Err;
       if ('NoNewUtxos' in err) return 'No new BTC found yet — Bitcoin deposits need confirmations (typically ~1 hour).';
-      throw new Error(JSON.stringify(err, (_k, v) => typeof v === 'bigint' ? v.toString() : v));
+      throw backendErr(err, 'wallet:btc-check');
     } catch (e) {
       if (String(e).includes('NoNewUtxos')) return 'No new BTC found yet.';
       throw e;
@@ -500,7 +501,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
     });
     const minter = makeCkbtcMinter(agentOpts);
     const res = await minter.retrieve_btc_with_approval({ address: nDest.trim(), amount, from_subaccount: [] });
-    if ('Err' in res) throw new Error(JSON.stringify(res.Err, (_k, v) => typeof v === 'bigint' ? v.toString() : v));
+    if ('Err' in res) throw backendErr(res.Err, 'wallet:btc-withdraw');
     await refreshBalances();
     return `BTC withdrawal queued (block ${res.Ok.block_index}) — the minter batches retrievals to Bitcoin.`;
   });

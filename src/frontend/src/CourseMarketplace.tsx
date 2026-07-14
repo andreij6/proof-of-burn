@@ -6,6 +6,7 @@ import { Icon, Eyebrow, Chip, Btn, LiveDot, formatPrincipal, fmtICP, usePageDevC
 import { useErrorImpression } from './analytics';
 import { parseTokenAmount } from './tokens';
 import { makeApprover } from './minters';
+import { FriendlyError, backendErr, toFriendly, friendlyFromRaw, logRealError } from './errors';
 import {
   difficultyBucket, mulberry32, poolOrder, pageSlice, pageCount, freshSeed,
   formatRating, toggleFavoriteId,
@@ -119,8 +120,7 @@ export default function CourseMarketplace({
       setCourses(pageRes.courses);
       setTotal(Number(pageRes.total));
     } catch (err: any) {
-      console.error('marketplace load failed', err);
-      setError(err?.message || String(err));
+      setError(toFriendly(err, 'courses:load'));
     } finally {
       setLoading(false);
     }
@@ -199,7 +199,7 @@ export default function CourseMarketplace({
       refreshFavorites();
     } catch (e: any) {
       setFavoriteIds(favoriteIds);
-      setError(`Couldn't update favorites: ${e?.message || String(e)}`);
+      setError(`Couldn't update favorites — ${toFriendly(e, 'courses:favorite').toLowerCase()}`);
     }
   };
 
@@ -216,7 +216,7 @@ export default function CourseMarketplace({
       const res = await fn();
       if (res.__kind__ === 'Err') setError(`Dev: ${res.Err}`);
       await refresh(); await refreshFavorites();
-    } catch (e: any) { setError(`Dev: ${e?.message || String(e)}`); }
+    } catch (e: any) { logRealError('courses:dev', e); setError(`Dev: ${e?.message || String(e)}`); }
     finally { setDevBusy(null); }
   };
   const needTid = (): bigint => { const t = devTokenId(); if (t === null) { setError('Dev: enter a numeric token id.'); throw new Error('bad token id'); } return t; };
@@ -634,16 +634,16 @@ function ManageModal({ actor, card, onClose, onDone }: {
       setBusy(true);
       try {
         const res = await actor.list_course_for_sale(card.token_id, e8s);
-        if (res.__kind__ === 'Err') throw new Error(res.Err);
+        if (res.__kind__ === 'Err') throw backendErr(res.Err, 'courses');
         onDone();
-      } catch (e: any) { setErr(e?.message || String(e)); } finally { setBusy(false); }
+      } catch (e: any) { setErr(toFriendly(e, 'courses')); } finally { setBusy(false); }
     } else {
       setBusy(true);
       try {
         const res = await actor.delist_course(card.token_id);
-        if (res.__kind__ === 'Err') throw new Error(res.Err);
+        if (res.__kind__ === 'Err') throw backendErr(res.Err, 'courses');
         onDone();
-      } catch (e: any) { setErr(e?.message || String(e)); } finally { setBusy(false); }
+      } catch (e: any) { setErr(toFriendly(e, 'courses')); } finally { setBusy(false); }
     }
   };
 
@@ -716,11 +716,11 @@ function BurnModal({ actor, card, onClose, onError, onDone }: {
     setBusy(true);
     try {
       const res = await actor.burn_course_nft(card.token_id);
-      if (res.__kind__ === 'Err') throw new Error(burnErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(burnErr(res.Err), res.Err, 'courses:burn');
       onDone();
     } catch (e: any) {
       // Surface in the page-level error banner (consistent with buy/bid flows).
-      onError(`Couldn't burn "${label}": ${e?.message || String(e)}`);
+      onError(`Couldn't burn "${label}" — ${toFriendly(e, 'courses:burn').toLowerCase()}`);
     } finally { setBusy(false); }
   };
 
@@ -746,7 +746,7 @@ function burnErr(code: string): string {
     case 'NOT_OWNER': return 'You no longer own this course.';
     case 'NO_COURSE': return 'This course no longer exists.';
     case 'BURN_IN_PROGRESS': return 'A burn is already in progress — try again in a moment.';
-    default: return code;
+    default: return friendlyFromRaw(code);
   }
 }
 
@@ -786,14 +786,14 @@ function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, back
         amount: total,
         expected_allowance: [], expires_at: [], fee: [], memo: [], created_at_time: [],
       });
-      if (appr.Err !== undefined) throw new Error(`Approval failed: ${JSON.stringify(appr.Err, (_k, v) => typeof v === 'bigint' ? v.toString() : v)}`);
+      if (appr.Err !== undefined) throw backendErr(appr.Err, 'courses:approve');
 
       setStep('Step 2/2: Settling sale…');
       const res = await actor.buy_course_nft(card.token_id);
-      if (res.__kind__ === 'Err') throw new Error(saleErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(saleErr(res.Err), res.Err, 'courses:sale');
       setDone(true);
     } catch (e: any) {
-      setErr(e?.message || String(e));
+      setErr(toFriendly(e, 'courses:buy'));
     } finally {
       setBusy(false);
     }
@@ -848,7 +848,7 @@ function saleErr(code: string): string {
     case 'CANNOT_BUY_OWN_COURSE': return 'You already own this course.';
     case 'SALE_IN_PROGRESS': return 'Another buyer is mid-purchase — try again in a moment.';
     case 'OWNERSHIP_CHANGED': return 'The owner changed during the sale — you were refunded.';
-    default: return code;
+    default: return friendlyFromRaw(code);
   }
 }
 

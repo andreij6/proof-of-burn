@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { logRealError } from './errors';
 import { ExplorerToken } from "./bindings/backend";
 import { UnstakeStatus } from "./bindings/backend";
 import { FlagState } from "./bindings/backend";
@@ -307,6 +308,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       if (msg) setNotice(msg);
       onChanged();
     } catch (err: any) {
+      logRealError('admin', err);
       setError(err.message || String(err));
     } finally {
       setBusy(null);

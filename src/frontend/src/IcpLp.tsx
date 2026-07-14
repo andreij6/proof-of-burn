@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
 import { Btn, Chip, Eyebrow, Icon, LiveDot, Skeleton, usePageHelp } from './ui';
+import { FriendlyError, toFriendly, friendlyFromRaw } from './errors';
 
 // ==========================================
 // ICP LP — stake ICPSwap positions, fund the pot, earn tickets.
@@ -27,7 +28,7 @@ export function friendlyIcpLpErr(code: string): string {
     case 'RESERVATION_LIMIT': return 'You have too many open reservations — confirm or let one expire first.';
     case 'POSITION_ALREADY_STAKED': return 'That position is already registered.';
     case 'NOT_YOUR_POSITION': return 'Only the account that staked this position can unstake it.';
-    default: return code;
+    default: return friendlyFromRaw(code);
   }
 }
 
@@ -110,11 +111,11 @@ export default function IcpLp({ actor }: IcpLpProps) {
     setBusy('reserve');
     try {
       const res = await actor.reserve_lp_position(pool, pid);
-      if (res.__kind__ === 'Err') throw new Error(friendlyIcpLpErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyIcpLpErr(res.Err), res.Err, 'icplp');
       setNotice(`Position #${pid} reserved for 1 hour — now transfer it on ICPSwap, then confirm below.`);
       setPosIdText('');
       await refresh();
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'icplp')); }
     finally { setBusy(null); }
   };
 
@@ -124,10 +125,10 @@ export default function IcpLp({ actor }: IcpLpProps) {
     setBusy('stake');
     try {
       const res = await actor.stake_lp_position(pool, pid);
-      if (res.__kind__ === 'Err') throw new Error(friendlyIcpLpErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyIcpLpErr(res.Err), res.Err, 'icplp');
       setNotice(`Position #${pid} staked — tickets now land daily, scaled to your LP's value.`);
       await refresh();
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'icplp')); }
     finally { setBusy(null); }
   };
 
@@ -146,11 +147,11 @@ export default function IcpLp({ actor }: IcpLpProps) {
     setBusy('unstake'); setErr(null);
     try {
       const res = await actor.unstake_lp_position(p.pool, p.position_id, dest);
-      if (res.__kind__ === 'Err') throw new Error(friendlyIcpLpErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyIcpLpErr(res.Err), res.Err, 'icplp');
       setNotice(`Position #${p.position_id} returned to ${dest.toString().slice(0, 12)}…`);
       setUnstakeKey(null);
       await refresh();
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'icplp')); }
     finally { setBusy(null); }
   };
 

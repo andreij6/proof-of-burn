@@ -5,6 +5,7 @@ import type { StakingPoolInfo, TierPoolInfo, UserStakeInfo, PendingUnstake, Yiel
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, MoreInfo, fmtICP, usePageDevControls } from "./ui";
 import { useErrorImpression } from "./analytics";
+import { backendErr, toFriendly } from './errors';
 
 // ==========================================
 // Lossless Staking — pooled staking across three fixed-term NNS neurons
@@ -139,7 +140,7 @@ export default function Staking({
     try {
       await fn();
     } catch (err: any) {
-      setError(err.message || String(err));
+      setError(toFriendly(err, 'staking'));
     } finally {
       setBusy(null);
     }
@@ -162,12 +163,12 @@ export default function Staking({
       amount,
     });
     if (xfer.__kind__ === "Err") {
-      setError(`Deposit transfer failed: ${JSON.stringify(xfer.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
+      setError(toFriendly(backendErr(xfer.Err, 'staking:deposit'), 'staking'));
       return;
     }
     const res = await actor.stake(amount, tier);
     if (res.__kind__ === "Err") {
-      setError(`Stake failed: ${res.Err}`);
+      setError(toFriendly(backendErr(res.Err, 'staking:stake'), 'staking'));
       return;
     }
     setStakeInput('');
@@ -198,11 +199,11 @@ export default function Staking({
       amount: amount + eaInfo.fee_e8s,
     });
     if (xfer.__kind__ === "Err") {
-      setError(`Deposit transfer failed: ${JSON.stringify(xfer.Err, (_k, v) => typeof v === "bigint" ? v.toString() : v)}`);
+      setError(toFriendly(backendErr(xfer.Err, 'staking:perm-deposit'), 'staking'));
       return;
     }
     const res = await actor.early_adopter_stake(amount);
-    if (res.__kind__ === "Err") { setError(`Stake failed: ${res.Err}`); return; }
+    if (res.__kind__ === "Err") { setError(toFriendly(backendErr(res.Err, 'staking:perm-stake'), 'staking')); return; }
     setStakeInput('');
     setBoosterAck(false);
     setNotice(`Staked ${fmtICP(amount)} ICP into the Perm neuron — permanent, now earning 40 lottery tickets per ICP per day.`);
@@ -217,7 +218,7 @@ export default function Staking({
     const whole = (amountE8s / E8S) * E8S;
     if (whole < E8S) { setError('Nothing to convert — under 1 ICP folds into your next stake.'); return; }
     const res = await actor.wrap_stake_bond(whole, t);
-    if (res.__kind__ === 'Err') { setError(`Convert failed: ${res.Err}`); return; }
+    if (res.__kind__ === 'Err') { setError(toFriendly(backendErr(res.Err, 'staking:convert'), 'staking')); return; }
     setNotice(`Converted ${fmtICP(whole)} ICP of ${TIER_META[t].label} stake into a bond — manage it below.`);
     await refresh();
     onActivity();
@@ -225,7 +226,7 @@ export default function Staking({
 
   const handleDevSweep = () => run('sweep', async () => {
     const res = await actor.dev_run_staking_sweep();
-    if (res.__kind__ === "Err") setError(res.Err);
+    if (res.__kind__ === "Err") setError(toFriendly(backendErr(res.Err, 'staking:merge'), 'staking'));
     await refresh();
     onActivity();
   });
@@ -234,7 +235,7 @@ export default function Staking({
   const [restakeTarget, setRestakeTarget] = useState<bigint | null>(null); // unstake id
   const handleRestake = (id: bigint, t: StakeTier) => run(`merge-${id}`, async () => {
     const res = await actor.merge_unstake(id, t);
-    if (res.__kind__ === "Err") { setError(res.Err); setRestakeTarget(null); return; }
+    if (res.__kind__ === "Err") { setError(toFriendly(backendErr(res.Err, 'staking:restake'), 'staking')); setRestakeTarget(null); return; }
     setRestakeTarget(null);
     setNotice(`Restaked into the ${TIER_META[t].label} pool — your stake there is earning lottery tickets again (0.0001 ICP merge fee).`);
     await refresh();
@@ -243,7 +244,7 @@ export default function Staking({
 
   const handleDevFastForward = (id: bigint) => run(`ff-${id}`, async () => {
     const res = await actor.dev_fast_forward_dissolve(id);
-    if (res.__kind__ === "Err") { setError(res.Err); return; }
+    if (res.__kind__ === "Err") { setError(toFriendly(backendErr(res.Err, 'staking:action'), 'staking')); return; }
     const sweep = await actor.dev_run_staking_sweep();
     if (sweep.__kind__ === "Err") setError(sweep.Err);
     await refresh();
@@ -254,7 +255,7 @@ export default function Staking({
     const amount = parseIcp(maturityInput);
     if (!amount) { setError("Enter a maturity amount."); return; }
     const res = await actor.dev_add_mock_maturity(amount, maturityTier);
-    if (res.__kind__ === "Err") { setError(res.Err); return; }
+    if (res.__kind__ === "Err") { setError(toFriendly(backendErr(res.Err, 'staking:action'), 'staking')); return; }
     setMaturityInput('');
     await refresh();
   });

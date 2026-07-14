@@ -4,6 +4,7 @@ import { StakeTier } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
 import { Btn, Chip, Eyebrow, Icon, LiveDot, Skeleton, fmtICP } from './ui';
 import { TIER_META } from './Staking';
+import { FriendlyError, backendErr, toFriendly, friendlyFromRaw } from './errors';
 
 // ==========================================
 // Stake Vouchers — a staked position as a transferable NFT. Staking
@@ -33,7 +34,7 @@ export function friendlyVoucherErr(code: string): string {
     case 'BELOW_MINIMUM': return 'The minimum bond is 1 ICP of staked principal.';
     case 'ESCROW_NOT_FUNDED': return 'The sale escrow hasn\'t received the full ask yet — send the exact ICP amount, then buy.';
     case 'NOT_LISTED': return 'That bond isn\'t for sale.';
-    default: return code;
+    default: return friendlyFromRaw(code);
   }
 }
 
@@ -202,7 +203,7 @@ export function VouchersBody({
     try {
       setNotice(await fn());
       await refresh();
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'bonds')); }
     finally { setBusy(null); }
   };
 
@@ -224,7 +225,7 @@ export function VouchersBody({
       setNotice(`${success.title} — ${success.detail}`);
       await refresh();
     } catch (e: any) {
-      const message = e?.message || String(e);
+      const message = toFriendly(e, 'bonds');
       setOpPhase({ kind: 'error', message });
       setErr(message);
     } finally { setBusy(null); }
@@ -232,7 +233,7 @@ export function VouchersBody({
 
   const redeem = (v: BondView) => runOp(`redeem-${v.id}`, 'Starting the dissolve…', async () => {
     const res = await actor.redeem_stake_bond(v.id);
-    if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
+    if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
     return {
       title: 'Dissolve started',
       detail: `Your ${fmtICP(v.amount_e8s)} ICP pays your wallet automatically after the ${TIER_META[v.tier].label} dissolve — nothing to claim.`,
@@ -242,9 +243,9 @@ export function VouchersBody({
 
   const list = (v: BondView) => runOp(`list-${v.id}`, 'Listing your bond on the Exchange…', async () => {
     const price = parsePriceIcp(priceText);
-    if (!price) throw new Error('Enter an ask in ICP (up to 4 decimals).');
+    if (!price) throw new FriendlyError('Enter an ask in ICP (up to 4 decimals).');
     const res = await actor.list_bond(v.id, price);
-    if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
+    if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
     return {
       title: `Listed at ${fmtICP(price)} ICP`,
       detail: 'Your bond is on the Exchange. It won\'t earn tickets while listed — cancel anytime to resume.',
@@ -254,7 +255,7 @@ export function VouchersBody({
 
   const cancelListing = (v: BondView) => run(`cancel-${v.id}`, async () => {
     const res = await actor.cancel_bond_listing(v.id);
-    if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
+    if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
     return `Listing for bond #${v.id} cancelled — it's earning tickets again.`;
   });
 
@@ -262,7 +263,7 @@ export function VouchersBody({
     const quote = buybackQuoteE8s(v.amount_e8s, info?.buyback_discount_bps ?? 1500);
     return runOp(`buyback-${v.id}`, `Paying you ${fmtICP(quote)} ICP from the buyback fund…`, async () => {
       const res = await actor.buyback_bond(v.id);
-      if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
       return {
         title: `${fmtICP(res.Ok)} ICP paid to your wallet`,
         detail: 'The sale is complete and the bond is burned. The ICP is already in your wallet.',
@@ -272,7 +273,7 @@ export function VouchersBody({
   };
 
   const buy = (v: BondView) => runOp(`buy-${v.id}`, 'Sending your payment to escrow…', async () => {
-    if (v.listed_price_e8s == null) throw new Error(friendlyVoucherErr('NOT_LISTED'));
+    if (v.listed_price_e8s == null) throw new FriendlyError(friendlyVoucherErr('NOT_LISTED'), 'NOT_LISTED', 'bonds');
     // 1. Fund the sale escrow with EXACTLY the ask, 2. settle the purchase.
     const escrow = await actor.get_bond_sale_account(v.id);
     const ledger = createLedgerActor(ledgerCanisterId, { agentOptions: { host, identity, rootKey } });
@@ -281,11 +282,11 @@ export function VouchersBody({
       amount: v.listed_price_e8s,
     });
     if (xfer.__kind__ === 'Err') {
-      throw new Error(`Payment transfer failed: ${JSON.stringify(xfer.Err, (_k, val) => typeof val === 'bigint' ? val.toString() : val)}`);
+      throw backendErr(xfer.Err, 'bonds:buy-escrow');
     }
     setOpPhase({ kind: 'processing', text: 'Payment escrowed — settling the purchase…' });
     const res = await actor.buy_bond(v.id);
-    if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
+    if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
     return {
       title: `Bond #${v.id} is yours`,
       detail: `${ticketsPerDay(v)} tickets just landed for the upcoming draw, and it keeps earning daily.`,

@@ -91,6 +91,6 @@ describe('friendlyDailyErr', () => {
     expect(friendlyDailyErr('NOT_STAKED')).toContain('stake');
     expect(friendlyDailyErr('ALREADY_PLAYED_TODAY')).toContain('00:00 UTC');
     expect(friendlyDailyErr('RUN_EXPIRED')).toContain('1-hour');
-    expect(friendlyDailyErr('SOMETHING_ELSE')).toBe('SOMETHING_ELSE');
+    expect(friendlyDailyErr('SOMETHING_ELSE')).toBe('Something went wrong. Please try again.');
   });
 });

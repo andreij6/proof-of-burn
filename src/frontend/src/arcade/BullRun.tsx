@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Btn, Chip, Icon, LiveDot, formatPrincipal } from '../ui';
 import { mulberry, isTouchDevice } from './DropZone';
+import { FriendlyError, toFriendly, friendlyFromRaw } from '../errors';
 
 // ==========================================
 // Bull Run — arcade game 5: the ENDLESS encierro.
@@ -290,7 +291,7 @@ export function friendlyBullErr(code: string): string {
     case 'NOT_STAKED': return 'The daily run is for no-loss-lottery stakers — stake any amount of ICP to enter.';
     case 'ALREADY_PLAYED_TODAY': return 'You\'ve run today\'s street — a fresh course opens at 00:00 UTC.';
     case 'RUN_EXPIRED': return 'This run timed out (30-minute limit). Today\'s attempt was consumed.';
-    default: return code;
+    default: return friendlyFromRaw(code);
   }
 }
 
@@ -358,9 +359,9 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     setBusy(true); setErr(null);
     try {
       const res = await actor.start_bullrun_daily();
-      if (res.__kind__ === 'Err') throw new Error(friendlyBullErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyBullErr(res.Err), res.Err, 'bullrun');
       launch(Number(res.Ok.course_seed % 2_147_483_647n), true, res.Ok.run_id);
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'bullrun')); }
     finally { setBusy(false); }
   };
 
@@ -369,9 +370,9 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
     if (!game?.runId) return null;
     try {
       const res = await actor.complete_bullrun_daily(game.runId, coins, BigInt(Math.max(10_001, Math.round(ms))));
-      if (res.__kind__ === 'Err') throw new Error(friendlyBullErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyBullErr(res.Err), res.Err, 'bullrun');
       return res.Ok as number;
-    } catch (e: any) { setErr(e?.message || String(e)); return null; }
+    } catch (e: any) { setErr(toFriendly(e, 'bullrun')); return null; }
   };
 
   const steer = (dir: -1 | 1) => {

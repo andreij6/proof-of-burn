@@ -45,6 +45,7 @@ import Landing from "./Landing";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, PageHelpContext, PageHelpMobile, BrandMark, OpenChatMark, OPENCHAT_URL } from './ui';
 import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient, parseTokenAmount, fmtTokenAmount } from "./tokens";
 import { useErrorImpression } from "./analytics";
+import { FriendlyError, backendErr, toFriendly, friendlyFromRaw, logRealError } from './errors';
 import { countdownShort } from "./hubLogic";
 
 // ── Shareable URL routing (hash-based; this is a static asset canister) ──
@@ -506,7 +507,7 @@ export default function App() {
       setVoucherXferId(null); setVoucherXferTo("");
       setVoucherXferMsg(`Bond #${id} sent — it now lives in ${voucherXferTo.trim().slice(0, 8)}… and earns tickets there.`);
       await loadWalletVouchers();
-    } catch (e: any) { setVoucherXferMsg(e?.message || String(e)); }
+    } catch (e: any) { setVoucherXferMsg(toFriendly(e, 'wallet:bond-transfer')); }
     finally { setVoucherXferBusy(false); }
   };
 
@@ -947,7 +948,8 @@ export default function App() {
           kind === "TxCreatedInFuture" ? "clock skew — try again" :
           kind === "TxDuplicate" ? `duplicate of block ${err.TxDuplicate.duplicate_of.toString()}` :
           JSON.stringify(err);
-        setWithdrawError(`Transfer failed: ${detail}`);
+        logRealError('wallet:withdraw-legacy', err);
+        setWithdrawError(`Transfer failed — ${detail}.`);
         return;
       }
       setWithdrawSuccess(true);
@@ -956,9 +958,10 @@ export default function App() {
       await refreshAllData();
     } catch (err: any) {
       if (err.message && err.message.includes("does not have method")) {
+        logRealError('wallet:withdraw-legacy', err);
         setWithdrawError("Legacy Account ID transfers are not supported on the local dev ledger. Please deploy to mainnet to withdraw.");
       } else {
-        setWithdrawError(err.message || String(err));
+        setWithdrawError(toFriendly(err, 'wallet:withdraw-legacy'));
       }
     } finally {
       setIsWithdrawing(false);
@@ -1009,7 +1012,7 @@ export default function App() {
       setWithdrawTo("");
       await fetchTokenBalances();
     } catch (err: any) {
-      setWithdrawError(err.message || String(err));
+      setWithdrawError(toFriendly(err, 'wallet:withdraw'));
     } finally {
       setIsWithdrawing(false);
     }
@@ -1183,6 +1186,7 @@ export default function App() {
       const bal = await actor.get_treasury_balance();
       if (bal.__kind__ === "Ok") setTreasuryBalance(bal.Ok);
     } catch (err: any) {
+      logRealError('admin:treasury-withdraw', err);
       setTreasuryError(err.message || String(err));
     } finally {
       setIsTreasuryWithdrawing(false);
@@ -1201,11 +1205,11 @@ export default function App() {
         setIsFollowModalOpen(false);
         await refreshEligibility();
       } else {
-        alert(`Could not record follow: ${res.Err}`);
+        logRealError('syndicate:follow', res.Err);
+        alert(`Could not record the follow: ${friendlyFromRaw(String(res.Err))}`);
       }
     } catch (err: any) {
-      console.error("Failed to confirm follow:", err);
-      alert(`Error: ${err.message || err}`);
+      alert(toFriendly(err, 'syndicate:follow'));
     } finally {
       setIsVerifying(false);
     }
@@ -1536,7 +1540,7 @@ export default function App() {
           kind === "TemporarilyUnavailable" ? "ledger temporarily unavailable" :
           kind === "GenericError"  ? (err as any).GenericError.message :
           JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
-        throw new Error(`Ledger transfer failed (${kind}): ${detail}`);
+        throw new FriendlyError(`The ledger transfer didn't go through — ${detail}.`, err, 'vote:commit-transfer');
       }
 
       // Step 3: Finalize commit on backend
@@ -1545,10 +1549,11 @@ export default function App() {
 
       if (commitResult.__kind__ === "Err") {
         const code = commitResult.Err as string;
-        throw new Error(
+        throw new FriendlyError(
           code === "BELOW_MINIMUM" ? "Too small — votes start at $1 worth of ICP."
           : code === "TREASURY_DEPLETED" ? "Voting is paused — the treasury can't currently cover the ledger fees this commitment needs. Your ICP is safe in escrow; try again shortly."
-          : `Commit registration failed: ${code}`,
+          : friendlyFromRaw(code),
+          code, 'vote:commit',
         );
       }
 
@@ -1562,8 +1567,7 @@ export default function App() {
       await refreshAllData();
       
     } catch (err: any) {
-      console.error("Transaction error:", err);
-      setTxError(err.message || String(err));
+      setTxError(toFriendly(err, 'vote:commit'));
     } finally {
       setIsTransacting(false);
     }
@@ -1647,7 +1651,7 @@ export default function App() {
             kind === "TemporarilyUnavailable" ? "ledger temporarily unavailable" :
             kind === "GenericError"  ? (err as any).GenericError.message :
             JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
-          throw new Error(`Ledger transfer failed (${kind}): ${detail}`);
+          throw new FriendlyError(`The ledger transfer didn't go through — ${detail}.`, err, 'vote:commit-transfer');
         }
       } else {
         setAddMoreTxStep("Step 1/2: Reclaiming ICP already in escrow...");
@@ -1659,10 +1663,10 @@ export default function App() {
 
       if (result.__kind__ === "Err") {
         const code = result.Err as string;
-        if (code === "BELOW_MINIMUM") throw new Error(`Too small — top-ups start at $${MIN_COMMIT_USD} worth of ICP.`);
-        if (code === "INSUFFICIENT_DEPOSIT") throw new Error("Deposit didn't register — your ICP is safe in escrow; try again in a moment.");
-        if (code === "TREASURY_DEPLETED") throw new Error("Top-ups are paused — the treasury can't currently cover the ledger fees this commitment needs. Your ICP is safe in escrow; try again shortly.");
-        throw new Error(`Add-to-commitment failed: ${code}`);
+        if (code === "BELOW_MINIMUM") throw new FriendlyError(`Too small — top-ups start at $${MIN_COMMIT_USD} worth of ICP.`, code, 'vote:add-more');
+        if (code === "INSUFFICIENT_DEPOSIT") throw new FriendlyError("Deposit didn't register — your ICP is safe in escrow; try again in a moment.", code, 'vote:add-more');
+        if (code === "TREASURY_DEPLETED") throw new FriendlyError("Top-ups are paused — the treasury can't currently cover the ledger fees this commitment needs. Your ICP is safe in escrow; try again shortly.", code, 'vote:add-more');
+        throw backendErr(code, 'vote:add-more');
       }
 
       setAddMoreTxSuccess(true);
@@ -1670,8 +1674,7 @@ export default function App() {
       await refreshAllData();
 
     } catch (err: any) {
-      console.error("Add-more transaction error:", err);
-      setAddMoreTxError(err.message || String(err));
+      setAddMoreTxError(toFriendly(err, 'vote:add-more'));
     } finally {
       setIsAddMoreTransacting(false);
     }
@@ -1750,7 +1753,7 @@ export default function App() {
       await fetchMyPoolNeuron(actor);
       setPoolWizardStep(3);
     } catch (err: any) {
-      setPoolVerifyError(err.message || String(err));
+      setPoolVerifyError(toFriendly(err, 'pool:verify'));
     } finally {
       setIsPoolVerifying(false);
     }
@@ -1799,7 +1802,7 @@ export default function App() {
       await fetchPoolInfo(actor);
       await refreshAllData();
     } catch (err: any) {
-      setPoolFinalizeError(err.message || String(err));
+      setPoolFinalizeError(toFriendly(err, 'pool:finalize'));
     } finally {
       setIsPoolFinalizing(false);
     }

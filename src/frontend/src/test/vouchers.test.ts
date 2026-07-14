@@ -23,8 +23,9 @@ describe('friendlyVoucherErr', () => {
     expect(friendlyVoucherErr('BELOW_MINIMUM')).toContain('1 ICP');
     expect(friendlyVoucherErr('ESCROW_NOT_FUNDED')).toContain('exact');
     expect(friendlyVoucherErr('NOT_LISTED')).toContain('for sale');
-    // Unknown codes pass through verbatim.
-    expect(friendlyVoucherErr('SOMETHING_ELSE')).toBe('SOMETHING_ELSE');
+    // Unknown codes read as the shared plain-English fallback (owner 2026-07-14);
+    // the raw code still lands in the error log.
+    expect(friendlyVoucherErr('SOMETHING_ELSE')).toBe('Something went wrong. Please try again.');
   });
 });
 

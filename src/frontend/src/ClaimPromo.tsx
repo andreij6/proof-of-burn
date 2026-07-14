@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
 import { BrandMark, Icon, LiveDot } from './ui';
 import { friendlyVoucherErr } from './Vouchers';
+import { FriendlyError, toFriendly } from './errors';
 
 // ==========================================
 // Golden Ticket claim — the standalone campaign page (#/claim).
@@ -72,13 +73,13 @@ export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: Clai
     setBusy(label); setErr(null);
     try {
       const res = await actor.claim_golden_ticket(dest);
-      if (res.__kind__ === 'Err') throw new Error(friendlyVoucherErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'claim');
       setClaimed({
         id: res.Ok,
         to: dest ? dest.toString() : (principal?.toString() ?? 'your account'),
       });
       await refresh();
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'claim')); }
     finally { setBusy(null); }
   };
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Btn, Chip, Icon, LiveDot, formatPrincipal } from '../ui';
+import { FriendlyError, toFriendly, friendlyFromRaw } from '../errors';
 
 // ==========================================
 // Sklansky Trainer (Luck-Proof) — arcade game 3.
@@ -107,7 +108,7 @@ export function friendlyDailyErr(code: string): string {
     case 'ALREADY_PLAYED_TODAY': return 'You\'ve used today\'s attempt — a fresh deal drops at 00:00 UTC.';
     case 'RUN_EXPIRED': return 'This run timed out (1-hour limit). Today\'s attempt was consumed.';
     case 'INVALID_TIME': return 'That run finished implausibly fast — it wasn\'t scored.';
-    default: return code;
+    default: return friendlyFromRaw(code);
   }
 }
 
@@ -273,7 +274,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
     setBusy(true); setErr(null);
     try {
       const res = await actor.start_luckproof_daily();
-      if (res.__kind__ === 'Err') throw new Error(friendlyDailyErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyDailyErr(res.Err), res.Err, 'luckproof');
       resetTracks();
       runRef.current = {
         id: res.Ok.run_id, gambles: res.Ok.gambles, rolls: Array.from(res.Ok.rolls),
@@ -282,7 +283,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
       setGamble(res.Ok.gambles[0]);
       setMode('daily');
       beginCountdown();
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'luckproof')); }
     finally { setBusy(false); }
   };
 
@@ -366,11 +367,11 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
     try {
       const millis = BigInt(Math.round(performance.now() - run.startedAt));
       const res = await actor.complete_luckproof_daily(run.id, run.decisions, millis);
-      if (res.__kind__ === 'Err') throw new Error(friendlyDailyErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyDailyErr(res.Err), res.Err, 'luckproof');
       setResult(res.Ok);
       setMode('dailyDone');
       refreshMenu();
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'luckproof')); }
     finally { setBusy(false); }
   };
 
@@ -383,10 +384,10 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
     setBusy(true); setErr(null);
     try {
       const r = await actor.get_luckproof_daily_replay(status.day, row.player);
-      if (!r) throw new Error('No run recorded for that player today.');
+      if (!r) throw new FriendlyError('No run recorded for that player today.');
       setReplay(r);
       setMode('replay');
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'luckproof')); }
     finally { setBusy(false); }
   };
 

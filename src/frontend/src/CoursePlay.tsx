@@ -6,6 +6,7 @@ import MiniGolf from './arcade/MiniGolf';
 import CourseOverview from './arcade/CourseOverview';
 import type { HoleDef, CharacterLook } from './arcade/engine';
 import { decodeCourseBlob } from './arcade/courseInstructions';
+import { FriendlyError, toFriendly, friendlyFromRaw, logRealError } from './errors';
 
 // ==========================================
 // Course Play (PB-306 frontend wiring) — loads a chosen course's blob, decodes
@@ -83,7 +84,7 @@ export default function CoursePlay({ actor, card, character, onExit, onGoPartici
         if (!blob) { setLoadErr('This course could not be loaded.'); return; }
         setHoles(decodeCourseBlob(blob));
       } catch (err: any) {
-        if (!cancelled) setLoadErr(err?.message || String(err));
+        if (!cancelled) { logRealError('course-play:load', err); setLoadErr('This course could not be loaded — try again in a moment.'); }
       }
     })();
 
@@ -246,15 +247,16 @@ function CompletionRateModal({ actor, card, onClose }: { actor: any; card: Cours
       const res = await actor.rate_course(card.token_id, stars, text.trim() ? text.trim() : null);
       if (res.__kind__ === 'Err') {
         const code = res.Err as string;
-        throw new Error(
+        throw new FriendlyError(
           code === 'MUST_COMPLETE_ROUND' ? 'Finish a full round before rating.'
           : code === 'CANNOT_RATE_OWN_COURSE' ? 'You cannot rate a course you own.'
           : code === 'TEXT_TOO_LONG' ? 'Review must be 280 characters or fewer.'
-          : code,
+          : friendlyFromRaw(code),
+          code, 'course-rate',
         );
       }
       setDone(true);
-    } catch (e: any) { setErr(e?.message || String(e)); } finally { setBusy(false); }
+    } catch (e: any) { setErr(toFriendly(e, 'course-play')); } finally { setBusy(false); }
   };
 
   return (

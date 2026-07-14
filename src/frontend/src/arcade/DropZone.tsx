@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Btn, Chip, Icon, LiveDot, formatPrincipal } from '../ui';
+import { FriendlyError, toFriendly, friendlyFromRaw } from '../errors';
 
 // ==========================================
 // Drop Zone — arcade game 4: the PUBG/Warzone-style target drop.
@@ -215,7 +216,7 @@ export function friendlyDropErr(code: string): string {
     case 'NOT_STAKED': return 'The daily drop is for no-loss-lottery stakers — stake any amount of ICP to enter.';
     case 'ALREADY_PLAYED_TODAY': return 'You\'ve used today\'s jump — a fresh drop zone opens at 00:00 UTC.';
     case 'RUN_EXPIRED': return 'This run timed out (15-minute limit). Today\'s attempt was consumed.';
-    default: return code;
+    default: return friendlyFromRaw(code);
   }
 }
 
@@ -314,13 +315,13 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
     setBusy(true); setErr(null);
     try {
       const res = await actor.start_skydive_daily();
-      if (res.__kind__ === 'Err') throw new Error(friendlyDropErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyDropErr(res.Err), res.Err, 'dropzone');
       const sc = res.Ok.scenario;
       launch(
         { targetX: sc.target_x_dm / 10, targetZ: sc.target_z_dm / 10, planeDir: sc.plane_dir, decorSeed: Number(sc.decor_seed % 2_147_483_647n) },
         true, res.Ok.run_id,
       );
-    } catch (e: any) { setErr(e?.message || String(e)); }
+    } catch (e: any) { setErr(toFriendly(e, 'dropzone')); }
     finally { setBusy(false); }
   };
 
@@ -329,10 +330,10 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
     if (!game?.runId) return null;
     try {
       const res = await actor.complete_skydive_daily(game.runId, Math.round(dist * 10), BigInt(Math.max(3_001, Math.round(ms))), safe);
-      if (res.__kind__ === 'Err') throw new Error(friendlyDropErr(res.Err));
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyDropErr(res.Err), res.Err, 'dropzone');
       return res.Ok as number;
     } catch (e: any) {
-      setErr(e?.message || String(e));
+      setErr(toFriendly(e, 'dropzone'));
       return null;
     }
   };

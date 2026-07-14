@@ -209,7 +209,7 @@ export function DiscordMark({ size = 16, color = 'currentColor' }: { size?: numb
   );
 }
 
-export const DISCORD_INVITE = 'https://discord.gg/N7K2veuzV';
+export const DISCORD_INVITE = 'https://discord.gg/jSmSAwpKes';
 
 /** OpenChat (oc.app) chat-bubble mark — simple rounded bubble with dots,
  *  inline like DiscordMark (CSP forbids remote images). */

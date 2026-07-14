@@ -12,6 +12,7 @@ import CoursePlay from "./CoursePlay";
 import { courseIdFromScreen, spectateIdFromScreen, playIdFromScreen } from "./arcade/courseMarket";
 import MiniGolf from "./arcade/MiniGolf";
 import type { CourseCard } from "./bindings/backend";
+import { FriendlyError, backendErr, toFriendly } from './errors';
 import {
   HAIR_COLORS, HAIR_NAMES, SKIN_COLORS, SKIN_NAMES, OUTFIT_COLORS, OUTFIT_NAMES,
   DEFAULT_CHARACTER, type CharacterLook,
@@ -193,7 +194,7 @@ export default function MiniGolfPage({ actor, identity, host, rootKey, ledgerCan
         if (res.__kind__ === "Ok") { setPayQuote(res.Ok); setEditorError(null); }
         else setEditorError(`Quote failed: ${res.Err}`);
       })
-      .catch((err: any) => { if (!cancelled) setEditorError(err.message || String(err)); })
+      .catch((err: any) => { if (!cancelled) setEditorError(toFriendly(err, 'minigolf:quote')); })
       .finally(() => { if (!cancelled) setIsQuoting(false); });
     return () => { cancelled = true; };
   }, [isEditorOpen, payToken, actor]);
@@ -263,19 +264,21 @@ export default function MiniGolfPage({ actor, identity, host, rootKey, ledgerCan
       });
       if (transferResult.__kind__ === "Err") {
         const err = transferResult.Err as any;
-        const detail = err.__kind__ === "InsufficientFunds"
-          ? `balance is ${fmtTokenAmount(err.InsufficientFunds.balance, meta.decimals)} ${meta.label} — the look costs ${fmtTokenAmount(payQuote.amount, meta.decimals)} ${meta.label} + fees`
-          : JSON.stringify(err, (_k, v) => typeof v === "bigint" ? v.toString() : v);
-        throw new Error(`Payment failed: ${detail}`);
+        if (err.__kind__ === "InsufficientFunds") {
+          throw new FriendlyError(
+            `Not enough ${meta.label} — your balance is ${fmtTokenAmount(err.InsufficientFunds.balance, meta.decimals)} ${meta.label} and the look costs ${fmtTokenAmount(payQuote.amount, meta.decimals)} ${meta.label} plus fees.`,
+            err, 'minigolf:customize-pay',
+          );
+        }
+        throw backendErr(err, 'minigolf:customize-pay');
       }
       setEditorStep("Step 2/2: Saving your look on-chain...");
       const res = await actor.customize_character(draft.hair, draft.skin, draft.outfit, payToken);
-      if (res.__kind__ === "Err") throw new Error(res.Err);
+      if (res.__kind__ === "Err") throw backendErr(res.Err, 'minigolf:customize');
       setIsEditorOpen(false);
       await refreshAll();
     } catch (err: any) {
-      console.error("Customize error:", err);
-      setEditorError(err.message || String(err));
+      setEditorError(toFriendly(err, 'minigolf:customize'));
     } finally {
       setEditorBusy(false);
     }

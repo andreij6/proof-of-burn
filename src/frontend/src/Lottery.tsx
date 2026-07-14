@@ -5,6 +5,7 @@ import type { LotteryInfo, LotteryDraw } from "./bindings/backend";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, fmtICP, formatPrincipal, usePageDevControls } from "./ui";
 import { VouchersBody } from "./Vouchers";
 import { useErrorImpression } from "./analytics";
+import { toFriendly } from './errors';
 
 // ==========================================
 // No-Loss Lottery — stake-weighted tickets, dynamic odds (one winner a month
@@ -139,7 +140,7 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
     try {
       await fn();
     } catch (err: any) {
-      setError(err.message || String(err));
+      setError(toFriendly(err, 'lottery'));
     } finally {
       setBusy(null);
     }
