@@ -44,7 +44,7 @@ import Landing from "./Landing";
 // Shared design-system primitives live in ui.tsx.
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, PageHelpContext, PageHelpMobile, BrandMark, OpenChatMark, OPENCHAT_URL } from './ui';
 import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient, parseTokenAmount, fmtTokenAmount } from "./tokens";
-import { useErrorImpression } from "./analytics";
+import { useErrorImpression, trackScreen } from "./analytics";
 import { FriendlyError, backendErr, toFriendly, friendlyFromRaw, logRealError } from './errors';
 import { countdownShort } from "./hubLogic";
 
@@ -405,6 +405,20 @@ function AIPanel({ open, onToggle, score, text }: { open: boolean; onToggle: () 
 // 3. Main React App
 // ==========================================
 
+/** Human page titles for document.title / analytics (Firebase breaks views
+ *  out by 'Page title'). Keyed by AppPage; falls back to 'Cycle Burn'. */
+const PAGE_TITLE: Record<AppPage, string> = {
+  landing: 'Home', auth: 'Sign in', voting: 'Voting', earn: 'Neuron Syndicate',
+  staking: 'Stake', lottery: 'No-Loss Lottery', devdocs: 'Developer Docs',
+  claim: 'Golden Ticket', neuronstake: 'Stake', exchange: 'Bond Exchange',
+  icplp: 'Liquidity Provider', luckproof: 'Luck-Proof', dropzone: 'Drop Zone',
+  bullrun: 'Bull Run', minigolf: 'Mini Golf', course_market: 'Course Market',
+  early_adopters: 'Early Adopters', payouts: 'Wallet', admin: 'Admin',
+  admin_money: 'Admin · Money', admin_economics: 'Admin · Economics',
+  admin_neurons: 'Admin · Neurons', admin_users: 'Admin · Users',
+  admin_system: 'Admin · System', admin_reference: 'Admin · How it works',
+};
+
 export default function App() {
   // Canister environment resolution
   const env = safeGetCanisterEnv<{
@@ -645,6 +659,15 @@ export default function App() {
   // the scroll — <main> is the scroller, not the window).
   const mainScrollRef = useRef<HTMLElement | null>(null);
   useEffect(() => { mainScrollRef.current?.scrollTo({ top: 0 }); }, [page]);
+
+  // Per-page document.title so Firebase/GA4 breaks views out by screen
+  // (the 'Page title' dimension was always 'Cycle Burn' → everything
+  // collapsed). Set the title, THEN fire the page_view so it carries it.
+  useEffect(() => {
+    const t = PAGE_TITLE[page] ?? 'Cycle Burn';
+    document.title = page === 'landing' ? 'Cycle Burn — No-Loss Lottery on ICP' : `${t} · Cycle Burn`;
+    trackScreen();
+  }, [page]);
   // User navigations push a history entry (Back works); a redirect/alias/bounce
   // calls `redirect()` so the hash is *replaced* — Back then skips the page that
   // would only bounce forward again.
