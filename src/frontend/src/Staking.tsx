@@ -37,6 +37,10 @@ interface StakingProps {
   treasuryCanFront: boolean;
   /** Called after stake/unstake so the app shell can refresh balances. */
   onActivity: () => void;
+  /** Which half of the page renders (Stake-page tabs, owner 2026-07-14):
+   *  'new' = stake form + term pools + yield history; 'current' = pending
+   *  unstakes (+ restake dialog). Omit to render everything. */
+  view?: 'new' | 'current';
 }
 
 const TIER_ORDER: StakeTier[] = [StakeTier.TwoWeeks, StakeTier.SixMonths, StakeTier.OneYear, StakeTier.TwoYears];
@@ -81,7 +85,7 @@ function bootstrapChip(b: StakingBootstrap) {
 }
 
 export default function Staking({
-  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, isAdmin, treasuryCanFront, onActivity,
+  actor, identity, principal, host, rootKey, ledgerCanisterId, isLocal, boostersEnabled, isAdmin, treasuryCanFront, onActivity, view,
 }: StakingProps) {
   void treasuryCanFront; // unstake UI removed — exits are voucher-native now
 
@@ -353,7 +357,7 @@ export default function Staking({
       )}
 
       {/* ── Pending unstakes ── */}
-      {unstakes.filter(u => u.status !== UnstakeStatus.Merged).length > 0 && (
+      {view !== 'new' && unstakes.filter(u => u.status !== UnstakeStatus.Merged).length > 0 && (
         <div className="col" style={{ ...card, gap: 10 }}>
           <Eyebrow>Your unstakes</Eyebrow>
           <div className="col" style={{ gap: 8 }}>
@@ -440,7 +444,7 @@ export default function Staking({
       )}
 
       {/* ── Restake dialog: choose the destination tier pool ── */}
-      {restakeTarget !== null && (() => {
+      {view !== 'new' && restakeTarget !== null && (() => {
         const u = unstakes.find(x => x.id === restakeTarget);
         if (!u) return null;
         return (
@@ -485,6 +489,7 @@ export default function Staking({
       })()}
 
       
+      {view !== 'current' && (
       <div className="row" style={{ gap: 14, alignItems: 'stretch', flexWrap: 'wrap' }}>
         {/* ── Your stake (with tier selector) — 50/50 with Term pools ── */}
         <div className="col" style={{ ...card, gap: 12, flex: '1 1 0', minWidth: 320 }}>
@@ -744,9 +749,10 @@ export default function Staking({
           )}
         </div>
       </div>
+      )}
 
       {/* ── Yield history ── */}
-      {yields.length > 0 && (
+      {view !== 'current' && yields.length > 0 && (
         <div className="col" style={{ ...card, gap: 10 }}>
           <Eyebrow>Yield distributions</Eyebrow>
           <div className="col" style={{ gap: 6 }}>

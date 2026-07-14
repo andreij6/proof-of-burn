@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Principal } from "@icp-sdk/core/principal";
 import { Icon, Eyebrow, Chip, LiveDot, usePageHelp } from "./ui";
 import Staking from "./Staking";
@@ -31,6 +32,9 @@ export default function NeuronStakePage({
   actor, identity, principal, host, rootKey, ledgerCanisterId,
   isLocal, boostersEnabled, isAdmin, treasuryCanFront, onActivity, onGoExchange, onGoLiquidity,
 }: NeuronStakePageProps) {
+  // Stake-page tabs (owner 2026-07-14): New = stake form + term pools;
+  // Current = dissolving unstakes + the bonds you hold.
+  const [tab, setTab] = useState<'new' | 'current'>('new');
   usePageHelp(() => (
     <>
       <div className="col" style={{ gap: 6 }}>
@@ -76,43 +80,85 @@ export default function NeuronStakePage({
             <Chip tone="pending"><LiveDot size={6} /> daily tickets</Chip>
           </span>
           <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
-            Every stake is issued as a <b>Bond NFT</b> below — sell it, redeem
-            it, or take an instant exit, right on this page.
+            Every stake is issued as a <b>Bond NFT</b> — open the <b>Current</b> tab
+            to sell it, redeem it, or take an instant exit.
           </span>
         </div>
       </div>
 
+      {/* ── Tabs (wallet-tab idiom): New stake vs what you already hold ── */}
+      <div className="idea-board-container" style={{ paddingTop: 0, paddingBottom: 0 }}>
+        <div className="row" style={{ gap: 6 }}>
+          {([['new', 'New', 'zap'], ['current', 'Current', 'star']] as const).map(([key, label, icon]) => {
+            const active = tab === key;
+            return (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                style={{
+                  flex: 1, padding: '7px 4px', borderRadius: 7, cursor: 'pointer', fontSize: 12,
+                  fontWeight: active ? 700 : 500, fontFamily: 'inherit',
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  border: `1px solid ${active ? 'var(--burn)' : 'var(--border)'}`,
+                  background: active ? 'color-mix(in srgb, var(--burn) 14%, transparent)' : 'transparent',
+                  color: active ? 'var(--burn-ink)' : 'var(--fg-2)',
+                }}
+              >
+                <Icon name={icon} size={12} stroke="currentColor" /> {label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
+      {/* ── New: create a stake + the term pools ── */}
+      {tab === 'new' && (
+        <Staking
+          actor={actor}
+          identity={identity}
+          principal={principal}
+          host={host}
+          rootKey={rootKey}
+          ledgerCanisterId={ledgerCanisterId}
+          isLocal={isLocal}
+          boostersEnabled={boostersEnabled}
+          isAdmin={isAdmin}
+          treasuryCanFront={treasuryCanFront}
+          onActivity={onActivity}
+          view="new"
+        />
+      )}
 
-      {/* ── Your bonds — the stake positions this page issues (also on the
-            Lottery page; owner 2026-07-11) ── */}
-      <VouchersBody
-        actor={actor}
-        identity={identity}
-        principal={principal}
-        host={host}
-        rootKey={rootKey}
-        ledgerCanisterId={ledgerCanisterId}
-        section="mine"
-        onGoExchange={onGoExchange}
-        onGoLiquidity={onGoLiquidity}
-      />
-
-      <Staking
-        actor={actor}
-        identity={identity}
-        principal={principal}
-        host={host}
-        rootKey={rootKey}
-        ledgerCanisterId={ledgerCanisterId}
-        isLocal={isLocal}
-        boostersEnabled={boostersEnabled}
-        isAdmin={isAdmin}
-        treasuryCanFront={treasuryCanFront}
-        onActivity={onActivity}
-      />
-
-
+      {/* ── Current: dissolving unstakes + the bonds you hold ── */}
+      {tab === 'current' && (
+        <>
+          <Staking
+            actor={actor}
+            identity={identity}
+            principal={principal}
+            host={host}
+            rootKey={rootKey}
+            ledgerCanisterId={ledgerCanisterId}
+            isLocal={isLocal}
+            boostersEnabled={boostersEnabled}
+            isAdmin={isAdmin}
+            treasuryCanFront={treasuryCanFront}
+            onActivity={onActivity}
+            view="current"
+          />
+          <VouchersBody
+            actor={actor}
+            identity={identity}
+            principal={principal}
+            host={host}
+            rootKey={rootKey}
+            ledgerCanisterId={ledgerCanisterId}
+            section="mine"
+            onGoExchange={onGoExchange}
+            onGoLiquidity={onGoLiquidity}
+          />
+        </>
+      )}
     </>
   );
 }
