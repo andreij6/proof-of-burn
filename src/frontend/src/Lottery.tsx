@@ -53,7 +53,7 @@ function drawDate(atNs: bigint): string {
 }
 
 /** Human labels for ticket-source codes (fallback: the raw code). */
-const TICKET_SOURCE_LABELS: Record<string, string> = {
+export const TICKET_SOURCE_LABELS: Record<string, string> = {
   daily_stake: 'Daily staking claims',
   course_play: 'Mini Golf — playing courses',
   course_owner: 'Mini Golf — your courses played',

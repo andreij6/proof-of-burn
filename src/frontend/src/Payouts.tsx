@@ -11,6 +11,8 @@ import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, formatPrincipal } from "./ui
 import { useErrorImpression } from "./analytics";
 import { makeCkbtcMinter, makeApprover, CKBTC_MINTER_ID } from "./minters";
 import { TIER_META, etaLabel } from "./Staking";
+import { VouchersBody } from "./Vouchers";
+import { TICKET_SOURCE_LABELS } from "./Lottery";
 
 // ==========================================
 // Profile — your wallet (token accounts + on/off-ramps) and the full
@@ -184,8 +186,23 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
             />
           )}
 
-          {/* ════ DISSOLVING NEURONS ════ (own section, below whichever tab) */}
-          <DissolvingNeurons actor={actor} principal={principal!} isLocal={isLocal} />
+          {/* ════ BALANCE TAB EXTRAS: tickets, bonds, dissolving neurons ════ */}
+          {tab === 'balance' && (
+            <>
+              <TicketsCard actor={actor} />
+              <VouchersBody
+                actor={actor}
+                identity={identity}
+                principal={principal}
+                host={host}
+                rootKey={rootKey}
+                ledgerCanisterId={ledgerCanisterId}
+                section="mine"
+                bare
+              />
+              <DissolvingNeurons actor={actor} principal={principal!} isLocal={isLocal} />
+            </>
+          )}
 
           {/* ════ ACTIVITY (History tab) ════ */}
           {tab === 'history' && (
@@ -233,6 +250,64 @@ export default function Payouts({ actor, principal, identity, host, rootKey, led
           )}
       </div>
     </>
+  );
+}
+
+// ==========================================
+// Lottery tickets — this round's count + where they came from (same source
+// labels as the Lottery page). Balance-tab card: tickets are a holding too.
+// ==========================================
+function TicketsCard({ actor }: { actor: Backend }) {
+  const card: React.CSSProperties = {
+    border: '1px solid var(--border)', borderRadius: 10,
+    background: 'var(--surface)', padding: 16,
+  };
+  const [info, setInfo] = useState<{ my_tickets: bigint; my_daily_tickets: bigint } | null>(null);
+  const [breakdown, setBreakdown] = useState<{ source: string; count: bigint }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [i, b] = await Promise.all([
+          actor.get_lottery_info(),
+          actor.get_my_ticket_breakdown().catch(() => []),
+        ]);
+        if (!cancelled) { setInfo(i); setBreakdown(b); }
+      } catch { /* best-effort — the card shows a loading dash */ }
+    })();
+    return () => { cancelled = true; };
+  }, [actor]);
+
+  const tracked = breakdown.reduce((a, r) => a + Number(r.count), 0);
+  const earlier = Number(info?.my_tickets ?? 0n) - tracked;
+  const rows = [
+    ...breakdown.map((r) => ({ label: TICKET_SOURCE_LABELS[r.source] ?? r.source, count: Number(r.count) })),
+    ...(earlier > 0 ? [{ label: 'Earlier grants (untracked)', count: earlier }] : []),
+  ];
+
+  return (
+    <div className="col" style={{ ...card, gap: 10 }}>
+      <Eyebrow>Lottery tickets</Eyebrow>
+      <div className="row" style={{ gap: 10, alignItems: 'baseline' }}>
+        <b className="mono" style={{ fontSize: 24 }}>{info ? Number(info.my_tickets).toLocaleString() : '…'}</b>
+        <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>
+          in this round's drawing{info && info.my_daily_tickets > 0n && <> · earning <span className="mono">{Number(info.my_daily_tickets)}</span>/day</>}
+        </span>
+      </div>
+      {rows.length > 0 && (
+        <div className="col" style={{ gap: 4, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+          <span style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--fg-3)' }}>
+            Where they came from
+          </span>
+          {rows.map((r) => (
+            <span key={r.label} className="row" style={{ justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
+              <span style={{ color: 'var(--fg-2)' }}>{r.label}</span>
+              <span className="mono">{r.count.toLocaleString()}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
