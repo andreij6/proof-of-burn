@@ -340,6 +340,7 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
   const [notice, setNotice] = useState<string | null>(null);
   useErrorImpression(error, 'payouts');
   const [balances, setBalances] = useState<Record<string, bigint | null>>({});
+  const [fees, setFees] = useState<Record<string, bigint>>({});
   const [ledgers, setLedgers] = useState<Record<string, string>>({});
   const [copied, setCopied] = useState<string | null>(null);
   // ICP deposits go to the ledger ACCOUNT ID (what exchanges ask for), not
@@ -393,13 +394,20 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
     try {
       const map = await loadLedgers();
       const next: Record<string, bigint | null> = {};
+      const nextFees: Record<string, bigint> = {};
       await Promise.all(WALLET_TOKENS_META.map(async ({ token }) => {
         try {
           const l = createLedgerActor(map[token], { agentOptions: agentOpts });
-          next[token] = await l.icrc1_balance_of({ owner: principal, subaccount: undefined });
+          const [bal, fee] = await Promise.all([
+            l.icrc1_balance_of({ owner: principal, subaccount: undefined }),
+            l.icrc1_fee().catch(() => null),
+          ]);
+          next[token] = bal;
+          if (fee !== null) nextFees[token] = fee;
         } catch { next[token] = null; }
       }));
       setBalances(next);
+      setFees((prev) => ({ ...prev, ...nextFees }));
     } catch { /* transient */ }
   };
 
@@ -594,48 +602,118 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
       )}
 
       {/* Withdraw */}
-      {section === 'withdraw' && (
+      {section === 'withdraw' && (() => {
+        const wMeta = WALLET_TOKENS_META.find(t => t.token === wToken)!;
+        const wBal = balances[wToken];
+        const wFee = fees[wToken] ?? 0n;
+        const wParsed = parseUnits(wAmount, wMeta.decimals);
+        const wBadAmount = wAmount.trim() !== '' && (wParsed === null || wParsed <= 0n);
+        // The ledger charges its fee ON TOP of the amount — the spend is
+        // amount + fee, so that's what must fit in the balance.
+        const wExceeds = wParsed !== null && wParsed > 0n && wBal !== null && wBal !== undefined && wParsed + wFee > wBal;
+        const wMax = wBal !== null && wBal !== undefined && wBal > wFee ? wBal - wFee : 0n;
+        return (
       <div className="col" style={{ ...card, gap: 12 }}>
         <Eyebrow>Withdraw</Eyebrow>
         <div className="col" style={{ gap: 8 }}>
           <b style={{ fontSize: 13 }}>To any Internet Computer principal</b>
-          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-            {WALLET_TOKENS_META.map(({ token, label }) => (
-              <Btn key={token} variant={wToken === token ? 'primary' : 'ghost'} sm onClick={() => setWToken(token)}>{label}</Btn>
-            ))}
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <select
+              className="burn-input"
+              value={wToken}
+              onChange={(e) => setWToken(e.target.value as ExplorerToken)}
+              aria-label="Token to withdraw"
+              style={{ maxWidth: 160 }}
+            >
+              {WALLET_TOKENS_META.map(({ token, label }) => (
+                <option key={token} value={token}>{label}</option>
+              ))}
+            </select>
+            <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+              Available:{' '}
+              <b className="mono" style={{ color: 'var(--fg)' }}>
+                {wBal !== null && wBal !== undefined ? fmtUnits(wBal, wMeta.decimals) : '…'}
+              </b>{' '}
+              {wMeta.label}
+              {wFee > 0n && <span style={{ color: 'var(--fg-3)' }}> · network fee {fmtUnits(wFee, wMeta.decimals)}</span>}
+            </span>
+            {wMax > 0n && (
+              <button
+                onClick={() => setWAmount(fmtUnits(wMax, wMeta.decimals).replace(/,/g, ''))}
+                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--burn-ink)', fontSize: 11.5, textDecoration: 'underline' }}
+              >
+                Max
+              </button>
+            )}
           </div>
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-            <input type="text" placeholder="Amount" className="burn-input" style={{ ...inputStyle, maxWidth: 180 }}
+            <input type="text" placeholder="Amount" className="burn-input"
+              style={{ ...inputStyle, maxWidth: 180, borderColor: (wBadAmount || wExceeds) ? 'var(--ember)' : undefined }}
               value={wAmount} onChange={e => setWAmount(e.target.value)} />
             <input type="text" placeholder="Destination principal" className="burn-input" style={{ ...inputStyle, minWidth: 260 }}
               value={wDest} onChange={e => setWDest(e.target.value)} />
-            <Btn variant="primary" sm onClick={withdrawIc} disabled={busy !== null || !wAmount || !wDest}>
+            <Btn variant="primary" sm onClick={withdrawIc}
+              disabled={busy !== null || !wDest || wParsed === null || wParsed <= 0n || wExceeds || wBal === null || wBal === undefined}>
               {busy === 'w-ic' ? '…' : 'Withdraw'}
             </Btn>
           </div>
+          {wBadAmount && (
+            <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--ember)' }}>
+              <Icon name="x" size={11} stroke="var(--ember)" /> That doesn't parse as a {wMeta.label} amount.
+            </span>
+          )}
+          {wExceeds && (
+            <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--ember)' }}>
+              <Icon name="x" size={11} stroke="var(--ember)" />
+              More than your balance — the most you can send is {fmtUnits(wMax, wMeta.decimals)} {wMeta.label} (amount + network fee must fit).
+            </span>
+          )}
         </div>
 
         {/* Native BTC off-ramp (mainnet only) */}
-        {!isLocal && (
+        {!isLocal && (() => {
+          const btcBal = balances[ExplorerToken.CkBTC];
+          const btcFee = fees[ExplorerToken.CkBTC] ?? 0n;
+          const nParsed = parseUnits(nAmount, 8);
+          const nBadAmount = nAmount.trim() !== '' && (nParsed === null || nParsed <= 0n);
+          // The flow spends amount + an icrc2_approve fee + the transfer fee
+          // the minter charges when it pulls the funds — two ledger fees.
+          const nExceeds = nParsed !== null && nParsed > 0n && btcBal !== null && btcBal !== undefined && nParsed + btcFee * 2n > btcBal;
+          return (
           <div className="col" style={{ gap: 8, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
             <b style={{ fontSize: 13 }}>To a native Bitcoin address</b>
+            <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+              Available:{' '}
+              <b className="mono" style={{ color: 'var(--fg)' }}>
+                {btcBal !== null && btcBal !== undefined ? fmtUnits(btcBal, 8) : '…'}
+              </b>{' '}ckBTC
+            </span>
             <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-              <input type="text" placeholder="Amount (BTC)" className="burn-input" style={{ ...inputStyle, maxWidth: 180 }}
+              <input type="text" placeholder="Amount (BTC)" className="burn-input"
+                style={{ ...inputStyle, maxWidth: 180, borderColor: (nBadAmount || nExceeds) ? 'var(--ember)' : undefined }}
                 value={nAmount} onChange={e => setNAmount(e.target.value)} />
               <input type="text" placeholder="Bitcoin address" className="burn-input" style={{ ...inputStyle, minWidth: 260 }}
                 value={nDest} onChange={e => setNDest(e.target.value)} />
-              <Btn variant="primary" sm onClick={withdrawBtc} disabled={busy !== null || !nAmount || !nDest}>
+              <Btn variant="primary" sm onClick={withdrawBtc}
+                disabled={busy !== null || !nDest || nParsed === null || nParsed <= 0n || nExceeds || btcBal === null || btcBal === undefined}>
                 {busy === 'n-withdraw' ? '…' : 'Withdraw BTC'}
               </Btn>
             </div>
+            {nExceeds && (
+              <span className="row" style={{ gap: 6, fontSize: 11.5, color: 'var(--ember)' }}>
+                <Icon name="x" size={11} stroke="var(--ember)" /> More than your ckBTC balance (the approval + transfer fees must fit too).
+              </span>
+            )}
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Spends your ckBTC; the minter batches retrievals to Bitcoin. The flow asks the ledger
               for an approval first — two transactions total.
             </span>
           </div>
-        )}
+          );
+        })()}
       </div>
-      )}
+        );
+      })()}
     </>
   );
 }
