@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Btn, Chip, Icon, LiveDot, formatPrincipal } from '../ui';
 import { FriendlyError, toFriendly, friendlyFromRaw } from '../errors';
+import { track } from '../analytics';
 
 // ==========================================
 // Sklansky Trainer (Luck-Proof) — arcade game 3.
@@ -368,6 +369,7 @@ export default function LuckProof({ actor, onGoParticipate, onExit }: LuckProofP
       const millis = BigInt(Math.round(performance.now() - run.startedAt));
       const res = await actor.complete_luckproof_daily(run.id, run.decisions, millis);
       if (res.__kind__ === 'Err') throw new FriendlyError(friendlyDailyErr(res.Err), res.Err, 'luckproof');
+      track("game_played", { game: "luck_proof", score: res.Ok.correct, rank: res.Ok.rank, daily: true });
       setResult(res.Ok);
       setMode('dailyDone');
       refreshMenu();

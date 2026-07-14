@@ -5,6 +5,7 @@ import { createActor as createLedgerActor } from './bindings/ledger';
 import { Btn, Chip, Eyebrow, Icon, LiveDot, Skeleton, fmtICP } from './ui';
 import { TIER_META } from './Staking';
 import { FriendlyError, backendErr, toFriendly, friendlyFromRaw } from './errors';
+import { trackConversion, icp } from './analytics';
 
 // ==========================================
 // Stake Vouchers — a staked position as a transferable NFT. Staking
@@ -234,6 +235,7 @@ export function VouchersBody({
   const redeem = (v: BondView) => runOp(`redeem-${v.id}`, 'Starting the dissolve…', async () => {
     const res = await actor.redeem_stake_bond(v.id);
     if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
+    trackConversion('bond_redeem', { value: icp(v.amount_e8s), currency: 'ICP', tier: TIER_META[v.tier].short });
     return {
       title: 'Dissolve started',
       detail: `Your ${fmtICP(v.amount_e8s)} ICP pays your wallet automatically after the ${TIER_META[v.tier].label} dissolve — nothing to claim.`,
@@ -246,6 +248,7 @@ export function VouchersBody({
     if (!price) throw new FriendlyError('Enter an ask in ICP (up to 4 decimals).');
     const res = await actor.list_bond(v.id, price);
     if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
+    trackConversion('bond_list', { value: icp(price), currency: 'ICP', tier: TIER_META[v.tier].short });
     return {
       title: `Listed at ${fmtICP(price)} ICP`,
       detail: 'Your bond is on the Exchange. It won\'t earn tickets while listed — cancel anytime to resume.',
@@ -264,6 +267,7 @@ export function VouchersBody({
     return runOp(`buyback-${v.id}`, `Paying you ${fmtICP(quote)} ICP from the buyback fund…`, async () => {
       const res = await actor.buyback_bond(v.id);
       if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
+      trackConversion('bond_buyback', { value: icp(res.Ok), currency: 'ICP', tier: TIER_META[v.tier].short });
       return {
         title: `${fmtICP(res.Ok)} ICP paid to your wallet`,
         detail: 'The sale is complete and the bond is burned. The ICP is already in your wallet.',
@@ -287,6 +291,7 @@ export function VouchersBody({
     setOpPhase({ kind: 'processing', text: 'Payment escrowed — settling the purchase…' });
     const res = await actor.buy_bond(v.id);
     if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
+    trackConversion('bond_buy', { value: icp(v.listed_price_e8s), currency: 'ICP', tier: TIER_META[v.tier].short });
     return {
       title: `Bond #${v.id} is yours`,
       detail: `${ticketsPerDay(v)} tickets just landed for the upcoming draw, and it keeps earning daily.`,
@@ -599,7 +604,7 @@ export function VouchersBody({
                         ? 'Paid to your wallet on the spot — no waiting for a buyer.'
                         : 'Currently unavailable — the buyback fund can\'t cover this sale right now. Listing on the Exchange still works.'}
                     </span>
-                    <Btn variant="primary" sm onClick={() => buyback(v)} disabled={busy !== null || !canBuyback} style={{ alignSelf: 'flex-start' }}>
+                    <Btn variant="primary" sm dataEvt="bond_buyback" onClick={() => buyback(v)} disabled={busy !== null || !canBuyback} style={{ alignSelf: 'flex-start' }}>
                       {busy === `buyback-${v.id}` ? <LiveDot size={7} /> : <Icon name="zap" size={12} stroke="var(--char-950)" />} Take {fmtICP(quote)} ICP now
                     </Btn>
                   </div>
@@ -679,7 +684,7 @@ export function VouchersBody({
             <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
               Your {fmtICP(v.listed_price_e8s)} ICP goes to a sale escrow, then the purchase settles and the bond moves to you. An unfinished purchase is always reclaimable.
             </span>
-            <Btn variant="primary" onClick={() => buy(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+            <Btn variant="primary" dataEvt="bond_buy" onClick={() => buy(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
               <Icon name="coins" size={13} stroke="var(--char-950)" /> Buy for {fmtICP(v.listed_price_e8s)} ICP
             </Btn>
             </>)}

@@ -1,5 +1,12 @@
 import { useEffect } from "react";
-import { getAnalytics, isSupported, logEvent, type Analytics } from "firebase/analytics";
+import {
+  getAnalytics,
+  isSupported,
+  logEvent,
+  setUserId,
+  setUserProperties,
+  type Analytics,
+} from "firebase/analytics";
 import { app } from "./firebase";
 
 // ==========================================================================
@@ -21,11 +28,17 @@ let analytics: Analytics | null = null;
 let ready = false;
 // Events fired before isSupported() resolves are buffered, then flushed.
 const queue: Array<[string, Record<string, unknown>]> = [];
+// User id + properties may also be set before Analytics is ready; hold the
+// latest value and apply it on flush (only the last one matters).
+let pendingUserId: string | null | undefined; // undefined = never set
+let pendingUserProps: Record<string, string | number | boolean> | null = null;
 
 isSupported().then((supported) => {
   if (!supported) return; // SSR / unsupported browser / no measurementId
   analytics = getAnalytics(app);
   ready = true;
+  if (pendingUserId !== undefined) setUserId(analytics, pendingUserId);
+  if (pendingUserProps) setUserProperties(analytics, pendingUserProps);
   for (const [name, params] of queue) logEvent(analytics, name, params);
   queue.length = 0;
   trackScreen(); // initial landing screen
@@ -35,6 +48,63 @@ isSupported().then((supported) => {
 export function track(name: string, params: Record<string, unknown> = {}) {
   if (ready && analytics) logEvent(analytics, name, params);
   else queue.push([name, params]);
+}
+
+/**
+ * Fire a named conversion event. Thin wrapper over track() that stamps the
+ * current screen and (for monetary events) leaves `value`/`currency` as the
+ * caller passes them so GA4's monetary reports populate. `value` must be a
+ * plain Number (ICP), never a bigint — divide e8s by 1e8 via `icp()`.
+ */
+export function trackConversion(name: string, params: Record<string, unknown> = {}) {
+  track(name, { screen: screenName(), ...params });
+}
+
+/** e8s (bigint | number) → whole-ICP Number for GA4 `value`. */
+export function icp(e8s: bigint | number): number {
+  return Number(e8s) / 1e8;
+}
+
+/**
+ * Set GA4 user properties for segmentation (e.g. is_staked, is_admin) — and,
+ * crucially, so the owner can FILTER admin traffic out of reports. Buffered
+ * until Analytics is ready. GA4 caps property values at 36 chars / names at 24.
+ */
+export function setUserProps(props: Record<string, string | number | boolean>) {
+  pendingUserProps = props;
+  if (ready && analytics) setUserProperties(analytics, props);
+}
+
+/**
+ * A stable, NON-reversible short id derived from a principal — a 16-hex-char
+ * FNV-1a-ish hash. We deliberately never send the raw principal to GA4;
+ * this gives pseudonymous cross-session stitching without exposing identity.
+ */
+export function hashPrincipal(principalText: string): string {
+  // Two independent 32-bit FNV-1a passes (different offset bases) concatenated
+  // → 64 bits / 16 hex chars. Synchronous, dependency-free, non-reversible.
+  const fnv = (seed: number) => {
+    let h = seed >>> 0;
+    for (let i = 0; i < principalText.length; i++) {
+      h ^= principalText.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h >>> 0;
+  };
+  const a = fnv(0x811c9dc5);
+  const b = fnv(0x7ee3623b);
+  return a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0");
+}
+
+/**
+ * Identify the current user to GA4 by a HASH of their principal (never the
+ * principal itself) so their journey stitches across sessions. Pass null on
+ * sign-out to clear it. Buffered until Analytics is ready.
+ */
+export function setAnalyticsUser(principalText: string | null) {
+  const id = principalText ? hashPrincipal(principalText) : null;
+  pendingUserId = id;
+  if (ready && analytics) setUserId(analytics, id);
 }
 
 /**

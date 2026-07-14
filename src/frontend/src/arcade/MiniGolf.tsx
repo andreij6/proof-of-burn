@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Btn, Chip, Icon } from '../ui';
+import { track } from '../analytics';
 import {
   STEP, MAX_POWER, DEFAULT_CHARACTER,
   initHole, stepHole, strike, dragToShot, speed, fmtMillis, scoreLabel,
@@ -198,6 +199,7 @@ export default function MiniGolf({ course, character, fullAccess, onHoleSunk, on
                 if (!g.completed) {
                   g.completed = true;
                   onRoundComplete(nextPerHole, Math.round(g.finalMs));
+                  track("game_played", { game: "mini_golf", score: nextPerHole.reduce((a, b) => a + b, 0) });
                 }
                 setPhase('done');
               } else if (g.holeIdx === 0 && !g.fullAccess) {

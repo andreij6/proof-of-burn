@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Btn, Chip, Icon, LiveDot, formatPrincipal } from '../ui';
 import { FriendlyError, toFriendly, friendlyFromRaw } from '../errors';
+import { track } from '../analytics';
 
 // ==========================================
 // Drop Zone — arcade game 4: the PUBG/Warzone-style target drop.
@@ -465,6 +466,7 @@ export default function DropZone({ actor, onGoParticipate, isLocal = false }: Dr
         const safe = landingVerdict(game.fall.chute, game.fall.deployAlt);
         (async () => {
           const rank = game.daily ? await submitDaily(dist, ms, safe) : null;
+          track("game_played", { game: "drop_zone", score: Math.round(dist), daily: game.daily, rank: rank ?? undefined });
           setResult({ dist, ms, safe, daily: game.daily, rank });
           setMode('done');
           refreshMenu();

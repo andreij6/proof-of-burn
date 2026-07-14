@@ -4,7 +4,7 @@ import { StakeTier, StakingBootstrap, UnstakeStatus, YieldStatus } from "./bindi
 import type { StakingPoolInfo, TierPoolInfo, UserStakeInfo, PendingUnstake, YieldDistribution, EarlyAdopterInfo } from "./bindings/backend";
 import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, MoreInfo, fmtICP, usePageDevControls } from "./ui";
-import { useErrorImpression } from "./analytics";
+import { useErrorImpression, trackConversion, icp } from "./analytics";
 import { backendErr, toFriendly } from './errors';
 
 // ==========================================
@@ -172,6 +172,7 @@ export default function Staking({
       return;
     }
     setStakeInput('');
+    trackConversion("stake", { value: icp(amount), currency: "ICP", tier: TIER_META[tier].short });
     setNotice(`Staked ${fmtICP(amount)} ICP for ${termLabel} — ${TIER_META[tier].tickets} lottery tickets per ICP per day are live.`);
     await refresh();
     onActivity();
@@ -206,6 +207,7 @@ export default function Staking({
     if (res.__kind__ === "Err") { setError(toFriendly(backendErr(res.Err, 'staking:perm-stake'), 'staking')); return; }
     setStakeInput('');
     setBoosterAck(false);
+    trackConversion("stake", { value: icp(amount), currency: "ICP", tier: "perm" });
     setNotice(`Staked ${fmtICP(amount)} ICP into the Perm neuron — permanent, now earning 40 lottery tickets per ICP per day.`);
     await refresh();
     onActivity();

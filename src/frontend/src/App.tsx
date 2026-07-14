@@ -44,7 +44,7 @@ import Landing from "./Landing";
 // Shared design-system primitives live in ui.tsx.
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, PageHelpContext, PageHelpMobile, BrandMark, OpenChatMark, OPENCHAT_URL } from './ui';
 import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient, parseTokenAmount, fmtTokenAmount } from "./tokens";
-import { useErrorImpression, trackScreen } from "./analytics";
+import { useErrorImpression, trackScreen, trackConversion, setUserProps, setAnalyticsUser, icp } from "./analytics";
 import { FriendlyError, backendErr, toFriendly, friendlyFromRaw, logRealError } from './errors';
 import { countdownShort } from "./hubLogic";
 
@@ -628,6 +628,9 @@ export default function App() {
         if (cancelled) return;
         if (mine && localStorage.getItem(`lottery_win_seen_${mine.id}`) === null) {
           setWinBanner({ id: mine.id, prize: mine.prize_e8s });
+          // The single most important conversion signal: the user just saw
+          // they won. Once per win (the seen-flag gate above dedupes).
+          trackConversion("lottery_win", { value: icp(mine.prize_e8s), currency: "ICP", draw_id: Number(mine.id) });
         } else {
           setWinBanner(null);
         }
@@ -1334,7 +1337,11 @@ export default function App() {
   // noise: ALREADY_CLAIMED_TODAY / FEATURE_DISABLED.
   useEffect(() => {
     if (!actor || !lotteryEnabled || !principal || principal.isAnonymous()) return;
-    actor.claim_daily_tickets().catch(() => {});
+    actor.claim_daily_tickets()
+      .then((res: { __kind__: string; Ok?: bigint }) => {
+        if (res?.__kind__ === "Ok") trackConversion("ticket_claim", { count: Number(res.Ok ?? 0n) });
+      })
+      .catch(() => {});
   }, [actor, principal, lotteryEnabled]);
 
   // Login ping: record this principal with the backend's "ever logged in"
@@ -1450,6 +1457,7 @@ export default function App() {
         });
         setActor(newActor);
         setIsSigningIn(false);
+        trackConversion("sign_in");
       },
       onError: () => setIsSigningIn(false),
     });
@@ -1886,6 +1894,40 @@ export default function App() {
     principal && !principal.isAnonymous() && config &&
     config.admins.some((a) => a.toString() === principal.toString())
   );
+
+  // ── Analytics identity + segmentation ────────────────────────────────────
+  // Identify the user to GA4 by a HASH of their principal (never the raw
+  // principal) and set user properties so reports can segment — and so the
+  // owner can FILTER admin traffic out. Best-effort; runs when the signed-in
+  // actor / admin status settles.
+  useEffect(() => {
+    const signedIn = !!(principal && !principal.isAnonymous());
+    setAnalyticsUser(signedIn ? principal!.toString() : null);
+    if (!signedIn || !actor) {
+      setUserProps({ signed_in: signedIn, is_admin: false });
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      let hasBond = false, isStaked = false, isLp = false;
+      try {
+        const bm = await actor.get_bond_market();
+        hasBond = (bm?.my_bonds?.length ?? 0) > 0;
+      } catch { /* best-effort */ }
+      try {
+        const li = await actor.get_lottery_info();
+        isStaked = !!li?.eligible; // true for neuron OR LP stakers
+      } catch { /* best-effort */ }
+      try {
+        const lp = await actor.get_icp_lp_info();
+        isLp = (lp?.my_positions?.length ?? 0) > 0;
+      } catch { /* best-effort */ }
+      if (cancelled) return;
+      setUserProps({ signed_in: true, is_admin: isAdmin, is_staked: isStaked, has_bond: hasBond, is_lp: isLp });
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [actor, principal, isAdmin]);
 
 
   // Admin console pages are invisible to non-admins; bounce them once auth

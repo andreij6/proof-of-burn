@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Btn, Chip, Icon, LiveDot, formatPrincipal } from '../ui';
 import { mulberry, isTouchDevice } from './DropZone';
 import { FriendlyError, toFriendly, friendlyFromRaw } from '../errors';
+import { track } from '../analytics';
 
 // ==========================================
 // Bull Run — arcade game 5: the ENDLESS encierro.
@@ -471,6 +472,7 @@ export default function BullRun({ actor, onGoParticipate, isLocal = false }: Bul
             const b = game.bull;
             (async () => {
               const rank = game.daily ? await submitDaily(b.coins, b.t * 1000) : null;
+              track("game_played", { game: "bull_run", score: b.coins, daily: game.daily, rank: rank ?? undefined });
               setResult({ coins: b.coins, ms: b.t * 1000, dist: b.z, daily: game.daily, rank });
               setMode('done');
               refreshMenu();

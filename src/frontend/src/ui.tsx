@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, type ReactNode, type DependencyList } from 'react';
 import { createPortal } from 'react-dom';
 import { Principal } from "@icp-sdk/core/principal";
+import { track } from "./analytics";
 
 // ==========================================
 // Dev-controls registry
@@ -57,7 +58,7 @@ export function PageHelpMobile({ children }: { children: ReactNode }) {
       <button
         type="button"
         className="show-mobile"
-        onClick={() => setOpen(true)}
+        onClick={() => { setOpen(true); track("how_it_works_opened", { screen: window.location.hash.replace(/^#\/?/, "") || "landing" }); }}
         aria-label="How it works"
         style={{
           position: 'fixed', right: 0, top: '42%', zIndex: 70,
@@ -271,7 +272,7 @@ export function Chip({ tone = 'muted', children, style }: { tone?: keyof typeof 
   );
 }
 
-export function Btn({ variant = 'secondary', sm, children, disabled, style, onClick, title }: {
+export function Btn({ variant = 'secondary', sm, children, disabled, style, onClick, title, dataEvt }: {
   variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
   sm?: boolean;
   children: React.ReactNode;
@@ -279,6 +280,10 @@ export function Btn({ variant = 'secondary', sm, children, disabled, style, onCl
   style?: React.CSSProperties;
   onClick?: () => void;
   title?: string;
+  /** Stable analytics label for the delegated click listener (data-evt) —
+   *  use on buttons whose text has dynamic amounts to avoid high-cardinality
+   *  labels like "Take 1.7 ICP now". */
+  dataEvt?: string;
 }) {
   const base = {
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
@@ -300,6 +305,7 @@ export function Btn({ variant = 'secondary', sm, children, disabled, style, onCl
       style={{ ...base, ...skins[variant] }}
       disabled={disabled}
       title={title}
+      data-evt={dataEvt}
     >
       {children}
     </button>

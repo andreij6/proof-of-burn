@@ -3,6 +3,7 @@ import { Principal } from '@icp-sdk/core/principal';
 import { BrandMark, Icon, LiveDot } from './ui';
 import { friendlyVoucherErr } from './Vouchers';
 import { FriendlyError, toFriendly } from './errors';
+import { trackConversion } from './analytics';
 
 // ==========================================
 // Golden Ticket claim — the standalone campaign page (#/claim).
@@ -74,6 +75,7 @@ export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: Clai
     try {
       const res = await actor.claim_golden_ticket(dest);
       if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'claim');
+      trackConversion('claim_golden_ticket', { method: dest ? 'paste' : 'signin' });
       setClaimed({
         id: res.Ok,
         to: dest ? dest.toString() : (principal?.toString() ?? 'your account'),
