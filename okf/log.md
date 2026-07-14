@@ -1,5 +1,16 @@
 # Log
 
+## 2026-07-14 — Mainnet frontend deploy 37f2bf2 (analytics enrichment + per-page titles)
+
+Frontend-only. Firebase/GA4: per-page document.title (Firebase was
+collapsing every view under "Cycle Burn"); + 5-part enrichment —
+named conversion events (sign_in/stake/bond_*/claim_golden_ticket/
+ticket_claim/lottery_win with value+currency ICP), user properties
+(is_staked/has_bond/is_admin/is_lp — lets owner FILTER admin traffic),
+hashed setUserId (never raw principal), feature-usage (how_it_works_
+opened, game_played), data-evt labels on dynamic bond buttons. 373/373.
+New screens/events populate in Firebase within ~a day.
+
 ## 2026-07-12 — Mainnet deploy 2e33e7d (feature removal + Bond stack + help panel)
 
 Big deploy. REMOVED: Dapp Explorer, Solana/ANSEM LP, X-Farm (+xfarm_farmer
