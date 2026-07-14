@@ -384,7 +384,7 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
             <div className="col" style={{ gap: 8, alignItems: 'flex-start' }}>
               <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
                 Staking is the entry ticket: stake ICP (or an LP position) to start collecting
-                5 / 10 / 20 free tickets a day (6-month / 1-year / 2-year terms).
+                1 / 5 / 10 / 20 free tickets a day (2-week / 6-month / 1-year / 2-year terms).
               </span>
               <Btn variant="primary" sm onClick={onGoStaking}>
                 <Icon name="zap" size={13} stroke="var(--char-950)" /> Stake to earn tickets

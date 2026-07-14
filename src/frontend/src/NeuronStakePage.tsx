@@ -44,7 +44,7 @@ export default function NeuronStakePage({
       <div className="col" style={{ gap: 6 }}>
         <Eyebrow accent>Earning tickets</Eyebrow>
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-          <li><b>5 / 10 / 20 tickets a day per ICP</b> for 6-month / 1-year / 2-year terms — tiers add up.</li>
+          <li><b>1 / 5 / 10 / 20 tickets a day per ICP</b> for 2-week / 6-month / 1-year / 2-year terms — tiers add up.</li>
           <li><b>Scales with your stake:</b> 500 ICP for 2 years is 10,000 tickets every day.</li>
           <li><b>Tickets follow the bond</b> — whoever holds it earns; a bond <b>listed for sale pauses</b> its tickets until delisted.</li>
         </ul>

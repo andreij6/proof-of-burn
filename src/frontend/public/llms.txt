@@ -25,7 +25,7 @@ burns 5% to cycles.
 - Queries are free and fast. stake/redeem_stake_bond are update calls (~2s consensus).
 
 ## Candid interface (the integration surface)
-type StakeTier = variant { SixMonths; OneYear; TwoYears };
+type StakeTier = variant { TwoWeeks; SixMonths; OneYear; TwoYears };
 type Result = variant { Ok; Err : text };
 type BalanceResult = variant { Ok : nat64; Err : text };
 type LedgerAccount = record { owner : principal; subaccount : opt blob };
@@ -41,7 +41,7 @@ service : {
 
 ## agent-js idlFactory (paste-ready)
 export const idlFactory = ({ IDL }) => {
-  const StakeTier = IDL.Variant({ SixMonths: IDL.Null, OneYear: IDL.Null, TwoYears: IDL.Null });
+  const StakeTier = IDL.Variant({ TwoWeeks: IDL.Null, SixMonths: IDL.Null, OneYear: IDL.Null, TwoYears: IDL.Null });
   const Result = IDL.Variant({ Ok: IDL.Null, Err: IDL.Text });
   const BalanceResult = IDL.Variant({ Ok: IDL.Nat64, Err: IDL.Text });
   const LedgerAccount = IDL.Record({ owner: IDL.Principal, subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)) });
@@ -69,7 +69,8 @@ export const idlFactory = ({ IDL }) => {
    // transfer EXACTLY the amount you will pass to stake(); ledger fees are
    // covered by the protocol treasury. The transfer must land BEFORE step 3.
 3. const res = await cycleBurn.stake(amount, { SixMonths: null });
-   // Err variants are text codes. Tiers: SixMonths = 5 tickets/ICP/day,
+   // Err variants are text codes. Tiers: TwoWeeks = 1 ticket/ICP/day,
+   // SixMonths = 5,
    // OneYear = 10, TwoYears = 20. Minimum FIRST stake per tier: 1 ICP.
 
 ## Flow 2 — Read lottery state (drives your whole UI)
@@ -98,7 +99,7 @@ BOND_EXIT_ONLY).
 2. Exit one of three ways:
    - 100% after dissolve: const out = await cycleBurn.redeem_stake_bond(bond.id);
      Ok is a pending-unstake id; the ICP pays the OWNER automatically once the
-     tier's neuron finishes dissolving (6mo/1y/2y). Nothing to claim.
+     tier's neuron finishes dissolving (2wk/6mo/1y/2y). Nothing to claim.
    - Instant 85%: await cycleBurn.buyback_bond(bond.id); // Ok = ICP paid now
      Refuses with BUYBACK_UNAVAILABLE when the buyback fund can't cover it.
    - Market price: list_bond(bond.id, askE8s) — a buyer takes the position.

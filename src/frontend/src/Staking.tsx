@@ -9,8 +9,8 @@ import { backendErr, toFriendly } from './errors';
 
 // ==========================================
 // Lossless Staking — pooled staking across three fixed-term NNS neurons
-// (6 months / 1 year / 2 years), all controlled by the canister. Stakers keep
-// their principal and qualify for the lossless lottery, earning 5 / 10 / 20
+// (2 weeks / 6 months / 1 year / 2 years), all controlled by the canister. Stakers keep
+// their principal and qualify for the lossless lottery, earning 1 / 5 / 10 / 20
 // daily tickets per ICP per tier (term multiplier 1× / 2× / 4×). Staking does
 // NOT grant voting power — voting is burn-only. Unstaking splits the tier's
 // neuron and dissolves it for the tier's full term. A fourth, PERMANENT
@@ -39,9 +39,12 @@ interface StakingProps {
   onActivity: () => void;
 }
 
-const TIER_ORDER: StakeTier[] = [StakeTier.SixMonths, StakeTier.OneYear, StakeTier.TwoYears];
+const TIER_ORDER: StakeTier[] = [StakeTier.TwoWeeks, StakeTier.SixMonths, StakeTier.OneYear, StakeTier.TwoYears];
 
 export const TIER_META: Record<StakeTier, { label: string; short: string; mult: number; tickets: string }> = {
+  // Taster tier (2026-07-14): 1 ticket/ICP/day, 2-week dissolve. mult is the
+  // ticket rate relative to the 6-month base (backend: base/5, floored to 1).
+  [StakeTier.TwoWeeks]: { label: '2 weeks', short: '2 wk', mult: 0.2, tickets: '1' },
   [StakeTier.SixMonths]: { label: '6 months', short: '6 mo', mult: 1, tickets: '5' },
   [StakeTier.OneYear]: { label: '1 year', short: '1 yr', mult: 2, tickets: '10' },
   [StakeTier.TwoYears]: { label: '2 years', short: '2 yr', mult: 4, tickets: '20' },
@@ -513,7 +516,7 @@ export default function Staking({
                     <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
                       Same 2-year neuron as the term tier, with two differences: it is{' '}
                       <b>permanent — never unstakeable, by anyone</b> — and it earns the highest ticket
-                      rate, <b>40 lottery tickets/day per ICP</b> (vs 5/10/20). Like every neuron here,
+                      rate, <b>40 lottery tickets/day per ICP</b> (vs 1/5/10/20). Like every neuron here,
                       its yield funds the lottery and the protocol — you're never paid ICP from it.
                     </span>
                   </div>

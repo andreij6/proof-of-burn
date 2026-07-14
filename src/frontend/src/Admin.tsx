@@ -518,7 +518,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     const res = await actor.admin_set_lottery_config(BigInt(n));
     if (res.__kind__ === "Err") { setError(res.Err); return null; }
     setTicketsInput('');
-    return `Base ticket grant set to ${n} per ICP per day (tiers pay ${n}/${n * 2}/${n * 4}).`;
+    return `Base ticket grant set to ${n} per ICP per day (tiers pay ${Math.max(1, Math.floor(n / 5))}/${n}/${n * 2}/${n * 4} for 2wk/6mo/1yr/2yr).`;
   });
 
   const setPoolFee = () => run('poolfee', async () => {
@@ -735,7 +735,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
               {/* Allocate to neurons */}
               <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                 <span style={{ fontSize: 11.5, color: 'var(--fg-3)', minWidth: 72 }}>Allocate</span>
-                {[['SixMonths', '6-mo pool'], ['OneYear', '1-yr pool'], ['TwoYears', '2-yr pool'], ['EarlyAdopters', 'Perm']].map(([key, label]) => (
+                {[['TwoWeeks', '2-wk pool'], ['SixMonths', '6-mo pool'], ['OneYear', '1-yr pool'], ['TwoYears', '2-yr pool'], ['EarlyAdopters', 'Perm']].map(([key, label]) => (
                   <Btn key={key} variant={allocTarget === key ? 'primary' : 'ghost'} sm onClick={() => setAllocTarget(key)}>{label}</Btn>
                 ))}
                 <input type="text" placeholder="Amount (ICP)" className="burn-input" style={{ ...inputStyle, maxWidth: 140 }}
@@ -811,7 +811,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       {section === 'economics' && (
         <>
           <FeatureGate flagKey="lossless_lottery" label="Lottery & bond dials" flags={featureFlags} busy={busy} onToggle={cycleFlag}>
-            <Sec label="Lottery ticket grant" right={<span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>{base}/{base * 2}/{base * 4} per ICP/day</span>}>
+            <Sec label="Lottery ticket grant" right={<span className="mono" style={{ fontSize: 12, color: 'var(--fg-2)' }}>{Math.max(1, Math.floor(base / 5))}/{base}/{base * 2}/{base * 4} per ICP/day</span>}>
               <div className="row" style={{ gap: 8 }}>
                 <input type="number" min="1" step="1" placeholder="Base (6-month tier)" className="burn-input" style={inputStyle}
                   value={ticketsInput} onChange={(e) => setTicketsInput(e.target.value)} />
@@ -820,7 +820,8 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                 </Btn>
               </div>
               <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                Tickets scale with staked ICP automatically; this sets the base per whole ICP.
+                Tickets scale with staked ICP automatically; this sets the base (6-month) rate per
+                whole ICP — 1yr pays ×2, 2yr ×4, and the 2-week taster tier pays base÷5 (floored to 1).
                 Draw gates (read-only): pot ≥ {lottery ? fmtICP(lottery.min_pot_e8s) : '…'} ICP,
                 ≥ {lottery ? lottery.min_unique_holders.toString() : '…'} players.
               </span>
@@ -1366,9 +1367,10 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             <Li>Each payout lands in the recipient's wallet and their payout history. Deactivating keeps the registration — reactivating never re-charges the fee.</Li>
           </Section>
 
-          <Section icon="zap" title="Lossless staking — three terms, one principal, zero loss">
-            <Li>Three pooled NNS neurons, one per term: 6 months, 1 year, 2 years. Your ICP joins the term's neuron; your principal is never spent. Every neuron is made PUBLIC on the NNS the moment it's configured — anyone can audit it on the dashboard.</Li>
-            <Li>Staking grants <b>no voting power</b> — voting is burn-only. Staking's sole reward is lottery eligibility: the term length scales the daily ticket grant (6mo / 1y / 2y → 5 / 10 / 20 tickets per ICP per day).</Li>
+          <Section icon="zap" title="Lossless staking — four terms, one principal, zero loss">
+            <Li>Four pooled NNS neurons, one per term: 2 weeks, 6 months, 1 year, 2 years. Your ICP joins the term's neuron; your principal is never spent. Every neuron is made PUBLIC on the NNS the moment it's configured — anyone can audit it on the dashboard.</Li>
+            <Li>Staking grants <b>no voting power</b> — voting is burn-only. Staking's sole reward is lottery eligibility: the term length scales the daily ticket grant (2wk / 6mo / 1y / 2y → 1 / 5 / 10 / 20 tickets per ICP per day).</Li>
+            <Li>The 2-week taster tier is <b>membership, not yield</b>: neurons under a 6-month dissolve earn no NNS maturity, so its pool contributes nothing to the prize pot.</Li>
             <Li>Whole-ICP amounts only. Every stake is issued as a Bond NFT; exits are bond-native (sell, instant 85% buyback, or redeem = dissolve for 100%). The treasury fronts every neuron fee.</Li>
             <Li>Neuron maturity harvests once it crosses ~1.05 ICP and is split <b>70% lottery prize pot / 30% treasury</b> — all the staking neurons feed the same pot.</Li>
           </Section>

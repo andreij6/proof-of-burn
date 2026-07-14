@@ -26,6 +26,7 @@ drawings and winners.
 ## Eligibility — staking is the entry ticket
 Only stakers collect tickets. Daily grant = base (5) × the term multiplier,
 summed across the tiers you hold a stake in:
+* 2-week stake → 1 ticket/day
 * 6-month stake → 5 tickets/day
 * 1-year stake → 10 tickets/day
 * 2-year stake → 20 tickets/day

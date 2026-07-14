@@ -163,7 +163,7 @@ export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: Clai
               automatically. There is nothing else to do.
             </p>
             <p style={{ fontSize: 14, lineHeight: 1.6, color: 'var(--fg-2)', maxWidth: 460, margin: 0 }}>
-              Want better odds than 1 ticket a day? Staking earns <b style={{ color: 'var(--fg-1)' }}>5–20 tickets
+              Want better odds than 1 ticket a day? Staking earns <b style={{ color: 'var(--fg-1)' }}>up to 20 tickets
               per ICP, every day</b> — and your ICP is never at risk.
             </p>
             <button onClick={onEnter} style={{ ...primaryBtn, background: 'var(--burn)' }}>Stake for real odds →</button>
@@ -182,8 +182,8 @@ export default function ClaimPromo({ actor, principal, onSignIn, onEnter }: Clai
             </h2>
             <p style={{ fontSize: 14.5, lineHeight: 1.6, color: 'var(--fg-2)', maxWidth: 440, margin: 0 }}>
               {remaining === 0
-                ? 'This drop is over — but the lottery never closes. Staking earns 5–20 free tickets per ICP every day, and your principal is never at risk.'
-                : 'Follow us on X or OpenChat to catch the next drop — or skip the wait: staking earns 5–20 free tickets per ICP every day.'}
+                ? 'This drop is over — but the lottery never closes. Staking earns up to 20 free tickets per ICP every day, and your principal is never at risk.'
+                : 'Follow us on X or OpenChat to catch the next drop — or skip the wait: staking earns up to 20 free tickets per ICP every day.'}
             </p>
             <button onClick={onEnter} style={{ ...primaryBtn, background: 'var(--burn)' }}>Explore the lottery →</button>
           </div>

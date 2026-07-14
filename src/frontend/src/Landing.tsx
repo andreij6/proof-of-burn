@@ -14,7 +14,7 @@ type UsdRate = { token: string; rate_usd_e8s: bigint };
 // drop the visitor straight onto the Lottery page (`onEnter`).
 //
 // What's *real* vs the comp's demo data: the comp invented 4yr/8yr neuron
-// tiers and an "APY" row — the app actually has 6-month / 1-year / 2-year
+// tiers and an "APY" row — the app actually has 2-week / 6-month / 1-year / 2-year
 // pooled tiers (base × {1,2,4} tickets per ICP per
 // day), a 65% / 30% / 5% prize split, and draws 3× a week that only fire once
 // the pot clears its minimum. This component reflects that.
@@ -40,6 +40,7 @@ interface LandingProps {
 // 6-month base, so the table tracks any admin change to the base. (The
 // permanent Booster neuron is admin-only and intentionally not shown here.)
 const TIER_ROWS: { label: string; mult: number }[] = [
+  { label: '2 weeks', mult: 0.2 },
   { label: '6 months', mult: 1 },
   { label: '1 year', mult: 2 },
   { label: '2 years', mult: 4 },
@@ -252,7 +253,7 @@ export default function Landing({ onEnter, actor }: LandingProps) {
           <h2 style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: 48, lineHeight: 1.05, letterSpacing: '-.03em', color: 'var(--fg)', margin: '12px 0 44px', maxWidth: 680 }}>Stake. Earn tickets. Win the yield.</h2>
           <div className="ll-how-grid" style={{ borderTop: '1px solid var(--char-800)', borderBottom: '1px solid var(--char-800)' }}>
             {[
-              { n: '01', h: 'Stake into a neuron', b: "Lock ICP into a pooled Cycle Burn neuron — choose a 6-month, 1-year, or 2-year term. Your principal always stays yours." },
+              { n: '01', h: 'Stake into a neuron', b: "Lock ICP into a pooled Cycle Burn neuron — terms from 2 weeks to 2 years. Your principal always stays yours." },
               { n: '02', h: 'Earn tickets daily', b: "Tickets mint every day you're staked. The longer the term, the more you earn per ICP — up to 4× — and the better your odds." },
               { n: '03', h: 'Win the yield', b: "Three times a week the pooled neuron yield is drawn: 65% to one winner, 30% rolls into the next pot, 5% is burned. Lose and you keep every staked token — there's no losing." },
             ].map((c, i) => (

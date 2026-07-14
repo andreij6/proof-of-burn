@@ -15,7 +15,7 @@ const BACKEND = 'k7dn6-qiaaa-aaaap-qutha-cai';
 const LEDGER = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
 
 const CANDID_SNIPPET = `// The integration surface (candid) — full .did via the canister's metadata.
-type StakeTier = variant { SixMonths; OneYear; TwoYears };
+type StakeTier = variant { TwoWeeks; SixMonths; OneYear; TwoYears };
 type Result = variant { Ok; Err : text };
 type BalanceResult = variant { Ok : nat64; Err : text };
 type LedgerAccount = record { owner : principal; subaccount : opt blob };
@@ -37,7 +37,7 @@ const IDL_SNIPPET = `// Minimal agent-js IDL for the lottery integration (paste 
 import { IDL } from '@dfinity/candid';
 
 export const idlFactory = ({ IDL }) => {
-  const StakeTier = IDL.Variant({ SixMonths: IDL.Null, OneYear: IDL.Null, TwoYears: IDL.Null });
+  const StakeTier = IDL.Variant({ TwoWeeks: IDL.Null, SixMonths: IDL.Null, OneYear: IDL.Null, TwoYears: IDL.Null });
   const Result = IDL.Variant({ Ok: IDL.Null, Err: IDL.Text });
   const BalanceResult = IDL.Variant({ Ok: IDL.Nat64, Err: IDL.Text });
   const LedgerAccount = IDL.Record({ owner: IDL.Principal, subaccount: IDL.Opt(IDL.Vec(IDL.Nat8)) });
@@ -83,7 +83,8 @@ await ledger.icrc1_transfer({
   fee: [], memo: [], from_subaccount: [], created_at_time: [],
 });
 
-// 3. Register the stake (6-month tier → 5 tickets/day per ICP).
+// 3. Register the stake (6-month tier → 5 tickets/day per ICP;
+//    TwoWeeks = 1, OneYear = 10, TwoYears = 20).
 const res = await cycleBurn.stake(amount, { SixMonths: null });
 if ('Err' in res) throw new Error(res.Err);`;
 
@@ -327,8 +328,8 @@ export default function DevDocs() {
         {h('02', 'Stake — three calls, tickets start same day')}
         <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
           Deposit address → exact-amount transfer → <span className="mono">stake</span>. Tiers:{' '}
-          <span className="mono">SixMonths</span> (5 tickets/ICP/day), <span className="mono">OneYear</span> (10),{' '}
-          <span className="mono">TwoYears</span> (20). Minimum first stake per tier: 1 ICP.
+          <span className="mono">TwoWeeks</span> (1 ticket/ICP/day), <span className="mono">SixMonths</span> (5),{' '}
+          <span className="mono">OneYear</span> (10), <span className="mono">TwoYears</span> (20). Minimum first stake per tier: 1 ICP.
         </span>
         <CodeBlock code={STAKE_SNIPPET} />
       </div>

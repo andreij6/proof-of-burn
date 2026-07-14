@@ -848,7 +848,10 @@ type SkydiveScenario = record {
 // delay for voting eligibility, so no Mission 70 gate applies. Voting weight
 // and the daily lottery-ticket grant both scale with the same multiplier,
 // proportional to the term length (6mo = 1×, 1y = 2×, 2y = 4×).
-type StakeTier = variant { OneYear; SixMonths; TwoYears };
+// TwoWeeks (2026-07-14): 2-week taster tier — 1 ticket/ICP/day at the
+// default base rate; earns no NNS yield (sub-6-month dissolve), so it adds
+// members, not pot.
+type StakeTier = variant { OneYear; SixMonths; TwoYears; TwoWeeks };
 type StakingBootstrap = variant {
   // Neuron claimed; dissolve delay not yet set.
   Claimed;
@@ -1099,7 +1102,8 @@ service : (InitPayload) -> {
   admin_set_frontend_canister : (principal) -> (Result);
   // Admin: configure the qualifying ICPSwap pools.
   admin_set_icpswap_pools : (vec IcpLpPoolCfg) -> (Result_1);
-  // Admin: tune how many tickets a daily login credits.
+  // Admin: tune the base daily ticket rate (the 6-month tier's per-ICP rate;
+  // every tier scales from it — 1yr ×2, 2yr ×4, 2wk = base/5 floored to 1).
   admin_set_lottery_config : (opt nat64) -> (Result);
   // Admin: set the minimum number of unique ticket-holders a round needs before a
   // draw runs (below it the drawing rolls over). 0 disables the gate.

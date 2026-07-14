@@ -37,7 +37,7 @@ export default function LotteryHub({
       <div className="col" style={{ gap: 6 }}>
         <Eyebrow accent>Earning &amp; odds</Eyebrow>
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
-          <li><b>Staking is the entry ticket:</b> lock ICP into a 6-month / 1-year / 2-year pooled neuron for free daily tickets (longer terms earn more) — or stake an LP position on the Liquidity Provider pages.</li>
+          <li><b>Staking is the entry ticket:</b> lock ICP into a pooled neuron — terms from 2 weeks to 2 years — for free daily tickets (longer terms earn more), or stake an LP position on the Liquidity Provider pages.</li>
           <li><b>Unstake in full any time</b> — your ICP stays yours.</li>
           <li><b>Fixed odds</b> per draw; the winner is paid straight to their wallet and everyone's tickets reset.</li>
         </ul>

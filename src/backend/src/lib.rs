@@ -5875,11 +5875,17 @@ pub enum StakeTier {
     SixMonths,
     OneYear,
     TwoYears,
+    /// Taster tier (owner 2026-07-14): 2-week dissolve, 1 ticket/ICP/day at
+    /// the default base rate. NOTE: neurons under a 6-month dissolve earn NO
+    /// NNS voting rewards, so this tier contributes nothing to the prize
+    /// pot — it's a low-commitment membership tier, not a yield source.
+    /// Appended after TwoYears so existing candid/idx encodings are stable.
+    TwoWeeks,
 }
 
 impl StakeTier {
-    pub fn all() -> [StakeTier; 3] {
-        [StakeTier::SixMonths, StakeTier::OneYear, StakeTier::TwoYears]
+    pub fn all() -> [StakeTier; 4] {
+        [StakeTier::TwoWeeks, StakeTier::SixMonths, StakeTier::OneYear, StakeTier::TwoYears]
     }
 
     pub fn idx(self) -> u8 {
@@ -5887,6 +5893,7 @@ impl StakeTier {
             StakeTier::SixMonths => 0,
             StakeTier::OneYear => 1,
             StakeTier::TwoYears => 2,
+            StakeTier::TwoWeeks => 3,
         }
     }
 
@@ -5895,16 +5902,32 @@ impl StakeTier {
             StakeTier::SixMonths => 15_778_800, // 6 months
             StakeTier::OneYear => 31_557_600,   // 1 year
             StakeTier::TwoYears => 63_115_200,  // 2 years
+            StakeTier::TwoWeeks => 1_209_600,   // 2 weeks
         }
     }
 
     /// Term multiplier applied to both voting weight and the daily lottery
-    /// ticket grant.
+    /// ticket grant. (TwoWeeks reports 1 for display; its ticket rate is the
+    /// sub-base override in `daily_tickets_per_icp`.)
     pub fn weight_multiplier(self) -> u64 {
         match self {
             StakeTier::SixMonths => 1,
             StakeTier::OneYear => 2,
             StakeTier::TwoYears => 4,
+            StakeTier::TwoWeeks => 1,
+        }
+    }
+
+    /// Daily lottery tickets per whole ICP staked in this tier, derived from
+    /// the admin-dialed base rate (`lottery_tickets_per_day` = the 6-month
+    /// rate; admin_set_lottery_config scales every tier through this one
+    /// number). TwoWeeks is the taster tier at one-fifth of base — exactly
+    /// 1/day at the default base of 5 — floored to 1 so the dial can never
+    /// zero it.
+    pub fn daily_tickets_per_icp(self, base: u64) -> u64 {
+        match self {
+            StakeTier::TwoWeeks => (base / 5).max(1),
+            _ => base.saturating_mul(self.weight_multiplier()),
         }
     }
 }
@@ -7585,7 +7608,7 @@ fn get_staking_pool_info() -> StakingPoolInfo {
             tier,
             dissolve_delay_secs: tier.dissolve_delay_secs(),
             weight_multiplier: tier.weight_multiplier(),
-            daily_tickets: ticket_base.saturating_mul(tier.weight_multiplier()),
+            daily_tickets: tier.daily_tickets_per_icp(ticket_base),
             neuron_id: pool.neuron_id,
             total_staked_e8s: pool.total_staked_e8s,
             staker_count,
@@ -8399,7 +8422,7 @@ fn user_daily_tickets(user: Principal) -> u64 {
         if staked_e8s > 0 {
             let whole_icp = (staked_e8s / ONE_ICP_E8S).max(1);
             acc.saturating_add(
-                base.saturating_mul(tier.weight_multiplier()).saturating_mul(whole_icp),
+                tier.daily_tickets_per_icp(base).saturating_mul(whole_icp),
             )
         } else {
             acc
@@ -16593,13 +16616,13 @@ fn voucher_nft_cid() -> Result<Principal, String> {
 }
 
 /// Backed voucher e8s a user holds in one tier (their wrapped stake).
-/// One voucher's daily ticket rate: base × tier multiplier × whole ICP
+/// One voucher's daily ticket rate: the tier's per-ICP rate × whole ICP
 /// (sub-1-ICP floors to one base unit) — the same math the daily grant uses.
 fn voucher_daily_rate(v: &BondRecord) -> u64 {
     let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
     let tier = tier_from_idx(v.tier);
     let whole_icp = (v.amount_e8s / ONE_ICP_E8S).max(1);
-    base.saturating_mul(tier.weight_multiplier()).saturating_mul(whole_icp)
+    tier.daily_tickets_per_icp(base).saturating_mul(whole_icp)
 }
 
 fn voucher_backed_e8s(user: Principal, tier: StakeTier) -> u64 {
@@ -16760,6 +16783,7 @@ fn tier_from_idx(idx: u8) -> StakeTier {
     match idx {
         0 => StakeTier::SixMonths,
         1 => StakeTier::OneYear,
+        3 => StakeTier::TwoWeeks,
         _ => StakeTier::TwoYears,
     }
 }
@@ -20237,6 +20261,17 @@ mod tests {
         assert_eq!(StakeTier::SixMonths.weight_multiplier(), 1);
         assert_eq!(StakeTier::OneYear.weight_multiplier(), 2);
         assert_eq!(StakeTier::TwoYears.weight_multiplier(), 4);
+        // TwoWeeks taster tier: 2-week dissolve, 1 ticket/ICP/day at the
+        // default base of 5, scaling with the admin dial, never zero.
+        assert_eq!(StakeTier::TwoWeeks.dissolve_delay_secs(), 14 * 86_400);
+        assert_eq!(StakeTier::TwoWeeks.daily_tickets_per_icp(5), 1);
+        assert_eq!(StakeTier::TwoWeeks.daily_tickets_per_icp(10), 2);
+        assert_eq!(StakeTier::TwoWeeks.daily_tickets_per_icp(3), 1, "floored, never 0");
+        assert_eq!(StakeTier::SixMonths.daily_tickets_per_icp(5), 5);
+        assert_eq!(StakeTier::OneYear.daily_tickets_per_icp(5), 10);
+        assert_eq!(StakeTier::TwoYears.daily_tickets_per_icp(5), 20);
+        assert_eq!(tier_from_idx(3), StakeTier::TwoWeeks);
+        assert_eq!(StakeTier::TwoWeeks.idx(), 3);
     }
 
 
@@ -20727,6 +20762,32 @@ mod tests {
         assert_eq!(count(alice()), day1 * 2);
 
         STAKES.with(|m| { m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice())); });
+        LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
+    }
+
+    /// The 2-week taster tier (owner 2026-07-14): 1 ticket per ICP per day
+    /// through the same sweep grant, scaling with whole ICP, stacking with
+    /// other tiers.
+    #[test]
+    fn test_two_week_tier_grants_one_ticket_per_icp_per_day() {
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        enable_lottery();
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        seed_stake(StakeTier::TwoWeeks, alice(), 300_000_000); // 3 ICP
+        let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
+
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice()), 3, "3 ICP × 1 ticket/ICP/day");
+        assert_eq!(user_daily_tickets(alice()), 3);
+
+        // Stacks with a 6-month stake: 3×1 + 2×5 = 13/day.
+        seed_stake(StakeTier::SixMonths, alice(), 200_000_000);
+        assert_eq!(user_daily_tickets(alice()), 13);
+
+        STAKES.with(|m| {
+            m.borrow_mut().remove(&stake_key(StakeTier::TwoWeeks, alice()));
+            m.borrow_mut().remove(&stake_key(StakeTier::SixMonths, alice()));
+        });
         LOTTERY_TICKETS.with(|m| { m.borrow_mut().remove(&alice()); });
     }
 
