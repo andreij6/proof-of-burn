@@ -7,6 +7,7 @@ import { useErrorImpression } from './analytics';
 import { parseTokenAmount } from './tokens';
 import { makeApprover } from './minters';
 import { FriendlyError, backendErr, toFriendly, friendlyFromRaw, logRealError } from './errors';
+import { useTxFlow, TxModal } from './TxModal';
 import {
   difficultyBucket, mulberry32, poolOrder, pageSlice, pageCount, freshSeed,
   formatRating, toggleFavoriteId,
@@ -764,9 +765,9 @@ function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, back
   onDone: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [step, setStep] = useState('');
-  const [err, setErr] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  // Staged transaction modal for the buy (approve → settle) flow.
+  const tx = useTxFlow();
 
   const price = card.price_e8s;
   const total = price + ICP_FEE_E8S;
@@ -776,9 +777,12 @@ function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, back
 
   const buy = async () => {
     if (busy || !identity) return;
-    setBusy(true); setErr(null);
+    setBusy(true);
+    tx.start(['Approving', 'Settling the sale'], {
+      title: `Buying "${card.name || `Course #${card.token_id}`}"`,
+      detail: `Approving ${fmtICP(total)} ICP…`,
+    });
     try {
-      setStep(`Step 1/2: Approving ${fmtICP(total)} ICP…`);
       const approver = makeApprover(ledgerCanisterId, { host, identity, rootKey });
       const appr = await approver.icrc2_approve({
         from_subaccount: [],
@@ -788,18 +792,21 @@ function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, back
       });
       if (appr.Err !== undefined) throw backendErr(appr.Err, 'courses:approve');
 
-      setStep('Step 2/2: Settling sale…');
+      tx.next('Settling the sale…');
       const res = await actor.buy_course_nft(card.token_id);
       if (res.__kind__ === 'Err') throw new FriendlyError(saleErr(res.Err), res.Err, 'courses:sale');
+      // Close the staged modal and reveal the rich "you now own it" success view.
+      tx.reset();
       setDone(true);
     } catch (e: any) {
-      setErr(toFriendly(e, 'courses:buy'));
+      tx.fail(toFriendly(e, 'courses:buy'));
     } finally {
       setBusy(false);
     }
   };
 
   return (
+    <>
     <ModalShell title={`Buy "${card.name || `Course #${card.token_id}`}"`} onClose={() => !busy && onClose()}>
       {done ? (
         <div className="col" style={{ gap: 12 }}>
@@ -828,8 +835,6 @@ function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, back
             <span className="row" style={{ justifyContent: 'space-between' }}><span>Protocol — cycles + treasury (15%)</span><span className="mono">{fmtICP(protocolShare)} ICP</span></span>
           </div>
           <p style={{ fontSize: 11.5, color: 'var(--fg-3)', margin: 0 }}>The creator earns 10% on every resale.</p>
-          {busy && step && <span className="row" style={{ gap: 8, fontSize: 12, color: 'var(--fg-2)' }}><LiveDot size={7} /> {step}</span>}
-          {err && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{err}</span>}
           <div className="row" style={{ justifyContent: 'flex-end', gap: 8 }}>
             <Btn variant="ghost" sm disabled={busy} onClick={onClose}>Cancel</Btn>
             <Btn variant="primary" sm disabled={busy} onClick={buy}>{busy ? 'Working…' : `Buy — ${fmtICP(price)} ICP`}</Btn>
@@ -837,6 +842,9 @@ function BuyModal({ actor, card, identity, host, rootKey, ledgerCanisterId, back
         </>
       )}
     </ModalShell>
+    {/* Staged buy (approve → settle) transaction modal. */}
+    {tx.isOpen && <TxModal flow={tx} onClose={tx.reset} />}
+    </>
   );
 }
 

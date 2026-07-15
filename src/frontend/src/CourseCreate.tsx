@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CourseUniquenessReport, MintError } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
-import { Icon, Eyebrow, Chip, Btn, LiveDot, fmtICP, usePageHelp } from './ui';
+import { Icon, Eyebrow, Chip, Btn, fmtICP, usePageHelp } from './ui';
 import { FriendlyError, toFriendly } from './errors';
+import { useTxFlow, TxModal } from './TxModal';
 import MiniGolf from './arcade/MiniGolf';
 import CourseOverview from './arcade/CourseOverview';
 import type { CharacterLook } from './arcade/engine';
@@ -173,8 +174,9 @@ export default function CourseCreate({
   // Step 4 — mint.
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
-  const [step, setStep] = useState('');
   const [mintErr, setMintErr] = useState<string | null>(null);
+  // Staged transaction modal for the mint (deposit → mint) flow.
+  const tx = useTxFlow();
   const [mintedId, setMintedId] = useState<bigint | null>(null);
   const [shareCopied, setShareCopied] = useState(false);
 
@@ -239,8 +241,11 @@ export default function CourseCreate({
     if (!finalName) { setMintErr('Give your course a name.'); return; }
     setBusy(true);
     setMintErr(null);
+    tx.start(['Transferring', 'Minting your course NFT'], {
+      title: 'Minting your course',
+      detail: `Depositing ${fmtICP(MINT_FEE_E8S)} ICP mint fee…`,
+    });
     try {
-      setStep(`Step 1/2: Depositing ${fmtICP(MINT_FEE_E8S)} ICP mint fee…`);
       const acct = await actor.get_mint_deposit_address();
       const ledgerActor = createLedgerActor(ledgerCanisterId, {
         agentOptions: { host, identity, rootKey },
@@ -256,13 +261,15 @@ export default function CourseCreate({
         throw new FriendlyError(transferErrMessage(transferResult.Err), transferResult.Err, 'course-create:pay');
       }
 
-      setStep('Step 2/2: Minting your course NFT…');
+      tx.next('Minting your course NFT…');
       // The NFT carries the user's original JSON document as its course_data blob.
       const res = await actor.mint_course_nft(new TextEncoder().encode(jsonText.trim()), finalName);
       if (res.__kind__ === 'Err') throw new FriendlyError(mintErrMessage(res.Err), res.Err, 'course-create:mint');
+      // Close the staged modal and reveal the rich minted-success card below.
+      tx.reset();
       setMintedId(res.Ok);
     } catch (e: any) {
-      setMintErr(toFriendly(e, 'course-create'));
+      tx.fail(toFriendly(e, 'course-create'));
     } finally {
       setBusy(false);
     }
@@ -576,11 +583,6 @@ export default function CourseCreate({
                 Tip: test-play your course first — minted courses can't be edited.
               </span>
             )}
-            {busy && step && (
-              <span className="row" style={{ gap: 8, fontSize: 12, color: 'var(--fg-2)' }}>
-                <LiveDot size={7} /> {step}
-              </span>
-            )}
             {mintErr && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{mintErr}</span>}
             <Btn
               variant="primary"
@@ -633,6 +635,9 @@ export default function CourseCreate({
           </div>
         </div>
       )}
+
+      {/* Staged mint (deposit → mint) transaction modal. */}
+      {tx.isOpen && <TxModal flow={tx} onClose={tx.reset} />}
     </div>
   );
 }

@@ -1376,7 +1376,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
           </Section>
 
           <Section icon="spark" title="No-Loss Lottery — dynamic odds, funded by yield">
-            <Li>Stakers only — daily grant = base ({base}) × term multiplier × whole ICP staked, granted server-side every UTC day (no visit needed). Fully unstake and any tickets already held void immediately; the same happens on promotion to admin. Listed bonds pause their ticket stream until delisted; buying a bond grants its daily rate instantly (once per bond per day).</Li>
+            <Li>Stakers only — daily grant = base ({base}) × term multiplier × whole ICP staked (2-week taster tier = base÷5, floored to 1), granted server-side every UTC day (no visit needed). Exits never void already-earned tickets — they ride until the next drawing and the round only resets on a win (promotion to admin still voids them). Listed bonds pause their ticket stream until delisted. Buying a bond earns from the NEXT daily grant (no instant grant); selling or transferring a bond claws its current-round tickets back from the seller — the NFT's earnings leave with it.</Li>
             <Li>Drawings 3× a week (Mon/Wed/Sat nights US Eastern), but a drawing only runs when the pot holds at least 25 ICP AND enough unique players hold tickets — below that it rolls over. Odds are dynamic: every drawing that runs has a 1-in-13 chance of paying out regardless of ticket supply, decided by on-chain randomness (raw_rand).</Li>
             <Li>The winner takes 65% of the prize pot; 30% seeds the next round; 5% is burned to backend-canister cycles; all tickets reset.</Li>
             <Li>The pot is funded purely by staking yield — players never pay in, so nobody can lose money.</Li>

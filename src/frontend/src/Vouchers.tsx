@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Principal } from '@icp-sdk/core/principal';
 import { StakeTier } from './bindings/backend';
 import { createActor as createLedgerActor } from './bindings/ledger';
 import { Btn, Chip, Eyebrow, Icon, LiveDot, Skeleton, fmtICP } from './ui';
 import { TIER_META } from './Staking';
 import { FriendlyError, backendErr, toFriendly, friendlyFromRaw } from './errors';
+import { useTxFlow, TxModal } from './TxModal';
 import { trackConversion, icp } from './analytics';
 
 // ==========================================
@@ -165,7 +166,7 @@ interface VouchersBodyProps {
   bare?: boolean;
 }
 
-const ticketsPerDay = (v: BondView) =>
+export const ticketsPerDay = (v: BondView) =>
   Number(TIER_META[v.tier].tickets) * Math.max(1, Math.round(Number(v.amount_e8s) / 1e8))
   + Number(v.age_bonus_daily ?? 0n);
 /** "+7.3%" — the bond's live age bonus, one decimal. */
@@ -186,11 +187,13 @@ export function VouchersBody({
   const [sellStep, setSellStep] = useState<'choose' | 'list'>('choose');
   const [buyModal, setBuyModal] = useState<bigint | null>(null);
   const [priceText, setPriceText] = useState('');
-  // In-modal operation lifecycle (owner 2026-07-11: money ops must NEVER look
-  // frozen). While a money op runs, the open modal swaps to a processing
-  // panel; it ends on an explicit success/error panel instead of silently
-  // closing. Only one modal is ever open, so one shared phase suffices.
-  const [opPhase, setOpPhase] = useState<OpPhase | null>(null);
+  // Money ops drive the shared staged-transaction modal (owner 2026-07-11: a
+  // money op must NEVER look frozen). The op closes its picker modal and hands
+  // the user to the staged modal, which shows each stage live and ends on an
+  // explicit success/error panel. `onFinishRef` carries any post-success side
+  // effect (e.g. jump to the Exchange after listing) to run on dismiss.
+  const tx = useTxFlow();
+  const onFinishRef = useRef<(() => void) | null>(null);
 
   const refresh = async () => {
     if (!actor) return;
@@ -206,106 +209,97 @@ export function VouchersBody({
   };
   useEffect(() => { refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [actor]);
 
-  const run = async (label: string, fn: () => Promise<string>) => {
-    if (busy) return;
-    setBusy(label); setErr(null); setNotice(null);
-    try {
-      setNotice(await fn());
-      await refresh();
-    } catch (e: any) { setErr(toFriendly(e, 'bonds')); }
-    finally { setBusy(null); }
-  };
-
-  /** Money-op runner for the modals: shows a processing panel while the
-   *  update call is in flight, then an explicit success/error panel — the
-   *  modal never silently closes, and never looks frozen. The page-level
-   *  notice stays as a secondary echo. */
-  const runOp = async (
+  /** Money-op runner: hands the user to the shared staged-transaction modal
+   *  and drives it live. `fn` runs the update call(s) and may advance stages
+   *  (tx.next); it returns the friendly success line. Failures surface the
+   *  plain-English message via errors.ts. The page-level notice/err stay as a
+   *  secondary echo. `onFinish` runs on dismiss AFTER a success only. */
+  const runTx = async (
     label: string,
-    processingText: string,
-    fn: () => Promise<{ title: string; detail: string; onDone?: () => void }>,
+    stages: string[],
+    title: string,
+    fn: () => Promise<string>,
+    onFinish?: () => void,
   ) => {
     if (busy) return;
     setBusy(label); setErr(null); setNotice(null);
-    setOpPhase({ kind: 'processing', text: processingText });
+    onFinishRef.current = onFinish ?? null;
+    tx.start(stages, { title });
     try {
-      const success = await fn();
-      setOpPhase({ kind: 'success', ...success });
-      setNotice(`${success.title} — ${success.detail}`);
+      const message = await fn();
+      tx.succeed(message);
+      setNotice(message);
       await refresh();
     } catch (e: any) {
       const message = toFriendly(e, 'bonds');
-      setOpPhase({ kind: 'error', message });
+      tx.fail(message);
       setErr(message);
     } finally { setBusy(null); }
   };
 
-  const redeem = (v: BondView) => runOp(`redeem-${v.id}`, 'Starting the dissolve…', async () => {
-    const res = await actor.redeem_stake_bond(v.id);
-    if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
-    trackConversion('bond_redeem', { value: icp(v.amount_e8s), currency: 'ICP', tier: TIER_META[v.tier].short });
-    return {
-      title: 'Dissolve started',
-      detail: `Your ${fmtICP(v.amount_e8s)} ICP pays your wallet automatically after the ${TIER_META[v.tier].label} dissolve — nothing to claim.`,
-      onDone: () => setRedeemModal(null),
-    };
-  });
-
-  const list = (v: BondView) => runOp(`list-${v.id}`, 'Listing your bond on the Exchange…', async () => {
-    const price = parsePriceIcp(priceText);
-    if (!price) throw new FriendlyError('Enter an ask in ICP (up to 4 decimals).');
-    const res = await actor.list_bond(v.id, price);
-    if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
-    trackConversion('bond_list', { value: icp(price), currency: 'ICP', tier: TIER_META[v.tier].short });
-    return {
-      title: `Listed at ${fmtICP(price)} ICP`,
-      detail: 'Your bond is on the Exchange. It won\'t earn tickets while listed — cancel anytime to resume.',
-      onDone: () => { setSellModal(null); setSellStep('choose'); setPriceText(''); onGoExchange?.(); },
-    };
-  });
-
-  const cancelListing = (v: BondView) => run(`cancel-${v.id}`, async () => {
-    const res = await actor.cancel_bond_listing(v.id);
-    if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
-    return `Listing for bond #${v.id} cancelled — it's earning tickets again.`;
-  });
-
-  const buyback = (v: BondView) => {
-    const quote = buybackQuoteE8s(v.amount_e8s, info?.buyback_discount_bps ?? 1500);
-    return runOp(`buyback-${v.id}`, `Paying you ${fmtICP(quote)} ICP from the buyback fund…`, async () => {
-      const res = await actor.buyback_bond(v.id);
+  const redeem = (v: BondView) => {
+    setRedeemModal(null);
+    return runTx(`redeem-${v.id}`, ['Starting the dissolve'], `Redeem ${fmtICP(v.amount_e8s)} ICP`, async () => {
+      const res = await actor.redeem_stake_bond(v.id);
       if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
-      trackConversion('bond_buyback', { value: icp(res.Ok), currency: 'ICP', tier: TIER_META[v.tier].short });
-      return {
-        title: `${fmtICP(res.Ok)} ICP paid to your wallet`,
-        detail: 'The sale is complete and the bond is burned. The ICP is already in your wallet.',
-        onDone: () => { setSellModal(null); setSellStep('choose'); setRedeemModal(null); },
-      };
+      trackConversion('bond_redeem', { value: icp(v.amount_e8s), currency: 'ICP', tier: TIER_META[v.tier].short });
+      return `Dissolve started — your ${fmtICP(v.amount_e8s)} ICP pays your wallet automatically after the ${TIER_META[v.tier].label} dissolve. Nothing to claim.`;
     });
   };
 
-  const buy = (v: BondView) => runOp(`buy-${v.id}`, 'Sending your payment to escrow…', async () => {
-    if (v.listed_price_e8s == null) throw new FriendlyError(friendlyVoucherErr('NOT_LISTED'), 'NOT_LISTED', 'bonds');
-    // 1. Fund the sale escrow with EXACTLY the ask, 2. settle the purchase.
-    const escrow = await actor.get_bond_sale_account(v.id);
-    const ledger = createLedgerActor(ledgerCanisterId, { agentOptions: { host, identity, rootKey } });
-    const xfer = await ledger.icrc1_transfer({
-      to: { owner: escrow.owner, subaccount: escrow.subaccount },
-      amount: v.listed_price_e8s,
+  const list = (v: BondView) => {
+    const price = parsePriceIcp(priceText);
+    if (!price) { setErr('Enter an ask in ICP (up to 4 decimals).'); return; }
+    setSellModal(null); setSellStep('choose'); setPriceText('');
+    return runTx(`list-${v.id}`, ['Listing on the Exchange'], `List your ${TIER_META[v.tier].short} bond`, async () => {
+      const res = await actor.list_bond(v.id, price);
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
+      trackConversion('bond_list', { value: icp(price), currency: 'ICP', tier: TIER_META[v.tier].short });
+      return `Listed at ${fmtICP(price)} ICP — your bond is on the Exchange. It won't earn tickets while listed; cancel anytime to resume.`;
+    }, () => onGoExchange?.());
+  };
+
+  const cancelListing = (v: BondView) =>
+    runTx(`cancel-${v.id}`, ['Cancelling the listing'], `Cancel bond #${v.id} listing`, async () => {
+      const res = await actor.cancel_bond_listing(v.id);
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
+      return `Listing for bond #${v.id} cancelled — it's earning tickets again.`;
     });
-    if (xfer.__kind__ === 'Err') {
-      throw backendErr(xfer.Err, 'bonds:buy-escrow');
-    }
-    setOpPhase({ kind: 'processing', text: 'Payment escrowed — settling the purchase…' });
-    const res = await actor.buy_bond(v.id);
-    if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
-    trackConversion('bond_buy', { value: icp(v.listed_price_e8s), currency: 'ICP', tier: TIER_META[v.tier].short });
-    return {
-      title: `Bond #${v.id} is yours`,
-      detail: `${ticketsPerDay(v)} tickets just landed for the upcoming draw, and it keeps earning daily.`,
-      onDone: () => setBuyModal(null),
-    };
-  });
+
+  const buyback = (v: BondView) => {
+    const discount = info?.buyback_discount_bps ?? 1500;
+    const pct = ((10_000 - discount) / 100).toFixed(0);
+    setSellModal(null); setSellStep('choose'); setRedeemModal(null);
+    return runTx(`buyback-${v.id}`, [`Paying you ${pct}%`], `Sell your ${TIER_META[v.tier].short} bond`, async () => {
+      const res = await actor.buyback_bond(v.id);
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
+      trackConversion('bond_buyback', { value: icp(res.Ok), currency: 'ICP', tier: TIER_META[v.tier].short });
+      return `${fmtICP(res.Ok)} ICP paid to your wallet — the sale is complete and the bond is burned.`;
+    });
+  };
+
+  const buy = (v: BondView) => {
+    if (v.listed_price_e8s == null) { setErr(friendlyVoucherErr('NOT_LISTED')); return; }
+    const price = v.listed_price_e8s;
+    setBuyModal(null);
+    return runTx(`buy-${v.id}`, ['Funding escrow', 'Settling sale'], `Buy bond #${v.id}`, async () => {
+      // 1. Fund the sale escrow with EXACTLY the ask, 2. settle the purchase.
+      const escrow = await actor.get_bond_sale_account(v.id);
+      const ledger = createLedgerActor(ledgerCanisterId, { agentOptions: { host, identity, rootKey } });
+      const xfer = await ledger.icrc1_transfer({
+        to: { owner: escrow.owner, subaccount: escrow.subaccount },
+        amount: price,
+      });
+      if (xfer.__kind__ === 'Err') {
+        throw backendErr(xfer.Err, 'bonds:buy-escrow');
+      }
+      tx.next('Payment escrowed — settling the purchase…');
+      const res = await actor.buy_bond(v.id);
+      if (res.__kind__ === 'Err') throw new FriendlyError(friendlyVoucherErr(res.Err), res.Err, 'bonds');
+      trackConversion('bond_buy', { value: icp(price), currency: 'ICP', tier: TIER_META[v.tier].short });
+      return `Bond #${v.id} is yours — ${ticketsPerDay(v)} tickets just landed for the upcoming draw, and it keeps earning daily.`;
+    });
+  };
 
   const usd = (e8s: bigint): string => icpUsdE8s > 0n
     ? `$${((Number(e8s) / 1e8) * (Number(icpUsdE8s) / 1e8)).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
@@ -406,7 +400,7 @@ export function VouchersBody({
                           {backed ? (
                             /* ONE action (owner 2026-07-11): selling lives inside
                                the redeem modal's "Sell it instead" chooser. */
-                            <Btn variant="primary" sm onClick={() => { setOpPhase(null); setRedeemModal(v.id); }} disabled={busy !== null}>
+                            <Btn variant="primary" sm onClick={() => setRedeemModal(v.id)} disabled={busy !== null}>
                               <Icon name="coins" size={11} stroke="var(--char-950)" /> Redeem ICP
                             </Btn>
                           ) : lp ? (
@@ -503,6 +497,10 @@ export function VouchersBody({
                       <span className="mono">{fmtICP(v.amount_e8s)} ICP</span>
                     </div>
                     <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                      <span style={{ color: 'var(--fg-3)' }}>Age bonus</span>
+                      <span className="mono" style={{ color: 'var(--haze-ink)' }}>{ageBonusPct(v)}</span>
+                    </div>
+                    <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                       <span style={{ color: 'var(--fg-3)' }}>Asking</span>
                       <span className="mono" style={{ fontWeight: 700 }}>{fmtICP(v.listed_price_e8s ?? 0n)} ICP{usd(v.listed_price_e8s ?? 0n) ? ` · ${usd(v.listed_price_e8s ?? 0n)}` : ''}</span>
                     </div>
@@ -511,17 +509,14 @@ export function VouchersBody({
                     {delta < 0 ? `${Math.abs(delta)}% under value` : delta > 0 ? `${delta}% over value` : 'at value'}
                   </Chip>
                   <span style={{ fontSize: 11, color: 'var(--fg-2)' }}>
-                    Earns {ticketsPerDay(v)} tickets/day
-                    {Number(v.age_bonus_bps ?? 0n) > 100
-                      ? <> — includes a <b style={{ color: 'var(--haze-ink)' }}>{ageBonusPct(v)} age bonus</b> that transfers with the bond.</>
-                      : '.'}
+                    Earns {ticketsPerDay(v)} tickets/day — the age bonus travels with the bond.
                   </span>
                   {isMine ? (
                     <Btn variant="secondary" sm onClick={() => cancelListing(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
                       {busy === `cancel-${v.id}` ? <LiveDot size={7} /> : null} Cancel listing
                     </Btn>
                   ) : (
-                    <Btn variant="primary" sm onClick={() => { setOpPhase(null); setBuyModal(v.id); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+                    <Btn variant="primary" sm onClick={() => setBuyModal(v.id)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
                       <Icon name="coins" size={12} stroke="var(--char-950)" /> Buy
                     </Btn>
                   )}
@@ -541,12 +536,7 @@ export function VouchersBody({
         const opt: React.CSSProperties = { border: '1px solid var(--border)', borderRadius: 10, padding: 14, background: 'var(--bg-alt)', width: '100%' };
         return (
           <ModalShell title={`Redeem ${fmtICP(v.amount_e8s)} ICP`} locked={busy !== null}
-            onClose={() => { setRedeemModal(null); setOpPhase(null); }}>
-            {opPhase ? (
-              <OpPanel phase={opPhase}
-                onDone={() => { const done = opPhase.kind === 'success' ? opPhase.onDone : undefined; setOpPhase(null); done?.(); }}
-                onDismissError={() => setOpPhase(null)} />
-            ) : (<>
+            onClose={() => setRedeemModal(null)}>
             <span style={{ fontSize: 12.5, color: 'var(--fg-2)' }}>
               Your bond is the claim on this ICP — choose how it comes back to you.
             </span>
@@ -569,11 +559,10 @@ export function VouchersBody({
               <span style={{ fontSize: 12, color: 'var(--fg-2)', margin: '4px 0 8px' }}>
                 Cash out without the wait — sell instantly to the house or list it on the Exchange.
               </span>
-              <Btn variant="secondary" sm onClick={() => { setRedeemModal(null); setSellModal(v.id); setSellStep('choose'); setPriceText(''); setOpPhase(null); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
+              <Btn variant="secondary" sm onClick={() => { setRedeemModal(null); setSellModal(v.id); setSellStep('choose'); setPriceText(''); }} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
                 <Icon name="coins" size={12} /> Sell options
               </Btn>
             </div>
-            </>)}
           </ModalShell>
         );
       })()}
@@ -586,12 +575,7 @@ export function VouchersBody({
         const delta = price != null ? listingDeltaPct(price, v.amount_e8s) : null;
         return (
           <ModalShell title={`Sell your ${TIER_META[v.tier].short} bond`} locked={busy !== null}
-            onClose={() => { setSellModal(null); setSellStep('choose'); setPriceText(''); setOpPhase(null); }}>
-            {opPhase ? (
-              <OpPanel phase={opPhase}
-                onDone={() => { const done = opPhase.kind === 'success' ? opPhase.onDone : undefined; setOpPhase(null); done?.(); }}
-                onDismissError={() => setOpPhase(null)} />
-            ) : (<>
+            onClose={() => { setSellModal(null); setSellStep('choose'); setPriceText(''); }}>
             <div className="col" style={{ gap: 3, fontSize: 12.5, border: '1px solid var(--border)', borderRadius: 10, padding: 12, background: 'var(--bg-alt)' }}>
               <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                 <span style={{ color: 'var(--fg-3)' }}>Value (staked principal)</span>
@@ -655,7 +639,6 @@ export function VouchersBody({
                 </span>
               </>
             )}
-            </>)}
           </ModalShell>
         );
       })()}
@@ -667,12 +650,7 @@ export function VouchersBody({
         const delta = listingDeltaPct(v.listed_price_e8s, v.amount_e8s);
         return (
           <ModalShell title="Confirm purchase" locked={busy !== null}
-            onClose={() => { setBuyModal(null); setOpPhase(null); }}>
-            {opPhase ? (
-              <OpPanel phase={opPhase}
-                onDone={() => { const done = opPhase.kind === 'success' ? opPhase.onDone : undefined; setOpPhase(null); done?.(); }}
-                onDismissError={() => setOpPhase(null)} />
-            ) : (<>
+            onClose={() => setBuyModal(null)}>
             <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
               <div className="col" style={{ gap: 2, flex: '1 1 130px', border: '1px solid var(--border)', borderRadius: 10, padding: 12, background: 'var(--bg-alt)' }}>
                 <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Value</span>
@@ -698,61 +676,20 @@ export function VouchersBody({
             <Btn variant="primary" dataEvt="bond_buy" onClick={() => buy(v)} disabled={busy !== null} style={{ alignSelf: 'flex-start' }}>
               <Icon name="coins" size={13} stroke="var(--char-950)" /> Buy for {fmtICP(v.listed_price_e8s)} ICP
             </Btn>
-            </>)}
           </ModalShell>
         );
       })()}
-    </div>
-  );
-}
 
-/** Lifecycle of an in-modal money operation. */
-type OpPhase =
-  | { kind: 'processing'; text: string }
-  | { kind: 'success'; title: string; detail: string; onDone?: () => void }
-  | { kind: 'error'; message: string };
-
-/** The three op panels a modal swaps to while a money op runs/finishes —
- *  the user always sees WHAT is happening and that their funds are safe. */
-function OpPanel({ phase, onDone, onDismissError }: {
-  phase: OpPhase;
-  onDone: () => void;
-  onDismissError: () => void;
-}) {
-  if (phase.kind === 'processing') {
-    return (
-      <div className="col" style={{ alignItems: 'center', gap: 12, padding: '30px 8px' }} aria-busy="true" role="status">
-        <LiveDot size={12} color="var(--burn-ink)" />
-        <b style={{ fontSize: 14.5, textAlign: 'center' }}>{phase.text}</b>
-        <span style={{ fontSize: 12, color: 'var(--fg-3)', textAlign: 'center', lineHeight: 1.5 }}>
-          Your funds are safe — this takes a few seconds. Don't close the tab.
-        </span>
-      </div>
-    );
-  }
-  if (phase.kind === 'success') {
-    return (
-      <div className="col" style={{ alignItems: 'center', gap: 10, padding: '26px 8px' }} role="status">
-        <Icon name="checkCircle" size={34} stroke="var(--sprout-ink)" />
-        <b style={{ fontSize: 15, textAlign: 'center' }}>{phase.title}</b>
-        <span style={{ fontSize: 12.5, color: 'var(--fg-2)', textAlign: 'center', lineHeight: 1.55, maxWidth: 340 }}>
-          {phase.detail}
-        </span>
-        <Btn variant="primary" onClick={onDone} style={{ marginTop: 4 }}>Done</Btn>
-      </div>
-    );
-  }
-  return (
-    <div className="col" style={{ alignItems: 'center', gap: 10, padding: '26px 8px' }} role="alert">
-      <Icon name="x" size={30} stroke="var(--ember)" />
-      <b style={{ fontSize: 14.5, textAlign: 'center' }}>That didn't go through</b>
-      <span style={{ fontSize: 12.5, color: 'var(--ember)', textAlign: 'center', lineHeight: 1.55, maxWidth: 340 }}>
-        {phase.message}
-      </span>
-      <span style={{ fontSize: 11.5, color: 'var(--fg-3)', textAlign: 'center', maxWidth: 340 }}>
-        Nothing is lost when an operation fails — any payment already in escrow stays reclaimable.
-      </span>
-      <Btn variant="secondary" onClick={onDismissError} style={{ marginTop: 4 }}>Close</Btn>
+      {/* ── Staged-transaction modal — drives every money op live; on dismiss
+           after a success we run any queued side effect (e.g. go to Exchange). ── */}
+      {tx.isOpen && (
+        <TxModal flow={tx} onClose={() => {
+          const finish = tx.state.kind === 'success' ? onFinishRef.current : null;
+          onFinishRef.current = null;
+          tx.reset();
+          finish?.();
+        }} />
+      )}
     </div>
   );
 }

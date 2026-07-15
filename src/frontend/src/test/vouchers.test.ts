@@ -3,9 +3,45 @@ import {
   friendlyVoucherErr, buybackQuoteE8s, buybackAvailable, listingDeltaPct,
   promoDaysLeft, parseWrapIcp, parsePriceIcp, isPromo,
   sortListingsBestDeal, type BondView, isLpBacked, isBacked,
+  ageBonusPct, ticketsPerDay,
 } from '../Vouchers';
+import { StakeTier } from '../bindings/backend';
 import { Principal } from '@icp-sdk/core/principal';
 import { validateClaimPrincipal } from '../ClaimPromo';
+
+// A Backed BondView with sensible defaults, overridable per test.
+function bond(over: Partial<BondView> = {}): BondView {
+  return {
+    id: 1n, class: 'Backed', tier: StakeTier.SixMonths, amount_e8s: 100_000_000n,
+    owner: Principal.anonymous(), minted_at: 0n, expires_at: null,
+    listed_price_e8s: null, age_bonus_bps: 100n, age_bonus_daily: 0n, ...over,
+  };
+}
+
+describe('ageBonusPct (the bond age-bonus badge, 2026-07-14)', () => {
+  it('formats basis points as a signed one-decimal percent', () => {
+    expect(ageBonusPct(bond({ age_bonus_bps: 100n }))).toBe('+1.0%');   // fresh mint
+    expect(ageBonusPct(bond({ age_bonus_bps: 730n }))).toBe('+7.3%');
+    expect(ageBonusPct(bond({ age_bonus_bps: 2500n }))).toBe('+25.0%'); // 10-year plateau
+  });
+  it('treats a missing bonus as zero', () => {
+    expect(ageBonusPct(bond({ age_bonus_bps: undefined as unknown as bigint }))).toBe('+0.0%');
+  });
+});
+
+describe('ticketsPerDay (base rate + age bonus)', () => {
+  it('sums the tier per-ICP rate × whole ICP plus the backend age bonus', () => {
+    // 6-month tier = 5/ICP/day; 3 ICP = 15; + 2 age-bonus tickets = 17.
+    expect(ticketsPerDay(bond({ amount_e8s: 300_000_000n, age_bonus_daily: 2n }))).toBe(17);
+    // 2-year tier = 20/ICP/day; 5 ICP = 100; no bonus yet = 100.
+    expect(ticketsPerDay(bond({ tier: StakeTier.TwoYears, amount_e8s: 500_000_000n }))).toBe(100);
+    // 2-week taster tier = 1/ICP/day.
+    expect(ticketsPerDay(bond({ tier: StakeTier.TwoWeeks, amount_e8s: 400_000_000n }))).toBe(4);
+  });
+  it('floors sub-1-ICP bonds to one whole ICP of base rate', () => {
+    expect(ticketsPerDay(bond({ amount_e8s: 40_000_000n }))).toBe(5); // <1 ICP → 1×5
+  });
+});
 
 describe('friendlyVoucherErr', () => {
   it('maps every voucher endpoint code to actionable copy', () => {

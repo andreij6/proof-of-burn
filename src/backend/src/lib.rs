@@ -1331,8 +1331,11 @@ async fn admin_trigger_sweep() -> Result<(), String> {
     retry_failed_settlements().await;
     cycle_topup_check().await;
     let _ = refresh_buyback_fund_cache().await; // voucher fund display stays honest
+    // resume_voucher_buybacks holds the StakingLock and routes the buyback
+    // spreads internally — do NOT also call route_buyback_spreads() here
+    // lock-free (that reopened a spread-double-transfer race, sec review
+    // 2026-07-14).
     resume_voucher_buybacks().await;
-    route_buyback_spreads().await;
     staking_sweep().await;
     early_adopter_settlement_check().await;
     Ok(())
@@ -5108,6 +5111,7 @@ fn setup_timers() {
         luckproof_daily_award(); // pay yesterday's Sklansky Trainer winner (tickets = player count)
         sweep_game_retention(); // 1-day game-data retention (owner 2026-07-06)
         icpswap_lp_grant_daily_tickets().await; // ICP LP: 15 tickets/day per $1 of LP value
+        auto_grant_daily_stake_tickets(); // stake/bond daily tickets land without a visit (per-day idempotent)
         harvest_icpswap_lp().await; // claim + route ICPSwap LP yield (throttled 1h internally)
         resume_voucher_buybacks().await; // stake vouchers: finish interrupted buybacks + route spreads
         staking_sweep().await; // bootstrap/unstakes every sweep; maturity+inbox hourly inside
@@ -8114,13 +8118,18 @@ fn find_ticket_owner(round: u64, index: u64) -> Option<Principal> {
 
 /// Count the unique users holding at least one ticket in `round` (synthetic and
 /// real alike). Drives the minimum-players gate on a draw.
+/// Distinct principals that count toward the anti-sybil min-holders draw gate.
+/// A holder counts ONLY if they currently hold a real stake (stake row, Backed
+/// bond, or LP custody — see `author_is_staked`). Free promo-only principals
+/// carry tickets but no stake, so they must NOT satisfy the gate — otherwise a
+/// promo airdrop could mint enough "holders" to unlock a draw.
 fn lottery_unique_holders(round: u64) -> u64 {
     LOTTERY_TICKETS.with(|m| {
         m.borrow()
             .iter()
             .filter(|e| {
                 let t = e.value();
-                t.round == round && t.count > 0
+                t.round == round && t.count > 0 && author_is_staked(*e.key())
             })
             .count() as u64
     })
@@ -8398,27 +8407,23 @@ fn void_current_round_tickets(user: Principal) {
     }
 }
 
-/// Tickets the user collects per login day: the base grant × the term
-/// multiplier, summed over every tier they hold a stake in (6mo = 1×,
-/// 1y = 2×, 2y = 4× — i.e. 5/10/20 at the default base of 5). Zero when
-/// not staked: staking is the lottery eligibility gate. Admins are excluded
-/// outright — the house never holds tickets.
-fn user_daily_tickets(user: Principal) -> u64 {
+/// The stake-only daily rate: STAKES rows (base × term multiplier × whole ICP,
+/// 6mo = 1×, 1y = 2×, 2y = 4×) plus any Booster (permanent) stake. Sub-1-ICP
+/// stakes still earn one base unit. EXCLUDES Backed bonds — those are metered
+/// per-bond (see `bond_base_daily_tickets` / `pending_bond_grant`) so a bond
+/// flipped between accounts mid-day can't be granted in both. Stake rows are
+/// principal-bound and can't transfer, so per-user idempotency stays safe.
+/// Admins are excluded outright — the house never holds tickets.
+fn stake_only_daily_tickets(user: Principal) -> u64 {
     if is_admin_principal(user) {
         return 0;
     }
     let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
-    // Stake-weighted: base × term multiplier × whole ICP staked in the tier
-    // (1 ICP for 6 months = base/day; 500 ICP for 2 years = base × 4 × 500).
-    // Sub-1-ICP stakes still earn one base unit so small stakers participate.
     let tier_tickets = StakeTier::all().iter().fold(0u64, |acc, &tier| {
-        // A wrapped stake earns exactly like an unwrapped one: the Backed
-        // voucher registry is stake (okf/ideas/stake-vouchers §2).
         let staked_e8s = STAKES
             .with(|m| m.borrow().get(&stake_key(tier, user)))
             .map(|s| s.amount_e8s)
-            .unwrap_or(0)
-            .saturating_add(voucher_backed_e8s(user, tier));
+            .unwrap_or(0);
         if staked_e8s > 0 {
             let whole_icp = (staked_e8s / ONE_ICP_E8S).max(1);
             acc.saturating_add(
@@ -8442,11 +8447,41 @@ fn user_daily_tickets(user: Principal) -> u64 {
     tier_tickets.saturating_add(booster_tickets)
 }
 
+/// The Backed-bond base daily rate for a user: each unlisted Backed bond's
+/// tier per-ICP rate × its whole ICP (age bonus added separately). This is the
+/// DISPLAY rate — it never consumes the per-bond grant stamp. Bonds are always
+/// whole ICP, so summing per-bond equals the old aggregate whole-ICP math.
+/// A wrapped stake earns exactly like an unwrapped one (okf/ideas/stake-vouchers
+/// §2); a LISTED bond pauses its stream until delisted.
+fn bond_base_daily_tickets(user: Principal) -> u64 {
+    let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
+    BONDS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter(|e| {
+                let v = e.value();
+                v.class == BondClass::Backed && v.owner == user && v.listed_price_e8s.is_none()
+            })
+            .fold(0u64, |acc, e| acc.saturating_add(voucher_base_rate(&e.value(), base)))
+    })
+}
+
+/// Tickets the user collects per login day: the stake-only rate PLUS every
+/// Backed bond they hold. This is the DISPLAY/GATE rate — `get_lottery_info`'s
+/// `my_daily_tickets` and the NOT_STAKED gate read it. The grant paths meter
+/// the bond portion per-bond (age bonus included), so this rate never consumes
+/// a stamp. Zero when not staked. Admins are excluded outright.
+fn user_daily_tickets(user: Principal) -> u64 {
+    if is_admin_principal(user) {
+        return 0;
+    }
+    stake_only_daily_tickets(user).saturating_add(bond_base_daily_tickets(user))
+}
+
 /// Credit today's tickets (once per UTC day). Requires an active stake —
 /// the grant scales with the staked tiers (see `user_daily_tickets`). The
 /// frontend calls this on login / page load; returns the caller's
 /// current-round ticket count.
-#[ic_cdk::update]
 /// Sweep leg (owner 2026-07-10): daily stake tickets land WITHOUT a visit.
 /// Every staker whose last grant predates today gets their per-day grant —
 /// same guards as the on-visit claim (per_day==0 skip, admin-excluded skip,
@@ -8474,36 +8509,45 @@ fn auto_grant_daily_stake_tickets() {
         if is_admin_principal(user) {
             continue;
         }
-        let stake_part = user_daily_tickets(user);
-        let promo_part = promo_daily_tickets(user);
-        let age_part = user_age_bonus_daily(user);
-        let per_day = stake_part.saturating_add(promo_part).saturating_add(age_part);
-        if per_day == 0 {
-            continue;
-        }
+        // Per-bond portion (base + age): idempotent PER BOND via last_grant_day,
+        // so a bond flipped between accounts today is granted only once.
+        let bond_grants = pending_bond_grants(user, today);
+        let bond_base: u64 = bond_grants.iter().map(|g| g.1).fold(0, u64::saturating_add);
+        let bond_age: u64 = bond_grants.iter().map(|g| g.2).fold(0, u64::saturating_add);
         let mut entry = LOTTERY_TICKETS
             .with(|m| m.borrow().get(&user))
             .unwrap_or(TicketEntry { round: state.round, count: 0, last_claim_day: 0 });
         if entry.round != state.round {
             entry = TicketEntry { round: state.round, count: 0, last_claim_day: entry.last_claim_day };
         }
-        if entry.last_claim_day >= today {
+        // Per-user portion (stake rows + promo): idempotent PER USER via
+        // last_claim_day. These can't be double-granted by a transfer.
+        let do_user_part = entry.last_claim_day < today;
+        let stake_part = if do_user_part { stake_only_daily_tickets(user) } else { 0 };
+        let promo_part = if do_user_part { promo_daily_tickets(user) } else { 0 };
+        let user_part = stake_part.saturating_add(promo_part);
+        let per_day = user_part.saturating_add(bond_base).saturating_add(bond_age);
+        if per_day == 0 {
             continue;
         }
         entry.count = entry.count.saturating_add(per_day);
-        entry.last_claim_day = today;
+        if user_part > 0 {
+            entry.last_claim_day = today;
+        }
         state.total_tickets = state.total_tickets.saturating_add(per_day);
         LOTTERY_TICKETS.with(|m| {
             m.borrow_mut().insert(user, entry);
         });
-        if stake_part > 0 {
-            note_ticket_source(user, "daily_stake", stake_part, state.round);
+        commit_bond_grants(&bond_grants, today, state.round);
+        let daily_stake = stake_part.saturating_add(bond_base);
+        if daily_stake > 0 {
+            note_ticket_source(user, "daily_stake", daily_stake, state.round);
         }
         if promo_part > 0 {
             note_ticket_source(user, "promo_voucher", promo_part, state.round);
         }
-        if age_part > 0 {
-            note_ticket_source(user, "age_bonus", age_part, state.round);
+        if bond_age > 0 {
+            note_ticket_source(user, "age_bonus", bond_age, state.round);
         }
         granted_any = true;
     }
@@ -8525,11 +8569,10 @@ fn claim_daily_tickets() -> Result<u64, String> {
     }
     let now = current_time();
     let today = now / 1_000_000_000 / SECS_PER_DAY;
-    let stake_part = user_daily_tickets(caller);
-    let promo_part = promo_daily_tickets(caller);
-    let age_part = user_age_bonus_daily(caller);
-    let per_day = stake_part.saturating_add(promo_part).saturating_add(age_part);
-    if per_day == 0 {
+    // Eligibility gate reads the DISPLAY rate (no stamp consumed): a genuinely
+    // staked caller who already claimed must get ALREADY_CLAIMED_TODAY, not
+    // NOT_STAKED. Promo-only holders still qualify to claim their promo ticket.
+    if total_daily_tickets(caller) == 0 {
         return Err("NOT_STAKED".to_string());
     }
 
@@ -8541,11 +8584,24 @@ fn claim_daily_tickets() -> Result<u64, String> {
         // Stale tickets from a finished round die here.
         entry = TicketEntry { round: state.round, count: 0, last_claim_day: entry.last_claim_day };
     }
-    if entry.last_claim_day >= today {
+    // Per-bond portion (base + age): idempotent PER BOND via last_grant_day.
+    let bond_grants = pending_bond_grants(caller, today);
+    let bond_base: u64 = bond_grants.iter().map(|g| g.1).fold(0, u64::saturating_add);
+    let bond_age: u64 = bond_grants.iter().map(|g| g.2).fold(0, u64::saturating_add);
+    // Per-user portion (stake rows + promo): idempotent PER USER via
+    // last_claim_day.
+    let do_user_part = entry.last_claim_day < today;
+    let stake_part = if do_user_part { stake_only_daily_tickets(caller) } else { 0 };
+    let promo_part = if do_user_part { promo_daily_tickets(caller) } else { 0 };
+    let user_part = stake_part.saturating_add(promo_part);
+    let per_day = user_part.saturating_add(bond_base).saturating_add(bond_age);
+    if per_day == 0 {
         return Err("ALREADY_CLAIMED_TODAY".to_string());
     }
     entry.count = entry.count.saturating_add(per_day);
-    entry.last_claim_day = today;
+    if user_part > 0 {
+        entry.last_claim_day = today;
+    }
     state.total_tickets = state.total_tickets.saturating_add(per_day);
     if state.next_draw_at == 0 {
         state.next_draw_at = next_draw_after(now);
@@ -8553,14 +8609,16 @@ fn claim_daily_tickets() -> Result<u64, String> {
     LOTTERY_TICKETS.with(|m| {
         m.borrow_mut().insert(caller, entry.clone());
     });
-    if stake_part > 0 {
-        note_ticket_source(caller, "daily_stake", stake_part, state.round);
+    commit_bond_grants(&bond_grants, today, state.round);
+    let daily_stake = stake_part.saturating_add(bond_base);
+    if daily_stake > 0 {
+        note_ticket_source(caller, "daily_stake", daily_stake, state.round);
     }
     if promo_part > 0 {
         note_ticket_source(caller, "promo_voucher", promo_part, state.round);
     }
-    if age_part > 0 {
-        note_ticket_source(caller, "age_bonus", age_part, state.round);
+    if bond_age > 0 {
+        note_ticket_source(caller, "age_bonus", bond_age, state.round);
     }
     set_lottery_state(state);
     Ok(entry.count)
@@ -12420,6 +12478,9 @@ async fn mint_lp_voucher(owner: Principal) -> Option<u64> {
             last_purchase_grant_day: 0,
             listed_at: None,
             age_decay_ns: 0,
+            last_grant_day: 0,
+            round_contribution: 0,
+            contribution_round: 0,
         });
     });
     staking_audit("lp_voucher_mint", owner, 0, id);
@@ -16520,6 +16581,24 @@ pub struct BondRecord {
     /// grace, at the same rate it grows).
     #[serde(default)]
     pub age_decay_ns: u64,
+    /// UTC day this bond last contributed its (base + age) tickets to a daily
+    /// grant. Per-bond idempotency: a Backed bond earns at most once per day
+    /// regardless of how many accounts it flips through — the stamp travels
+    /// with the NFT, so a mid-day transfer can't double-count it. Internal
+    /// storage only (never surfaced in BondView / .did).
+    #[serde(default)]
+    pub last_grant_day: u64,
+    /// Tickets this bond has credited to its CURRENT owner in
+    /// `contribution_round` (base + age, summed across the round's daily
+    /// grants). On any ownership change (sale or transfer) this many tickets
+    /// are clawed back from the seller — the NFT's earnings leave with the
+    /// NFT (owner 2026-07-14). Reset to 0 for the new owner on transfer.
+    #[serde(default)]
+    pub round_contribution: u64,
+    /// The lottery round `round_contribution` applies to; a round change
+    /// zeroes the counter lazily on next grant/clawback.
+    #[serde(default)]
+    pub contribution_round: u64,
 }
 
 /// Marketplace sale saga journal — persisted between legs so an interrupted
@@ -16634,15 +16713,6 @@ fn voucher_nft_cid() -> Result<Principal, String> {
         .ok_or_else(|| "VOUCHER_NFT_NOT_CONFIGURED".to_string())
 }
 
-/// Backed voucher e8s a user holds in one tier (their wrapped stake).
-/// One voucher's daily ticket rate: the tier's per-ICP rate × whole ICP
-/// (sub-1-ICP floors to one base unit) — the same math the daily grant uses —
-/// PLUS the bond's age bonus (so buying a vintage bond grants its boosted
-/// rate immediately).
-fn voucher_daily_rate(v: &BondRecord) -> u64 {
-    let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
-    voucher_base_rate(v, base).saturating_add(bond_age_bonus_daily(v, base, current_time()))
-}
 
 /// The bond's un-bonused daily rate (tier per-ICP rate × whole ICP).
 fn voucher_base_rate(v: &BondRecord, base: u64) -> u64 {
@@ -16777,6 +16847,112 @@ fn total_daily_tickets(user: Principal) -> u64 {
     user_daily_tickets(user)
         .saturating_add(promo_daily_tickets(user))
         .saturating_add(user_age_bonus_daily(user))
+}
+
+/// Per-bond ticket grants a user is owed TODAY that haven't been granted yet —
+/// the per-bond idempotent portion of the daily grant. For every unlisted
+/// Backed bond the user owns whose `last_grant_day` predates `today`, returns
+/// `(id, base, age)`. A bond flipped between accounts mid-day carries its stamp
+/// with the NFT, so it contributes to at most one account's grant that UTC day.
+/// DISPLAY/GATE never calls this (it doesn't stamp) — only the two grant paths.
+fn pending_bond_grants(user: Principal, today: u64) -> Vec<(u64, u64, u64)> {
+    let base = CONFIG.with(|c| c.borrow().get().lottery_tickets_per_day);
+    let now = current_time();
+    BONDS.with(|m| {
+        m.borrow()
+            .iter()
+            .filter_map(|e| {
+                let v = e.value();
+                if v.class == BondClass::Backed
+                    && v.owner == user
+                    && v.listed_price_e8s.is_none()
+                    && v.last_grant_day < today
+                {
+                    let b = voucher_base_rate(&v, base);
+                    let a = bond_age_bonus_daily(&v, base, now);
+                    if b > 0 || a > 0 {
+                        return Some((v.id, b, a));
+                    }
+                }
+                None
+            })
+            .collect()
+    })
+}
+
+/// Commit a set of per-bond grants: stamp `last_grant_day` (so a same-day
+/// transferee can't re-pay them) AND record each bond's (base + age) into its
+/// `round_contribution` for `round` (so a later sale/transfer claws exactly the
+/// tickets this NFT earned its owner out of the seller). Lazily zeroes the
+/// counter on a round change.
+fn commit_bond_grants(grants: &[(u64, u64, u64)], today: u64, round: u64) {
+    if grants.is_empty() {
+        return;
+    }
+    BONDS.with(|m| {
+        let mut reg = m.borrow_mut();
+        for (id, base, age) in grants {
+            if let Some(mut v) = reg.get(id) {
+                v.last_grant_day = today;
+                if v.contribution_round != round {
+                    v.round_contribution = 0;
+                    v.contribution_round = round;
+                }
+                v.round_contribution =
+                    v.round_contribution.saturating_add(base.saturating_add(*age));
+                reg.insert(*id, v);
+            }
+        }
+    });
+}
+
+/// The UTC day a user last received their per-user daily grant (persists
+/// across round resets). Used to carry the "paid today?" bit across the
+/// stake↔bond seam: a bond wrapped from stake that was already paid today
+/// inherits this so it can't re-grant the same capital the same day.
+fn user_last_claim_day(user: Principal) -> u64 {
+    LOTTERY_TICKETS.with(|m| m.borrow().get(&user).map(|e| e.last_claim_day).unwrap_or(0))
+}
+
+/// Claw back the tickets a bond credited to `from` in the current round —
+/// called when the bond LEAVES `from` (marketplace sale or transfer), so the
+/// NFT's earnings depart with the NFT (owner 2026-07-14: "tickets earned by
+/// the NFT are removed from the player once they sell"). Subtracts from the
+/// seller's current-round entry and the global tally, then resets the bond's
+/// counter so the new owner starts from zero. No-op for stale-round counters
+/// (a win already zeroed everyone).
+fn clawback_bond_tickets(bond_id: u64, from: Principal) {
+    let round = lottery_state().round;
+    let contrib = BONDS.with(|m| {
+        m.borrow()
+            .get(&bond_id)
+            .filter(|v| v.contribution_round == round)
+            .map(|v| v.round_contribution)
+            .unwrap_or(0)
+    });
+    if contrib > 0 {
+        LOTTERY_TICKETS.with(|m| {
+            let mut reg = m.borrow_mut();
+            if let Some(mut e) = reg.get(&from) {
+                if e.round == round {
+                    e.count = e.count.saturating_sub(contrib);
+                    reg.insert(from, e);
+                }
+            }
+        });
+        let mut st = lottery_state();
+        st.total_tickets = st.total_tickets.saturating_sub(contrib);
+        set_lottery_state(st);
+    }
+    // Reset the bond's counter for its next owner, regardless of contrib.
+    BONDS.with(|m| {
+        let mut reg = m.borrow_mut();
+        if let Some(mut v) = reg.get(&bond_id) {
+            v.round_contribution = 0;
+            v.contribution_round = round;
+            reg.insert(bond_id, v);
+        }
+    });
 }
 
 // ── voucher_nft inter-canister seams (mock pair for native tests) ──────────
@@ -16995,7 +17171,6 @@ fn get_bond_market() -> BondMarketInfo {
 /// registry row now carries the claim). Whole-ICP amounts only, so a later
 /// buyback's neuron split stays valid. EA/Booster stakes are NOT wrappable
 /// (separate map, permanent by design).
-#[ic_cdk::update]
 /// Auto-issue a voucher for a freshly landed stake (owner 2026-07-10: no
 /// manual wrap — staking IS receiving the NFT). Converts the WHOLE-ICP part
 /// of the caller's plain stake row into a Backed voucher; any sub-ICP
@@ -17049,6 +17224,13 @@ async fn auto_issue_voucher(user: Principal, tier: StakeTier) -> Option<u64> {
             last_purchase_grant_day: 0,
             listed_at: None,
             age_decay_ns: 0,
+            // Carry the "paid today?" bit across the stake→bond seam: if this
+            // capital already earned its per-user grant today, the new bond
+            // starts stamped so it can't re-grant the same day (closes the
+            // claim→wrap→claim double-count).
+            last_grant_day: user_last_claim_day(user),
+            round_contribution: 0,
+            contribution_round: 0,
         });
     });
     staking_audit("voucher_auto_issue", user, whole, id);
@@ -17091,6 +17273,9 @@ async fn dev_seed_mock_bonds(n: u32) -> Result<u32, String> {
                 owner, minted_at: now, expires_at: None, listed_price_e8s: Some(ask), last_purchase_grant_day: 0,
                 listed_at: None,
                 age_decay_ns: 0,
+                last_grant_day: 0,
+                round_contribution: 0,
+                contribution_round: 0,
             });
         });
         made += 1;
@@ -17124,6 +17309,9 @@ async fn transfer_bond(id: u64, to: Principal) -> Result<(), String> {
         return Err("BOND_LISTED".to_string());
     }
     voucher_nft_transfer(caller, to, id).await?;
+    // Tickets earned by the bond leave with the bond (owner 2026-07-14):
+    // claw this round's contribution back from the sender before reassigning.
+    clawback_bond_tickets(id, caller);
     BONDS.with(|m| {
         let mut reg = m.borrow_mut();
         if let Some(mut rec) = reg.get(&id) {
@@ -17230,6 +17418,11 @@ async fn wrap_stake_bond(amount_e8s: u64, tier: StakeTier) -> Result<u64, String
             last_purchase_grant_day: 0,
             listed_at: None,
             age_decay_ns: 0,
+            // Carry the "paid today?" bit across the stake→bond seam (see
+            // auto_issue_voucher).
+            last_grant_day: user_last_claim_day(caller),
+            round_contribution: 0,
+            contribution_round: 0,
         });
     });
     staking_audit("voucher_wrap", caller, amount_e8s, id);
@@ -17277,6 +17470,22 @@ async fn unwrap_stake_bond(voucher_id: u64) -> Result<(), String> {
     stake.last_action_at = now;
     STAKES.with(|m| { m.borrow_mut().insert(key, stake); });
     BONDS.with(|m| { m.borrow_mut().remove(&voucher_id); });
+    // Carry the "paid today?" bit back across the bond→stake seam: if this
+    // bond already earned today (e.g. a sweep granted it before the user
+    // unwrapped), mark the user's per-user grant as taken so the restored
+    // stake row can't re-grant the same capital the same day.
+    let today = now / 1_000_000_000 / SECS_PER_DAY;
+    if v.last_grant_day >= today {
+        let round = lottery_state().round;
+        LOTTERY_TICKETS.with(|m| {
+            let mut reg = m.borrow_mut();
+            let mut e = reg.get(&caller).unwrap_or(TicketEntry { round, count: 0, last_claim_day: 0 });
+            if e.last_claim_day < today {
+                e.last_claim_day = today;
+                reg.insert(caller, e);
+            }
+        });
+    }
     staking_audit("voucher_unwrap", caller, v.amount_e8s, voucher_id);
     Ok(())
 }
@@ -17394,6 +17603,10 @@ async fn buy_bond(voucher_id: u64) -> Result<(), String> {
     BOND_SALES.with(|m| { m.borrow_mut().insert(voucher_id, sale.clone()); });
     result?;
 
+    // Claw back the tickets this bond earned the SELLER this round — the
+    // NFT's earnings leave with the NFT (owner 2026-07-14). Do this before
+    // moving the owner; it also resets the bond's counter for the buyer.
+    clawback_bond_tickets(voucher_id, sale.seller);
     // Success: move the registry row, clear the listing + journal. The time
     // spent listed (past its grace) has decayed the bond's effective age —
     // bank it so the buyer inherits the honest, decayed vintage.
@@ -17407,25 +17620,11 @@ async fn buy_bond(voucher_id: u64) -> Result<(), String> {
         }
     });
     BOND_SALES.with(|m| { m.borrow_mut().remove(&voucher_id); });
-    // Owner rule (2026-07-10): buying a voucher rewards the buyer with THAT
-    // voucher's daily tickets immediately, entering the upcoming draw — once
-    // per voucher per UTC day, so a wash-traded voucher can't be farmed.
-    let today = current_time() / 1_000_000_000 / SECS_PER_DAY;
-    let granted = BONDS.with(|m| {
-        let mut reg = m.borrow_mut();
-        match reg.get(&voucher_id) {
-            Some(mut rec) if rec.class == BondClass::Backed && rec.last_purchase_grant_day < today => {
-                rec.last_purchase_grant_day = today;
-                let rate = voucher_daily_rate(&rec);
-                reg.insert(voucher_id, rec);
-                rate
-            }
-            _ => 0,
-        }
-    });
-    if granted > 0 {
-        grant_lottery_tickets(sale.buyer, granted, "voucher_purchase");
-    }
+    // No instant purchase-grant: the buyer simply earns from the next daily
+    // grant. The bond carries its own `last_grant_day` stamp, so if the seller
+    // already collected its tickets today the buyer waits until tomorrow —
+    // this closes the bond-flip ticket-farming path (a mid-day resale can't
+    // pay the same bond twice).
 
     staking_audit("voucher_sale", sale.buyer, sale.price_e8s, voucher_id);
     Ok(())
@@ -17773,6 +17972,13 @@ async fn route_buyback_spreads() {
 
 /// Sweep leg: resume interrupted buyback jobs (paid-but-not-split etc.).
 async fn resume_voucher_buybacks() {
+    // buyback_bond journals its pay_block only AFTER the ledger await while
+    // holding the StakingLock; a sweep firing mid-await would otherwise re-pay
+    // the 85% a second time. Take the same lock and bail if a call holds it.
+    let _lock = match StakingLock::new() {
+        Ok(l) => l,
+        Err(_) => return,
+    };
     let stuck: Vec<BuybackJob> = BUYBACK_JOBS.with(|m| {
         m.borrow()
             .iter()
@@ -17863,6 +18069,9 @@ async fn claim_golden_ticket(target: Option<Principal>) -> Result<u64, String> {
             last_purchase_grant_day: 0,
             listed_at: None,
             age_decay_ns: 0,
+            last_grant_day: 0,
+            round_contribution: 0,
+            contribution_round: 0,
         });
     });
     campaign.claimed += 1;
@@ -20919,7 +21128,7 @@ mod tests {
             id: 1, class: BondClass::Backed, tier: StakeTier::TwoYears.idx(),
             amount_e8s: 500_000_000, owner: alice(), minted_at: 0, expires_at: None,
             listed_price_e8s: listed_price, last_purchase_grant_day: 0,
-            listed_at, age_decay_ns: decay,
+            listed_at, age_decay_ns: decay, last_grant_day: 0, round_contribution: 0, contribution_round: 0,
         };
         // 5 ICP × 2yr tier at base 5 = 100/day base; at 5 years old → +13%.
         let v = mk(None, None, 0);
@@ -20961,7 +21170,7 @@ mod tests {
                 id: 77, class: BondClass::Backed, tier: StakeTier::TwoYears.idx(),
                 amount_e8s: 500_000_000, owner: alice(), minted_at: now - 5 * YEAR_NS,
                 expires_at: None, listed_price_e8s: None, last_purchase_grant_day: 0,
-                listed_at: None, age_decay_ns: 0,
+                listed_at: None, age_decay_ns: 0, last_grant_day: 0, round_contribution: 0, contribution_round: 0,
             });
         });
         auto_grant_daily_stake_tickets();
@@ -22532,9 +22741,12 @@ mod tests {
             let mut b = [0u8; 28];
             b[..4].copy_from_slice(b"TEST");
             b[20..28].copy_from_slice(&i.to_be_bytes());
+            let holder = Principal::from_slice(&b);
+            // Holders must be real stakers to count toward the gate (anti-sybil).
+            seed_stake(StakeTier::SixMonths, holder, 100_000_000);
             LOTTERY_TICKETS.with(|m| {
                 m.borrow_mut().insert(
-                    Principal::from_slice(&b),
+                    holder,
                     TicketEntry { round, count: 1, last_claim_day: 0 },
                 );
             });
@@ -22558,6 +22770,256 @@ mod tests {
         set_lottery_state(s);
         run_lottery_draw(None).await;
         assert_eq!(list_lottery_draws().len(), 1, "at min holders: draw runs");
+        reset_stakes_and_tickets();
+    }
+
+    // FIX 3: the min-unique-holders anti-sybil gate must count only principals
+    // that currently hold a real stake. Free promo-only holders carry tickets
+    // but no stake, so an airdrop of them must not unlock a draw.
+    #[test]
+    fn test_unique_holders_gate_counts_only_real_stakers() {
+        install_staking_test_config();
+        enable_lottery();
+        clear_vouchers();
+        reset_stakes_and_tickets();
+        let round = lottery_state().round;
+        let now = current_time();
+        let mk = |tag: &[u8; 4], i: u64| {
+            let mut b = [0u8; 28];
+            b[..4].copy_from_slice(tag);
+            b[20..28].copy_from_slice(&i.to_be_bytes());
+            Principal::from_slice(&b)
+        };
+
+        // 30 promo-only principals: a live promo voucher + a ticket entry, but
+        // NO stake. They must NOT count toward the 25-holder gate.
+        for i in 0..30u64 {
+            let holder = mk(b"PROM", i);
+            BONDS.with(|m| {
+                m.borrow_mut().insert(30_000 + i, BondRecord {
+                    id: 30_000 + i, class: BondClass::Promo, tier: 0, amount_e8s: 0,
+                    owner: holder, minted_at: now, expires_at: Some(now + PROMO_EXPIRY_NS),
+                    listed_price_e8s: None, last_purchase_grant_day: 0,
+                    listed_at: None, age_decay_ns: 0, last_grant_day: 0, round_contribution: 0, contribution_round: 0,
+                });
+            });
+            LOTTERY_TICKETS.with(|m| {
+                m.borrow_mut().insert(holder, TicketEntry { round, count: 1, last_claim_day: 0 });
+            });
+        }
+        assert_eq!(lottery_unique_holders(round), 0,
+            "30 promo-only principals do NOT satisfy the gate");
+
+        // 25 real stakers each with a ticket entry: these DO count.
+        for i in 0..25u64 {
+            let holder = mk(b"STAK", i);
+            seed_stake(StakeTier::SixMonths, holder, 100_000_000);
+            LOTTERY_TICKETS.with(|m| {
+                m.borrow_mut().insert(holder, TicketEntry { round, count: 1, last_claim_day: 0 });
+            });
+        }
+        assert_eq!(lottery_unique_holders(round), 25,
+            "25 real stakers satisfy the 25-holder gate; the 30 promo holders still don't");
+
+        clear_vouchers();
+        reset_stakes_and_tickets();
+    }
+
+    // FIX 2: an honest single bond holder still collects the full daily grant
+    // (base + age), and a repeat grant the same day is a no-op (per-bond stamp).
+    #[test]
+    fn test_honest_bond_holder_gets_full_daily_tickets() {
+        const YEAR_NS: u64 = 365 * 86_400 * 1_000_000_000;
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        enable_lottery();
+        clear_vouchers();
+        reset_stakes_and_tickets();
+        let now = 1_700_000_000_000_000_000u64;
+        set_mock_time(Some(now));
+        // 5-ICP 2yr Backed bond, aged 5 years → 100/day base + 13% age = 113.
+        BONDS.with(|m| {
+            m.borrow_mut().insert(50, BondRecord {
+                id: 50, class: BondClass::Backed, tier: StakeTier::TwoYears.idx(),
+                amount_e8s: 500_000_000, owner: alice(), minted_at: now - 5 * YEAR_NS,
+                expires_at: None, listed_price_e8s: None, last_purchase_grant_day: 0,
+                listed_at: None, age_decay_ns: 0, last_grant_day: 0, round_contribution: 0, contribution_round: 0,
+            });
+        });
+        let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
+        assert_eq!(total_daily_tickets(alice()), 113, "display rate = base 100 + 13% age");
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice()), 113, "honest holder receives the full daily grant");
+        // Second pass same day: the per-bond stamp blocks a re-grant.
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice()), 113, "no double-grant same UTC day");
+        clear_vouchers();
+        reset_stakes_and_tickets();
+    }
+
+    // FIX 2 core: the SAME bond flipped between two staked accounts mid-day
+    // contributes its tickets (base + age) to exactly ONE grant that UTC day.
+    #[test]
+    fn test_flipped_bond_grants_tickets_only_once_per_day() {
+        const YEAR_NS: u64 = 365 * 86_400 * 1_000_000_000;
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        enable_lottery();
+        clear_vouchers();
+        reset_stakes_and_tickets();
+        let now = 1_700_000_000_000_000_000u64;
+        set_mock_time(Some(now));
+        let alice = alice();
+        let bob = bob();
+        // Each account holds a separate 1-ICP 6mo stake (5/day) so both are
+        // independently lottery-eligible; the transferable asset is the bond.
+        seed_stake(StakeTier::SixMonths, alice, 100_000_000);
+        seed_stake(StakeTier::SixMonths, bob, 100_000_000);
+        // 5-ICP 2yr bond aged 5 years → 100 base + 13% age = 113.
+        BONDS.with(|m| {
+            m.borrow_mut().insert(60, BondRecord {
+                id: 60, class: BondClass::Backed, tier: StakeTier::TwoYears.idx(),
+                amount_e8s: 500_000_000, owner: alice, minted_at: now - 5 * YEAR_NS,
+                expires_at: None, listed_price_e8s: None, last_purchase_grant_day: 0,
+                listed_at: None, age_decay_ns: 0, last_grant_day: 0, round_contribution: 0, contribution_round: 0,
+            });
+        });
+        let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
+
+        // Alice grabs the daily grant while holding the bond: 5 stake + 113 bond.
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice), 5 + 113, "alice: stake + bond base + age");
+        assert_eq!(count(bob), 5, "bob so far only his own stake");
+
+        // Flip the bond to bob mid-day (its last_grant_day is now stamped today).
+        BONDS.with(|m| {
+            let mut v = m.borrow().get(&60).unwrap();
+            v.owner = bob;
+            m.borrow_mut().insert(60, v);
+        });
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(bob), 5,
+            "flipped bond pays bob NOTHING again today — base + age both blocked");
+        assert_eq!(count(alice), 5 + 113, "alice unchanged");
+
+        clear_vouchers();
+        reset_stakes_and_tickets();
+    }
+
+    // FIX 2 seam: claim stake tickets, wrap the stake into a fresh bond, claim
+    // again — the wrapped bond must NOT re-grant the same capital the same day
+    // (the wrap carries last_claim_day into the bond's last_grant_day).
+    #[tokio::test]
+    async fn test_wrap_after_claim_does_not_double_grant() {
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        enable_vouchers();
+        clear_vouchers();
+        reset_stakes_and_tickets();
+        let alice = alice();
+        set_mock_caller(alice);
+        set_mock_ledger_balance(100_000_000_000);
+        set_mock_ledger_transfer(Ok(1));
+        set_mock_time(Some(1_700_000_000_000_000_000));
+        // Stake 5 ICP (6mo → 5/ICP/day = 25/day); auto-issue is off here so it
+        // stays a plain row until we wrap it explicitly.
+        seed_stake(StakeTier::SixMonths, alice, 500_000_000);
+        let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
+        // 1) Claim the stake portion.
+        assert_eq!(claim_daily_tickets().unwrap(), 25, "stake portion granted");
+        // 2) Wrap the whole 5 ICP into a Backed bond (last_grant_day carries today).
+        let id = wrap_stake_bond(500_000_000, StakeTier::SixMonths).await.unwrap();
+        assert!(BONDS.with(|m| m.borrow().get(&id).unwrap().last_grant_day) >= 1,
+            "wrapped bond inherits today's grant stamp");
+        // 3) Claim again same day — the bond must add NOTHING.
+        assert_eq!(claim_daily_tickets().unwrap_err(), "ALREADY_CLAIMED_TODAY");
+        assert_eq!(count(alice), 25, "no wrap→claim double-count");
+        clear_vouchers();
+        reset_stakes_and_tickets();
+    }
+
+    // Owner 2026-07-14: tickets earned by a bond are removed from the seller
+    // when the bond leaves them (sale OR transfer).
+    #[test]
+    fn test_bond_sale_and_transfer_claw_back_tickets() {
+        const YEAR_NS: u64 = 365 * 86_400 * 1_000_000_000;
+        CONFIG.with(|c| { c.borrow_mut().set(test_config(true)); });
+        enable_lottery();
+        clear_vouchers();
+        reset_stakes_and_tickets();
+        let now = 1_700_000_000_000_000_000u64;
+        set_mock_time(Some(now));
+        let alice = alice();
+        let bob = bob();
+        seed_stake(StakeTier::SixMonths, alice, 100_000_000); // 5/day, keeps alice eligible
+        // 5-ICP 2yr bond, 5y old → 100 base + 13% age = 113/day.
+        BONDS.with(|m| {
+            m.borrow_mut().insert(70, BondRecord {
+                id: 70, class: BondClass::Backed, tier: StakeTier::TwoYears.idx(),
+                amount_e8s: 500_000_000, owner: alice, minted_at: now - 5 * YEAR_NS,
+                expires_at: None, listed_price_e8s: None, last_purchase_grant_day: 0,
+                listed_at: None, age_decay_ns: 0, last_grant_day: 0, round_contribution: 0, contribution_round: 0,
+            });
+        });
+        let count = |u: Principal| LOTTERY_TICKETS.with(|m| m.borrow().get(&u).map(|e| e.count).unwrap_or(0));
+        let total = || lottery_state().total_tickets;
+
+        auto_grant_daily_stake_tickets();
+        assert_eq!(count(alice), 5 + 113, "alice: stake 5 + bond 113");
+        let contrib = BONDS.with(|m| m.borrow().get(&70).unwrap().round_contribution);
+        assert_eq!(contrib, 113, "bond recorded its 113-ticket contribution this round");
+        let total_before = total();
+
+        // Clawback removes exactly the bond's contribution from the seller.
+        clawback_bond_tickets(70, alice);
+        assert_eq!(count(alice), 5, "bond's 113 clawed back — alice keeps only her stake tickets");
+        assert_eq!(total(), total_before - 113, "global tally drops by the same amount");
+        assert_eq!(BONDS.with(|m| m.borrow().get(&70).unwrap().round_contribution), 0,
+            "bond counter reset for the next owner");
+
+        // A stale-round contribution is a no-op (a win already zeroed everyone).
+        clawback_bond_tickets(70, alice);
+        assert_eq!(count(alice), 5, "second clawback removes nothing");
+        clear_vouchers();
+        reset_stakes_and_tickets();
+    }
+
+    // FIX 2(c): buying a bond grants no tickets immediately — the buyer simply
+    // earns from the next daily grant.
+    #[tokio::test]
+    async fn test_buying_a_bond_grants_no_immediate_tickets() {
+        enable_vouchers();
+        clear_vouchers();
+        reset_stakes_and_tickets();
+        let self_id = get_canister_id();
+        seed_stake(StakeTier::OneYear, alice(), 200_000_000);
+        let mut pool = tier_pool(StakeTier::OneYear);
+        pool.total_staked_e8s = 200_000_000;
+        set_tier_pool(StakeTier::OneYear, pool);
+        set_mock_caller(alice());
+        set_mock_ledger_transfer(Ok(1));
+        let id = wrap_stake_bond(200_000_000, StakeTier::OneYear).await.unwrap();
+        list_bond(id, 100_000_000).unwrap();
+
+        // Fund bob's escrow and buy.
+        let escrow_sub = derive_subaccount(&bob(), VOUCHER_SALE_TAG ^ id);
+        acct_reset();
+        acct_set(self_id, Some(escrow_sub), 100_000_000 + 4 * ICP_FEE_E8S);
+        reset_stakes_and_tickets();
+        set_mock_caller(bob());
+        buy_bond(id).await.unwrap();
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0)),
+            0,
+            "purchase grants no tickets immediately"
+        );
+
+        // The bond now belongs to bob (unstamped), so the next daily grant pays.
+        enable_lottery();
+        auto_grant_daily_stake_tickets();
+        assert!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0)) > 0,
+            "buyer earns on the next daily grant"
+        );
+        clear_vouchers();
+        reset_stakes_and_tickets();
     }
 
     #[tokio::test]
@@ -26659,6 +27121,15 @@ mod tests {
         set_mock_time(Some(1_700_000_000_000_000_000));
     }
 
+    // Reset stakes + lottery tickets WITHOUT touching BONDS (StableBTreeMap
+    // has no in-place clear — it consumes self). Safe to call mid-test.
+    fn reset_stakes_and_tickets() {
+        let stakes: Vec<StakeKey> = STAKES.with(|m| m.borrow().iter().map(|e| e.key().clone()).collect());
+        STAKES.with(|m| { let mut m = m.borrow_mut(); for k in &stakes { m.remove(k); } });
+        let tickets: Vec<Principal> = LOTTERY_TICKETS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
+        LOTTERY_TICKETS.with(|m| { let mut m = m.borrow_mut(); for p2 in &tickets { m.remove(p2); } });
+    }
+
     fn clear_vouchers() {
         let ids: Vec<u64> = BONDS.with(|m| m.borrow().iter().map(|e| *e.key()).collect());
         BONDS.with(|m| { let mut m = m.borrow_mut(); for id in &ids { m.remove(id); } });
@@ -26835,20 +27306,15 @@ mod tests {
         set_mock_caller(bob());
         let reclaimed = reclaim_escrow(EscrowKind::StakeVoucher, ExplorerToken::ICP, Some(id)).await.unwrap();
         assert_eq!(reclaimed, 55_000 - ICP_FEE_E8S, "leftover escrow minus the reclaim fee");
-// Owner rule: purchase grants THIS voucher's daily rate INSTANTLY into
-        // the current round (source voucher_purchase), once per voucher per day.
-        {
-            let vid_now = BONDS.with(|m| m.borrow().iter().find(|e| e.value().owner == bob()).map(|e| *e.key()));
-            if let Some(vid_now) = vid_now {
-                let v = BONDS.with(|m| m.borrow().get(&vid_now)).unwrap();
-                let rate = voucher_daily_rate(&v);
-                let count = LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0));
-                assert!(count >= rate, "instant grant landed: {} >= {}", count, rate);
-                assert_eq!(v.last_purchase_grant_day, current_time() / 1_000_000_000 / SECS_PER_DAY,
-                    "wash guard stamped");
-            }
-        }
-        
+        // No instant purchase-grant (bond-flip farming fix): buying the bond
+        // must NOT credit any tickets — the buyer earns from the next daily
+        // grant instead, and the bond carries no purchase stamp.
+        assert_eq!(
+            LOTTERY_TICKETS.with(|m| m.borrow().get(&bob()).map(|e| e.count).unwrap_or(0)),
+            0,
+            "purchase grants nothing immediately"
+        );
+
         clear_vouchers();
     }
 
@@ -27215,6 +27681,9 @@ mod tests {
             last_purchase_grant_day: 0,
             listed_at: None,
             age_decay_ns: 0,
+            last_grant_day: 0,
+            round_contribution: 0,
+            contribution_round: 0,
         });
         });
         auto_grant_daily_stake_tickets();

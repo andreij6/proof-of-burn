@@ -1168,7 +1168,6 @@ service : (InitPayload) -> {
   // same guards as the on-visit claim (per_day==0 skip, admin-excluded skip,
   // stale-round reset, last_claim_day idempotence), so the two paths can
   // coexist and never double-grant.
-  auto_grant_daily_stake_tickets : () -> ();
   // Wrap `amount_e8s` of the caller's `tier` stake into a Backed voucher NFT.
   // The STAKES row is debited (the ICP itself stays in the pooled neuron; the
   // registry row now carries the claim). Whole-ICP amounts only, so a later
@@ -1180,7 +1179,6 @@ service : (InitPayload) -> {
   // remainder stays a plain row. Best-effort: if the NFT canister is not
   // configured or the mint fails, the plain stake stands untouched (mainnet-
   // safe until voucher_nft is wired).
-  auto_issue_voucher : (principal, StakeTier) -> (opt nat64);
   // Owner-initiated burn of a course NFT, with backend marketplace cleanup
   // (PB-3xx). Destructive + a security boundary, so:
   // 1. Reject anonymous.

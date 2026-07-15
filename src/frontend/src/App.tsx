@@ -43,6 +43,7 @@ import Admin from "./Admin";
 import Landing from "./Landing";
 // Shared design-system primitives live in ui.tsx.
 import { Icon, Eyebrow, Chip, Btn, LiveDot, MoreInfo, fmtICP, DiscordMark, DISCORD_INVITE, DevControlsContext, PageHelpContext, PageHelpMobile, BrandMark, OpenChatMark, OPENCHAT_URL } from './ui';
+import { useTxFlow, TxModal } from './TxModal';
 import { WALLET_TOKEN_META, parseTokenUnits, thresholdProgress, usdToTokenUnits, unitsToDecimalString, commitInsufficient, parseTokenAmount, fmtTokenAmount } from "./tokens";
 import { useErrorImpression, trackScreen, trackConversion, setUserProps, setAnalyticsUser, icp } from "./analytics";
 import { FriendlyError, backendErr, toFriendly, friendlyFromRaw, logRealError } from './errors';
@@ -531,6 +532,11 @@ export default function App() {
   const [txStep, setTxStep] = useState<string>("");
   const [txError, setTxError] = useState<string | null>(null);
   const [txSuccess, setTxSuccess] = useState(false);
+  // Staged transaction modal that takes over AFTER the confirm dialog: it shows
+  // each on-chain stage updating live (escrow → ledger → finalize) and, on
+  // failure, the plain-English reason. The confirm dialog above stays purely an
+  // input/validation step.
+  const commitTx = useTxFlow();
   const [confirmProposalId, setConfirmProposalId] = useState<bigint | null>(null);
   const [confirmAmount, setConfirmAmount] = useState<string>(""); // token amount (derived from USD)
   const [confirmUsd, setConfirmUsd] = useState<string>("");       // dollar amount (the input)
@@ -553,6 +559,9 @@ export default function App() {
   const [addMoreTxError, setAddMoreTxError] = useState<string | null>(null);
   const [addMoreTxSuccess, setAddMoreTxSuccess] = useState(false);
   const [isAddMoreTransacting, setIsAddMoreTransacting] = useState(false);
+  // Staged transaction modal for the add-more (top-up) flow — same role as
+  // commitTx above, driven independently.
+  const addMoreTx = useTxFlow();
 
   // System health state
   const [cycleBalance, setCycleBalance] = useState<bigint | null>(null);
@@ -1539,14 +1548,21 @@ export default function App() {
     const requiredDeposit = amountE8s;
     setIsTransacting(true);
     setTxError(null);
-    
+
+    // Hand off from the input dialog to the staged transaction modal, which
+    // shows each on-chain stage live from here on.
+    setIsConfirming(false);
+    commitTx.start(
+      ['Securing escrow', 'Transferring ICP', 'Finalizing commitment'],
+      { title: 'Registering your vote', detail: 'Deriving your secure escrow subaccount…' },
+    );
+
     try {
       // Step 1: Get deterministic escrow address
-      setTxStep("Deriving secure escrow subaccount...");
       const depositAccount = await actor.get_deposit_address(confirmProposalId);
-      
+
       // Step 2: Transfer funds using ledger canister actor
-      setTxStep("Step 1/2: Depositing ICP into escrow subaccount...");
+      commitTx.next('Depositing your ICP into the escrow subaccount…');
       const ledgerActor = createLedgerActor(ledgerCanisterId, {
         agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
       });
@@ -1575,7 +1591,7 @@ export default function App() {
       }
 
       // Step 3: Finalize commit on backend
-      setTxStep("Step 2/2: Finalizing commitment on-chain...");
+      commitTx.next('Finalizing your commitment on-chain…');
       const commitResult = await actor.commit(confirmProposalId, confirmStance, amountE8s);
 
       if (commitResult.__kind__ === "Err") {
@@ -1589,16 +1605,15 @@ export default function App() {
       }
 
       // Success!
-      setTxSuccess(true);
-      setTxStep("Commitment finalized successfully!");
+      commitTx.succeed('Commitment registered — your ICP is locked in escrow for this proposal. If it reaches threshold and the neuron votes, it\'s spent; if not, it\'s returned in full.');
       // Land on the Committed tab so the user sees what they just voted on.
       setActiveTab('committed');
 
       // Refresh data
       await refreshAllData();
-      
+
     } catch (err: any) {
-      setTxError(toFriendly(err, 'vote:commit'));
+      commitTx.fail(toFriendly(err, 'vote:commit'));
     } finally {
       setIsTransacting(false);
     }
@@ -1635,13 +1650,19 @@ export default function App() {
     setIsAddMoreTransacting(true);
     setAddMoreTxError(null);
 
+    // Hand off from the input dialog to the staged transaction modal.
+    setIsAddingMore(false);
+    addMoreTx.start(
+      ['Checking your escrow', 'Funding escrow', 'Updating commitment'],
+      { title: 'Adding to your commitment', detail: 'Checking your escrow balance…' },
+    );
+
     try {
       // Step 1: escrow address + what's ALREADY deposited there. The escrow
       // holds exactly the committed ICP (zero-fee model), so we only deposit the
       // SHORTFALL needed to reach the new total. This also reclaims any ICP a
       // previously-failed top-up left stranded in escrow — in that case the
       // shortfall is 0 and we just reconcile the commitment on-chain.
-      setAddMoreTxStep("Checking your escrow balance...");
       const depositAccount = await actor.get_deposit_address(addMoreProposalId);
       const ledgerActor = createLedgerActor(ledgerCanisterId, {
         agentOptions: { host, identity, rootKey: env?.IC_ROOT_KEY }
@@ -1661,7 +1682,7 @@ export default function App() {
         if (need > holdings) {
           throw new Error(`Insufficient wallet balance — need at least ${fmtICP(need)} ICP (top-up + deposit fee).`);
         }
-        setAddMoreTxStep("Step 1/2: Depositing additional ICP into escrow...");
+        addMoreTx.next('Depositing additional ICP into escrow…');
         const transferResult = await ledgerActor.icrc1_transfer({
           to: {
             owner: depositAccount.owner,
@@ -1685,11 +1706,11 @@ export default function App() {
           throw new FriendlyError(`The ledger transfer didn't go through — ${detail}.`, err, 'vote:commit-transfer');
         }
       } else {
-        setAddMoreTxStep("Step 1/2: Reclaiming ICP already in escrow...");
+        addMoreTx.next('Reclaiming ICP already in escrow…');
       }
 
       // Step 3: Finalize on backend
-      setAddMoreTxStep("Step 2/2: Updating commitment on-chain...");
+      addMoreTx.next('Updating your commitment on-chain…');
       const result = await actor.add_to_commitment(addMoreProposalId, amountE8s);
 
       if (result.__kind__ === "Err") {
@@ -1700,12 +1721,11 @@ export default function App() {
         throw backendErr(code, 'vote:add-more');
       }
 
-      setAddMoreTxSuccess(true);
-      setAddMoreTxStep("Additional commitment registered!");
+      addMoreTx.succeed('Top-up registered — your additional ICP is locked in escrow under the same terms as your existing commitment.');
       await refreshAllData();
 
     } catch (err: any) {
-      setAddMoreTxError(toFriendly(err, 'vote:add-more'));
+      addMoreTx.fail(toFriendly(err, 'vote:add-more'));
     } finally {
       setIsAddMoreTransacting(false);
     }
@@ -4431,6 +4451,10 @@ export default function App() {
         </div>
         );
       })()}
+
+      {/* ── Staged transaction modals (take over after the confirm dialogs) ── */}
+      {commitTx.isOpen && <TxModal flow={commitTx} onClose={commitTx.reset} />}
+      {addMoreTx.isOpen && <TxModal flow={addMoreTx} onClose={addMoreTx.reset} />}
 
       {/* ── More Details Dialog ── */}
       {isDetailsOpen && (

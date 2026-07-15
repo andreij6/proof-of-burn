@@ -346,8 +346,8 @@ export default function Lottery({ actor, identity, principal, host, rootKey, led
             </Btn>
           ) : (
             <>
-              <Btn variant="primary" onClick={onGoStaking} style={{ borderRadius: 999, padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
-                <Icon name="zap" size={15} stroke="var(--char-950)" /> Stake more · earn more tickets
+              <Btn variant="primary" onClick={onGoStaking} style={{ padding: '14px 34px', fontSize: 16, fontWeight: 700 }}>
+                <Icon name="zap" size={15} stroke="var(--char-950)" /> Stake more
               </Btn>
               <button onClick={shareDrawing} style={{
                 background: 'transparent', border: 'none', cursor: 'pointer',

@@ -14,6 +14,7 @@ import { TIER_META, etaLabel } from "./Staking";
 import { VouchersBody } from "./Vouchers";
 import { TICKET_SOURCE_LABELS } from "./Lottery";
 import { backendErr, toFriendly } from './errors';
+import { useTxFlow, TxModal } from './TxModal';
 
 // ==========================================
 // Profile — your wallet (token accounts + on/off-ramps) and the full
@@ -339,6 +340,9 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Staged-transaction modal — drives the multi-step Withdraw flows (on-IC
+  // ICRC transfer and the native BTC off-ramp) so each stage shows live.
+  const tx = useTxFlow();
   useErrorImpression(error, 'payouts');
   const [balances, setBalances] = useState<Record<string, bigint | null>>({});
   const [fees, setFees] = useState<Record<string, bigint>>({});
@@ -444,20 +448,28 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
 
   const withdrawIc = () => run('w-ic', async () => {
     const meta = WALLET_TOKENS_META.find(t => t.token === wToken)!;
+    // Pre-validation stays inline guidance (never a modal stage).
     const amount = parseUnits(wAmount, meta.decimals);
     if (!amount || amount <= 0n) { setError(`Enter a valid ${meta.label} amount.`); return null; }
     let dest: Principal;
     try { dest = Principal.fromText(wDest.trim()); }
     catch { setError('Destination is not a valid principal.'); return null; }
-    const map = await loadLedgers();
-    const l = createLedgerActor(map[wToken], { agentOptions: agentOpts });
-    const res = await l.icrc1_transfer({ to: { owner: dest, subaccount: undefined }, amount });
-    if (res.__kind__ === 'Err') {
-      throw backendErr(res.Err, 'wallet:withdraw');
+    tx.start(['Sending', 'Confirming'], { title: `Withdrawing ${meta.label}` });
+    try {
+      const map = await loadLedgers();
+      const l = createLedgerActor(map[wToken], { agentOptions: agentOpts });
+      const res = await l.icrc1_transfer({ to: { owner: dest, subaccount: undefined }, amount });
+      if (res.__kind__ === 'Err') {
+        throw backendErr(res.Err, 'wallet:withdraw');
+      }
+      tx.next('Confirming the transfer on-chain…');
+      setWAmount('');
+      await refreshBalances();
+      tx.succeed(`${fmtUnits(amount, meta.decimals)} ${meta.label} sent to ${formatPrincipal(dest)}.`);
+    } catch (e) {
+      tx.fail(toFriendly(e, 'wallet:withdraw'));
     }
-    setWAmount('');
-    await refreshBalances();
-    return `${fmtUnits(amount, meta.decimals)} ${meta.label} sent to ${formatPrincipal(dest)}.`;
+    return null;
   });
 
   // ── native: BTC ──
@@ -491,23 +503,32 @@ function WalletSection({ actor, principal, identity, host, rootKey, ledgerCanist
   // ── native: BTC withdrawal (the only native off-ramp; ETH/USDC/USDT leave
   //    as their ck twins via the on-IC withdraw above) ──
   const withdrawBtc = () => run('n-withdraw', async () => {
-    const map = await loadLedgers();
+    // Pre-validation stays inline guidance (never a modal stage).
     const amount = parseUnits(nAmount, 8);
     if (!amount || amount <= 0n) { setError('Enter a valid BTC amount.'); return null; }
-    const approver = makeApprover(map.CkBTC, agentOpts);
-    await approver.icrc2_approve({
-      from_subaccount: [], spender: { owner: Principal.fromText(CKBTC_MINTER_ID), subaccount: [] },
-      amount: amount + 1000n, expected_allowance: [], expires_at: [], fee: [], memo: [], created_at_time: [],
-    });
-    const minter = makeCkbtcMinter(agentOpts);
-    const res = await minter.retrieve_btc_with_approval({ address: nDest.trim(), amount, from_subaccount: [] });
-    if ('Err' in res) throw backendErr(res.Err, 'wallet:btc-withdraw');
-    await refreshBalances();
-    return `BTC withdrawal queued (block ${res.Ok.block_index}) — the minter batches retrievals to Bitcoin.`;
+    tx.start(['Approving', 'Requesting Bitcoin retrieval'], { title: 'Withdrawing to Bitcoin' });
+    try {
+      const map = await loadLedgers();
+      const approver = makeApprover(map.CkBTC, agentOpts);
+      await approver.icrc2_approve({
+        from_subaccount: [], spender: { owner: Principal.fromText(CKBTC_MINTER_ID), subaccount: [] },
+        amount: amount + 1000n, expected_allowance: [], expires_at: [], fee: [], memo: [], created_at_time: [],
+      });
+      tx.next('Asking the minter to retrieve BTC…');
+      const minter = makeCkbtcMinter(agentOpts);
+      const res = await minter.retrieve_btc_with_approval({ address: nDest.trim(), amount, from_subaccount: [] });
+      if ('Err' in res) throw backendErr(res.Err, 'wallet:btc-withdraw');
+      await refreshBalances();
+      tx.succeed(`BTC withdrawal queued (block ${res.Ok.block_index}) — the minter batches retrievals to Bitcoin.`);
+    } catch (e) {
+      tx.fail(toFriendly(e, 'wallet:withdraw'));
+    }
+    return null;
   });
 
   return (
     <>
+      {tx.isOpen && <TxModal flow={tx} onClose={tx.reset} />}
       {(error || notice) && (
         <div className="row" style={{
           gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,

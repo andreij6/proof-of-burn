@@ -13,6 +13,7 @@ import { courseIdFromScreen, spectateIdFromScreen, playIdFromScreen } from "./ar
 import MiniGolf from "./arcade/MiniGolf";
 import type { CourseCard } from "./bindings/backend";
 import { FriendlyError, backendErr, toFriendly } from './errors';
+import { useTxFlow, TxModal } from './TxModal';
 import {
   HAIR_COLORS, HAIR_NAMES, SKIN_COLORS, SKIN_NAMES, OUTFIT_COLORS, OUTFIT_NAMES,
   DEFAULT_CHARACTER, type CharacterLook,
@@ -178,9 +179,10 @@ export default function MiniGolfPage({ actor, identity, host, rootKey, ledgerCan
   const [payQuote, setPayQuote] = useState<ExplorerQuote | null>(null);
   const [isQuoting, setIsQuoting] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
-  const [editorStep, setEditorStep] = useState('');
   useErrorImpression(editorError, 'course_editor');
   const [editorBusy, setEditorBusy] = useState(false);
+  // Staged transaction modal for the customize (pay → save) flow.
+  const tx = useTxFlow();
 
   // Live $1 quote in the chosen token while the editor is open.
   useEffect(() => {
@@ -228,7 +230,6 @@ export default function MiniGolfPage({ actor, identity, host, rootKey, ledgerCan
   const openEditor = () => {
     setDraft(myLook);
     setEditorError(null);
-    setEditorStep('');
     setIsEditorOpen(true);
   };
 
@@ -249,8 +250,11 @@ export default function MiniGolfPage({ actor, identity, host, rootKey, ledgerCan
     const fee = payTokenFee(payToken, expInfo);
     setEditorBusy(true);
     setEditorError(null);
+    tx.start(['Paying', 'Saving your look'], {
+      title: 'Customizing your golfer',
+      detail: `Paying ${fmtTokenAmount(payQuote.amount, meta.decimals)} ${meta.label}…`,
+    });
     try {
-      setEditorStep('Step 1/2: Paying 0.5 ICP...');
       const acct = await actor.get_arcade_deposit_address();
       const ledgerActor = createLedgerActor(ledger, {
         agentOptions: { host, identity, rootKey }
@@ -272,13 +276,14 @@ export default function MiniGolfPage({ actor, identity, host, rootKey, ledgerCan
         }
         throw backendErr(err, 'minigolf:customize-pay');
       }
-      setEditorStep("Step 2/2: Saving your look on-chain...");
+      tx.next('Saving your look on-chain…');
       const res = await actor.customize_character(draft.hair, draft.skin, draft.outfit, payToken);
       if (res.__kind__ === "Err") throw backendErr(res.Err, 'minigolf:customize');
+      tx.succeed('Your new look is live.');
       setIsEditorOpen(false);
       await refreshAll();
     } catch (err: any) {
-      setEditorError(toFriendly(err, 'minigolf:customize'));
+      tx.fail(toFriendly(err, 'minigolf:customize'));
     } finally {
       setEditorBusy(false);
     }
@@ -481,7 +486,6 @@ export default function MiniGolfPage({ actor, identity, host, rootKey, ledgerCan
                   : 'Preparing your quote…'}
               </span>
             </div>
-            {editorStep && !editorError && <span style={{ fontSize: 12, color: 'var(--fg-3)' }}>{editorStep}</span>}
             {editorError && <span style={{ fontSize: 12, color: 'var(--ember)' }}>{editorError}</span>}
             <Btn variant="primary" disabled={editorBusy || !payQuote} onClick={executeCustomize}>
               {editorBusy ? 'Working...'
@@ -491,6 +495,9 @@ export default function MiniGolfPage({ actor, identity, host, rootKey, ledgerCan
           </div>
         </div>
       )}
+
+      {/* Staged customize (pay → save) transaction modal. */}
+      {tx.isOpen && <TxModal flow={tx} onClose={tx.reset} />}
     </div>
   );
 }

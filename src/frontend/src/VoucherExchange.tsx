@@ -41,6 +41,7 @@ export default function VoucherExchange(props: VoucherExchangeProps) {
         <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13, lineHeight: 1.55, color: 'var(--fg-1)' }}>
           <li><b>List from your bonds</b> right here or on the Stake page — you set the ask in ICP.</li>
           <li><b>Listed bonds pause ticket earning</b> until sold or delisted — and after a 3-day grace the age bonus slowly decays (at the same rate it grows), so price to sell rather than to sit.</li>
+          <li><b>Tickets leave with the bond:</b> the tickets it earned you this round are removed from your entry when it sells or transfers.</li>
           <li>A small marketplace fee comes out of the sale.</li>
         </ul>
       </div>

@@ -87,8 +87,11 @@ sources), list_recent_winners() (winners feed).
 Staking AUTO-ISSUES a Stake Bond NFT — the bond IS the stake. The
 holder redeems via redeem_stake_bond (100% after dissolve), sells it on
 the marketplace, or takes the instant 15%-discount buyback. Tickets always
-follow the bond's current owner; buying a bond grants ITS daily
-tickets to the buyer instantly (once per bond per UTC day).
+follow the bond's current owner: the buyer earns the bond's tickets from
+the NEXT daily grant (no instant grant), and per-bond idempotency means a
+bond earns at most once per UTC day no matter how many accounts it flips
+through. On a SALE or TRANSFER, the tickets that bond earned the seller this
+round are clawed back from the seller — the NFT's earnings leave with it.
 AGE BONUS: a Backed bond's daily tickets grow with the bond's age — +1% at
 mint rising smoothly to +25% at 10 years (plateau). The age belongs to the
 NFT and transfers with it (vintage bonds are worth more). While LISTED the

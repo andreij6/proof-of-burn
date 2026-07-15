@@ -1825,6 +1825,7 @@ enum StakeTier {
     SixMonths,
     OneYear,
     TwoYears,
+    TwoWeeks,
 }
 
 #[derive(CandidType, Deserialize, Debug)]

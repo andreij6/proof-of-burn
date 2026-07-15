@@ -6,6 +6,7 @@ import { createActor as createLedgerActor } from "./bindings/ledger";
 import { Icon, Eyebrow, Chip, Btn, LiveDot, Skeleton, MoreInfo, fmtICP, usePageDevControls } from "./ui";
 import { useErrorImpression, trackConversion, icp } from "./analytics";
 import { backendErr, toFriendly } from './errors';
+import { useTxFlow, TxModal } from './TxModal';
 
 // ==========================================
 // Lossless Staking — pooled staking across three fixed-term NNS neurons
@@ -107,6 +108,11 @@ export default function Staking({
   const [notice, setNotice] = useState<string | null>(null);
   useErrorImpression(error, 'staking');
 
+  // Staged-transaction modal — drives the stake / restake / convert flows so
+  // the user watches each ledger + backend step land live (and gets a
+  // plain-English reason on failure). Pre-submit validation stays inline.
+  const tx = useTxFlow();
+
   const refresh = async () => {
     if (!actor) return;
     try {
@@ -153,37 +159,50 @@ export default function Staking({
     }
   };
 
-  const handleStake = () => run('stake', async () => {
+  const handleStake = async () => {
+    if (!actor || busy) return;
+    // Pre-submit guidance (not a transaction stage) — validate before we start.
     const amount = parseIcp(stakeInput);
     if (!amount || amount < minStakeE8s) {
       setError(`Minimum ${firstStake ? 'first ' : ''}stake is ${fmtICP(minStakeE8s)} ICP${firstStake ? ` (creates the ${termLabel} pool neuron)` : ''}.`);
       return;
     }
-    // Zero-loss: deposit exactly the stake amount — the treasury covers
-    // every transfer fee in the cycle.
-    const ledger = createLedgerActor(ledgerCanisterId, {
-      agentOptions: { host, identity, rootKey },
-    });
-    const depositAccount = await actor.get_stake_deposit_address();
-    const xfer = await ledger.icrc1_transfer({
-      to: { owner: depositAccount.owner, subaccount: depositAccount.subaccount },
-      amount,
-    });
-    if (xfer.__kind__ === "Err") {
-      setError(toFriendly(backendErr(xfer.Err, 'staking:deposit'), 'staking'));
-      return;
+    setBusy('stake');
+    setError(null);
+    setNotice(null);
+    tx.start(['Transferring your ICP', 'Registering your stake'], { title: 'Staking your ICP' });
+    try {
+      // Zero-loss: deposit exactly the stake amount — the treasury covers
+      // every transfer fee in the cycle.
+      const ledger = createLedgerActor(ledgerCanisterId, {
+        agentOptions: { host, identity, rootKey },
+      });
+      const depositAccount = await actor.get_stake_deposit_address();
+      const xfer = await ledger.icrc1_transfer({
+        to: { owner: depositAccount.owner, subaccount: depositAccount.subaccount },
+        amount,
+      });
+      if (xfer.__kind__ === "Err") {
+        tx.fail(toFriendly(backendErr(xfer.Err, 'staking:deposit'), 'staking'));
+        return;
+      }
+      tx.next('Registering your stake…');
+      const res = await actor.stake(amount, tier);
+      if (res.__kind__ === "Err") {
+        tx.fail(toFriendly(backendErr(res.Err, 'staking:stake'), 'staking'));
+        return;
+      }
+      setStakeInput('');
+      trackConversion("stake", { value: icp(amount), currency: "ICP", tier: TIER_META[tier].short });
+      tx.succeed(`Staked ${fmtICP(amount)} ICP for ${termLabel} — ${TIER_META[tier].tickets} lottery tickets per ICP per day are live.`);
+      await refresh();
+      onActivity();
+    } catch (err: any) {
+      tx.fail(toFriendly(err, 'staking'));
+    } finally {
+      setBusy(null);
     }
-    const res = await actor.stake(amount, tier);
-    if (res.__kind__ === "Err") {
-      setError(toFriendly(backendErr(res.Err, 'staking:stake'), 'staking'));
-      return;
-    }
-    setStakeInput('');
-    trackConversion("stake", { value: icp(amount), currency: "ICP", tier: TIER_META[tier].short });
-    setNotice(`Staked ${fmtICP(amount)} ICP for ${termLabel} — ${TIER_META[tier].tickets} lottery tickets per ICP per day are live.`);
-    await refresh();
-    onActivity();
-  });
+  };
 
   // Booster stake: a permanent 2-year neuron — deposit, then early_adopter_stake.
   // No unstake exists; the reward is 40 lottery tickets/day per ICP.
@@ -223,15 +242,27 @@ export default function Staking({
   // Legacy plain stakes (pre-voucher, or a sub-ICP remainder) → wrap the whole
   // whole-ICP part into a voucher so everything is voucher-managed. Exits are
   // now voucher-native (redeem/sell/buyback on the voucher below).
-  const handleConvert = (t: StakeTier, amountE8s: bigint) => run(`convert-${t}`, async () => {
+  const handleConvert = async (t: StakeTier, amountE8s: bigint) => {
+    if (!actor || busy) return;
+    // Pre-submit guidance (not a transaction stage).
     const whole = (amountE8s / E8S) * E8S;
     if (whole < E8S) { setError('Nothing to convert — under 1 ICP folds into your next stake.'); return; }
-    const res = await actor.wrap_stake_bond(whole, t);
-    if (res.__kind__ === 'Err') { setError(toFriendly(backendErr(res.Err, 'staking:convert'), 'staking')); return; }
-    setNotice(`Converted ${fmtICP(whole)} ICP of ${TIER_META[t].label} stake into a bond — manage it below.`);
-    await refresh();
-    onActivity();
-  });
+    setBusy(`convert-${t}`);
+    setError(null);
+    setNotice(null);
+    tx.start(['Wrapping your stake into a bond'], { title: 'Converting to a bond' });
+    try {
+      const res = await actor.wrap_stake_bond(whole, t);
+      if (res.__kind__ === 'Err') { tx.fail(toFriendly(backendErr(res.Err, 'staking:convert'), 'staking')); return; }
+      tx.succeed(`Converted ${fmtICP(whole)} ICP of ${TIER_META[t].label} stake into a bond — manage it below.`);
+      await refresh();
+      onActivity();
+    } catch (err: any) {
+      tx.fail(toFriendly(err, 'staking'));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const handleDevSweep = () => run('sweep', async () => {
     const res = await actor.dev_run_staking_sweep();
@@ -242,14 +273,25 @@ export default function Staking({
 
   // Restake dialog: pick which tier pool to merge a dissolving neuron into.
   const [restakeTarget, setRestakeTarget] = useState<bigint | null>(null); // unstake id
-  const handleRestake = (id: bigint, t: StakeTier) => run(`merge-${id}`, async () => {
-    const res = await actor.merge_unstake(id, t);
-    if (res.__kind__ === "Err") { setError(toFriendly(backendErr(res.Err, 'staking:restake'), 'staking')); setRestakeTarget(null); return; }
-    setRestakeTarget(null);
-    setNotice(`Restaked into the ${TIER_META[t].label} pool — your stake there is earning lottery tickets again (0.0001 ICP merge fee).`);
-    await refresh();
-    onActivity();
-  });
+  const handleRestake = async (id: bigint, t: StakeTier) => {
+    if (!actor || busy) return;
+    setBusy(`merge-${id}`);
+    setError(null);
+    setNotice(null);
+    setRestakeTarget(null); // close the tier-picker dialog; the tx modal takes over
+    tx.start(['Restaking into the pool'], { title: 'Restaking your ICP' });
+    try {
+      const res = await actor.merge_unstake(id, t);
+      if (res.__kind__ === "Err") { tx.fail(toFriendly(backendErr(res.Err, 'staking:restake'), 'staking')); return; }
+      tx.succeed(`Restaked into the ${TIER_META[t].label} pool — your stake there is earning lottery tickets again (0.0001 ICP merge fee).`);
+      await refresh();
+      onActivity();
+    } catch (err: any) {
+      tx.fail(toFriendly(err, 'staking'));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const handleDevFastForward = (id: bigint) => run(`ff-${id}`, async () => {
     const res = await actor.dev_fast_forward_dissolve(id);
@@ -344,6 +386,7 @@ export default function Staking({
 
   return (
     <div className="idea-board-container">
+      {tx.isOpen && <TxModal flow={tx} onClose={tx.reset} />}
       {(error || notice) && (
         <div className="row" style={{
           gap: 8, padding: '10px 12px', borderRadius: 8, fontSize: 12.5,
