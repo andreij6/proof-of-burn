@@ -885,6 +885,9 @@ fn post_upgrade() {
         // Removed 2026-07-06 (owner): whole features deleted outright.
         "idea_board", "discussions", "crash", "cycles_faucet",
         "arcade", "arcade_fieldgoal", "dashboard", "mission_statement", "fast_lane",
+        // Retired 2026-07-16 (owner): the Booster/Early-Adopters yield now
+        // always routes to the pot; the neuron is managed from Admin → Neurons.
+        "early_adopters",
     ] {
         FEATURE_FLAGS.with(|m| { m.borrow_mut().remove(&retired.to_string()); });
     }
@@ -5327,8 +5330,11 @@ pub const FLAG_NAV_GOVERNANCE: &str = "nav_governance";
 /// NFTs, ICP marketplace, 15% house buyback, promo claim campaigns. Gates
 /// wrap/list/buy/claim ONLY — unwrap, cancel and buyback are exits and are
 /// NEVER flag-gated (custody house rule).
-const KNOWN_FEATURE_FLAGS: [&str; 9] = [
-    FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY, FLAG_EARLY_ADOPTERS,
+// early_adopters was retired as a toggle (owner 2026-07-16): the Booster
+// neuron's yield now ALWAYS routes to the prize pool (no flag gate), and the
+// neuron is managed from the Admin → Neurons page, not the Stake page.
+const KNOWN_FEATURE_FLAGS: [&str; 8] = [
+    FLAG_LOSSLESS_VOTING, FLAG_LOSSLESS_LOTTERY,
     FLAG_ARCADE_MINIGOLF, FLAG_ARCADE_LUCKPROOF, FLAG_ARCADE_SKYDIVE, FLAG_ARCADE_BULLRUN,
     FLAG_ICPSWAP_LP, FLAG_NAV_GOVERNANCE,
     ];
@@ -12999,7 +13005,9 @@ fn get_early_adopter_info() -> EarlyAdopterInfo {
     });
     let config = CONFIG.with(|c| c.borrow().get().clone());
     EarlyAdopterInfo {
-        enabled: feature_visible(FLAG_EARLY_ADOPTERS, get_caller()),
+        // Always on (owner 2026-07-16): the Booster mechanism no longer sits
+        // behind a flag — its yield always routes to the pot.
+        enabled: true,
         membership_closed: state.membership_closed,
         close_threshold_e8s: EARLY_ADOPTER_CLOSE_YIELD_E8S,
         restake_threshold_e8s: EARLY_ADOPTER_RESTAKE_BELOW_E8S,
@@ -13444,9 +13452,8 @@ async fn early_adopter_run_settlement(now: u64) -> Result<(), String> {
 /// Sweep hook: settle once whenever a new 30-day period has started (no-op
 /// until the first early adopter exists).
 async fn early_adopter_settlement_check() {
-    if !feature_enabled(FLAG_EARLY_ADOPTERS) {
-        return;
-    }
+    // No flag gate (owner 2026-07-16): the Booster neuron's yield always
+    // routes to the pot. Still a no-op until the program has a member.
     let has_members = EARLY_ADOPTERS.with(|m| !m.borrow().is_empty());
     if !has_members {
         return;
@@ -13477,9 +13484,8 @@ async fn early_adopter_settlement_check() {
 /// meaningful. Called at every scheduled draw SLOT — gates or no gates — and
 /// by the admin force endpoint.
 async fn early_adopter_route_yield_now() {
-    if !feature_enabled(FLAG_EARLY_ADOPTERS) {
-        return;
-    }
+    // No flag gate (owner 2026-07-16): route the Booster inbox to the pot
+    // on every draw slot, always.
     let config = CONFIG.with(|c| c.borrow().get().clone());
     let inbox = LedgerAccount { owner: get_canister_id(), subaccount: Some(EARLY_ADOPTER_YIELD_SUBACCOUNT) };
     let balance = call_ledger_balance(config.ledger_canister_id, inbox).await.unwrap_or(0);
@@ -19719,25 +19725,30 @@ mod tests {
 
     #[test]
     fn test_feature_flag_default_and_override() {
-        // dapp_explorer defaults ON; unknown flags default OFF.
-        assert!(feature_enabled(FLAG_EARLY_ADOPTERS));
+        // A shipped, known flag defaults ON; unknown flags default OFF.
+        assert!(feature_enabled(FLAG_LOSSLESS_LOTTERY));
         assert!(!feature_enabled("nonexistent_future_feature"));
+        // early_adopters was RETIRED as a toggle (2026-07-16) — no longer a
+        // known flag, so it defaults OFF and never surfaces as an admin toggle.
+        assert!(!KNOWN_FEATURE_FLAGS.contains(&FLAG_EARLY_ADOPTERS));
+        assert!(!feature_default(FLAG_EARLY_ADOPTERS));
 
         // Admin override wins over the default.
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_EARLY_ADOPTERS.to_string(), 0u8);
+            m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 0u8);
         });
-        assert!(!feature_enabled(FLAG_EARLY_ADOPTERS));
+        assert!(!feature_enabled(FLAG_LOSSLESS_LOTTERY));
 
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().insert(FLAG_EARLY_ADOPTERS.to_string(), 1u8);
+            m.borrow_mut().insert(FLAG_LOSSLESS_LOTTERY.to_string(), 1u8);
         });
-        assert!(feature_enabled(FLAG_EARLY_ADOPTERS));
+        assert!(feature_enabled(FLAG_LOSSLESS_LOTTERY));
 
         // Retired flags are gone from the known list — they no longer surface
         // as admin toggles even if stale stable rows linger pre-purge.
         for retired in ["idea_board", "discussions", "crash", "cycles_faucet",
-                        "arcade", "arcade_fieldgoal", "dashboard", "mission_statement"] {
+                        "arcade", "arcade_fieldgoal", "dashboard", "mission_statement",
+                        "early_adopters"] {
             assert!(!KNOWN_FEATURE_FLAGS.contains(&retired), "{retired} must be retired");
             assert!(!feature_default(retired), "retired flags default OFF");
         }
@@ -19747,12 +19758,12 @@ mod tests {
             m.borrow_mut().insert("future_thing".to_string(), 1u8);
         });
         let flags = list_feature_flags();
-        assert_eq!(flags.iter().filter(|f| f.key == FLAG_EARLY_ADOPTERS).count(), 1);
+        assert_eq!(flags.iter().filter(|f| f.key == FLAG_LOSSLESS_LOTTERY).count(), 1);
         assert!(flags.iter().any(|f| f.key == "future_thing" && f.enabled));
 
         // cleanup for other tests on this thread
         FEATURE_FLAGS.with(|m| {
-            m.borrow_mut().remove(&FLAG_EARLY_ADOPTERS.to_string());
+            m.borrow_mut().remove(&FLAG_LOSSLESS_LOTTERY.to_string());
             m.borrow_mut().remove(&"future_thing".to_string());
         });
     }

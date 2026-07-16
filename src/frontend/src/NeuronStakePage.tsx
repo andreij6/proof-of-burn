@@ -20,7 +20,6 @@ interface NeuronStakePageProps {
   rootKey?: Uint8Array;
   ledgerCanisterId: string;
   isLocal: boolean;
-  boostersEnabled: boolean;
   isAdmin: boolean;
   treasuryCanFront: boolean;
   onActivity: () => void;
@@ -30,7 +29,7 @@ interface NeuronStakePageProps {
 
 export default function NeuronStakePage({
   actor, identity, principal, host, rootKey, ledgerCanisterId,
-  isLocal, boostersEnabled, isAdmin, treasuryCanFront, onActivity, onGoExchange, onGoLiquidity,
+  isLocal, isAdmin, treasuryCanFront, onActivity, onGoExchange, onGoLiquidity,
 }: NeuronStakePageProps) {
   // Stake-page tabs (owner 2026-07-14): New = stake form + term pools;
   // Current = dissolving unstakes + the bonds you hold.
@@ -121,7 +120,6 @@ export default function NeuronStakePage({
           rootKey={rootKey}
           ledgerCanisterId={ledgerCanisterId}
           isLocal={isLocal}
-          boostersEnabled={boostersEnabled}
           isAdmin={isAdmin}
           treasuryCanFront={treasuryCanFront}
           onActivity={onActivity}
@@ -140,8 +138,7 @@ export default function NeuronStakePage({
             rootKey={rootKey}
             ledgerCanisterId={ledgerCanisterId}
             isLocal={isLocal}
-            boostersEnabled={boostersEnabled}
-            isAdmin={isAdmin}
+              isAdmin={isAdmin}
             treasuryCanFront={treasuryCanFront}
             onActivity={onActivity}
             view="current"

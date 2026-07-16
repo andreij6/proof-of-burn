@@ -961,6 +961,48 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             )}
           </Sec>
 
+          <Sec label="Booster / Perm neuron" right={ea === null ? <LiveDot size={8} color="var(--burn-ink)" /> : undefined}>
+            {ea && (
+              <div className="col" style={{ gap: 8, fontSize: 12.5 }}>
+                <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
+                  Permanent 2-year neuron (the former Early Adopters program). Its yield <b>always routes 70% to the prize pool / 30% treasury</b> — no feature flag, harvested hourly and routed on each draw slot. Managed here only; it is not shown on the Stake page.
+                </span>
+                <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  {ea.follows_primary_neuron
+                    ? <Chip tone="ok"><Icon name="checkCircle" size={11} /> Neuron ready · follows leader</Chip>
+                    : ea.neuron_id != null
+                      ? <Chip tone="pending"><LiveDot size={6} /> Configuring…</Chip>
+                      : <Chip tone="muted">No neuron yet</Chip>}
+                  <Chip tone="muted" style={{ height: 18, fontSize: 10.5 }}>{ea.membership_closed ? 'membership closed' : 'membership open'}</Chip>
+                </div>
+                <div className="col" style={{ gap: 5 }}>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Staked</span>
+                    <span className="mono">{fmtICP(ea.total_staked_e8s)} ICP</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Stakers</span>
+                    <span className="mono">{ea.early_adopter_count.toString()}</span>
+                  </div>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8, minWidth: 0 }}>
+                    <span style={{ color: 'var(--fg-3)', flexShrink: 0 }}>Neuron</span>
+                    {ea.neuron_id != null ? (
+                      <a className="mono" href={`https://dashboard.internetcomputer.org/neuron/${ea.neuron_id.toString()}`}
+                        target="_blank" rel="noreferrer"
+                        style={{ color: 'var(--sprout-ink)', overflowWrap: 'anywhere', textAlign: 'right', display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                        title="View this neuron on the NNS dashboard">
+                        #{ea.neuron_id.toString()} <Icon name="external" size={11} stroke="var(--sprout-ink)" />
+                      </a>
+                    ) : <span style={{ color: 'var(--fg-3)' }}>created on first allocation</span>}
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                  Fund it from <b>Economics → Allocate → Perm</b>.
+                </span>
+              </div>
+            )}
+          </Sec>
+
           <Sec label="Platform neurons — live from NNS governance" right={followStatus === null ? <LiveDot size={8} color="var(--burn-ink)" /> : undefined}>
             {followStatus && (
               <div className="col" style={{ gap: 4 }}>

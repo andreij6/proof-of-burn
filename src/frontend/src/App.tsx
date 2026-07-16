@@ -718,7 +718,6 @@ export default function App() {
   const icpLpEnabled = featureFlags.find(f => f.key === 'icpswap_lp_stake')?.enabled ?? false;
   // Bonds are part of the lottery product (owner 2026-07-11): one flag, never toggled separately.
   const vouchersEnabled = lotteryEnabled;
-  const earlyAdoptersEnabled = featureFlags.find(f => f.key === 'early_adopters')?.enabled ?? false;
 
   // Lossless staking: the caller's stake (earns lottery tickets only).
 
@@ -1296,7 +1295,7 @@ export default function App() {
     if (page === 'bullrun' && featureFlags.length > 0 && !bullrunEnabled) {
       redirect('lottery');
     }
-    if (page === 'neuronstake' && featureFlags.length > 0 && !(losslessEnabled || earlyAdoptersEnabled)) {
+    if (page === 'neuronstake' && featureFlags.length > 0 && !losslessEnabled) {
       redirect('lottery');
     }
     if (page === 'exchange' && featureFlags.length > 0 && !vouchersEnabled) {
@@ -1313,7 +1312,7 @@ export default function App() {
     if (page === 'early_adopters') {
       redirect('lottery');
     }
-  }, [page, losslessEnabled, lotteryEnabled, vouchersEnabled, govNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, icpLpEnabled, earlyAdoptersEnabled, principal, featureFlags.length]);
+  }, [page, losslessEnabled, lotteryEnabled, vouchersEnabled, govNavEnabled, luckproofEnabled, dropzoneEnabled, bullrunEnabled, icpLpEnabled, principal, featureFlags.length]);
 
   // ── The auth gate ──
   // Everything beyond the landing + claim pages requires a signed-in
@@ -2000,10 +1999,10 @@ export default function App() {
         )}
 
         {/* ── Task 4 Tickets: staking + LP rewards ── */}
-        {(losslessEnabled || earlyAdoptersEnabled || icpLpEnabled) && (
+        {(losslessEnabled || icpLpEnabled) && (
           <Eyebrow style={{ margin: '14px 0 4px' }}>Task 4 Tickets</Eyebrow>
         )}
-        {(losslessEnabled || earlyAdoptersEnabled) && (
+        {losslessEnabled && (
           <Btn variant={page === 'neuronstake' ? 'primary' : 'ghost'} style={linkStyle} onClick={() => go('neuronstake')}>
             <Icon name="zap" size={14} stroke={page === 'neuronstake' ? 'var(--char-950)' : 'currentColor'} />
             Stake
@@ -2581,7 +2580,7 @@ export default function App() {
               rootKey={env?.IC_ROOT_KEY}
               ledgerCanisterId={ledgerCanisterId}
             />
-          ) : page === 'neuronstake' && (losslessEnabled || earlyAdoptersEnabled) ? (
+          ) : page === 'neuronstake' && losslessEnabled ? (
             <NeuronStakePage
               actor={actor}
               identity={identity}
@@ -2590,7 +2589,6 @@ export default function App() {
               rootKey={env?.IC_ROOT_KEY}
               ledgerCanisterId={ledgerCanisterId}
               isLocal={config?.is_local ?? false}
-              boostersEnabled={earlyAdoptersEnabled}
               isAdmin={isAdmin}
               treasuryCanFront={globalStats?.treasury_can_front_fees ?? true}
               onActivity={refreshAllData}

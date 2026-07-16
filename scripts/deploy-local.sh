@@ -97,7 +97,7 @@ ok "Token ledgers wired (ckBTC=$CKBTC_ID, ckETH=$CKETH_ID, ckUSDC=$CKUSDC_ID, ck
 # arcade_minigolf (the Course Marketplace keys off it) are enabled for local
 # testing; arcade itself is forced OFF explicitly so a re-deploy over prior
 # state (which may have stored arcade=On from an older script) is deterministic.
-icp canister call backend admin_set_feature_flag '("early_adopters", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
+# early_adopters flag retired 2026-07-16 (yield always routes; managed in Admin)
 # The Course Marketplace keys off the arcade_minigolf sub-flag (PB-305 A7).
 icp canister call backend admin_set_feature_flag '("arcade_minigolf", true)' -e "$ENV" --identity "$ADMIN_IDENTITY" >/dev/null
 # Luck-Proof (arcade game 3) — enabled locally for testing; ships dark on mainnet.
