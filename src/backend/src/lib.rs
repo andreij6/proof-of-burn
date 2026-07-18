@@ -16525,7 +16525,7 @@ async fn admin_refund_xfarm_escrow(user: Principal) -> Result<u64, String> {
 // dedicated [10u8;32] fund subaccount and REFUSES when underfunded; every
 // fee (marketplace fee + realized buyback spread) splits 1/3 treasury /
 // 1/3 buyback fund / 1/3 voucher-canister cycles burn; promo cap 5,000,
-// drip 500/day, expiry 60 days from claim, 1 ticket/day, soulbound.
+// expiry 60 days from claim, 1 ticket/day, soulbound.
 
 /// The house buyback fund — a dedicated ICP subaccount seeded by the owner.
 /// Buybacks pay out of it; dissolved buyback principal redeems back into it.
@@ -16538,9 +16538,9 @@ const VOUCHER_FEE_BPS_DEFAULT: u16 = 250;
 const VOUCHER_MIN_WRAP_E8S_DEFAULT: u64 = ONE_ICP_E8S;
 /// Minimum listing ask — keeps fee legs meaningful.
 const VOUCHER_MIN_LIST_E8S: u64 = 10_000_000; // 0.1 ICP
-/// Promo campaign (owner-locked): global cap, daily drip, expiry, rate.
-const PROMO_CAP: u32 = 5_000;
-const PROMO_DAILY_DRIP: u32 = 500;
+/// Promo campaign (owner-locked): global cap, expiry, rate. Cap lowered
+/// 5_000 → 100 and the daily drip removed (owner 2026-07-17).
+const PROMO_CAP: u32 = 100;
 const PROMO_EXPIRY_NS: u64 = 60 * 86_400 * 1_000_000_000; // 60 days
 const PROMO_TICKETS_PER_DAY: u64 = 1;
 /// Per-sale escrow seed: `derive_subaccount(&buyer, VOUCHER_SALE_TAG ^ id)`.
@@ -18050,9 +18050,8 @@ async fn claim_golden_ticket(target: Option<Principal>) -> Result<u64, String> {
         campaign.day = today;
         campaign.claims_today = 0;
     }
-    if campaign.claims_today >= PROMO_DAILY_DRIP {
-        return Err("DAILY_LIMIT".to_string());
-    }
+    // Daily drip removed (owner 2026-07-17): only the global cap limits claims.
+    // `claims_today` is still tracked for the informational per-day count.
 
     let id = NEXT_BOND_ID.with(|c| {
         let id = *c.borrow().get();
@@ -27621,14 +27620,9 @@ mod tests {
             "INVALID_PRINCIPAL"
         );
 
-        // Daily drip: exhaust today's allowance → DAILY_LIMIT; a new UTC day
-        // re-arms the window.
-        let mut c2 = promo_campaign();
-        c2.claims_today = PROMO_DAILY_DRIP;
-        set_promo_campaign(c2);
+        // No daily drip (removed 2026-07-17): many claims can land the same day
+        // until the global cap; a second distinct wallet claims fine.
         let wallet2 = p("p2brp-aweqp-cxzia-sgqhq-poq4q-bxk6a-pyqz7-djize-23g7c-ejuz3-nqe");
-        assert_eq!(claim_golden_ticket(Some(wallet2)).await.unwrap_err(), "DAILY_LIMIT");
-        set_mock_time(Some(1_700_000_000_000_000_000 + 86_400 * 1_000_000_000));
         claim_golden_ticket(Some(wallet2)).await.unwrap();
 
         // Global cap → CAMPAIGN_EXHAUSTED (promo_open stays true per contract).

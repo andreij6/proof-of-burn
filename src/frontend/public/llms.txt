@@ -185,7 +185,7 @@ await cycleBurn.claim_golden_ticket(destOrNull);
 // tickets-only: never redeemable for ICP, never buyback-eligible, not
 // listable, not transferable (soulbound). One per principal per campaign;
 // campaign-capped with a daily claim limit (errors: CAMPAIGN_CLOSED,
-// CAMPAIGN_EXHAUSTED, DAILY_LIMIT, ALREADY_CLAIMED, INVALID_PRINCIPAL).
+// CAMPAIGN_EXHAUSTED, ALREADY_CLAIMED, INVALID_PRINCIPAL).
 
 ## Rules your UI should reflect
 - Tickets need a position, not a visit: staked ICP (a Stake Bond) or a custodied

@@ -1223,7 +1223,7 @@ service : (InitPayload) -> {
   // Claim a promo voucher. `target = None` mints to the (authenticated)
   // caller; `Some(p)` is the PASTE PATH — anonymously callable so Plug/OISY
   // holders can receive without ever signing in (earning is server-side and
-  // jackpots pay automatically). One per principal; global cap; daily drip.
+  // jackpots pay automatically). One per principal; global cap (no daily limit).
   claim_golden_ticket : (opt principal) -> (Result_1);
   commit : (nat64, Stance, nat64) -> (Result);
   // Commit a vote in ANY supported token. The token is ESCROWED — it only

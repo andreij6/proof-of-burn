@@ -853,7 +853,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                 {voucherMkt?.promo_open ? 'Close campaign' : 'Open campaign'}
               </Btn>
               <span style={{ fontSize: 11.5, color: 'var(--fg-3)' }}>
-                The #/claim page kill switch: 5,000 cap, 500/day drip, 1 ticket/day for 60 days, tickets-only.
+                The #/claim page kill switch: 100 cap, 1 ticket/day for 60 days, tickets-only.
               </span>
             </Sec>
           </FeatureGate>
