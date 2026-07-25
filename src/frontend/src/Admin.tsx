@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { logRealError } from './errors';
+import { logRealError, toFriendly, backendErr } from './errors';
+import { useTxFlow, TxModal } from './TxModal';
 import { ExplorerToken } from "./bindings/backend";
 import { UnstakeStatus } from "./bindings/backend";
 import { FlagState } from "./bindings/backend";
@@ -207,6 +208,8 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
   const [topupAmount, setTopupAmount] = useState('1'); // T cycles
   const [lottery, setLottery] = useState<LotteryInfo | null>(null);
   const [ea, setEa] = useState<EarlyAdopterInfo | null>(null);
+  const [eaInbox, setEaInbox] = useState<bigint | null>(null);
+  const routeTx = useTxFlow();
   const [staking, setStaking] = useState<StakingPoolInfo | null>(null);
   const [buybackFundE8s, setBuybackFundE8s] = useState<bigint | null>(null);
   const [buybackFundAmt, setBuybackFundAmt] = useState('');
@@ -343,6 +346,40 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
     } catch { /* transient */ }
   };
 
+  // The Booster/EA yield inbox (subaccount [6;32]) — ICP that has arrived from
+  // the neuron and is waiting to be routed 70% pot / 30% treasury.
+  const readEaInbox = async (): Promise<bigint | null> => {
+    if (!actor) return null;
+    try {
+      const acct = await actor.get_early_adopter_yield_inbox_address();
+      const ledger = createLedgerActor(ledgerCanisterId, { agentOptions: { host, identity, rootKey } });
+      return await ledger.icrc1_balance_of({ owner: acct.owner, subaccount: acct.subaccount });
+    } catch { return null; }
+  };
+
+  // Route the inbox to the pot & treasury NOW, with a staged modal.
+  const routeEaYield = async () => {
+    if (routeTx.isActive) return;
+    routeTx.start(['Reading the yield inbox', 'Sending to pot & treasury'], {
+      title: 'Route Booster yield',
+      detail: 'Checking the inbox balance…',
+    });
+    try {
+      const before = (await readEaInbox()) ?? 0n;
+      routeTx.next('Routing 70% to the prize pool, 30% to treasury…');
+      const res = await actor.admin_route_ea_yield_now();
+      if (res.__kind__ === 'Err') throw backendErr(res.Err, 'admin:ea-route');
+      const after = (await readEaInbox()) ?? 0n;
+      setEaInbox(after);
+      const moved = before > after ? before - after : 0n;
+      routeTx.succeed(moved > 0n
+        ? `Routed ${fmtICP(moved)} ICP — ~${fmtICP(moved * 70n / 100n)} to the prize pool, ~${fmtICP(moved * 30n / 100n)} to treasury.`
+        : 'The inbox was empty (below the minimum) — nothing was routed.');
+    } catch (e) {
+      routeTx.fail(toFriendly(e, 'admin:ea-route'));
+    }
+  };
+
   const refreshHealth = async () => {
     if (!actor) return;
     const grab = async <T,>(fn: () => Promise<T>): Promise<T | null> => { try { return await fn(); } catch { return null; } };
@@ -357,6 +394,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
       grab<{ __kind__: string; Ok?: bigint; Err?: string }>(() => actor.admin_get_course_nft_cycles()),
     ]);
     setStats(st); setCycles(cy); setLottery(lot); setEa(eaInfo); setStaking(stk); setPool(pl);
+    setEaInbox(await readEaInbox());
     setFeCycles(fe === null ? null : fe.__kind__ === 'Ok' ? fe.Ok! : 'unavailable');
     setNftCycles(nft === null ? null : nft.__kind__ === 'Ok' ? nft.Ok! : 'unavailable');
   };
@@ -965,7 +1003,7 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
             {ea && (
               <div className="col" style={{ gap: 8, fontSize: 12.5 }}>
                 <span style={{ fontSize: 11.5, color: 'var(--fg-2)', lineHeight: 1.5 }}>
-                  Permanent 2-year neuron (the former Early Adopters program). Its yield <b>always routes 70% to the prize pool / 30% treasury</b> — no feature flag, harvested hourly and routed on each draw slot. Managed here only; it is not shown on the Stake page.
+                  Permanent 2-year neuron (the former Early Adopters program). Its yield <b>always routes 70% to the prize pool / 30% treasury</b> — no feature flag, harvested hourly and routed to the pot once a day. Managed here only; it is not shown on the Stake page.
                 </span>
                 <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
                   {ea.follows_primary_neuron
@@ -996,11 +1034,31 @@ export default function Admin({ actor, config, featureFlags, identity, host, roo
                     ) : <span style={{ color: 'var(--fg-3)' }}>created on first allocation</span>}
                   </div>
                 </div>
+
+                {/* Yield inbox — arrived ICP waiting to route to pot/treasury */}
+                <div className="col" style={{ gap: 8, border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+                  <div className="row" style={{ justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                    <span style={{ color: 'var(--fg-3)' }}>Yield inbox</span>
+                    <span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>
+                      {eaInbox !== null ? `${fmtICP(eaInbox)} ICP` : '…'}
+                    </span>
+                  </div>
+                  <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                    ICP harvested from the neuron, waiting to route <b>70% to the prize pool / 30% treasury</b>. Auto-routes once a day; send it now:
+                  </span>
+                  <Btn variant="primary" sm onClick={routeEaYield}
+                    disabled={routeTx.isActive || eaInbox === null || eaInbox === 0n}
+                    style={{ alignSelf: 'flex-start' }}>
+                    <Icon name="zap" size={13} stroke="var(--char-950)" /> Route to pot &amp; treasury
+                  </Btn>
+                </div>
+
                 <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
                   Fund it from <b>Economics → Allocate → Perm</b>.
                 </span>
               </div>
             )}
+            {routeTx.isOpen && <TxModal flow={routeTx} onClose={routeTx.reset} />}
           </Sec>
 
           <Sec label="Platform neurons — live from NNS governance" right={followStatus === null ? <LiveDot size={8} color="var(--burn-ink)" /> : undefined}>

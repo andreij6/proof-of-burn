@@ -5065,6 +5065,7 @@ fn sweep_game_retention() {
 // runs everything once, then the throttles engage.
 const SWEEP_HOURLY_NS: u64 = 60 * 60 * 1_000_000_000;
 const SWEEP_15MIN_NS: u64 = 15 * 60 * 1_000_000_000;
+const SWEEP_DAILY_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 thread_local! {
     static SWEEP_LAST_RUNS: RefCell<std::collections::HashMap<&'static str, u64>> =
@@ -8178,10 +8179,9 @@ async fn lottery_draw_check() {
     if now < state.next_draw_at {
         return;
     }
-    // A scheduled draw SLOT has arrived: route the harvested yield into the
-    // pot NOW, whether or not the draw's gates let it fire (owner 2026-07-10)
-    // — the freshly routed 70% is then part of any prize this slot pays.
-    early_adopter_route_yield_now().await;
+    // A scheduled draw SLOT has arrived. Booster/EA yield is routed to the
+    // pot once a day by the sweep now (see early_adopter_settlement_check),
+    // so no per-draw routing is needed here (owner 2026-07-24).
     run_lottery_draw(None).await;
 }
 
@@ -13470,10 +13470,15 @@ async fn early_adopter_settlement_check() {
     }
     let now = current_time();
     let state = EARLY_ADOPTER_STATE.with(|c| c.borrow().get().clone());
-    // Owner (2026-07-10): yield routes on the DRAW SCHEDULE (see
-    // lottery_draw_check), whether or not a drawing actually fires. The sweep
-    // only RESUMES a mid-flight journaled settlement here.
-    if state.pending_job.is_some() {
+    // Owner (2026-07-24): route the inbox to the pot ONCE A DAY — no longer
+    // gated on the draw schedule. route_yield_now opens a fresh settlement
+    // whenever the inbox holds >= the minimum (and resumes any pending job).
+    // On the off-day ticks we still push a mid-flight settlement to completion
+    // so an interrupted route finishes within the next 5-minute sweep, not a
+    // full day later.
+    if sweep_due("ea_route", SWEEP_DAILY_NS) {
+        early_adopter_route_yield_now().await;
+    } else if state.pending_job.is_some() {
         if let Err(e) = early_adopter_run_settlement(now).await {
             canister_print(&format!("early_adopter settlement failed (will retry next sweep): {}", e));
         }
@@ -13481,8 +13486,8 @@ async fn early_adopter_settlement_check() {
 }
 
 /// Route the EA inbox NOW (70% pot / 30% treasury) if it holds anything
-/// meaningful. Called at every scheduled draw SLOT — gates or no gates — and
-/// by the admin force endpoint.
+/// meaningful. Called once a day by the sweep (early_adopter_settlement_check)
+/// and by the admin force endpoint — no longer tied to the draw schedule.
 async fn early_adopter_route_yield_now() {
     // No flag gate (owner 2026-07-16): route the Booster inbox to the pot
     // on every draw slot, always.
@@ -20085,9 +20090,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_early_adopter_settlement_is_slot_scheduled() {
-        // Owner (2026-07-10): yield routes whenever a drawing is SUPPOSED to
-        // happen — gates or no gates. The sweep only resumes mid-flight jobs.
+    async fn test_early_adopter_settlement_routes_daily() {
+        // Owner (2026-07-24): the sweep routes the inbox to the pot ONCE A DAY,
+        // no longer waiting for a draw slot. (sweep_due is always true under
+        // is_local, so the daily gate fires on every check here.)
         clear_early_adopters();
         enable_early_adopters_flag();
         let alice = p("a3x4d-cbe4h-bwmck-2ijqm-tipnj-qc6no-76xwa-cke2a-kkgoa-66ytk-eqe");
@@ -20098,21 +20104,17 @@ mod tests {
         early_adopter_stake(10 * ICP).await.unwrap();
         set_mock_ledger_balance(100 * ICP); // inbox reads 100 ICP
 
-        // The sweep check alone must NOT settle (no pending job, no slot).
+        // The daily sweep now routes the inbox with NO draw slot involved.
         early_adopter_settlement_check().await;
-        assert_eq!(list_early_adopter_rounds().len(), 0, "sweep never opens settlements");
-
-        // The slot router DOES — with no draw and no players, gates unmet.
-        early_adopter_route_yield_now().await;
         let rounds = list_early_adopter_rounds();
-        assert_eq!(rounds.len(), 1, "slot routes yield regardless of draw gates");
+        assert_eq!(rounds.len(), 1, "daily sweep routes yield without a draw");
         assert_eq!(rounds[0].treasury_e8s, 30 * ICP, "70/30 split unchanged");
         assert!(rounds[0].month > 1_000_000, "journal keyed by settlement seq");
 
-        // Dust: an empty inbox slot writes NO journal record.
+        // The admin/manual router still works; dust writes no journal record.
         set_mock_ledger_balance(0);
         early_adopter_route_yield_now().await;
-        assert_eq!(list_early_adopter_rounds().len(), 1, "dust slots skip");
+        assert_eq!(list_early_adopter_rounds().len(), 1, "dust routes skip");
 
         // Two meaningful settlements never collide on the journal key.
         set_mock_ledger_balance(50 * ICP);

@@ -1,5 +1,18 @@
 # Log
 
+## 2026-07-24 — Daily EA/Booster yield routing (replaces slot-scheduled)
+
+Owner: the Booster/EA yield inbox now routes to the pot ONCE A DAY from the
+sweep (`early_adopter_settlement_check` → `sweep_due("ea_route", SWEEP_DAILY_NS)`
+→ `early_adopter_route_yield_now`), no longer waiting for a scheduled draw
+slot. Removed the per-draw route call from `lottery_draw_check`. Off-day sweep
+ticks still push a mid-flight settlement to completion (fast recovery). Prompted
+by ~2 ICP sitting in the inbox `[6;32]` unrouted for days because draws weren't
+firing (only 2 unique holders vs the 25 gate). Harvest cadence unchanged
+(hourly, ≥1.05 ICP maturity threshold, ~7-day NNS mint delay). 279/279. Admin →
+Neurons card copy updated ("routed to the pot once a day"). `admin_route_ea_yield_now`
+force endpoint still available for an immediate push.
+
 ## 2026-07-14 — Mainnet frontend deploy 37f2bf2 (analytics enrichment + per-page titles)
 
 Frontend-only. Firebase/GA4: per-page document.title (Firebase was
